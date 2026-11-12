@@ -142,8 +142,17 @@ def _harvest_case(name, outcome, *, row=None, seeds=(), replay=False,
         _write(row_path, row_value)
 
         queue_path = root / "queue.json"
+        queue_order = []
+
+        def outcome_events():
+            return [value for value in outbox.retained()
+                    if value["source_key"].startswith("repair-outcome:")
+                    and not value["source_key"].startswith("repair-outcome:seed-")]
 
         def save_queue(value):
+            # Ordering evidence for the invalid-result path: queue identity is
+            # durable before the terminal ledger outcome exists.
+            queue_order.append(len(outcome_events()))
             queue_path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
         c = SimpleNamespace(
@@ -174,9 +183,7 @@ def _harvest_case(name, outcome, *, row=None, seeds=(), replay=False,
         with mock.patch.object(repair_tick, "require_canonical_delivery", delivery), \
                 mock.patch("backfill_runtime.settings", settings):
             repair_tick.harvest(c, {}, item, dry=False)
-            events_after = [value for value in outbox.retained()
-                            if value["source_key"].startswith("repair-outcome:")
-                            and not value["source_key"].startswith("repair-outcome:seed-")]
+            events_after = outcome_events()
             row_after = _row_bytes(row_path)
             if replay:
                 # Simulate a caller crash after spool and before the row write:
@@ -184,9 +191,7 @@ def _harvest_case(name, outcome, *, row=None, seeds=(), replay=False,
                 row_path.write_text(row_before + "\n", encoding="utf-8")
                 item["repair_runs"]["run-1"]["state"] = "queued"
                 repair_tick.harvest(c, {}, item, dry=False)
-                events_after = [value for value in outbox.retained()
-                                if value["source_key"].startswith("repair-outcome:")
-                                and not value["source_key"].startswith("repair-outcome:seed-")]
+                events_after = outcome_events()
                 row_replayed = _row_bytes(row_path)
             else:
                 row_replayed = None
@@ -200,6 +205,7 @@ def _harvest_case(name, outcome, *, row=None, seeds=(), replay=False,
             # A deterministic artifact defect persists queue identity before
             # the ledger write (repair_tick.harvest invalid-result path).
             "queue_saved": queue_path.exists(),
+            "queue_saved_before_outcome": None if not queue_order else queue_order[0] == 0,
             "outcome": outcome,
         }
 

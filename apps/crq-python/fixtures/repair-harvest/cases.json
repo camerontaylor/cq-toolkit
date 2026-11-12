@@ -78,6 +78,7 @@
       ],
       "row_replayed": null,
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "FAILED",
         "failure_class": "exhausted",
@@ -156,6 +157,7 @@
       ],
       "row_replayed": null,
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "FAILED",
         "failure_class": "transient",
@@ -234,6 +236,7 @@
       ],
       "row_replayed": null,
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "FAILED",
         "failure_class": "evidence",
@@ -312,6 +315,7 @@
       ],
       "row_replayed": null,
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "FAILED",
         "failure_class": "protected-path",
@@ -390,6 +394,7 @@
       ],
       "row_replayed": null,
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "FAILED",
         "failure_class": "owner-decision",
@@ -468,6 +473,7 @@
       ],
       "row_replayed": null,
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "FAILED",
         "failure_class": "bogus",
@@ -552,6 +558,7 @@
       ],
       "row_replayed": null,
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "NOT-FIXED",
         "reason": "already fixed upstream",
@@ -635,6 +642,7 @@
       ],
       "row_replayed": null,
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "NOT-FIXED",
         "reason": "no source read",
@@ -713,6 +721,7 @@
       ],
       "row_replayed": null,
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "NOT-FIXED",
         "failure_class": "owner-decision",
@@ -791,6 +800,7 @@
       ],
       "row_replayed": null,
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "STALE",
         "reason": "source moved"
@@ -868,6 +878,7 @@
       ],
       "row_replayed": null,
       "queue_saved": true,
+      "queue_saved_before_outcome": true,
       "outcome": {
         "verdict": "FIXED",
         "reason": "claimed fixed"
@@ -985,6 +996,7 @@
       ],
       "row_replayed": null,
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "FAILED",
         "failure_class": "exhausted",
@@ -1083,6 +1095,7 @@
       ],
       "row_replayed": null,
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "FAILED",
         "failure_class": "evidence",
@@ -1201,6 +1214,7 @@
       ],
       "row_replayed": null,
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "FAILED",
         "failure_class": "exhausted",
@@ -1291,6 +1305,7 @@
         "status": "needs-retriage"
       },
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "FAILED",
         "failure_class": "exhausted",
@@ -1346,6 +1361,7 @@
       "events_added": [],
       "row_replayed": null,
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "FAILED",
         "failure_class": "exhausted",
@@ -1401,6 +1417,7 @@
       "events_added": [],
       "row_replayed": null,
       "queue_saved": false,
+      "queue_saved_before_outcome": null,
       "outcome": {
         "verdict": "FAILED",
         "failure_class": "exhausted",

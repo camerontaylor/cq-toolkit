@@ -218,6 +218,11 @@ export async function executeRepairHarvest(
 
   let outcome: RepairHarvestExecutionResult | undefined;
   await effects.files.withLock(async () => {
+    // Python's `repair_outcome` reads `publication.retained()` again inside
+    // the lock for the retry walk and idempotence check; recovery above used
+    // the pre-lock snapshot. A caller that spooled our exact outcome and then
+    // crashed before its row write must be seen here, not double-written.
+    const planningRetained = await effects.publication.retained();
     const bytes = await effects.files.readTriage(input.findingId);
     if (bytes === null) {
       outcome = { kind: 'refused', refusal: 'finding-row-missing' };
@@ -242,7 +247,7 @@ export async function executeRepairHarvest(
       reason: mapped.reason,
       at: input.at,
       maxFindingRetries: input.maxFindingRetries,
-      retained,
+      retained: planningRetained,
       ...(input.repairBase === undefined ? {} : { repairBase: input.repairBase }),
       ...(input.fixPr === undefined ? {} : { fixPr: input.fixPr }),
       ...(input.mergedCommit === undefined ? {} : { mergedCommit: input.mergedCommit }),

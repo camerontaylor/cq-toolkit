@@ -90,6 +90,7 @@ class RepairHarvestVectorsTest(unittest.TestCase):
         # terminal failure: it persists queue identity first, then records the
         # FAILED outcome the TS port models as needs-retriage/exhausted.
         self.assertTrue(invalid["queue_saved"])
+        self.assertTrue(invalid["queue_saved_before_outcome"])
         self.assertEqual(len(invalid["events_added"]), 1)
         payload = invalid["events_added"][0]["payload"]
         self.assertEqual(payload["action"], "needs-retriage")

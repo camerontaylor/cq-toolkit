@@ -106,6 +106,27 @@ class MemoryPublication implements FindingPublication {
   }
 }
 
+/**
+ * A publication whose retained view grows between the executor's pre-lock
+ * recovery read and the read Python performs inside the findings lock, as if
+ * another caller spooled this exact outcome and crashed before its row write.
+ */
+class LateSpoolPublication extends MemoryPublication {
+  calls = 0;
+  spools = 0;
+  constructor(private readonly late: readonly JsonValue[]) {
+    super();
+  }
+  override async retained(): Promise<JsonValue[]> {
+    this.calls += 1;
+    return this.calls === 1 ? [] : [...this.events, ...this.late];
+  }
+  override async spool(value: JsonValue): Promise<string> {
+    this.spools += 1;
+    return super.spool(value);
+  }
+}
+
 function okRead(value: unknown, binding: 'verified' | 'not-ok' = 'verified'): RepairArtifactRead {
   return {
     selectedJobId: JOB,
@@ -256,6 +277,43 @@ describe('repair harvest execution', () => {
     expect(result.kind).toBe('written');
     if (result.kind === 'written') expect(result.action).toBe('needs-retriage');
     expect(files.current().get('failure_class')).toBe('transient');
+  });
+
+  test('an outcome spooled between recovery and the lock is not double-written', async () => {
+    const firstFiles = new MemoryFiles(row());
+    const firstPublication = new MemoryPublication();
+    const seed = await executeRepairHarvest(
+      {
+        findingId: FINDING,
+        read: failedRead('failed', 'transient'),
+        at: AT,
+        maxFindingRetries: MAX_RETRIES,
+        repairBase: BASE,
+      },
+      effects(firstFiles, firstPublication),
+    );
+    expect(seed.kind).toBe('written');
+    expect(firstPublication.events).toHaveLength(1);
+
+    // The crashed caller restored the input row but its spool survives. The
+    // executor's first retained() (recovery) misses it; only the read inside
+    // the lock can see the identical canonical outcome.
+    const files = new MemoryFiles(row());
+    const publication = new LateSpoolPublication([firstPublication.events[0] as JsonValue]);
+    const result = await executeRepairHarvest(
+      {
+        findingId: FINDING,
+        read: failedRead('failed', 'transient'),
+        at: AT,
+        maxFindingRetries: MAX_RETRIES,
+        repairBase: BASE,
+      },
+      effects(files, publication),
+    );
+    expect(result.kind).toBe('already-recorded');
+    expect(publication.calls).toBe(2);
+    expect(publication.spools).toBe(0);
+    expect(files.writes).toBe(0);
   });
 
   test('evidence-bearing unchanged_with_reason dismisses with source evidence', async () => {
