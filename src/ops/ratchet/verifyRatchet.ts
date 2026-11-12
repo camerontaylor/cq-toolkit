@@ -337,9 +337,7 @@ async function judgeRatchet(
   if ('reason' in subjectRead) return fail(subjectRead.reason);
   const trustValue = trustRead.value;
   const typecheckRecompute =
-    input.subjectKind === 'pr' &&
-    def.evidence === 'recompute' &&
-    def.metric === 'typecheck-count';
+    input.subjectKind === 'pr' && def.evidence === 'recompute' && def.metric === 'typecheck-count';
   // A supplied count and a supplied skip reason conflict: preferring the skip
   // would discard the count, and a dependency change would then excuse the
   // skip, so a supplied regression could still pass. Conflicting evidence is
