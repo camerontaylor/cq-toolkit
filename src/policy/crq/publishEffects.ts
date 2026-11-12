@@ -44,6 +44,7 @@ export type PublishEffectsPythonError =
   | 'OverflowError'
   | 'PermissionError'
   | 'TypeError'
+  | 'UnicodeDecodeError'
   | 'ValueError';
 
 /** A refusal with the Python exception class the oracle would raise. */
@@ -808,18 +809,49 @@ function parseResult(bytes: Uint8Array): TriageMapping {
   return TriageMapping.of(value);
 }
 
-/** Plain `json.loads`: parse errors carry the JSONDecodeError class name. */
+/**
+ * Plain `json.loads`: parse errors carry the JSONDecodeError class name. A
+ * leading UTF-8 BOM is NOT stripped: Python's `Path.read_text()` decodes the
+ * U+FEFF into the text and `json.loads` refuses it with `JSONDecodeError:
+ * Unexpected UTF-8 BOM (decode using utf-8-sig)`, so the exact-byte decode
+ * path must keep the character and refuse here too (invalid UTF-8 is a
+ * UnicodeDecodeError, a different class, exactly like the interpreter).
+ */
 function parsePlainJson(bytes: Uint8Array): JsonValue {
+  let text: string;
   try {
-    return parseJsonValue(
-      new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes),
+    text = decodeStrictUtf8(bytes);
+  } catch (error) {
+    throw new PublishEffectsError(
+      error instanceof Error ? error.message : String(error),
+      'UnicodeDecodeError',
     );
+  }
+  if (text.charCodeAt(0) === 0xfeff) {
+    throw new PublishEffectsError(
+      'Unexpected UTF-8 BOM (decode using utf-8-sig)',
+      'JSONDecodeError',
+    );
+  }
+  try {
+    return parseJsonValue(text);
   } catch (error) {
     throw new PublishEffectsError(
       error instanceof Error ? error.message : String(error),
       'JSONDecodeError',
     );
   }
+}
+
+/**
+ * Python `bytes.decode('utf-8')`: strict, BOM-PRESERVING. Node's TextDecoder
+ * defaults to `ignoreBOM: false`, which silently strips a leading U+FEFF -
+ * the opposite of the interpreter - so the BOM must be kept for the caller's
+ * json.loads-equivalent refusal, and invalid UTF-8 raises with the
+ * UnicodeDecodeError name.
+ */
+function decodeStrictUtf8(bytes: Uint8Array): string {
+  return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
 }
 
 class TriageRowError extends Error {
@@ -1050,14 +1082,18 @@ function itemGet(item: TriageMapping, key: string): unknown {
   return item.get(key);
 }
 
-/** Values leaving a digest result must be plain JSON, never views. */
+/** Values leaving a digest result must be serialisable JSON, never a
+ * TriageMapping wrapper: mappings project to their lossless JsonObject view
+ * (byte-exact Python key order, even for integer-like keys) and the
+ * projection recurses through ARRAYS, so mappings nested inside inner
+ * arrays plainify to views at any depth. A leaked wrapper reaches the
+ * exact-byte serializer and throws TypeError where Python publishes the
+ * nested list (round-4 P2); a plain-object hop would reorder the inner
+ * keys instead.
+ */
 function plainOf2(value: unknown): unknown {
-  if (value instanceof TriageMapping) return value.toPlain();
-  if (Array.isArray(value)) {
-    return (value as unknown[]).map((item: unknown) =>
-      item instanceof TriageMapping ? item.toPlain() : item,
-    );
-  }
+  if (value instanceof TriageMapping) return value.toView();
+  if (Array.isArray(value)) return value.map((item) => plainOf2(item));
   return value;
 }
 

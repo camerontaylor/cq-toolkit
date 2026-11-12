@@ -271,6 +271,93 @@ describe('repair digest oracle', () => {
     });
   }
 
+  test('a UTF-8 BOM-prefixed job file refuses with the JSONDecodeError message', () => {
+    // Round-4 P2: Python `Path.read_text()` decodes the U+FEFF into the text
+    // and `json.loads` refuses it with `JSONDecodeError: Unexpected UTF-8 BOM
+    // (decode using utf-8-sig)`. Node's TextDecoder silently STRIPS the BOM
+    // by default, so the port accepted a BOM-prefixed job where Python
+    // refuses. The exact-byte decode path keeps the character and refuses
+    // with the producer's class and message, for both the job and its
+    // result file.
+    const bom = new TextEncoder().encode('\uFEFF{}');
+    const state: RepairInboxState = {
+      entries: [{ stem: 'crq-bom-F1', jobBytes: bom, mtime: 1000 }],
+      readResult: () => null,
+      hasResult: () => false,
+      hasProgress: () => false,
+    };
+    const queue = {
+      items: [
+        {
+          id: 'i',
+          kind: 'open',
+          state: 'pending',
+          repair_runs: { r: { state: 'queued', jobs: ['crq-bom-F1'] } },
+        },
+      ],
+    };
+    try {
+      repairDigest(queue, state, 2000);
+      throw new Error('expected refusal');
+    } catch (error) {
+      expect(error).toBeInstanceOf(PublishEffectsError);
+      expect((error as PublishEffectsError).pythonError).toBe('JSONDecodeError');
+      expect((error as PublishEffectsError).message).toBe(
+        'Unexpected UTF-8 BOM (decode using utf-8-sig)',
+      );
+    }
+    // A BOM-prefixed RESULT refuses the same way when the job is clean; the
+    // queue targets the same stem the entry carries.
+    const state2: RepairInboxState = {
+      entries: [{ stem: 'crq-bom-F2', jobBytes: new TextEncoder().encode('{}'), mtime: 1000 }],
+      readResult: () => bom,
+      hasResult: () => true,
+      hasProgress: () => false,
+    };
+    const queue2 = {
+      items: [
+        {
+          id: 'i',
+          kind: 'open',
+          state: 'pending',
+          repair_runs: { r: { state: 'queued', jobs: ['crq-bom-F2'] } },
+        },
+      ],
+    };
+    try {
+      repairDigest(queue2, state2, 2000);
+      throw new Error('expected refusal');
+    } catch (error) {
+      expect((error as PublishEffectsError).pythonError).toBe('JSONDecodeError');
+    }
+  });
+
+  test('nested ordered mappings inside source_publication_error publish losslessly', () => {
+    // Round-4 P2: the digest projection wrapped only TOP-level array items,
+    // so a mapping view nested inside an inner array leaked into the
+    // exact-byte serializer (TypeError, publish aborts) where Python
+    // publishes the nested list. plainOf2 now projects mappings to their
+    // lossless JsonObject views recursively through arrays. The queue is
+    // parsed losslessly: a plain JS object literal would enumerate the
+    // integer-like keys 1,2 before any code runs and never reproduce the
+    // insertion order Python preserves.
+    const queue = parseJsonValue(
+      '{"items":[{"id":"i","repair_runs":{"r":{"source_publication_error":{"context":[[{"2":"first","1":"second"}]]}}}}]}',
+      { duplicates: 'last' },
+    );
+    const emptyState: RepairInboxState = {
+      entries: [],
+      readResult: () => null,
+      hasResult: () => false,
+      hasProgress: () => false,
+    };
+    const digest = repairDigest(queue, emptyState, 2000);
+    const errors = digest['source_publication_errors'] as Record<string, unknown>[];
+    expect(errors.length).toBe(1);
+    const serialized = pythonJsonText(errors[0] as unknown as JsonValue, COMPACT);
+    expect(serialized).toContain('"context":[[{"2":"first","1":"second"}]]');
+  });
+
   test('a result file that exists but is unreadable is refused, not orphaned', () => {
     // `readResult` returns null only for an absent file here; Python reads
     // `result.json` when it exists and refuses corrupt bytes. The TS seam
