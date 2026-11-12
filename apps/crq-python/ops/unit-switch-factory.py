@@ -112,8 +112,10 @@ def _verify_selection(selection):
         raise FactoryRefused("selected render has no bytes")
     if render.get("sha256") != hashlib.sha256(bytes(data)).hexdigest():
         raise FactoryRefused("selected render digest does not match its bytes")
-    if not isinstance(render.get("template_blob_oid"), str) \
-            or HEX40_RE.fullmatch(render["template_blob_oid"]) is None:
+    for key in ("sha256", "source_sha", "template_blob_oid"):
+        if not isinstance(render.get(key), str):
+            raise FactoryRefused("selected render lacks " + key)
+    if HEX40_RE.fullmatch(render["template_blob_oid"]) is None:
         raise FactoryRefused("selected render lacks a template blob")
     identity = selection.identity
     expected = (
