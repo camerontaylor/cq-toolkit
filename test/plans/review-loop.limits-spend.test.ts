@@ -128,6 +128,14 @@ describe('the fix-run wall-clock ladder (opts.limits → the governor)', () => {
     expect(outcome.fixReport?.jobs[1]?.result.status).toBe('budget-exhausted');
   });
   test('same-file wait does not consume the second job ladder and disjoint work starts', async () => {
+    // ADVERSARIAL SCHEDULE (the main-CI flake, fix-3/fix-1 ordering): fix-1's
+    // driver parks on a test gate before its body starts — the honest model
+    // of a fixer subprocess spawning late — while fix-3, a DISJOINT file
+    // with no lease ahead of it, is admitted and settles first. The old
+    // assertion demanded driver ENTRY order ['fix-1','fix-3']; under any
+    // concurrent schedule the disjoint worker may enter first (the flake:
+    // ['fix-3','fix-1'] vs ['fix-1','fix-3'], seen on main and PRs). Entry
+    // order is NOT the contract — the causal assertions below are.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const world = defaultWorld();
     world.threads = [
@@ -137,9 +145,13 @@ describe('the fix-run wall-clock ladder (opts.limits → the governor)', () => {
     ];
     const started: string[] = [];
     const aborted: string[] = [];
-    let firstPairStarted!: () => void;
-    const firstPair = new Promise<void>((resolve) => {
-      firstPairStarted = resolve;
+    let releaseFix1!: () => void;
+    const admitFix1 = new Promise<void>((resolve) => {
+      releaseFix1 = resolve;
+    });
+    let thirdEntered!: () => void;
+    const third = new Promise<void>((resolve) => {
+      thirdEntered = resolve;
     });
     let secondStarted!: () => void;
     const second = new Promise<void>((resolve) => {
@@ -152,25 +164,44 @@ describe('the fix-run wall-clock ladder (opts.limits → the governor)', () => {
         driverRun: async () => {
           const context = currentJobContext()!;
           const id = context.info.jobKey;
+          // fix-1 parks INSIDE its job context before its body starts; the
+          // ladder is armed, but virtual time moves only when this test
+          // advances it, so no rung can fire while parked.
+          if (id === 'fix-1') await admitFix1;
           started.push(id);
           context.signal.addEventListener('abort', () => aborted.push(id), { once: true });
-          if (started.length === 2) firstPairStarted();
+          if (id === 'fix-3') thirdEntered();
           if (id === 'fix-2') secondStarted();
-          await new Promise<void>((resolve) => setTimeout(resolve, 150));
+          await new Promise<void>((resolve) => setTimeout(resolve, id === 'fix-2' ? 150 : 50));
           return completeWorker(fixLine(false, 'No change needed.', []));
         },
       });
-      await firstPair;
-      expect(started).toEqual(['fix-1', 'fix-3']);
-      await vi.advanceTimersByTimeAsync(150);
+      // fix-3 enters while fix-1 is parked and fix-2 is lease-held.
+      await third;
+      expect(started).toEqual(['fix-3']);
+      await vi.advanceTimersByTimeAsync(50);
+      // fix-3 SETTLED ok; the same-file successor (fix-2) must still be
+      // parked behind fix-1's file lease, and no rung has fired on anyone.
+      expect(started).toEqual(['fix-3']);
+      expect(aborted).toEqual([]);
+      releaseFix1();
+      await vi.advanceTimersByTimeAsync(50);
+      await vi.advanceTimersByTimeAsync(0);
       await second;
       await vi.advanceTimersByTimeAsync(150);
       const { outcome } = await running;
-      expect(started).toEqual(['fix-1', 'fix-3', 'fix-2']);
+      // ENTRY ORDER IS NOT THE CONTRACT — the causal structure is: the
+      // same-file successor started only after its predecessor entered and
+      // settled; the disjoint worker needed neither; the waiter's wall-clock
+      // ladder was not consumed by the wait; every row still ended ok.
+      expect([...new Set(started)].sort()).toEqual(['fix-1', 'fix-2', 'fix-3']);
+      expect(started.indexOf('fix-2')).toBeGreaterThan(started.indexOf('fix-1'));
+      expect(started.indexOf('fix-3')).toBeLessThan(started.indexOf('fix-1'));
       expect(aborted).toEqual([]);
       expect(outcome.fixReport?.jobs).toHaveLength(3);
       expect(outcome.fixReport?.jobs.every((row) => row.result.status === 'ok')).toBe(true);
     } finally {
+      releaseFix1();
       vi.useRealTimers();
     }
   });
