@@ -94,12 +94,12 @@ const FROM_IMPORT_RE = new RegExp(`^\\s*from\\s+(${DOTTED})\\s+import\\s+\\(?([^
 const HUNK_START_RE = /^@@ -\d+(?:,\d+)? \+(\d+)/;
 const ALL_STATES: readonly StringState[] = [null, '"""', "'''"];
 
-/** Net open brackets on a lexed line (string contents and comments blanked). */
+/** Net open brackets on a lexed line (string contents and comments blanked). Signed. */
 function bracketBalance(code: string): number {
   let depth = 0;
   for (const ch of code) {
     if (ch === '(' || ch === '[' || ch === '{') depth++;
-    else if (ch === ')' || ch === ']' || ch === '}') depth = Math.max(0, depth - 1);
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
   }
   return depth;
 }
@@ -159,6 +159,9 @@ export class PythonSectionScanner {
     this.states = start <= 1 ? [null] : [...ALL_STATES];
     this.pendingFrom = null;
     this.defs = [];
+    // A hunk is scanned independently: its opening line is not guaranteed to
+    // close its brackets inside this hunk, so the signature state starts fresh.
+    this.signatureParens = 0;
     const context = /^@@ [^@]* @@ ?(.*)$/.exec(header)?.[1] ?? '';
     const def = DEF_RE.exec(context);
     if (def) {

@@ -182,6 +182,49 @@ describe('hackDetector: Python skip/xfail markers (#774)', () => {
         ]),
       ),
     ).toEqual(['pytest.importorskip']);
+    // A signature CLOSES: the next def is tracked again, and a dedent out of
+    // the test body ends it, so a module-level dependency guard stays quiet.
+    expect(
+      await markersOf(
+        pyDiff([
+          'def helper(',
+          '    value,',
+          '):',
+          '    return value',
+          'def test_x():',
+          '    pytest.importorskip("numpy")',
+        ]),
+      ),
+    ).toEqual(['pytest.importorskip']);
+    expect(
+      await markersOf(
+        pyDiff([
+          'def test_x(',
+          '    value,',
+          '):',
+          '    return value',
+          'pytest.importorskip("numpy")',
+        ]),
+      ),
+    ).toEqual([]);
+  });
+
+  test('a signature left open at a hunk boundary does not leak into the next hunk', async () => {
+    const diff = [
+      `diff --git a/${PY} b/${PY}`,
+      'index 1111111..2222222 100644',
+      `--- a/${PY}`,
+      `+++ b/${PY}`,
+      '@@ -1,2 +1,3 @@',
+      ' def helper(',
+      '+    value,',
+      '@@ -20,2 +21,3 @@',
+      '+def test_x():',
+      '+    pytest.importorskip("numpy")',
+    ].join('\n');
+    // Hunk 1 ends inside the signature (its closer is omitted), so only the
+    // per-hunk reset lets hunk 2 register `test_x` and flag the guard.
+    expect(await markersOf(diff)).toEqual(['pytest.importorskip']);
   });
 
   test.each([
