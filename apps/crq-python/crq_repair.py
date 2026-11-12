@@ -748,7 +748,11 @@ def reap_completed(active):
             del active[pid]
             reaped = True
             if status:
-                print('repair item ' + item + ': worker exit status ' + str(status), flush=True)
+                code = os.waitstatus_to_exitcode(status)
+                message = ('provider pause; stopping new admission' if code == 2 else
+                           'worker exited with code ' + str(code) if code >= 0 else
+                           'worker terminated by signal ' + str(-code))
+                print('repair item ' + item + ': ' + message, flush=True)
                 failed = True
     return failed, reaped
 

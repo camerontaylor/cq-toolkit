@@ -108,13 +108,18 @@ class RepairDrainTest(unittest.TestCase):
         self.config['repair']['max_concurrent_items'] = 2
         def worker(config, item, jobs):
             if item == 'pause':
+                deadline = time.monotonic() + 2
+                while not (self.root / 'paid-started').exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
                 service.rate_limit_pause({}, item)
                 return 'rate-limit'
+            (self.root / 'paid-started').touch()
             time.sleep(0.1)
             (self.root / item).touch()
         names = ['pause', 'paid', 'never']
         with mock.patch.object(service, 'drain_item', side_effect=worker), mock.patch.object(service, 'blocked', return_value=False):
             service.drain_items(self.config, {n: [] for n in names}, names)
+        self.assertTrue((self.root / 'paid').exists())
         self.assertFalse((self.root / 'never').exists())
         self.assertIsNotNone(service.paused())
 
@@ -193,10 +198,11 @@ class RepairDrainTest(unittest.TestCase):
 
     def test_admission_checks_exited_workers_even_below_capacity(self):
         self.config['repair']['max_concurrent_items'] = 10
-        with mock.patch.object(service.os, 'fork', return_value=100), mock.patch.object(service.os, 'waitpid', return_value=(100, 9)), mock.patch.object(service, 'blocked', return_value=False):
+        with mock.patch.object(service.os, 'fork', return_value=100) as fork, mock.patch.object(service.os, 'waitpid', return_value=(100, 9)), mock.patch.object(service, 'blocked', return_value=False):
             with mock.patch.object(service, 'drain_item') as work:
                 service.drain_items(self.config, {'a': [], 'b': []}, ['a', 'b'])
         work.assert_not_called()
+        self.assertEqual(fork.call_count, 1)
 
     def test_concurrency_config_refuses_invalid_limits(self):
         for limit in (True, 0, 11, 2.5, '10', None):
@@ -1547,6 +1553,7 @@ class RepairDrainTest(unittest.TestCase):
     def test_committed_config_enables_cq_with_provider_fallback(self):
         repair = json.loads((ROOT / 'config.json').read_text())['repair']
         self.assertIs(repair['enabled'], True)
+        self.assertEqual(repair['max_concurrent_items'], 1)
         self.assertIsInstance(repair['spend_authorization'], str)
         self.assertIn('2026-11-08', repair['spend_authorization'])
         self.assertEqual(repair['fallback_models'], ['opencode-go/deepseek-v4.1-flash', 'deepseek/deepseek-flash'])
