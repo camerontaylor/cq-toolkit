@@ -68,8 +68,12 @@ import { TOOL_FAILURE_KINDS } from './failures.js';
  * journal join) and `toolCalls` (the assistant's REQUESTED tool calls of
  * that step, JSON-encoded; the role-'tool' lines that follow remain the
  * RESULTS). Both absent on every pre-existing line; the schema stays
- * strict, so old readers reject only these NEW keys — there are none in
- * old files.
+ * strict, so old readers reject these NEW keys. The format change is
+ * ONE-WAY, and not only for these keys: a reader that predates the
+ * `tool-failure` and `budget-stop` line types fails the whole session
+ * file — not just the offending line — with a `corrupt line` error when
+ * it meets one (`load` refuses the file). Do not run an older toolkit
+ * version against a sessions directory that holds these lines.
  */
 export const SessionMessageSchema = z
   .object({
