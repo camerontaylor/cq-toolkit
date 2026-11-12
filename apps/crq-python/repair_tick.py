@@ -392,7 +392,7 @@ def harvest(c, q, item, dry=False):
                     c.save_queue(q)  # terminal identity before authoritative write-back
                     mark_finding_outcome(c, expected, failure)
                 break
-            if result.get('verdict') == 'FIXED':
+            if result.get('verdict') == 'FIXED' and not dry:
                 # Later findings move the shared HEAD; validate each immutable
                 # claimed range through a separate detached verification worktree.
                 check_wt, branch = c.make_worktree('verify-' + job_id, commits[-1])
@@ -426,6 +426,7 @@ def harvest(c, q, item, dry=False):
                     break
                 finally:
                     c.remove_worktree(check_wt, branch)
+            if result.get('verdict') == 'FIXED':
                 predecessor = commits[-1]
             if not dry:
                 mark_finding_outcome(c, expected, result)
