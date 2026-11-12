@@ -97,14 +97,18 @@ def _config_text(config):
     return json.dumps(config, ensure_ascii=True, indent=2) + "\n"
 
 
-def _role(config, job, role):
-    """Capture the role production ``process`` selects for this rung."""
+def _role(config, job, role, base_worktree):
+    """Capture the role and wt production ``process`` hands to dispatch."""
     assert role in ("fixer", "fixer_escalation"), "production selects only these literals"
     rung = 0 if role == "fixer" else 2
     captured = {}
 
     def dispatch(config_, role_, job_, wt, directory, judge=False):
         captured["role"] = copy.deepcopy(role_)
+        # The wt production actually dispatches against. process mutates the
+        # pinned path for A2, so this is the authoritative value, not the
+        # path process_item built before process ran.
+        captured["worktree"] = str(wt)
         raise _Stop()
 
     with tempfile.TemporaryDirectory() as root, \
@@ -129,10 +133,11 @@ def _role(config, job, role):
                 "retry_after": "2000-01-01T00:00:00Z",
             }))
         try:
-            service.process(config, copy.deepcopy(job), Path("/work/pinned"))
+            service.process(config, copy.deepcopy(job), Path(base_worktree))
         except _Stop:
             pass
-    return captured["role"]
+    assert "role" in captured and "worktree" in captured, "process did not reach dispatch"
+    return captured["role"], captured["worktree"]
 
 
 def _worktree(config, job):
@@ -214,23 +219,25 @@ def _case(name, config, *, role="fixer", item="pr1-merged", job_id=JOB_ID):
         "config_text": _config_text(config),
         "role": role,
         "pinned": {"item": item, "job": job_id},
+        "base_worktree": None,
         "worktree": None,
         "context": None,
         "context_json": None,
         "error": None,
     }
     try:
-        record["worktree"] = _worktree(config, job)
+        record["base_worktree"] = _worktree(config, job)
     except Exception as exc:  # The production exception is the oracle.
         record["error"] = _error("worktree", exc)
         return record
     try:
-        selected = _role(config, job, role)
+        selected, dispatched = _role(config, job, role, record["base_worktree"])
     except Exception as exc:
         record["error"] = _error("role", exc)
         return record
+    record["worktree"] = dispatched
     try:
-        flags = _payload(config, selected, job, Path(record["worktree"]))
+        flags = _payload(config, selected, job, Path(dispatched))
     except Exception as exc:
         record["error"] = _error("dispatch", exc)
         return record
@@ -440,7 +447,7 @@ def build():
         "schema": SCHEMA,
         "source": [
             "apps/crq-python/crq_repair.py:process_item (pinned worktree path)",
-            "apps/crq-python/crq_repair.py:process (rung-0 role selection)",
+            "apps/crq-python/crq_repair.py:process (rung-0 role selection and A2 '-A2' worktree mutation)",
             "apps/crq-python/crq_repair.py:_dispatch (driver gate)",
             "apps/crq-python/crq_repair/drivers/cq.py:invoke (repo/worktree/driver/budget)",
             "apps/crq-python/crq_repair/drivers/cq.py:budget",

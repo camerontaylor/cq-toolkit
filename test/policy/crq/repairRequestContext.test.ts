@@ -440,6 +440,16 @@ describe('pinned worktree inputs and path derivation', () => {
     );
   });
 
+  test('the escalation role dispatches against the A2 worktree', () => {
+    const escalation = valueOf(build(configText(), { role: 'fixer_escalation' }));
+    expect(escalation.worktree.path).toBe(`/work/crq-repair-pr1-merged-${JOB_ID}-A2`);
+  });
+
+  test('the fixer role keeps the base worktree', () => {
+    const fixer = valueOf(build(configText(), { role: 'fixer' }));
+    expect(fixer.worktree.path).toBe(`/work/crq-repair-pr1-merged-${JOB_ID}`);
+  });
+
   test('the path matches Python PurePosixPath joining', () => {
     const expected = (root: string, item: string, job: string): string =>
       valueOf(

@@ -8,7 +8,8 @@
  *   - `crq_repair.process_item` builds the pinned worktree path
  *     `<worktree_root>/crq-repair-<item>-<job>`;
  *   - `crq_repair.process` selects the rung role from
- *     `config.repair.roles` (`fixer` or `fixer_escalation`);
+ *     `config.repair.roles` (`fixer` or `fixer_escalation`) and, for the
+ *     escalation rung, appends `-A2` to the pinned worktree path;
  *   - `crq_repair._dispatch` gates the role driver and
  *     `crq_repair.drivers.cq.invoke` derives `repo`, `worktree`, `driver`
  *     (`role.model` split once on `/`) and `budget` (role overrides, base
@@ -56,6 +57,12 @@ const DEFAULT_MAX_CONTEXT_TOKENS = 200_000;
 const WALL_CLOCK_MS_PER_MINUTE = 60_000;
 /** The branch `cq.invoke` always sends for the pinned detached worktree. */
 const DETACHED_BRANCH = 'detached';
+/**
+ * Python `process` appends `-A2` to the pinned worktree before dispatching the
+ * `fixer_escalation` rung (`wt = Path(str(wt) + '-A2')`). The suffix is part of
+ * the path `cq.invoke` sends, so the context must name it.
+ */
+const ESCALATION_ROLE_NAME = 'fixer_escalation';
 
 /**
  * The local typed refusal vocabulary. These are precondition names, never
@@ -221,6 +228,10 @@ export function buildRepairRequestContext(
   const role = roles.get(input.role);
   if (!(role instanceof JsonObject)) return refusal('role-unknown');
 
+  // Python mutates the pinned path for the escalation rung before dispatch.
+  const dispatchedWorktreePath =
+    input.role === ESCALATION_ROLE_NAME ? `${worktreePath}-A2` : worktreePath;
+
   const driverName = role.get('driver');
   if (driverName === undefined) return refusal('role-invalid');
   if (driverName !== 'cq') return refusal('role-driver-unsupported');
@@ -255,7 +266,7 @@ export function buildRepairRequestContext(
     ok: true,
     value: {
       repo,
-      worktree: { path: worktreePath, branch: DETACHED_BRANCH },
+      worktree: { path: dispatchedWorktreePath, branch: DETACHED_BRANCH },
       driver,
       budget: {
         maxOutputTokens,

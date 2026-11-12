@@ -2,7 +2,7 @@
   "schema": "cq.crq-repair-request-context-vector/v1",
   "source": [
     "apps/crq-python/crq_repair.py:process_item (pinned worktree path)",
-    "apps/crq-python/crq_repair.py:process (rung-0 role selection)",
+    "apps/crq-python/crq_repair.py:process (rung-0 role selection and A2 '-A2' worktree mutation)",
     "apps/crq-python/crq_repair.py:_dispatch (driver gate)",
     "apps/crq-python/crq_repair/drivers/cq.py:invoke (repo/worktree/driver/budget)",
     "apps/crq-python/crq_repair/drivers/cq.py:budget"
@@ -22,6 +22,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": {
         "repo": "example/repo",
@@ -50,11 +51,12 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
-      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1-A2",
       "context": {
         "repo": "example/repo",
         "worktree": {
-          "path": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+          "path": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1-A2",
           "branch": "detached"
         },
         "driver": {
@@ -67,7 +69,7 @@
           "wallClockMs": 1200000
         }
       },
-      "context_json": "{\n  \"repo\": \"example/repo\",\n  \"worktree\": {\n    \"path\": \"/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n    \"branch\": \"detached\"\n  },\n  \"driver\": {\n    \"provider\": \"zai\",\n    \"model\": \"glm-5.3\"\n  },\n  \"budget\": {\n    \"maxOutputTokens\": 500000,\n    \"maxContextTokens\": 200000,\n    \"wallClockMs\": 1200000\n  }\n}\n",
+      "context_json": "{\n  \"repo\": \"example/repo\",\n  \"worktree\": {\n    \"path\": \"/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1-A2\",\n    \"branch\": \"detached\"\n  },\n  \"driver\": {\n    \"provider\": \"zai\",\n    \"model\": \"glm-5.3\"\n  },\n  \"budget\": {\n    \"maxOutputTokens\": 500000,\n    \"maxContextTokens\": 200000,\n    \"wallClockMs\": 1200000\n  }\n}\n",
       "error": null
     },
     {
@@ -78,6 +80,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": {
         "repo": "example/repo",
@@ -106,6 +109,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": {
         "repo": "example/repo",
@@ -134,6 +138,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": {
         "repo": "example/repo",
@@ -162,6 +167,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": {
         "repo": "example/repo",
@@ -190,6 +196,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": {
         "repo": "example/repo",
@@ -218,6 +225,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": {
         "repo": "example/repo",
@@ -246,6 +254,7 @@
         "item": "pr 7 (merged)",
         "job": "crq-backfill-ab/c"
       },
+      "base_worktree": "/work/crq-repair-pr 7 (merged)-crq-backfill-ab/c",
       "worktree": "/work/crq-repair-pr 7 (merged)-crq-backfill-ab/c",
       "context": {
         "repo": "example/repo",
@@ -274,6 +283,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/trees/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/trees/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": {
         "repo": "example/repo",
@@ -302,6 +312,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": {
         "repo": "example/repo",
@@ -330,6 +341,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "//crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "//crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": {
         "repo": "example/repo",
@@ -358,6 +370,7 @@
         "item": "pr-\u96ea",
         "job": "crq-\ud83d\ude00-F1"
       },
+      "base_worktree": "/work/crq-repair-pr-\u96ea-crq-\ud83d\ude00-F1",
       "worktree": "/work/crq-repair-pr-\u96ea-crq-\ud83d\ude00-F1",
       "context": {
         "repo": "example/repo",
@@ -386,6 +399,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": null,
       "worktree": null,
       "context": null,
       "context_json": null,
@@ -403,7 +417,8 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
-      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "worktree": null,
       "context": null,
       "context_json": null,
       "error": {
@@ -419,7 +434,8 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
-      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "worktree": null,
       "context": null,
       "context_json": null,
       "error": {
@@ -436,6 +452,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": null,
       "context_json": null,
@@ -452,7 +469,8 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
-      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "worktree": null,
       "context": null,
       "context_json": null,
       "error": {
@@ -469,6 +487,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": null,
       "context_json": null,
@@ -486,6 +505,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": null,
       "context_json": null,
@@ -503,6 +523,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": null,
       "context_json": null,
@@ -520,6 +541,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": null,
       "context_json": null,
@@ -536,6 +558,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": null,
       "context_json": null,
@@ -552,6 +575,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": null,
       "context_json": null,
@@ -569,6 +593,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": null,
       "context_json": null,
@@ -586,6 +611,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": null,
       "context_json": null,
@@ -603,6 +629,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": null,
       "context_json": null,
@@ -620,6 +647,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": null,
       "context_json": null,
@@ -636,6 +664,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": null,
       "context_json": null,
@@ -653,6 +682,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
       "context": null,
       "context_json": null,
@@ -670,6 +700,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": null,
       "worktree": null,
       "context": null,
       "context_json": null,
@@ -687,6 +718,7 @@
         "item": "pr1-merged",
         "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
       },
+      "base_worktree": null,
       "worktree": null,
       "context": null,
       "context_json": null,
@@ -703,6 +735,7 @@
         "item": "pr1-merged",
         "job": null
       },
+      "base_worktree": null,
       "worktree": null,
       "context": null,
       "context_json": null,
