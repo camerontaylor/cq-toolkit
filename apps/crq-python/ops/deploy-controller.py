@@ -1999,24 +1999,24 @@ def _error_artifact(kind: str, subcommand: str | None, message: str,
 
 
 class _JsonArgumentParser(argparse.ArgumentParser):
-    """argparse parser that can answer argument failures with the I1 artifact.
+    """argparse parser that answers argument failures with the I1 artifact.
 
     Machine mode (--json) is shared with the subparsers argparse derives from
     this class, so every usage error -- on this parser or a subparser --
     writes one error object to stdout with exit code 2 and keeps stderr
-    empty. Without --json, argparse's stderr usage text and exit code are
-    unchanged.
+    empty. Without --json, the same artifact still goes to stdout (I1:
+    stdout is always one JSON artifact) and the usage narration goes to
+    stderr.
     """
 
     json_mode = False
     subcommand: str | None = None
 
     def error(self, message: str):
-        if not self.json_mode:
-            super().error(message)
-            return
         print(json.dumps(_error_artifact("usage", self.subcommand, message, 2),
                          indent=2, sort_keys=True))
+        if not self.json_mode:
+            print("usage: " + message, file=sys.stderr)
         raise SystemExit(2)
 
 
@@ -2148,16 +2148,19 @@ def main(argv=None) -> int:
                 return 1
     except RecoveryRequired as exc:
         print(json.dumps(exc.recovery, indent=2, sort_keys=True))
-        print("recovery required: " + str(exc), file=sys.stderr)
+        if not parser.json_mode:
+            print("recovery required: " + str(exc), file=sys.stderr)
         return 3
     except NoChangeRefused as exc:
         print(json.dumps(exc.record, indent=2, sort_keys=True))
-        print("refused: " + str(exc), file=sys.stderr)
+        if not parser.json_mode:
+            print("refused: " + str(exc), file=sys.stderr)
         return 2
     except Refused as exc:
         print(json.dumps(_error_artifact("refused", args.operation, str(exc), 2),
                          indent=2, sort_keys=True))
-        print("refused: " + str(exc), file=sys.stderr)
+        if not parser.json_mode:
+            print("refused: " + str(exc), file=sys.stderr)
         return 2
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         if args.operation == "health":
@@ -2167,7 +2170,8 @@ def main(argv=None) -> int:
         message = str(exc)[:400] or type(exc).__name__
         print(json.dumps(_error_artifact("refused", args.operation, message, 2),
                          indent=2, sort_keys=True))
-        print("refused: " + message, file=sys.stderr)
+        if not parser.json_mode:
+            print("refused: " + message, file=sys.stderr)
         return 2
     return 0
 
