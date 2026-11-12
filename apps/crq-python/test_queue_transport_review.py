@@ -546,9 +546,15 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
         self.assertEqual(author_snapshot.git(clone, "cat-file", "commit", self.head),
                          author_snapshot.git(self.repo, "cat-file", "commit", self.head))
 
-    def test_primary_present_objects_and_unpublished_snapshot_do_not_fetch(self):
+    def test_primary_present_objects_unpublished_snapshot_and_retained_retry_do_not_fetch(self):
         self.runner.fetch = mock.Mock(side_effect=AssertionError("unnecessary fetch"))
         self.assertEqual(self.call_review(self.review)["action"], "created")
+        empty = self.repo / "retained-retry-empty"
+        empty.mkdir()
+        author_snapshot.git(empty, "init", "-q")
+        self.runner.CLONE = empty
+        self.assertEqual(self.call_review(self.review)["action"], "observed")
+        self.runner.CLONE = self.destination
         self.review.pop("snapshot")
         self.review["request_id"] = "already-present"
         self.assertEqual(self.call_review(self.review)["action"], "joined")
