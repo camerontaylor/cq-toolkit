@@ -593,6 +593,15 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           observationFailure(error);
         }
       }
+      // ADR-0008 T13: attempt-observation failures a unit could not hand to the
+      // writer are evidence about THIS composition's stream, so fold them into
+      // the observation status before it closes. Doing it here (rather than only
+      // where the unit rows are assembled) means no exit path can close the
+      // stream while `status` still claims `durable`/`unavailable` over
+      // incomplete observation evidence. Folding is idempotent — the status is
+      // set, not accumulated — so a failure already folded elsewhere is safe.
+      for (const unit of collected.values())
+        for (const failure of unit.observationFailures ?? []) observationFailure(failure);
       await closeObservation();
       if (observation !== undefined) {
         const writer = observation.writer;
