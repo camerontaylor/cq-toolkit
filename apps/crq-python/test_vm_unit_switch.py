@@ -3074,6 +3074,31 @@ class PartialHarnessCheckTests(unittest.TestCase):
                                 for item in problems), problems)
 
 
+class GuestBaselineSelectionTests(unittest.TestCase):
+    """The guest reads the baseline written by the mode it actually ran."""
+
+    def test_production_baseline_preferred_when_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            base = root / "fixture-baseline.json"
+            production = root / "production-baseline.json"
+            base.write_text('{"mode": "base"}')
+            production.write_text('{"mode": "production"}')
+            with mock.patch.object(guest, "BASELINE", base), \
+                    mock.patch.object(guest, "PROD_BASELINE", production):
+                self.assertEqual(guest.baseline(), {"mode": "production"})
+
+    def test_fixture_baseline_used_when_production_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            base = root / "fixture-baseline.json"
+            production = root / "production-baseline.json"
+            base.write_text('{"mode": "base"}')
+            with mock.patch.object(guest, "BASELINE", base), \
+                    mock.patch.object(guest, "PROD_BASELINE", production):
+                self.assertEqual(guest.baseline(), {"mode": "base"})
+
+
 class ProductionHarnessCheckTests(unittest.TestCase):
     """Synthetic production recover evidence through the real host checks."""
 

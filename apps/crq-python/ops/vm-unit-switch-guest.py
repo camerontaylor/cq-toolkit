@@ -542,7 +542,10 @@ def record_summary(path):
 
 
 def baseline():
-    data = json.loads(BASELINE.read_text())
+    # The production phases write their baseline under PRODUCTION and must
+    # read that one. Base/matrix runs only have the fixture baseline.
+    path = PROD_BASELINE if PROD_BASELINE.exists() else BASELINE
+    data = json.loads(path.read_text())
     return data
 
 
