@@ -162,15 +162,36 @@ export async function assertAddressDependencyMetadata(
       throw error;
     }
   };
+  // Scripts npm actually executes when installation runs: every lifecycle key,
+  // plus the scripts those lifecycle commands invoke (`npm run X` / `pnpm run X`)
+  // and their implicit pre/post hooks. A change to any of these changes what
+  // installation executes, even when every lifecycle key itself is identical.
+  const invokedScripts = (scripts: Record<string, string>): Set<string> => {
+    const invoked = new Set<string>();
+    for (const [key, command] of Object.entries(scripts)) {
+      if (!installLifecycleScripts.has(key)) continue;
+      for (const target of Object.keys(scripts)) {
+        if (target !== key && command.includes(target)) invoked.add(target);
+      }
+    }
+    for (const name of [...invoked]) {
+      if (`pre${name}` in scripts) invoked.add(`pre${name}`);
+      if (`post${name}` in scripts) invoked.add(`post${name}`);
+    }
+    return invoked;
+  };
   const relevant = (text: string | null) => {
     if (text === null) return text;
     const parsed = DependencyManifest.parse(JSON.parse(text) as unknown);
     const fields = Object.fromEntries(
       Object.entries(parsed).filter(([key]) => !descriptiveManifestFields.has(key)),
     );
-    const lifecycle = Object.fromEntries(
-      Object.entries(parsed.scripts ?? {}).filter(([key]) => installLifecycleScripts.has(key)),
-    );
+    const scripts = parsed.scripts ?? {};
+    const keep = new Set([...installLifecycleScripts].filter((key) => key in scripts));
+    for (const name of invokedScripts(scripts)) {
+      if (name in scripts) keep.add(name);
+    }
+    const lifecycle = Object.fromEntries(Object.entries(scripts).filter(([key]) => keep.has(key)));
     if (Object.keys(lifecycle).length) fields.scripts = lifecycle;
     return fields;
   };
