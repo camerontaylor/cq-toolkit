@@ -112,13 +112,13 @@ def handle(raw, runner, *, principal, policy):
         result = admission.retry(q, req["request_id"], key)
         if result is None:
             clone = clone_for(runner, inputs["repo"])
-            if not repo_registry.same_repo(inputs["repo"], runner.REPO):
-                needed = [inputs["base_commit"]] if "snapshot" in req else [inputs["base_commit"], inputs["head_commit"]]
-                try:
-                    for commit in needed:
-                        author_snapshot.git(clone, "cat-file", "-e", commit + "^{commit}")
-                except author_snapshot.AuthorRefused:
-                    runner.fetch(clone=clone)
+            # Snapshot bundles supply the unpublished head; only the base must be fetched.
+            needed = [inputs["base_commit"]] if "snapshot" in req else [inputs["base_commit"], inputs["head_commit"]]
+            try:
+                for commit in needed:
+                    author_snapshot.git(clone, "cat-file", "-e", commit + "^{commit}")
+            except author_snapshot.AuthorRefused:
+                runner.fetch(clone=clone)
             if "snapshot" in req:
                 if req["snapshot"]["tree"] != inputs["head_tree"]:
                     raise ValueError("snapshot tree mismatch")
