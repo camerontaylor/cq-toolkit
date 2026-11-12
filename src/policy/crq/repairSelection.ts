@@ -31,7 +31,7 @@
  * - `selectedJobId` is returned only when every check passes. A refusal never
  *   carries a selected job id.
  */
-import { JsonObject, type JsonValue } from './jsonValue.js';
+import { JsonNumber, JsonObject, type JsonValue } from './jsonValue.js';
 import {
   checkSha,
   findingDigest,
@@ -438,9 +438,29 @@ function mergeBinding(
  * identity. The canonical text is hashed with the same digest used for
  * findings and receipts, so two equal documents parsed independently compare
  * equal. Missing keys read as `None`, as `.get` does.
+ *
+ * A non-finite number anywhere in either value is never equal. Python's
+ * `nan != nan`, and Python's JSON reader accepts the non-standard `NaN`
+ * constant, so canonical text alone would make two NaNs match. Infinities are
+ * refused with them rather than adding a numeric layer; that can only refuse
+ * a pair Python would select, never select one Python would refuse.
  */
 function pythonEqual(a: JsonValue | undefined, b: JsonValue | undefined): boolean {
-  return findingDigest(a ?? null) === findingDigest(b ?? null);
+  const left = a ?? null;
+  const right = b ?? null;
+  if (containsNonFinite(left) || containsNonFinite(right)) return false;
+  return findingDigest(left) === findingDigest(right);
+}
+
+function containsNonFinite(value: JsonValue): boolean {
+  if (value instanceof JsonNumber) {
+    return value.kind === 'float' && !Number.isFinite(value.float as number);
+  }
+  if (Array.isArray(value)) return value.some(containsNonFinite);
+  if (value instanceof JsonObject) {
+    return value.entries.some(([, entry]) => containsNonFinite(entry));
+  }
+  return false;
 }
 
 /**

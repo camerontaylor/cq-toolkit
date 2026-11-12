@@ -475,6 +475,67 @@ describe('repair explicit selection', () => {
     expect(result.selection.originJob).toEqual(jobOrigin);
   });
 
+  test('non-finite origin_job values never select, even when both sides match', () => {
+    const entry = caseByName('select-prepared');
+    const { input } = selectInputOf(entry);
+    if (input.jobFile.kind !== 'value' || !(input.jobFile.value instanceof JsonObject)) {
+      throw new Error('select-prepared job is not an object');
+    }
+    const jobValue = input.jobFile.value;
+    const nonFinite = (): JsonNumber => JsonNumber.float(Number.NaN);
+    const parseDoc = (value: JsonValue, origin: JsonValue): JsonObject =>
+      asObject(
+        parseJsonValue(receiptJsonText(replaceOriginJob(value, origin)), {
+          parseConstant: nonFinite,
+        }),
+      );
+    const select = (jobOrigin: JsonValue, queueOrigin: JsonValue) =>
+      selectJob({
+        ...input,
+        jobFile: {
+          kind: 'value',
+          value: parseDoc(jobValue, jobOrigin),
+        },
+        queue: parseDoc(input.queue, queueOrigin),
+      });
+
+    expect(select(nonFinite(), nonFinite())).toEqual({
+      ok: false,
+      refusal: 'revalidation-lineage-mismatch',
+    });
+    const nested = new JsonObject([['deep', [nonFinite()]]]);
+    expect(select(nested, nested)).toEqual({
+      ok: false,
+      refusal: 'revalidation-lineage-mismatch',
+    });
+  });
+
+  test('finite origin_job numbers still compare by canonical text', () => {
+    const entry = caseByName('select-prepared');
+    const { input } = selectInputOf(entry);
+    if (input.jobFile.kind !== 'value' || !(input.jobFile.value instanceof JsonObject)) {
+      throw new Error('select-prepared job is not an object');
+    }
+    const jobValue = input.jobFile.value;
+    const parseDoc = (value: JsonValue, origin: JsonValue): JsonObject =>
+      asObject(parseJsonValue(receiptJsonText(replaceOriginJob(value, origin))));
+    const select = (jobOrigin: JsonValue, queueOrigin: JsonValue) =>
+      selectJob({
+        ...input,
+        jobFile: {
+          kind: 'value',
+          value: parseDoc(jobValue, jobOrigin),
+        },
+        queue: parseDoc(input.queue, queueOrigin),
+      });
+
+    expect(select(JsonNumber.int(1), JsonNumber.int(1)).ok).toBe(true);
+    expect(select(JsonNumber.int(1), JsonNumber.float(1))).toEqual({
+      ok: false,
+      refusal: 'revalidation-lineage-mismatch',
+    });
+  });
+
   test('selection failures are typed and never carry a selected job id', () => {
     const prepared = caseByName('select-prepared');
     const invalidSha = selectJob({ ...selectInputOf(prepared).input, sourceSha: 'not-a-sha' });

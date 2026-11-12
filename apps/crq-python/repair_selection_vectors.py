@@ -61,7 +61,6 @@ PREPARED_RUN = "revalidated-fixture"
 REFUSALS = {
     "full immutable source SHA required": "source-sha-invalid",
     "expected one exact CRQ job id": "job-id-invalid",
-    "job path outside inbox": "job-path-invalid",
     "job identity/source pin mismatch; historical jobs cannot be repinned": "job-identity-mismatch",
     "finding evidence digest mismatch": "finding-digest-mismatch",
     "invalid canonical finding identity": "canonical-delivery-invalid",
@@ -114,6 +113,9 @@ def _error_refusal(exc: BaseException) -> str:
         return _refusal(str(exc))  # type: ignore[return-value]
     if isinstance(exc, OSError):
         return "job-unreadable"
+    if isinstance(exc, RuntimeError) and str(exc).startswith("git rev-parse failed:"):
+        # `validate_revalidation`'s raising `git rev-parse <sha>:<path>` read.
+        return "source-blob-unreadable"
     raise AssertionError("unmapped Python error: " + type(exc).__name__)
 
 
@@ -420,7 +422,7 @@ def _select_case(
                     "job_keys": list(selected),
                     "selection": _selection(selected, source_sha, job_id),
                 }
-            except (ValueError, OSError) as exc:
+            except (ValueError, OSError, RuntimeError) as exc:
                 expected = {
                     "ok": False,
                     "refusal": _error_refusal(exc),
@@ -755,6 +757,12 @@ def build() -> dict:
                 structural_evidence,
                 origin_job={"id": ORIGIN},
             ),
+        ),
+        _select_case(
+            "select-revalidated-blob-missing",
+            job=prepared_job,
+            queue=prepared_queue,
+            git=_git(blobs={}),
         ),
         _select_case("select-source-sha-invalid", job=prepared_job, queue=prepared_queue, source_sha="nope"),
         _select_case("select-job-id-invalid", job_id="bad id", job=prepared_job, queue=prepared_queue),

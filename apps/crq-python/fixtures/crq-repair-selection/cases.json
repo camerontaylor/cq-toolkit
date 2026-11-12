@@ -6070,6 +6070,86 @@
     },
     {
       "expected": {
+        "error_type": "RuntimeError",
+        "ok": false,
+        "refusal": "source-blob-unreadable"
+      },
+      "finding_sha256": "6567a98569c3a3189845f51031355c25bb830ee375176bb68be11fa8a47e64c2",
+      "git": {
+        "ancestors": [],
+        "blobs": {},
+        "branches": {},
+        "tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "git_reads": [
+        "rev-parse origin/main",
+        "rev-parse aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:src/kept.ts"
+      ],
+      "job": {
+        "branch": null,
+        "cycle": null,
+        "finding": {
+          "body": "Finding data",
+          "line": 2,
+          "path": "src/kept.ts",
+          "severity": "major"
+        },
+        "finding_sha256": "6567a98569c3a3189845f51031355c25bb830ee375176bb68be11fa8a47e64c2",
+        "item": "pr1-merged",
+        "job": "crq-revalidated-fixture-F1",
+        "kind": "merged",
+        "origin_job": "crq-origin-F1",
+        "pr": 1,
+        "prior": null,
+        "recurrence": false,
+        "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "repair_round": 1,
+        "revalidation": {
+          "finding_sha256": "6567a98569c3a3189845f51031355c25bb830ee375176bb68be11fa8a47e64c2",
+          "reason": "Pinned source retains the unstable initialization comparison.",
+          "reviewer": "independent-test-reviewer",
+          "source_blob_sha": "cccccccccccccccccccccccccccccccccccccccc",
+          "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "verdict": "still-valid"
+        },
+        "run": "revalidated-fixture",
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "job_id": "crq-revalidated-fixture-F1",
+      "job_raw": null,
+      "kind": "select",
+      "name": "select-revalidated-blob-missing",
+      "queue": {
+        "items": [
+          {
+            "id": "pr1-merged",
+            "kind": "merged",
+            "pr": 1,
+            "repair_runs": {
+              "revalidated-fixture": {
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch": null,
+                "jobs": [
+                  "crq-revalidated-fixture-F1"
+                ],
+                "open_pr": false,
+                "origin_job": "crq-origin-F1",
+                "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "revalidation_sha256": "b2ccfec15117f28c7806825f2435731f9dab55ed3e0c7e45638655801bb8bd3e",
+                "round": 1,
+                "state": "queued"
+              }
+            },
+            "state": "repairing"
+          }
+        ]
+      },
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "triage_row": null,
+      "triage_row_raw": null
+    },
+    {
+      "expected": {
         "error_type": "ValueError",
         "ok": false,
         "refusal": "source-sha-invalid"
