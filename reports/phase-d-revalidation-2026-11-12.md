@@ -10,6 +10,11 @@ Verdicts: **OPEN** = evidence holds at the pinned semantics (line drift noted wh
 moved); **STALE-FIXED** = the premise is gone from main; **PARTIALLY FIXED** = part of the
 issue landed, the core gap remains.
 
+Amendment 2026-11-12: the #1186 section was corrected — `runOwned`/`withOwnership` still
+exist in address.ts (`:1400`/`:1331`, call site `:3519`); the caller moved lines, it was not
+removed. Conclusion unchanged: the bounded record store is deleted; the live caller delegates
+to slot-lock-based ownership.
+
 | Issue                                                    | Verdict           | Owner lane        | Size | Group        |
 | -------------------------------------------------------- | ----------------- | ----------------- | ---- | ------------ |
 | #1186 review.address ownership store bound               | STALE-FIXED       | review            | M    | none (close) |
@@ -47,10 +52,18 @@ the store. Every `review.address` run was the caller (`src/ops/review/address.ts
 - `src/ops/review/internal/addressOwnership.ts` **does not exist at `039697dd0`**. Repo-wide
   grep finds no `cq-review-address-ownership`, no `MAX_RECORDS`, no "attended compaction
   required", no quarantine marker writer. The pinned bounds test file is missing from main's tree.
-- `src/ops/review/address.ts` retains ownership vocabulary but no store: ownership-guard
-  refusal prose at `:1083-1085` ("a run refused before it holds ownership (admission/active-guard
-  refusal)"), observation failure reason "observation: ownership not held" at `:1102`. The
-  `runOwned()` call the issue cites at `:3344` is gone (file shrank; that region is now gate/stop logic).
+- **The caller stands (amended 2026-11-12: the old cited line moved, it was not removed).**
+  `src/ops/review/address.ts:3519` (was `:3344` at the pin) `return await runOwned();`;
+  `runOwned` is defined at `:1400` as `withOwnership(async (lease) => { ... })`, and
+  `withOwnership` (`:1331`) delegates to `withAddressOwnership` from
+  `./internal/addressCheckoutOwnership.js` (import at `:94`; the lease is asserted with
+  `lease.assertOwned()`, e.g. `:1408`). So the issue's caller premise — every `review.address`
+  run takes ownership — still holds, but the ownership it takes is the slot-lock-based
+  coordination (`addressCheckoutOwnership.ts` + `src/adapters/lock/slotLock.ts`), which has
+  no record store, no 64-record bound and no quarantine markers. Ownership-guard refusal
+  prose remains in address.ts at `:1083-1085` ("a run refused before it holds ownership
+  (admission/active-guard refusal)") and the observation reason "observation: ownership not
+  held" at `:1102`.
 - Replacement coordination: `src/ops/review/internal/addressCheckoutOwnership.ts` +
   `src/adapters/lock/slotLock.ts` (advisory flock slots, "Never unlink these lock files...",
   `SlotBusyError`/`IncompleteSlotError`), with a documented attended recovery:
@@ -62,11 +75,15 @@ the store. Every `review.address` run was the caller (`src/ops/review/address.ts
 **Callers of the old API today:** none; only test imports of the _new_ module
 `addressRunLifecycle.js` (`test/ops/review/addressWorker.terminalCapture.test.ts:4`).
 
-**Consequence:** the issue's proposed fix (base-record generational compaction inside the
-store) designs machinery that no longer exists. Recommend **close as fixed-by-removal**
-(parent decision). If any residue deserves a new issue, candidates are: (a) attended recovery
-for the new slot locks is documented but the recovery UX is a script, not an op; (b) the
-`addressEvidence.ts` terminal bounds are per-session by design. Neither recreates #1186's
+**Consequence:** the issue's premise decomposes as: caller premise TRUE (every run takes
+ownership, via `runOwned` → `withOwnership` → `withAddressOwnership`), store premise FALSE
+(the bounded append-only record store it targets is deleted; the current ownership mechanism
+has no cross-run bound to hit and no compaction problem). The issue's proposed fix (base-record
+generational compaction inside the store) designs machinery that no longer exists. Recommend
+**close as fixed-by-removal** (parent decision). If any residue deserves a new issue,
+candidates are: (a) attended recovery for the new slot locks is documented but the recovery
+UX is a script, not an op; (b) the `addressEvidence.ts` terminal bounds are per-session by
+design ("terminal receipt bound reached" `:605`, `:733`). Neither recreates #1186's
 cross-run store failure mode. The area was actively reworked (address.ts last touched by
 merge `62ee234cf` "Merge origin/main into ownership redesign"), not forgotten.
 
