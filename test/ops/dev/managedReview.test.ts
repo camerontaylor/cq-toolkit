@@ -4,13 +4,14 @@
 //
 // submit → complete → receipt read → no second start:
 //  1. submit CREATES the queue item (action=created, deterministic
-//     requestId `dev-{base8}-{head8}`), the fake server starts one review;
+//     requestId hashes the resolved inputs), the fake server starts one review;
 //  2. completion arrives through status polling; the result fetch verifies
 //     chunk digests, persists receipt.json, and the seam maps the receipt
 //     outcome/findings (completed + findings, findings verbatim);
 //  3. a second submit with the same pins REJOINS (action=joined): the fake
 //     server starts NO second review, and both submits resolve completed
 //     with the same receipt.
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -53,7 +54,9 @@ test('S2b-i e2e: fake-transport submit completes and rejoins without a second re
   const head = repo.git('rev-parse', 'HEAD').trim();
   const baseTree = repo.git('rev-parse', `${base}^{tree}`).trim();
   const headTree = repo.git('rev-parse', 'HEAD^{tree}').trim();
-  const requestId = `dev-${base.slice(0, 8)}-${head.slice(0, 8)}`;
+  const requestId = `dev-${createHash('sha256')
+    .update(JSON.stringify(['owner/repo', 'merge-queue', base, head]))
+    .digest('hex')}`;
 
   // The fake review-v1 server: one review per request id. Submit CREATES on
   // first sight and JOINS after; status reports running until the review is
@@ -233,6 +236,54 @@ test('S2b-i e2e: fake-transport submit completes and rejoins without a second re
   expect(reviewsStarted).toBe(1);
   expect(submitWires).toHaveLength(2);
   expect(submitWires[1]).toMatchObject({ op: 'submit', request_id: requestId });
+  // Feed the actual TS submit wire into Python admission, retain its completed
+  // receipt, then open the PR through real enrollment. No handcrafted facts
+  // bypass the client/server identity boundary.
+  const associated = execFileSync(
+    'python3',
+    [
+      '-c',
+      `
+import copy, json, sys, tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+import author_snapshot, crq, review_transport, review_receipt
+payload = json.load(sys.stdin)
+wire, doc = payload['wire'], payload['receipt']
+root = Path(payload['root'])
+q = {'items': [], 'starts': []}
+with tempfile.TemporaryDirectory() as directory:
+    state = Path(directory)
+    def git(*args, **kw):
+        return author_snapshot.git(root, *args).decode().strip()
+    runner = SimpleNamespace(CLONE=root, STATE=state, REPO='owner/repo', CONFIG={},
+        load_queue=lambda: q, save_queue=lambda value: None,
+        iso=lambda: '2026-11-08T00:00:00Z')
+    policy = dict(repo='owner/repo', enabled=True, write=['test'], branches=['merge-queue'])
+    admitted = json.loads(review_transport.handle(json.dumps(wire).encode(), runner, principal='test', policy=policy))
+    assert admitted['action'] == 'created', admitted
+    item = q['items'][0]
+    doc.update(identity=item['identity'], identity_inputs=item['identity_inputs'], profile=item['profile'])
+    item.update(state='done', scope_adequate=True, receipt_id=review_receipt.write_receipt(state / 'receipts', doc))
+    assert review_transport.retained(runner, item)
+    author_snapshot.git(root, 'update-ref', 'refs/remotes/origin/main', wire['inputs']['base_commit'])
+    opened = [dict(number=7, isDraft=False, baseRefName='main', headRefName='feature', headRefOid=wire['inputs']['head_commit'])]
+    with mock.patch.multiple(crq, CLONE=root, STATE=state, REPO='owner/repo', CONFIG={}), mock.patch.object(crq, 'gh_json', return_value=opened), mock.patch.object(crq, 'ensure_commit', return_value=True), mock.patch.object(crq, 'event'):
+        crq.enroll(q, False)
+    assert [i['kind'] for i in q['items']] == ['local-review'], q
+    assert q['review_pr_links']['owner/repo#7']['item'] == item['id'], q
+    print('associated-without-second-start')
+`,
+    ],
+    {
+      input: JSON.stringify({ wire: submitWires[0], receipt, root }),
+      env: { ...process.env, PYTHONPATH: join(process.cwd(), 'apps/crq-python') },
+      encoding: 'utf8',
+      timeout: 30_000,
+    },
+  );
+  expect(associated.trim()).toBe('associated-without-second-start');
 });
 
 test('S2b-i e2e: explicit scanner rides snapshot transport for unpublished work', async () => {
@@ -308,4 +359,74 @@ test('S2b-i e2e: explicit scanner rides snapshot transport for unpublished work'
   // The snapshot tree pins exactly the submitted head tree.
   expect(snapshot.tree).toBe(repo.git('rev-parse', `${head}^{tree}`).trim());
   expect(snapshot.objects.length).toBeGreaterThan(0);
+});
+
+test('an exhausted wall budget makes no transport or repo-resolution call', async () => {
+  const submit = makeManagedReviewSubmit(
+    () => {
+      throw new Error('must not connect');
+    },
+    async () => {
+      throw new Error('must not resolve');
+    },
+  );
+  expect(
+    await submit({
+      cwd: repo.root,
+      target: 'main',
+      base: 'a'.repeat(40),
+      head: 'b'.repeat(40),
+      remainingWallMs: () => 0,
+    }),
+  ).toEqual({ status: 'refused', reason: 'the review wall budget expired before submission' });
+});
+
+test('production defaults detect advertised heads, separate targets, and return explicit failed-attempt recovery', async () => {
+  // Advertise this head on the origin without injecting reachable or a scanner.
+  repo.git('config', 'remote.origin.url', repo.root);
+  const base = repo.git('rev-parse', 'origin/merge-queue').trim();
+  const head = repo.git('rev-parse', 'HEAD').trim();
+  const wires: { request_id: string; snapshot?: unknown }[] = [];
+  const submit = makeManagedReviewSubmit(
+    () => async (raw) => {
+      const wire = JSON.parse(raw) as { op: string; request_id: string; snapshot?: unknown };
+      if (wire.op === 'capabilities') return JSON.stringify(caps);
+      expect(wire.op).toBe('submit');
+      wires.push(wire);
+      return JSON.stringify({
+        v: 1,
+        action: 'observed',
+        state: 'failed',
+        next_action: 'resubmit',
+        reason: 'provider unavailable',
+      });
+    },
+    async () => 'owner/repo',
+  );
+  for (const target of ['main', 'merge-queue']) {
+    const result = await submit({ cwd: repo.root, target, base, head });
+    expect(result).toMatchObject({
+      status: 'refused',
+      reason: expect.stringContaining('--repeat --requestId=') as unknown,
+    });
+    expect(result).toMatchObject({
+      reason: expect.stringContaining('provider unavailable') as unknown,
+    });
+  }
+  expect(wires).toHaveLength(2);
+  expect(wires[0]?.snapshot).toBeUndefined();
+  expect(wires[0]?.request_id).not.toBe(wires[1]?.request_id);
+});
+
+test('empty committed diff reports no changes without fetching an unknown result', async () => {
+  const head = repo.git('rev-parse', 'HEAD').trim();
+  const submit = makeManagedReviewSubmit(
+    () => async () => {
+      throw new Error('must not contact server');
+    },
+    async () => 'owner/repo',
+  );
+  expect(
+    await submit({ cwd: repo.root, target: 'main', base: head, head, reachable: true }),
+  ).toEqual({ status: 'refused', reason: 'the queue saw no committed changes to review' });
 });

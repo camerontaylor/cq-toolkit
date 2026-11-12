@@ -7,13 +7,14 @@
 //
 // The submit-wait-fetch leg reuses the S1d-tested ops (submit, status, result)
 // over an injected transport — no wire or chunk logic is reimplemented here.
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DevEffects } from './effects.js';
 import { faultText } from './effects.js';
 import { CLEAN_TREE, type WorkState } from './internal/workState.js';
 import type { DevCycleRecord, DevFinding } from './record.js';
-import { evidenceRoot } from '../review/internal/localReview.js';
+import { evidenceRoot, git } from '../review/internal/localReview.js';
 import type { QueueTransport } from '../review/internal/queueProtocol.js';
 import { makeSubmit } from '../review/submit.js';
 import { makeStatus } from '../review/status.js';
@@ -47,13 +48,10 @@ export interface ManagedReviewSubmit {
     /**
      * How the runner proves the pinned commits: an absolute scanner
      * executable producing the original-commit snapshot for unpublished
-     * work, or a caller-attested reachable-ref proof when the caller knows
-     * the runner's clone resolves them. Both absent forwards neither — the
-     * submit leg takes its own default (snapshot path: explicit scanner,
-     * else CQ_AUTHOR_SNAPSHOT_SCANNER, else an honest configuration
-     * refusal). The seam never infers reachability from the local
-     * checkout: the local machine having the commits says nothing about
-     * the queue host. The server re-derives every hashed fact and refuses
+     * work, or an explicit reachable-ref proof. When both are absent, the
+     * seam checks origin's advertised heads for ancestry; unpublished or
+     * offline work uses CQ_AUTHOR_SNAPSHOT_SCANNER. Local tracking refs
+     * alone do not prove reachability. The server verifies every fact and refuses
      * a mismatch (plan D2), so this is a transport hint, never authority.
      */
     scanner?: string;
@@ -170,7 +168,7 @@ function opRefused(
  * the server re-derives every hashed fact and refuses a mismatch (plan D2),
  * so this value is a routing hint, never authority.
  *
- * The request id is deterministic in (base, head): a re-run after a lost
+ * The request id hashes the repository, target and full base/head identities: a re-run after a lost
  * response or a crash rejoins the same queue item instead of spending a
  * second review (the submit op persists the request; the server dedups).
  */
@@ -179,6 +177,8 @@ export function makeManagedReviewSubmit(
   resolveRepo: () => Promise<string>,
 ): ManagedReviewSubmit {
   return async (input) => {
+    if (input.signal?.aborted || (input.remainingWallMs?.() ?? Infinity) <= 0)
+      return { status: 'refused', reason: 'the review wall budget expired before submission' };
     let transport: QueueTransport;
     try {
       transport = getTransport();
@@ -194,32 +194,50 @@ export function makeManagedReviewSubmit(
         reason: `cannot resolve the forge repository identity — ${error instanceof Error ? error.message : String(error)}`,
       };
     }
-    const requestId = `dev-${input.base.slice(0, 8)}-${input.head.slice(0, 8)}`;
+    const requestId = `dev-${createHash('sha256')
+      .update(JSON.stringify([repo, input.target, input.base, input.head]))
+      .digest('hex')}`;
+    // Check the actual forge remote rather than trusting stale tracking refs.
+    // The server still resolves and verifies every claimed object.
+    let reachable = input.reachable;
+    if (reachable === undefined && input.scanner === undefined) {
+      try {
+        const advertised = await git(input.cwd, 'ls-remote', '--heads', 'origin');
+        for (const line of advertised.split('\n')) {
+          const oid = line.split(/\s+/)[0];
+          if (!oid || !/^[0-9a-f]{40}$/.test(oid)) continue;
+          try {
+            if ((await git(input.cwd, 'merge-base', input.head, oid)) === input.head) {
+              reachable = true;
+              break;
+            }
+          } catch {
+            /* A remote-only object cannot establish local ancestry. */
+          }
+        }
+      } catch {
+        /* Offline or unpublished work uses the scanned snapshot route. */
+      }
+    }
     const submitted = await makeSubmit(transport)({
       cwd: input.cwd,
       repo,
       target: input.target,
       base: input.base,
       requestId,
-      // The submitter declares how the runner proves the pinned commits:
-      // a snapshot scanner for unpublished work, or a caller-attested
-      // reachable-ref proof when the caller knows the runner's clone
-      // resolves them. Both absent forwards neither — the submit leg takes
-      // its own default (snapshot path, else an honest configuration
-      // refusal). The seam never infers reachability: the local machine
-      // having the commits says nothing about the queue host. The server
-      // re-derives every hashed fact and refuses a mismatch (plan D2).
+      // Advertised remote ancestry selects reachable proof; unpublished work
+      // requires the original-commit snapshot scanner. Server facts are authoritative.
       ...(input.scanner !== undefined ? { scanner: input.scanner } : {}),
-      ...(input.reachable !== undefined ? { reachable: input.reachable } : {}),
+      ...(reachable !== undefined ? { reachable } : {}),
     });
     if (submitted.status !== 'ok') return opRefused('submit', submitted);
     if (typeof submitted.value !== 'object' || submitted.value === null)
       return { status: 'refused', reason: 'queue admission returned no state' };
     const admission: QueueValue = submitted.value as QueueValue;
+    if (admission['action'] === 'no-changes')
+      return { status: 'refused', reason: 'the queue saw no committed changes to review' };
     const admissionState = queueState(admission);
     if (admissionState === undefined) {
-      if ((admission as { action?: unknown }).action === 'no-changes')
-        return { status: 'refused', reason: 'the queue saw no committed changes to review' };
       return { status: 'refused', reason: 'queue admission returned no state' };
     }
     if (admissionState === 'unsupported')
@@ -260,7 +278,7 @@ export function makeManagedReviewSubmit(
         reason: `the queued review ended '${finalState}'${(() => {
           const reason = queueReason(terminal.value);
           return reason === undefined ? '' : ` — ${reason}`;
-        })()}`,
+        })()} — retry explicitly with cq review.submit --repo=${repo} --target=${input.target} --base=${input.base} --repeat --requestId=${randomUUID()}`,
       };
     const fetched = await makeResult(transport)({ requestId, cwd: input.cwd });
     if (fetched.status !== 'ok') return opRefused('result', fetched);
@@ -305,7 +323,11 @@ export function makeManagedReviewSubmit(
         receiptId: value['receipt_id'] as string,
         completion: mapReceiptOutcome(value['reviewOutcome']),
         findings,
-        advisories: [],
+        advisories: [admission, terminal.value, value].flatMap((row) =>
+          Array.isArray(row['advisories'])
+            ? row['advisories'].filter((notice): notice is string => typeof notice === 'string')
+            : [],
+        ),
       },
     };
   };
@@ -497,7 +519,6 @@ export async function runManagedReviewSpan(options: {
   let budgetStopped = false;
   try {
     await effects.withHostLock(async () => {
-      signal?.throwIfAborted();
       await refuseDrift('during the managed review run');
       // #532/#534: a completed TERMINAL receipt after the caller's wall expired is
       // a budget stop, not a reviewer verdict — mirroring the CLI path's
@@ -541,12 +562,13 @@ export async function runManagedReviewSpan(options: {
         base: state.base,
         head: state.head,
         dirtySha256: state.dirtySha256,
-        completion: budgetStopped
-          ? {
-              kind: 'blocked',
-              reason: `review wall budget exhausted before the managed receipt could be recorded — ${value.receiptId}`,
-            }
-          : value.completion,
+        completion:
+          budgetStopped || (signal?.aborted && value.completion.kind === 'terminal')
+            ? {
+                kind: 'blocked',
+                reason: `review cancelled or wall budget exhausted before the managed receipt could be recorded — ${value.receiptId}`,
+              }
+            : value.completion,
         findings: value.findings,
         ...(value.advisories.length > 0 ? { advisories: value.advisories } : {}),
         logPath,
@@ -554,7 +576,7 @@ export async function runManagedReviewSpan(options: {
         untracked: state.untracked,
         at,
       };
-    }, signal);
+    });
   } catch (error) {
     return { ok: false, reason: `the managed review cycle could not run — ${faultText(error)}` };
   }

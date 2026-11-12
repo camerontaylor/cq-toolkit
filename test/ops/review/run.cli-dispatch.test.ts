@@ -1,3 +1,4 @@
+import { managedBlocked } from '../dev/reviewTestKit.js';
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,7 +12,7 @@ import { repoEffects, makeTestRepo } from '../dev/repo.js';
 import { configureAgentRepo } from './run.helpers.js';
 
 describe('review.run', () => {
-  it('dispatches the fresh unauthenticated-CodeRabbit fixture through the CLI', async () => {
+  it('dispatches a queue-blocked CodeRabbit fixture through the CLI', async () => {
     const repo = await makeTestRepo();
     const opsRoot = await mkdtemp(join(tmpdir(), 'cq-review-cli-ops-'));
     const bin = await mkdtemp(join(tmpdir(), 'cq-review-cli-bin-'));
@@ -45,7 +46,7 @@ describe('review.run', () => {
           `import { makeSubprocessDevEffects } from ${JSON.stringify(effectsUrl)};\n` +
           `const entry = entries.find((candidate) => candidate.name === 'review.run');\n` +
           `const drivers = { resolve: (request) => ({ lane: 'ai-sdk', modelSpec: { provider: 'mock', model: 'mock' }, driver: { run: async (invocation) => { await request.beforeRequest?.(JSON.stringify({ prompt: [{ role: 'user', content: invocation.prompt }] }), [{ text: invocation.prompt }], { kind: 'model-request' }); return { stopReason: 'complete', structuredOutput: { findings: [{ file: 'src/a.ts', line: 1, rule: 'fixture', severity: 'high', text: 'Seeded fixture finding' }] }, usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 }, denials: [] }; } } }) };\n` +
-          `export const registry = [{ ...entry, importer: async () => makeReviewRun({ drivers, effectsFactory: makeSubprocessDevEffects, scannerFactory: () => async (components) => components.map((component) => ({ component: component.component, hits: [] })) }) }];\n`,
+          `export const registry = [{ ...entry, importer: async () => makeReviewRun({ managedSubmit: async () => ({ status: 'completed', value: { receiptId: 'b'.repeat(64), completion: { kind: 'blocked', reason: 'not authenticated' }, findings: [], advisories: [] } }), drivers, effectsFactory: makeSubprocessDevEffects, scannerFactory: () => async (components) => components.map((component) => ({ component: component.component, hits: [] })) }) }];\n`,
       );
       process.env['PATH'] = `${bin}:${priorPath}`;
       const out: string[] = [];
@@ -170,6 +171,7 @@ describe('review.run', () => {
         ),
       } as unknown as DriverFactory;
       const result = await makeReviewRun({
+        managedSubmit: managedBlocked('not authenticated'),
         drivers,
         effectsFactory: () => effects,
         scannerFactory: () => async (components) =>
