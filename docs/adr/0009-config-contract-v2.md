@@ -209,4 +209,6 @@ registered `CqEnv` snapshot (`currentCqEnv()`) — the entry/run snapshot, never
 a live ambient re-read — so an ambient policy-knob change after entry cannot
 move a mid-run gate (issue #1185). An explicit `env` argument remains the
 deliberate foreign-environment injection path and still overrides the
-snapshot; launcher PATH and child env are untouched.
+snapshot; launcher PATH and child env are untouched. The author-admission
+transport (`makeAuthorAdmission`/`envAuthorAdmission`) was subsequently retired
+with its module in the S2b-ii slice, so no `processEnv()` debt remains there.

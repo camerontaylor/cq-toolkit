@@ -136,11 +136,13 @@ execution head, even when admission waits across a sibling commit. The engine
 returns that identity to the loop, which verifies its ancestry before validating
 citations or stamping replies. Git operations use literal pathspecs and path lists
 use NUL delimiters, retaining pathspec-like names, Unicode, whitespace, newlines
-and quotes as literal filenames. Terminal cancellation settlement is the
-exception for the attempted file: it refuses a name containing a glob character
-(`*?[]{}`) instead of treating it literally. Foreign tracked names may contain
-glob characters because settlement only reads and hashes them, without using
-them as Git pathspecs. Parent cancellation reaches baseline, related and broader check
+and quotes as literal filenames. Terminal cancellation settlement treats those
+names literally too: the attempted file may contain glob characters, a tracked
+symlink (mode 120000) is verified by its link-target bytes — or by the
+checked-out file bytes when `core.symlinks=false` — a submodule pointer
+(mode 160000) is skipped, and a foreign tracked file may be hard linked,
+because settlement only reads and hashes foreign entries without using them as
+Git pathspecs. Parent cancellation reaches baseline, related and broader check
 subprocesses; the engine awaits child termination before candidate cleanup,
 restoration or releasing its serial validation boundary.
 
