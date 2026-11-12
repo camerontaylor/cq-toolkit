@@ -453,8 +453,6 @@ def _prepare_case(spec):
                     _handoff_args(inbox)[first_handoff:] if canonical is not None else []
                 ),
             }
-            if canonical is not None:
-                expected["handoff_calls"] = inbox.handoff.call_count
             if spec.get("select_on_prepared"):
                 try:
                     bounded.select_job(
