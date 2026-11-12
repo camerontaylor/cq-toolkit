@@ -769,9 +769,8 @@ def reap_item(active):
 def process_item(config, jobs):
     # Each finding has its own worktree; successful commits chain by base.
     item = jobs[0]['item']
-    base = jobs[0]['repair_base']
     jobs.sort(key=finding_order)
-    last_run = None
+    bases = {}  # run -> tip of that run's successful chain
     for job in jobs:
         if blocked(config['repair']):
             break  # never start a new finding inside the GLM peak window
@@ -782,9 +781,7 @@ def process_item(config, jobs):
         except ValueError as exc:
             print('repair ' + job['job'] + ': skipped: ' + str(exc))
             continue
-        if job['run'] != last_run:
-            base = job['repair_base']
-            last_run = job['run']
+        base = bases.get(job['run'], job['repair_base'])
         job['repair_base'] = base
         wt = Path(config['worktree_root']) / ('crq-repair-' + item + '-' + job['job'])
         if pending(job['job']) and not wt.exists():
@@ -797,7 +794,7 @@ def process_item(config, jobs):
         if res.get('retry_after'):
             break
         if res['verdict'] == 'FIXED':
-            base = res['commits'][-1]
+            bases[job['run']] = res['commits'][-1]
     return None
 
 
