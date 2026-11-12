@@ -164,6 +164,7 @@ class FakeCompletion:
         self.records = []
         self.fail = None
         self.override = None
+        self.read_delay = 0
 
     def sequence(self, unit):
         if self.fail == "sequence":
@@ -173,6 +174,9 @@ class FakeCompletion:
     def read(self, unit, runtime, previous):
         if self.fail == "read":
             raise RuntimeError("completion unavailable")
+        if self.read_delay:
+            self.read_delay -= 1
+            return None
         if self.override is not None:
             return copy.deepcopy(self.override)
         service = self.unit_dir / unit
@@ -207,6 +211,7 @@ class FakeSystemd:
         self.fail_commands = set()
         self.incomplete_discovery = False
         self.calls = []
+        self.post_start_state = {}
         self._services = {entry["service"] for entry in inventory.values()}
         for entry in inventory.values():
             self.active[entry["service"]] = "inactive"
@@ -286,7 +291,7 @@ class FakeSystemd:
                 return {"argv": list(args), "rc": 1, "stdout": "",
                         "stderr": "Unit is masked.", "timeout": False}
             if unit in self.active:
-                self.active[unit] = "active"
+                self.active[unit] = self.post_start_state.get(unit, "active")
             return {"argv": list(args), "rc": 0, "stdout": "",
                     "stderr": "", "timeout": False}
         if args and args[0] == "stop":
@@ -381,6 +386,7 @@ class AdapterFixture(ControllerFixture):
         self.fake = FakeSystemd(self.unit_dir, self.inventory)
         self.fake.active["crq-tick.timer"] = "active"
         self.fake.active["crq-slot.timer"] = "active"
+        self.fake.active["crq-repair.timer"] = "active"
         self.fake.active["crq-repair.path"] = "active"
         self.fake.active["crq-publisher.path"] = "active"
         self.identity = LiveIdentity()
@@ -412,7 +418,7 @@ class AdapterFixture(ControllerFixture):
             "queue_drain": lambda: self.queue,
             "error_type": dc.Refused,
             "drain_timeout": 3.0,
-            "completion_timeout": 0.2,
+            "completion_timeout": 3600.0,
             "clock": Ticker(),
             "sleep": lambda _seconds: None,
         }
@@ -475,6 +481,21 @@ class InventoryTests(unittest.TestCase):
             self.assertIsNotNone(entry["timer"])
             self.assertTrue(entry["timer_wants"])
             self.assertIn(entry["service"], entry["blobs"])
+
+    def test_declared_inventory_parses_schedules(self):
+        inventory = adapter_mod.declared_inventory(self.root, self.sha)
+        self.assertEqual(inventory["crq-tick.service"]["timer_bound_seconds"],
+                         12 * 60)
+        self.assertEqual(inventory["crq-slot.service"]["timer_bound_seconds"],
+                         61)
+        self.assertEqual(
+            inventory["crq-backfill.service"]["timer_bound_seconds"], 6 * 3600)
+        self.assertEqual(
+            inventory["crq-publisher.service"]["timer_bound_seconds"], 65)
+        self.assertEqual(inventory["crq-repair.service"]["service_type"],
+                         "simple")
+        self.assertIsNone(
+            inventory["crq-watchdog.service"]["service_timeout_seconds"])
 
     def test_undeclared_template_refuses(self):
         (self.template("crq-extra.service")).write_text(
@@ -540,6 +561,55 @@ class AdapterTests(AdapterFixture):
         _write(self.unit_dir / "crq-tick.service", rendered["bytes"], 0o600)
         prior = self.adapter.preflight("crq-tick.service", "python")
         self.assertEqual(prior["runtime"], NODE_RUNTIME)
+
+    def test_preflight_node_with_default_artifact_root(self):
+        current = self.make_adapter(artifact_root=None)
+        prior = current.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(prior["runtime"], "python")
+
+    def test_preflight_refuses_alternate_artifact_tree(self):
+        alternate = self.base / "alternate"
+        shutil.copytree(self.artifact, alternate)
+        current = self.make_adapter(artifact_root=alternate)
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "not the rendered executable tree"):
+            current.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_completion_deadline_below_schedule(self):
+        current = self.make_adapter(completion_timeout=600.0)
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "completion deadline .* below the "
+                                    "declared bound"):
+            current.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_completion_schedule_beyond_maximum(self):
+        self.fake.active["crq-backfill.timer"] = "active"
+        current = self.make_adapter(completion_timeout=36000.0)
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "exceeds the supported maximum"):
+            current.preflight("crq-backfill.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_inactive_timer_completion(self):
+        self.fake.active["crq-tick.timer"] = "inactive"
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "prior timer activator is inactive"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_unbounded_oneshot_timeout(self):
+        self.fake.active["crq-watchdog.timer"] = "active"
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "start timeout is not bounded"):
+            self.adapter.preflight("crq-watchdog.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
 
     def test_default_node_capability_is_empty_and_refuses(self):
         capability = adapter_mod.DeclaredCapabilities()
@@ -643,7 +713,8 @@ class AdapterTests(AdapterFixture):
         current, _prior, _snapshot = self.switch_ready(
             "crq-tick.service", NODE_RUNTIME)
         self.fake.jobs_lines = ["42 crq-tick.service start running"]
-        with self.assertRaisesRegex(dc.Refused, "did not establish absence"):
+        with self.assertRaisesRegex(dc.Refused,
+                                    "queued or running systemd job remains"):
             current.stop_and_drain("crq-tick.service")
         self.assertTrue((self.unit_dir / "crq-tick.service").is_symlink())
 
@@ -652,7 +723,7 @@ class AdapterTests(AdapterFixture):
             "crq-tick.service", NODE_RUNTIME)
         self.fake.cgroup["crq-tick.service"] = {
             "main_pid": 123, "pids": [123], "cgroup": "/user.slice/crq"}
-        with self.assertRaisesRegex(dc.Refused, "did not establish absence"):
+        with self.assertRaisesRegex(dc.Refused, "owned process remains"):
             current.stop_and_drain("crq-tick.service")
 
     def test_stop_and_drain_refuses_jobs_failure(self):
@@ -675,6 +746,26 @@ class AdapterTests(AdapterFixture):
         self.fake.fail_commands = {"stop"}
         with self.assertRaisesRegex(dc.Refused, "stop did not complete"):
             current.stop_and_drain("crq-tick.service")
+
+    def test_stop_and_drain_refuses_stale_service_bytes_before_fence(self):
+        current, _prior, _snapshot = self.switch_ready(
+            "crq-tick.service", NODE_RUNTIME)
+        other = self.python_service("crq-slot.service")["bytes"]
+        _write(self.unit_dir / "crq-tick.service", other, 0o600)
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "service file does not match its snapshot"):
+            current.stop_and_drain("crq-tick.service")
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_stop_and_drain_refuses_malformed_job_observation(self):
+        current, _prior, _snapshot = self.switch_ready(
+            "crq-tick.service", NODE_RUNTIME)
+        self.fake.jobs_lines = ["not-a-systemd-job"]
+        with self.assertRaisesRegex(dc.Refused,
+                                    "list-jobs observation is malformed"):
+            current.stop_and_drain("crq-tick.service")
+        self.assertTrue((self.unit_dir / "crq-tick.service").is_symlink())
 
     def test_stop_and_drain_refuses_unsafe_service_before_mutation(self):
         current, _prior, _snapshot = self.switch_ready(
@@ -749,6 +840,32 @@ class AdapterTests(AdapterFixture):
         with self.assertRaisesRegex(dc.Refused, "no staged install"):
             current.start("crq-tick.service")
 
+    def test_start_refuses_tampered_staged_metadata_before_release(self):
+        current, _prior, snapshot = self.switch_ready(
+            "crq-tick.service", NODE_RUNTIME)
+        current.stop_and_drain("crq-tick.service")
+        current.install("crq-tick.service", NODE_RUNTIME)
+        staged = self.unit_dir / ".crq-tick.service.staged"
+        staged.chmod(0o666)
+        calls = len(self.fake.calls)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "staged target changed before release"):
+            current.start("crq-tick.service")
+        service = self.unit_dir / "crq-tick.service"
+        self.assertTrue(service.is_symlink())
+        self.assertEqual(os.readlink(service), "/dev/null")
+        self.assertFalse(any(call and call[0] in {"daemon-reload", "start"}
+                             for call in self.fake.calls[calls:]))
+        # The adapter's rollback path can now drain the mask and restore the
+        # prior service; the unsafe staged file never reaches the service path.
+        current.stop_and_drain("crq-tick.service")
+        restored = current.restore("crq-tick.service", snapshot)
+        current.restore_activation("crq-tick.service", snapshot)
+        prior = self.python_service("crq-tick.service")
+        self.assertEqual(service.read_bytes(), prior["bytes"])
+        self.assertEqual(service.stat().st_mode & 0o7777, 0o600)
+        self.assertFalse(Path(restored["staged"]).exists())
+
     def test_completion_binds_file_identity_and_sequence(self):
         current, _prior, _snapshot = self.switch_ready(
             "crq-tick.service", NODE_RUNTIME)
@@ -763,6 +880,17 @@ class AdapterTests(AdapterFixture):
         service = self.unit_dir / "crq-tick.service"
         self.assertEqual(first["service_sha256"],
                          hashlib.sha256(service.read_bytes()).hexdigest())
+
+    def test_completion_waits_for_a_delayed_provider(self):
+        current, _prior, _snapshot = self.switch_ready(
+            "crq-tick.service", NODE_RUNTIME)
+        current.stop_and_drain("crq-tick.service")
+        current.install("crq-tick.service", NODE_RUNTIME)
+        current.start("crq-tick.service")
+        self.completion.read_delay = 2
+        record = current.completion("crq-tick.service", NODE_RUNTIME, 0)
+        self.assertEqual(record["unit"], "crq-tick.service")
+        self.assertEqual(self.completion.read_delay, 0)
 
     def test_completion_refuses_foreign_evidence(self):
         current, _prior, _snapshot = self.switch_ready(
@@ -799,7 +927,7 @@ class AdapterTests(AdapterFixture):
             with self.subTest(name=name):
                 self.completion.override = evidence
                 with self.assertRaises(dc.Refused):
-                    self.adapter.completion("crq-tick.service", NODE_RUNTIME, 0)
+                    current.completion("crq-tick.service", NODE_RUNTIME, 0)
 
     def test_restore_stages_behind_mask_and_releases_only_after_journal(self):
         current, _prior, snapshot = self.switch_ready(
@@ -838,6 +966,21 @@ class AdapterTests(AdapterFixture):
             "crq-tick.service", NODE_RUNTIME)
         with self.assertRaisesRegex(dc.Refused, "no staged restore"):
             current.restore_activation("crq-tick.service", snapshot)
+
+    def test_restore_activation_refuses_failed_simple_service(self):
+        self.fake.active["crq-repair.service"] = "active"
+        current, _prior, snapshot = self.switch_ready(
+            "crq-repair.service", NODE_RUNTIME)
+        current.stop_and_drain("crq-repair.service")
+        current.install("crq-repair.service", NODE_RUNTIME)
+        current.start("crq-repair.service")
+        recovery = self.make_adapter()
+        recovery.validate_snapshot("crq-repair.service", snapshot)
+        recovery.stop_and_drain("crq-repair.service")
+        recovery.restore("crq-repair.service", snapshot)
+        self.fake.post_start_state["crq-repair.service"] = "failed"
+        with self.assertRaisesRegex(dc.Refused, "restored service is failed"):
+            recovery.restore_activation("crq-repair.service", snapshot)
 
     def test_forward_and_recovery_for_both_runtimes(self):
         cases = [
@@ -912,6 +1055,35 @@ class ControllerIntegrationTests(AdapterFixture):
                            NODE_RUNTIME)
         self.assertEqual(self.records(), [])
         self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_switch_unit_leaves_safe_mask_on_tampered_staged_file(self):
+        current = self.make_adapter()
+        install = current.install
+
+        def install_then_tamper(unit, runtime):
+            result = install(unit, runtime)
+            (self.unit_dir / ("." + unit + ".staged")).chmod(0o666)
+            return result
+
+        current.install = install_then_tamper
+        with self.assertRaises(dc.RecoveryRequired) as failure:
+            dc.switch_unit(self.effects, current, "crq-tick.service",
+                           NODE_RUNTIME)
+        recovery = failure.exception.recovery
+        self.assertEqual(recovery["outcome"], "recovery_required")
+        path = Path(recovery["record_path"])
+        service = self.unit_dir / "crq-tick.service"
+        self.assertTrue(service.is_symlink())
+        self.assertEqual(os.readlink(service), "/dev/null")
+        # The controller refuses to auto-restore from activation_pending; the
+        # durable mask remains the safe recovery anchor rather than an unsafe
+        # installed service.
+        with self.assertRaises(dc.RecoveryRequired) as blocked:
+            dc.recover_unit(self.effects, self.make_adapter(), path)
+        self.assertIn("activation may have occurred",
+                      str(blocked.exception))
+        self.assertTrue(service.is_symlink())
+        self.assertEqual(os.readlink(service), "/dev/null")
 
     def test_recover_unit_restores_prior_service(self):
         current = self.make_adapter()

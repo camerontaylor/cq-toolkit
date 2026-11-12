@@ -40,9 +40,15 @@ MAX_UNIT_BYTES = 1 << 20
 RUNTIME_RE = re.compile(r"node:[0-9a-f]{40}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
+NODE_SCRIPT_RE = re.compile(
+    r"(?P<root>.*/\.local/opt/crq-(?P<sha>[0-9a-f]{40}))"
+    r"/dist/queue-runner/crq\.js")
+DURATION_RE = re.compile(r"(?P<value>\d+)(?P<unit>ms|s|min|h)?")
 UNIT_FILE_STATES = {"enabled", "disabled", "static", "masked", "alias",
                     "indirect", "generated", "transient", "bad"}
 RESTORABLE_ACTIVE = {"active", "inactive"}
+DEFAULT_COMPLETION_WINDOW = 1800.0
+COMPLETION_MARGIN_SECONDS = 60
 
 
 class SystemdPort(Protocol):
@@ -167,6 +173,75 @@ def _section_values(text: str, section: str, key: str) -> list[str]:
     return values
 
 
+def _duration_seconds(text: str) -> int | None:
+    match = DURATION_RE.fullmatch(text.strip())
+    if match is None:
+        return None
+    value = int(match.group("value"))
+    unit = match.group("unit") or "s"
+    factor = {"ms": 0.001, "s": 1, "min": 60, "h": 3600}[unit]
+    seconds = value * factor
+    if seconds <= 0:
+        return None
+    return int(seconds) if seconds >= 1 else 1
+
+
+def _calendar_interval_seconds(text: str) -> int | None:
+    value = text.strip()
+    cadence = re.fullmatch(r"\*:0/(\d+)", value)
+    if cadence is not None:
+        value = int(cadence.group(1))
+        return value * 60 if value > 0 else None
+    if re.fullmatch(r"\*-\*-\* \*:\*:00", value):
+        return 60
+    daily = re.fullmatch(
+        r"\*-\*-\* ([0-9,]+):([0-9]{2}):([0-9]{2})(?: \S+)?", value)
+    if daily is None:
+        return None
+    hours = [int(item) for item in daily.group(1).split(",") if item]
+    minute = int(daily.group(2))
+    second = int(daily.group(3))
+    if (not hours or any(hour < 0 or hour > 23 for hour in hours)
+            or minute > 59 or second > 59):
+        return None
+    points = sorted({hour * 60 + minute for hour in hours})
+    if len(points) == 1:
+        return 24 * 60 * 60
+    gaps = [right - left for left, right in zip(points, points[1:])]
+    gaps.append(24 * 60 - points[-1] + points[0])
+    return max(gaps) * 60
+
+
+def _timer_bound_seconds(text: str) -> int | None:
+    intervals = []
+    for value in _section_values(text, "Timer", "OnCalendar"):
+        parsed = _calendar_interval_seconds(value)
+        if parsed is None:
+            return None
+        intervals.append(parsed)
+    for key in ("OnUnitActiveSec", "OnUnitInactiveSec"):
+        for value in _section_values(text, "Timer", key):
+            parsed = _duration_seconds(value)
+            if parsed is None:
+                return None
+            intervals.append(parsed)
+    accuracy = 0
+    for value in _section_values(text, "Timer", "AccuracySec"):
+        parsed = _duration_seconds(value)
+        if parsed is None:
+            return None
+        accuracy = max(accuracy, parsed)
+    if not intervals:
+        return None
+    return max(intervals) + accuracy
+
+
+def _single_value(values: list[str], name: str, default=None):
+    if len(values) > 1:
+        raise ValueError("template declares multiple " + name)
+    return values[0] if values else default
+
+
 def declared_inventory(root: Path, source_sha: str) -> dict:
     """The declared six-unit inventory at one pinned commit.
 
@@ -205,6 +280,25 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
                        if line.startswith("ExecStart=")]
         if len(exec_starts) != 1:
             raise ValueError("service template must have exactly one ExecStart: " + unit)
+        service_type = _single_value(
+            _section_values(service_text, "Service", "Type"),
+            "service Type", "simple")
+        if service_type not in {"oneshot", "simple"}:
+            raise ValueError("service template has an unsupported Type: " + unit)
+        explicit_timeout = _section_values(
+            service_text, "Service", "TimeoutStartSec")
+        if explicit_timeout:
+            service_timeout = _duration_seconds(_single_value(
+                explicit_timeout, "service TimeoutStartSec"))
+            if service_timeout is None:
+                raise ValueError(
+                    "service template has an invalid TimeoutStartSec: " + unit)
+        elif service_type == "oneshot":
+            # systemd disables the start timeout for oneshot by default, so the
+            # declared topology does not bound completion for these units.
+            service_timeout = None
+        else:
+            service_timeout = 90
         stem = unit[:-len(".service")]
         timer = stem + ".timer"
         path_unit = stem + ".path"
@@ -212,6 +306,7 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
             raise ValueError("pinned commit lacks the timer template: " + timer)
         timer_wants = None
         path_wants = None
+        timer_bound = None
         blobs = {unit: service_oid}
         declared_templates.add(unit)
         if timer in committed:
@@ -227,6 +322,7 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
                 raise ValueError("timer template names another unit: " + timer)
             timer_wants = wanted[0] + ".wants/" + timer
             _valid_template_name(timer_wants)
+            timer_bound = _timer_bound_seconds(timer_text)
             blobs[timer] = timer_oid
             declared_templates.add(timer)
         if path_unit in committed:
@@ -250,6 +346,9 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
             "path": path_unit if path_unit in committed else None,
             "timer_wants": timer_wants,
             "path_wants": path_wants,
+            "service_type": service_type,
+            "service_timeout_seconds": service_timeout,
+            "timer_bound_seconds": timer_bound,
             "blobs": blobs,
         }
     extra = sorted(committed - declared_templates)
@@ -269,10 +368,18 @@ class ProductionUnitAdapter:
     def __init__(self, *, root, source_sha, unit_dir, artifact_root,
                  systemd, identity, capability, completion, queue_drain,
                  error_type=RuntimeError, drain_timeout=30.0,
-                 completion_timeout=600.0, clock=time.monotonic,
-                 sleep=time.sleep):
+                 completion_timeout=DEFAULT_COMPLETION_WINDOW,
+                 max_completion_window=DEFAULT_COMPLETION_WINDOW,
+                 clock=time.monotonic, sleep=time.sleep):
         if systemd is None or identity is None or capability is None:
             raise TypeError("systemd, identity and capability ports are required")
+        if (not isinstance(completion_timeout, (int, float))
+                or isinstance(completion_timeout, bool)
+                or completion_timeout <= 0
+                or not isinstance(max_completion_window, (int, float))
+                or isinstance(max_completion_window, bool)
+                or max_completion_window <= 0):
+            raise TypeError("completion window must be a positive number")
         self.root = Path(root)
         self.source_sha = source_sha
         self.unit_dir = Path(unit_dir)
@@ -286,10 +393,13 @@ class ProductionUnitAdapter:
         self.error = error_type
         self.drain_timeout = drain_timeout
         self.completion_timeout = completion_timeout
+        self.max_completion_window = max_completion_window
+        self._completion_window = None
         self.clock = clock
         self.sleep = sleep
         self._declared = None
         self._rendered = {}
+        self._requested_runtime = None
         self._snapshot = None
         self._snapshot_unit = None
         self._install = None
@@ -529,6 +639,13 @@ class ProductionUnitAdapter:
         if not isinstance(lines, list) or not all(isinstance(line, str)
                                                   for line in lines):
             self.refuse("systemd list-jobs returned an unreadable result")
+        for line in lines:
+            if not line.strip():
+                continue
+            fields = line.split()
+            if len(fields) < 4 or not fields[0].isdigit():
+                self.refuse("systemd list-jobs observation is malformed: "
+                            + line[:160])
         return lines
 
     def _cgroup(self, unit):
@@ -631,6 +748,33 @@ class ProductionUnitAdapter:
                 self.refuse("node artifact integrity was not established")
             if artifact.get("authenticity") != "not-established":
                 self.refuse("node artifact authenticity must not be claimed")
+            exec_start = rendered.get("exec_start")
+            if not isinstance(exec_start, str):
+                self.refuse("rendered node ExecStart is absent")
+            try:
+                parts = shlex.split(exec_start)
+            except ValueError as exc:
+                self.refuse("rendered node ExecStart cannot be parsed: "
+                            + str(exc)[:160])
+            if len(parts) < 3 or Path(parts[0]).name != "env":
+                self.refuse("rendered node ExecStart is not the expected shape")
+            match = NODE_SCRIPT_RE.fullmatch(str(Path(parts[2])))
+            if match is None:
+                self.refuse("rendered node ExecStart is not the canonical "
+                            "artifact pointer")
+            canonical_root = Path(match.group("root"))
+            verified_root = (self.artifact_root
+                             if self.artifact_root is not None
+                             else Path.home() / ".local/opt"
+                             / ("crq-" + runtime[5:]))
+            try:
+                same_tree = (canonical_root.resolve()
+                             == verified_root.resolve())
+            except OSError:
+                same_tree = False
+            if not same_tree:
+                self.refuse("verified node artifact tree is not the rendered "
+                            "executable tree")
         return rendered
 
     def _check_python_entry(self, rendered):
@@ -677,12 +821,10 @@ class ProductionUnitAdapter:
                 self.refuse("installed python script escapes the checkout")
             return "python"
         if interpreter == "node":
-            match = re.fullmatch(
-                r".*/\.local/opt/crq-([0-9a-f]{40})/dist/queue-runner/crq\.js",
-                str(script))
+            match = NODE_SCRIPT_RE.fullmatch(str(script))
             if match is None:
                 self.refuse("installed node pointer is not the canonical artifact")
-            return "node:" + match.group(1)
+            return "node:" + match.group("sha")
         self.refuse("installed unit interpreter is unsupported")
 
     def _observe_activators(self, unit, inventory):
@@ -732,6 +874,7 @@ class ProductionUnitAdapter:
         if prior == runtime:
             self.refuse("unit already selects requested runtime")
         observed = self._observe_activators(unit, inventory)
+        completion_window = self._completion_budget(unit, inventory, observed)
         commands = self.capability.commands(runtime)
         if not isinstance(commands, (set, frozenset)):
             self.refuse("runtime command capability is not declared")
@@ -749,6 +892,7 @@ class ProductionUnitAdapter:
         sequence = self._completion_port.sequence(unit)
         if type(sequence) is not int or sequence < 0:
             self.refuse("completion provider returned an invalid sequence")
+        self._requested_runtime = runtime
         return {
             "runtime": prior,
             "inventory": inventory,
@@ -759,10 +903,46 @@ class ProductionUnitAdapter:
                        "template_blob_oid": rendered["template_blob_oid"],
                        "sha256": rendered["sha256"]},
             "completion_sequence": sequence,
+            "completion_window": completion_window,
             "discovery": {"scope": "declared-template-paths",
                           "exhaustive": False,
                           "complete": discovery["complete"]},
         }
+
+    def _completion_budget(self, unit, inventory, observed):
+        """Derive a completion bound from the declared timer topology.
+
+        The controller requires two strictly advancing completions after one
+        ``start``. The first is produced by the started service; the second is
+        produced by the restored timer. An inactive timer cannot produce it
+        without spawning unrecorded work, and a schedule whose worst-case
+        interval exceeds the supported maximum is refused before mutation.
+        """
+        timer = inventory[unit]["timer"]
+        if timer is None:
+            self.refuse("unit has no declared timer activator")
+        if observed.get("timer_active") != "active":
+            self.refuse("prior timer activator is inactive; no bounded second "
+                        "invocation is available")
+        bound = inventory[unit]["timer_bound_seconds"]
+        if type(bound) is not int or bound <= 0:
+            self.refuse("declared timer schedule has no bounded repeat interval")
+        service_timeout = inventory[unit]["service_timeout_seconds"]
+        if type(service_timeout) is not int or service_timeout <= 0:
+            self.refuse("declared service start timeout is not bounded")
+        required = float(service_timeout + bound + COMPLETION_MARGIN_SECONDS)
+        if required > self.max_completion_window:
+            self.refuse(
+                "declared completion bound %.0fs exceeds the supported "
+                "maximum %.0fs; no switch was attempted"
+                % (required, self.max_completion_window))
+        if self.completion_timeout < required:
+            self.refuse(
+                "completion deadline %.0fs is below the declared bound %.0fs; "
+                "no switch was attempted"
+                % (self.completion_timeout, required))
+        self._completion_window = required
+        return required
 
     # -- seam: snapshot and validation ----------------------------------
     def snapshot(self, unit):
@@ -888,11 +1068,22 @@ class ProductionUnitAdapter:
                 return {"jobs": matching, "owned": owned, "state": state,
                         "activators": activators, "attempts": attempts}
             if self.clock() >= deadline:
-                self.refuse("drain did not establish absence within the bound: "
-                            + json.dumps({"jobs": matching, "owned": owned,
-                                          "state": state,
-                                          "activators": activators},
-                                         sort_keys=True)[:500])
+                if matching:
+                    self.refuse("queued or running systemd job remains: "
+                                + json.dumps(matching, sort_keys=True)[:400])
+                if owned["pids"] or owned["main_pid"] > 0:
+                    self.refuse("owned process remains: "
+                                + json.dumps(owned, sort_keys=True)[:400])
+                if state["ActiveState"] != "inactive":
+                    self.refuse("service remains active: "
+                                + str(state["ActiveState"]))
+                active = sorted(name for name, item in activators.items()
+                                if item["ActiveState"]
+                                not in ("inactive", "failed"))
+                if active:
+                    self.refuse("activator remains active: "
+                                + ", ".join(active))
+                self.refuse("drain did not establish absence within the bound")
             self.sleep(0.25)
 
     def stop_and_drain(self, unit):
@@ -906,6 +1097,32 @@ class ProductionUnitAdapter:
         self._installed_entries(unit, inventory)
         self._discover(unit, inventory, paths)
         self._usable_current_service(paths["service"])
+        expected = snapshot["paths"][str(paths["service"])]
+        actual = self._path_state(paths["service"])
+        if actual["type"] == "file":
+            if self._requested_runtime is not None:
+                current_runtime = self._runtime_from_unit(paths["service"])
+                if current_runtime == snapshot["runtime"]:
+                    self._compare_state(paths["service"], expected,
+                                        "service file")
+                elif current_runtime == self._requested_runtime:
+                    rendered = self._rendered.get(
+                        (unit, self._requested_runtime))
+                    if rendered is None:
+                        self.refuse("released service has no verified render")
+                    try:
+                        released = paths["service"].read_bytes()
+                    except OSError as exc:
+                        self.refuse("released service is unreadable: "
+                                    + str(exc)[:160])
+                    if released != rendered["bytes"]:
+                        self.refuse("released service bytes do not match the "
+                                    "verified render")
+                else:
+                    self.refuse("service runtime is neither the snapshot nor "
+                                "the requested runtime")
+        elif actual["type"] != "symlink" or actual.get("target") != "/dev/null":
+            self.refuse("service path is neither the snapshot file nor a mask")
         for _role, name in self._activator_units(unit, inventory):
             result = self._run("stop", name, timeout=60)
             if result.get("timeout") or result.get("rc") not in (0, 5):
@@ -1068,6 +1285,10 @@ class ProductionUnitAdapter:
             self.refuse("start requires the durable /dev/null service fence")
         staged_state = self._path_state(staged)
         if staged_state["type"] != "file" \
+                or staged_state["mode"] != install["mode"] \
+                or staged_state["uid"] != self.identity.uid \
+                or staged_state["gid"] != self.identity.gid \
+                or staged_state["xattrs"] != [] \
                 or staged_state["sha256"] != install["sha256"] \
                 or staged_state["size"] != install["size"] \
                 or self._runtime_from_unit(staged) != install["runtime"]:
@@ -1123,11 +1344,13 @@ class ProductionUnitAdapter:
         self._validate_runtime(runtime)
         if self._completion_port is None:
             self.refuse("no runtime-bound completion provider")
+        if self._completion_window is None:
+            self.refuse("completion budget was not established by preflight")
         if type(previous) is not int or previous < 0:
             self.refuse("invalid completion sequence")
         inventory = self._inventory()
         service = self._unit_paths(unit, inventory)["service"]
-        deadline = self.clock() + self.completion_timeout
+        deadline = self.clock() + self._completion_window
         while True:
             try:
                 evidence = self._completion_port.read(unit, runtime, previous)
@@ -1170,7 +1393,7 @@ class ProductionUnitAdapter:
             self.sleep(0.25)
 
     # -- restore ---------------------------------------------------------
-    def _compare_state(self, path, expected):
+    def _compare_state(self, path, expected, what="restored path"):
         actual = self._path_state(path)
         keys = {"type"}
         if expected["type"] == "file":
@@ -1180,7 +1403,7 @@ class ProductionUnitAdapter:
         mismatched = sorted(key for key in keys
                             if actual.get(key) != expected.get(key))
         if mismatched:
-            self.refuse("restored path does not match its snapshot: "
+            self.refuse(what + " does not match its snapshot: "
                         + str(path) + " (" + ", ".join(mismatched) + ")")
 
     def _restore_path(self, path, state):
@@ -1332,6 +1555,16 @@ class ProductionUnitAdapter:
         if desired_service == "active":
             if observed["LoadState"] != "loaded":
                 self.refuse("restored service did not remain loaded")
+            if observed["ActiveState"] == "failed":
+                self.refuse("restored service is failed")
+            if inventory[unit]["service_type"] == "simple":
+                if observed["ActiveState"] != "active":
+                    self.refuse("restored simple service is not active: "
+                                + str(observed["ActiveState"]))
+            elif observed["ActiveState"] not in ("active", "inactive"):
+                self.refuse("restored service active state is not a running "
+                            "or completed state: "
+                            + str(observed["ActiveState"]))
         elif observed["ActiveState"] not in ("inactive", "failed"):
             self.refuse("restored service active state does not match the snapshot")
         restore_order.append("service")

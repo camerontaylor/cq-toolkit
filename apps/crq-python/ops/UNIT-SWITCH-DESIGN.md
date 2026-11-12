@@ -112,6 +112,29 @@ production completion coverage. `test_unit_adapter.py` exercises both
 runtimes, forward and recovery, real temporary files and injected host ports
 only.
 
+The completion budget is derived from the declared topology rather than a
+fixed default. Preflight requires the prior timer to be active, parses the
+committed timer schedule and service start timeout, and refuses when the
+declared bound exceeds the supported maximum or the caller's deadline is below
+it. An inactive timer has no bounded second invocation and refuses before
+snapshot or mutation; the 6-hour backfill and 45-minute publisher shapes exceed
+the default supported maximum, and an oneshot without a declared start timeout
+(the watchdog template) has no bounded completion and refuses. The verified
+Node artifact tree must also
+resolve to the rendered canonical ExecStart tree; an alternate tree that
+passes manifest verification is rejected. Staged mode, ownership and xattrs are
+validated before the atomic release, so a tampered staged file refuses while
+the durable mask is still in place. A forward fence re-checks service bytes
+against the snapshot (or the verified rendered target after release); a fresh
+recovery adapter does not require the post-switch service to equal the prior
+snapshot. `restore_activation` rejects a failed service and requires a simple
+service to be active. Drain diagnostics distinguish queued jobs, owned
+processes, active services and active activators, and malformed `list-jobs`
+observations refuse. A pre-release refusal at `start` leaves the mask in place,
+but the controller's `activation_pending` gate still refuses automatic restore
+after any `start` attempt; it records `recovery_required` rather than claiming
+a rollback. The adapter does not change that controller contract.
+
 ## Proposed stable-manager sequence
 
 1. Under the existing controller lock, validate the unit and target, artifact
