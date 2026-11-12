@@ -41,6 +41,7 @@ import { realpath, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { ENV_NAME_PATTERN, parsePassthrough } from '../config/parsers.js';
+import { currentCqEnv } from '../config/run-env.js';
 import type { SandboxLevel, ToolPolicy } from '../driver/types.js';
 import { TOOL_FAILURE_KINDS } from './failures.js';
 import { HarnessConfigSchema } from './config.js';
@@ -54,7 +55,6 @@ import type {
   ToolkitToolName,
   ToolkitToolResult,
 } from './tools.js';
-import { processEnv } from '../config/process-env.js';
 
 // ---------------------------------------------------------------------------
 // Naming
@@ -193,13 +193,18 @@ export interface ManifestInputs {
  * pre-dispatch failures.
  */
 export async function buildManifest(inputs: ManifestInputs): Promise<HarnessManifest | undefined> {
+  // The passthrough names come from the RUN'S SNAPSHOT, not the live ambient
+  // environment: an ambient CQ_RUN_ENV_PASSTHROUGH change after entry cannot
+  // widen a manifest mid-run.
+  const cqEnv = currentCqEnv();
+  const passthroughRaw = cqEnv.values['CQ_RUN_ENV_PASSTHROUGH'];
   // The gate decides the surface the SAME way execution will: a withheld run
   // tool is absent from both, so a manifest never names a tool the surface
   // cannot serve.
   const tools = selectHarnessSurface(
     inputs.harness,
     inputs.toolPolicy,
-    harnessRunGate(),
+    harnessRunGate({ cqEnv }),
     inputs.sandbox,
   );
   if (tools.length === 0) return undefined;
@@ -224,7 +229,7 @@ export async function buildManifest(inputs: ManifestInputs): Promise<HarnessMani
     envNames: [
       ...new Set([
         ...(inputs.envNames ?? []),
-        ...parsePassthrough(processEnv()['CQ_RUN_ENV_PASSTHROUGH']),
+        ...parsePassthrough(typeof passthroughRaw === 'string' ? passthroughRaw : undefined),
       ]),
     ],
   });
