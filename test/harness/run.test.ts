@@ -207,21 +207,46 @@ describe('no-shell run lifecycle', { timeout: 30_000 }, () => {
   test('a completed exit survives an abort while a descendant holds the pipes', async () => {
     // The child exits at once but an inherited pipe keeps `close` pending; an
     // abort inside that window must not relabel the finished command `killed`.
-    const script = [
-      "const { spawn } = require('node:child_process');",
-      "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 5000)'], { stdio: 'inherit' });",
-      'setTimeout(() => process.exit(5), 200);',
-    ].join(' ');
-    const controller = new AbortController();
-    const pending = runArgvCommand(process.execPath, ['-e', script], {
-      cwd: tmpdir(),
-      env: buildChildEnv(process.env),
-      maxBytes: 1_024,
-      timeoutMs: 20_000,
-      signal: controller.signal,
-    });
-    setTimeout(() => controller.abort(), 1_200);
-    expect(await pending).toMatchObject({ kind: 'exit', code: 5 });
+    // The abort is armed from the child's OWN exit signal (a marker written
+    // immediately before it exits) rather than a fixed delay, so a slow child
+    // start cannot race the abort past the exit event on a loaded runner.
+    const dir = await mkdtemp(join(tmpdir(), 'cq-run-exit-'));
+    try {
+      const exited = join(dir, 'exited');
+      const script = [
+        "const { spawn } = require('node:child_process');",
+        "const { writeFileSync } = require('node:fs');",
+        "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 5000)'], { stdio: 'inherit' });",
+        'setTimeout(() => {',
+        `  writeFileSync(${JSON.stringify(exited)}, 'exit 5');`,
+        '  process.exit(5);',
+        '}, 200);',
+      ].join(' ');
+      const controller = new AbortController();
+      const pending = runArgvCommand(process.execPath, ['-e', script], {
+        cwd: tmpdir(),
+        env: buildChildEnv(process.env),
+        maxBytes: 1_024,
+        timeoutMs: 20_000,
+        signal: controller.signal,
+      });
+      // Wait for the marker (bounded), then give the parent's `exit` delivery a
+      // beat before aborting: the descendant still holds the pipes either way.
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        try {
+          await readFile(exited);
+          break;
+        } catch (error) {
+          if (Date.now() > deadline) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+      setTimeout(() => controller.abort(), 250);
+      expect(await pending).toMatchObject({ kind: 'exit', code: 5 });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
