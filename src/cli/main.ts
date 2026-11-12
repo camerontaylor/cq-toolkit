@@ -519,8 +519,15 @@ async function dispatchCli(
   let cqEnv: CqEnv | undefined;
   // `cq config` still runs when the snapshot carries errors (the report must reach
   // stdout so the operator sees what failed); it then exits 2 like every other entry.
+  // Its snapshot is RETAINED and rides the importer wiring (and the run context)
+  // exactly like every other op's, so the report describes the entry state even if
+  // the ambient environment changes before the op loads.
   let configErrorLines: readonly string[] = [];
-  if (sub === 'config') configErrorLines = checkEntryEnv().errorLines;
+  if (sub === 'config') {
+    const check = checkEntryEnv();
+    configErrorLines = check.errorLines;
+    cqEnv = check.cqEnv;
+  }
   if (sub !== 'config') {
     const check = checkEntryEnv();
     if (check.errorLines.length > 0) {
