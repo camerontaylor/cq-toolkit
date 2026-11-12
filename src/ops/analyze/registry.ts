@@ -605,11 +605,12 @@ export const registry: OpRegistryEntry[] = [
           m.makeAnalyzeFix({
             run: runner.subprocessRunCheck,
             attended: a.makeAttendedApprovalAuthority,
-            drivers: createDriverFactory(
-              wiring?.onDeprecatedAlias !== undefined
+            drivers: createDriverFactory({
+              ...(wiring?.onDeprecatedAlias !== undefined
                 ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-                : {},
-            ),
+                : {}),
+              ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+            }),
           }) as Op<unknown, unknown>,
       ),
   },
@@ -686,15 +687,16 @@ export const registry: OpRegistryEntry[] = [
       import('./agenticRemediation.js').then(
         (m) =>
           m.makeAgenticRemediation(
-            createDriverFactory(
+            createDriverFactory({
               // Dispatch wiring (PR #238 review P2): the host's alias-notice
               // sink rides the factory config; absent (every library
               // caller), the library default — one stderr line — is
               // unchanged.
-              wiring?.onDeprecatedAlias !== undefined
+              ...(wiring?.onDeprecatedAlias !== undefined
                 ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-                : {},
-            ),
+                : {}),
+              ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+            }),
           ) as Op<unknown, unknown>,
       ),
   },

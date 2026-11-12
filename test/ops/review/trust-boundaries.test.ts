@@ -198,11 +198,11 @@ describe('W1.1 reviewer trust and SHA binding', () => {
       expect(result).toMatchObject({ verdict: 'awaiting', reason: 'no_acceptable_review' });
     });
 
-    test('an omitted head preserves legacy acceptance without a review commit', () => {
+    test('an omitted head fails closed exactly like null (#1213)', () => {
       const legacy = candidate([{ ...review('member', 'APPROVED', HEAD), commitOid: null }]);
       delete legacy.headRefOid;
       const result = classifyPr(legacy, NOW, config);
-      expect(result).toMatchObject({ verdict: 'eligible', reason: 'settle_window_elapsed' });
+      expect(result).toMatchObject({ verdict: 'awaiting', reason: 'no_acceptable_review' });
     });
 
     test('a known matching head still supplies acceptance', () => {

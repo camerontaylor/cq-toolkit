@@ -19,6 +19,7 @@
 // ACP) — each stamps the env of the child it is about to spawn, nothing
 // wider.
 
+import type { CqEnv } from '../config/env.js';
 import type { WorkCorrelation } from './types.js';
 import { paseoParentLinkFromAgentId } from '../shared/proc.js';
 
@@ -116,4 +117,29 @@ export function inboundParentWorkId(
   const explicit = pick('CQ_WORK_ID') ?? pick('CQ_PARENT_WORK_ID');
   if (explicit !== undefined) return explicit;
   return paseoParentWorkId(env);
+}
+
+/**
+ * Snapshot-aware {@link inboundParentWorkId}: the explicit CQ_* tiers come
+ * from the entry/run `CqEnv` snapshot, so an ambient identity change after
+ * entry can never move a run's recorded parent. `PASEO_AGENT_ID` is a
+ * FOREIGN name (never part of the CQ_* registry), so its fallback stays a
+ * live read of the caller-supplied foreign environment — that last
+ * precedence tier is unchanged. Precedence and blank-as-absent semantics
+ * are delegated to {@link inboundParentWorkId} so there is one
+ * implementation.
+ */
+export function inboundParentWorkIdFromSnapshot(
+  cqEnv: Pick<CqEnv, 'values'>,
+  foreignEnv: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+  const snapshotValue = (name: string): string | undefined => {
+    const value = cqEnv.values[name];
+    return typeof value === 'string' ? value : undefined;
+  };
+  return inboundParentWorkId({
+    CQ_WORK_ID: snapshotValue('CQ_WORK_ID'),
+    CQ_PARENT_WORK_ID: snapshotValue('CQ_PARENT_WORK_ID'),
+    PASEO_AGENT_ID: foreignEnv['PASEO_AGENT_ID'],
+  });
 }

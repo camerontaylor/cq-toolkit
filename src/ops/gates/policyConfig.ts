@@ -1,11 +1,12 @@
 // D11 protected-path posture (W1.9, ADR-0004 D-G; key naming per RS-15
 // Annex B): which changed protected paths need a human.
 //
-// The resolver is deliberately pure, following W1.11's sandbox resolver
-// (`src/sandbox/config.ts`): the caller injects the environment and the
-// explicit per-call opt-in. Unset or blank is the conservative `human`
-// posture (P8); any value other than `human`/`diff-check`/`advisory` is a
-// configuration error, never a silent fallback.
+// The resolver keeps W1.11's sandbox resolver shape (`src/sandbox/config.ts`):
+// an explicit `CqEnv` snapshot, an explicit raw env record (the injection seam
+// used by tests and library callers), and the explicit per-call opt-in.
+// Unset or blank is the conservative `human` posture (P8); any value other than
+// `human`/`diff-check`/`advisory` is a configuration error, never a silent
+// fallback.
 //
 // THE ADVISORY POSTURE (development posture, 2026-10-20; docs/protected-scope.md
 // "Advisory posture"): only privileged paths (the trust ref's project
@@ -13,12 +14,17 @@
 // definition/policy-list entries still need a human; every other finding is
 // an annotation in the run report. `lint` stays `fail` in every posture.
 //
-// WHERE THE POSTURE MAY COME FROM (Annex B §B.1): only the project env
-// (`CQ_MERGE_PROTECTED_PATHS`) and an explicit per-call opt-in. Plan JSON, op
-// input and workspace files never carry it — the policy op's input schema is
-// strict and has no posture field, so a subject cannot relax its own check.
-// The per-call object shape follows W1.11's `SandboxOptIn` and plan §3.1; the
-// CLI `--opt-in` flag that would populate it is W3.6's.
+// WHERE THE POSTURE MAY COME FROM (Annex B §B.1): the entry/run CqEnv snapshot
+// (`CQ_MERGE_PROTECTED_PATHS` as resolved once at the entry), an explicitly
+// injected raw env record (the same key, verbatim), and an explicit per-call
+// opt-in. Plan JSON, op input and workspace files never carry it — the policy
+// op's input schema is strict and has no posture field, so a subject cannot
+// relax its own check. The per-call object shape follows W1.11's
+// `SandboxOptIn` and plan §3.1; the CLI `--opt-in` flag that would populate it
+// is W3.6's. The live ambient environment is never read: with neither an
+// explicit snapshot nor an explicit raw record the enclosing run's snapshot is
+// the authority (one fresh read outside a run), so an ambient change after the
+// entry cannot alter the posture.
 
 import type { CqEnv } from '../../config/env.js';
 import {
@@ -28,7 +34,7 @@ import {
   type ProtectedPathsPosture,
 } from '../../config/values.js';
 import { assertCqEnvName } from '../../config/entry.js';
-import { processEnv } from '../../config/process-env.js';
+import { currentCqEnv } from '../../config/run-env.js';
 import type { CqEnvRegistry } from '../../config/env-registry.js';
 import { assertOptInAuthority } from '../../config/optin.js';
 
@@ -59,8 +65,9 @@ export interface ProtectedPathsConfig {
 }
 
 /**
- * Resolve the D11 posture: explicit per-call opt-in, then project env, over
- * the conservative `human` default.
+ * Resolve the D11 posture: explicit per-call opt-in, then the entry/run
+ * environment (an injected snapshot, an injected raw env record, or the
+ * enclosing run's snapshot), over the conservative `human` default.
  *
  * The opt-in wins whichever way it points. Moving to `human` is a
  * tightening; moving to `diff-check` or `advisory` is a relaxation,
@@ -68,6 +75,11 @@ export interface ProtectedPathsConfig {
  * wildcard opt-in. Unlike the env,
  * a present-but-blank opt-in is an error: naming the key is a deliberate act,
  * so an empty value is a mistake rather than "unset".
+ *
+ * `cqEnv` wins over `env` (the snapshot was resolved once, at the entry);
+ * an explicit `env` record wins over the ambient run snapshot, so a caller
+ * that injects a raw environment keeps the exact call-time semantics it
+ * asked for.
  */
 export function resolveProtectedPathsConfig(
   options: {
@@ -79,10 +91,6 @@ export function resolveProtectedPathsConfig(
     registry?: CqEnvRegistry;
   } = {},
 ): ProtectedPathsConfig {
-  const env =
-    options.cqEnv !== undefined
-      ? { [PROTECTED_PATHS_ENV]: options.cqEnv.values[PROTECTED_PATHS_ENV] as string | undefined }
-      : (options.env ?? processEnv());
   const optIn = options.optIn ?? {};
   assertOptInAuthority(
     'policy',
@@ -99,8 +107,18 @@ export function resolveProtectedPathsConfig(
     return Object.freeze({ posture: call, layer: 'call' });
   }
 
-  // An invalid snapshot value is unset in `values`: refuse it, never default to `human` silently.
-  if (options.cqEnv !== undefined) assertCqEnvName(options.cqEnv, 'policy', PROTECTED_PATHS_ENV);
+  // Source precedence: an explicitly injected snapshot, then an explicitly
+  // injected raw env record, then the enclosing run's snapshot (or one fresh
+  // read outside a run). The last case is a snapshot too, never a live
+  // ambient read: a `process.env` change after the entry cannot alter it.
+  const snapshot = options.cqEnv ?? (options.env === undefined ? currentCqEnv() : undefined);
+  const env: Readonly<Record<string, string | undefined>> =
+    snapshot !== undefined
+      ? { [PROTECTED_PATHS_ENV]: snapshot.values[PROTECTED_PATHS_ENV] as string | undefined }
+      : (options.env ?? {});
+  // An invalid snapshot value is unset in `values`: refuse it, never default
+  // to `human` silently (the explicit raw-record path below refuses it too).
+  if (snapshot !== undefined) assertCqEnvName(snapshot, 'policy', PROTECTED_PATHS_ENV);
   const raw = env[PROTECTED_PATHS_ENV];
   if (raw === undefined || raw.trim() === '') {
     return Object.freeze({ posture: 'human', layer: 'default' });

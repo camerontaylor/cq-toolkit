@@ -199,12 +199,19 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
           const failure = error as Error & {
             code?: unknown;
             killed?: boolean;
+            signal?: string;
             stdout?: string;
             stderr?: string;
           };
+          // Same rule as the execFile callback: an external-signal death
+          // (code null, killed false, `signal` set) is a verdict, not a fault.
+          const signalled = typeof failure.signal === 'string';
           if (
             !failure.message.includes('maxBuffer') &&
-            (typeof failure.code === 'number' || failure.killed || failure.code === 'ABORT_ERR')
+            (typeof failure.code === 'number' ||
+              failure.killed ||
+              failure.code === 'ABORT_ERR' ||
+              signalled)
           )
             return {
               exitCode: typeof failure.code === 'number' ? failure.code : null,
@@ -238,9 +245,14 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
             return;
           }
           const code = (error as { code?: unknown }).code;
+          // A child this runner did not kill can still die from an EXTERNAL
+          // signal (the OOM killer's SIGKILL, SIGSEGV/SIGABRT from a crashing
+          // toolchain): Node then reports code null, killed false and a
+          // `signal` name. That command RAN — a verdict, not a spawn fault.
+          const signalled = typeof (error as { signal?: unknown }).signal === 'string';
           if (
             !error.message.includes('maxBuffer') &&
-            (typeof code === 'number' || error.killed === true || code === 'ABORT_ERR')
+            (typeof code === 'number' || error.killed === true || code === 'ABORT_ERR' || signalled)
           ) {
             // The command RAN and exited non-zero (or was killed on
             // timeout): a verdict the caller classifies, not a fault.
@@ -299,6 +311,7 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
       try {
         const stats = await lstat(resolved);
         if (stats.isSymbolicLink()) return { ok: false, reason: `symlink (not followed): ${path}` };
+        if (!stats.isFile()) return { ok: false, reason: `not a regular file: ${path}` };
         if (stats.size > capBytes) {
           return {
             ok: false,

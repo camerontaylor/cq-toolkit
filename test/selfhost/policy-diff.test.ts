@@ -138,12 +138,35 @@ describe('mainWith', () => {
     expect(h.configs).toEqual([{ posture: 'diff-check', layer: 'env' }]);
   });
 
-  test('an invalid posture is a failed result, exit 1, and nothing is judged', async () => {
+  test('the entry snapshot, not a later read of the injected env, supplies the posture', async () => {
+    const h = harness();
+    let reads = 0;
+    const env = Object.defineProperty({}, 'CQ_MERGE_PROTECTED_PATHS', {
+      enumerable: true,
+      configurable: true,
+      get: () => (++reads === 1 ? 'diff-check' : 'advisory'),
+    }) as Record<string, string | undefined>;
+    expect(await mainWith(ARGV, { env, create: h.create, write: h.write })).toBe(0);
+    expect(h.configs).toEqual([{ posture: 'diff-check', layer: 'env' }]);
+    expect(reads).toBe(1);
+  });
+
+  test('an invalid injected posture is refused by the entry gate before judging', async () => {
     const h = harness();
     const env = { CQ_MERGE_PROTECTED_PATHS: 'off' };
-    expect(await mainWith(ARGV, { env, create: h.create, write: h.write })).toBe(1);
+    const errs: string[] = [];
+    expect(
+      await mainWith(ARGV, {
+        env,
+        create: h.create,
+        write: h.write,
+        stderr: (text) => errs.push(text),
+      }),
+    ).toBe(2);
     expect(h.configs).toEqual([]);
+    expect(h.lines).toHaveLength(1);
     expect(JSON.parse(h.lines[0] ?? '')).toMatchObject({ status: 'failed' });
+    expect(errs.join('')).toContain('CQ_MERGE_PROTECTED_PATHS');
   });
 
   test('a fail or needs-human verdict is still an ok result (the check run carries it)', async () => {

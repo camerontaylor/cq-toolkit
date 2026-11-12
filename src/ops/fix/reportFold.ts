@@ -116,8 +116,10 @@ export function foldObservations(input: ReportFoldInput): ReportV2 {
     source: null,
   };
   if (unknownLinks.length) {
+    // Version-neutral wrapper: each inner reason already names the actual
+    // journal version (or the absence of a descriptor) for its own run.
     availability['/provenance/journalLink'] = unavailable(
-      'T04 kernel v3 descriptors unavailable: ' +
+      'T04 kernel run descriptors unavailable: ' +
         unknownLinks.map((link) => link.reason).join('; '),
     );
   }
