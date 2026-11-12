@@ -42,6 +42,7 @@
 // `failed`/`needs-human`, never a fabricated reading.
 import { execFile, spawn } from 'node:child_process';
 import { lstat, mkdir, readdir, writeFile } from 'node:fs/promises';
+import { devNull } from 'node:os';
 import { dirname, join } from 'node:path';
 import { GIT_HARDEN, HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 
@@ -88,6 +89,16 @@ const SCRUBBED_ENV = [
 function gitEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of SCRUBBED_ENV) delete env[key];
+  // Preserve a caller's explicit global-config disable: deleting
+  // GIT_CONFIG_GLOBAL=/dev/null would restore the default global config,
+  // whose insteadOf rules could redirect ls-remote/push away from the
+  // intended remote. Only re-pins an explicit disable; unset stays unset.
+  if (
+    process.env['GIT_CONFIG_GLOBAL'] === '/dev/null' ||
+    process.env['GIT_CONFIG_GLOBAL'] === devNull
+  ) {
+    env['GIT_CONFIG_GLOBAL'] = devNull;
+  }
   env['GIT_CONFIG_NOSYSTEM'] = '1';
   env['GIT_TERMINAL_PROMPT'] = '0';
   env['GIT_OPTIONAL_LOCKS'] = '0';
