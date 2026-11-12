@@ -125,3 +125,77 @@ test('a malformed non-diff text yields no entry and never throws', () => {
   expect(expectationChangesOf('hello\nworld\n')).toEqual([]);
   expect(expectationChangesOf('')).toEqual([]);
 });
+
+test('a Python unittest assertEqual rewrite is one entry with the before/after pair', () => {
+  const diff = diffOf(
+    'apps/crq-python/test_summary.py',
+    [
+      '@@ -1,4 +1,4 @@',
+      ' class TestSummary(TestCase):',
+      '     def test_value(self) -> None:',
+      '-        self.assertEqual(actual, 1)',
+      '+        self.assertEqual(actual, 2)',
+      '',
+    ].join('\n'),
+  );
+  expect(expectationChangesOf(diff)).toEqual([
+    {
+      file: 'apps/crq-python/test_summary.py',
+      line: 3,
+      before: 'self.assertEqual(actual, 1)',
+      after: 'self.assertEqual(actual, 2)',
+    },
+  ]);
+});
+
+test('the Python unittest family covers assertTrue, assertIn and assertRaises', () => {
+  const diff = diffOf(
+    'tests/test_worker.py',
+    [
+      '@@ -10,4 +10,4 @@',
+      '-        self.assertTrue(worker.ready)',
+      '+        self.assertTrue(worker.done)',
+      '         name = "x"',
+      '-        self.assertIn(name, roles)',
+      '+        self.assertIn(name, groups)',
+      '-        with self.assertRaises(ValueError):',
+      '+        with self.assertRaises(KeyError):',
+      '',
+    ].join('\n'),
+  );
+  expect(expectationChangesOf(diff)).toEqual([
+    {
+      file: 'tests/test_worker.py',
+      line: 10,
+      before: 'self.assertTrue(worker.ready)',
+      after: 'self.assertTrue(worker.done)',
+    },
+    {
+      file: 'tests/test_worker.py',
+      line: 12,
+      before: 'self.assertIn(name, roles)',
+      after: 'self.assertIn(name, groups)',
+    },
+    {
+      file: 'tests/test_worker.py',
+      line: 13,
+      before: 'with self.assertRaises(ValueError):',
+      after: 'with self.assertRaises(KeyError):',
+    },
+  ]);
+});
+
+test('a non-assertion Python line change in a Python test file yields no entry', () => {
+  const diff = diffOf(
+    'apps/crq-python/test_summary.py',
+    [
+      '@@ -1,4 +1,4 @@',
+      ' class TestSummary(TestCase):',
+      '-        actual = compute(1)',
+      '+        actual = compute(2)',
+      '         self.assertEqual(actual, 1)',
+      '',
+    ].join('\n'),
+  );
+  expect(expectationChangesOf(diff)).toEqual([]);
+});

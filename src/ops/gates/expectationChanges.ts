@@ -16,8 +16,9 @@
 // What counts (deliberately narrow): within one edit block of a hunk in a
 // test file (the shared protected-path test taxonomy — no new taxonomy), a
 // removed line and the re-added line replacing it BOTH look like they sit
-// inside an assertion call (`expect(`, `assert`, `.toBe(`, `.toEqual(`, or a
-// `==` comparison) and their contents differ. One-sided matches flag
+// inside an assertion call (`expect(`, `assert`, a `.assert*(` Python
+// unittest method, `.toBe(`, `.toEqual(`, or a `==` comparison) and their
+// contents differ. One-sided matches flag
 // nothing: a fresh assertion has no disputed oracle (the tamper scan already
 // classifies fresh skip/focus markers), and deleting an assertion outright is
 // the removed-test heuristic's territory, not a rewritten expectation.
@@ -57,9 +58,13 @@ export interface ExpectationChange {
  * Assertion-call shape, matched against BOTH sides of the pair on the raw
  * line content (comment syntax deliberately unrecognized — the noise
  * direction is the hack detector's accepted trade). The `==` arm covers
- * plain comparison assertions in any language (`x === 1`, `assert x == 1`).
+ * plain comparison assertions in any language (`x === 1`, `assert x == 1`);
+ * the `.assert*(` arm covers the Python unittest method family —
+ * `self.assertEqual/assertTrue/assertIn/assertRaises/...`, whose names
+ * `\bassert\b` can never match (no word boundary inside `assertEqual`).
  */
-const ASSERTION_RE = /(?:\bexpect\s*\(|\bassert\b|\.toBe\s*\(|\.toEqual\s*\(|==)/;
+const ASSERTION_RE =
+  /(?:\bexpect\s*\(|\bassert\b|\.assert[A-Za-z0-9_]*\s*\(|\.toBe\s*\(|\.toEqual\s*\(|==)/;
 
 /** Hunk header: `@@ -old[,[count]] +new[,[count]] @@` — captures the new start. */
 const HUNK_HEADER_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
