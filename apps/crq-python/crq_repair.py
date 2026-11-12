@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import random
 import re
+import sys
 import time
 from zoneinfo import ZoneInfo
 from crq_repair import atomic, command, git, hack_detector, utc, verify
@@ -21,6 +22,20 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_RATE_LIMIT_PAUSE = dt.timedelta(minutes=30)
 MAX_RATE_LIMIT_PAUSE = dt.timedelta(hours=24)
 TICK_LOCK_WAIT_S = 300
+
+
+@contextlib.contextmanager
+def cooldown_write():
+    # Same canonical state/tick.lock used by fetch_clone and the tick. Never
+    # hold it while waiting for workers or calling providers.
+    path = ROOT / 'state/tick.lock'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def pause_path():
@@ -37,10 +52,11 @@ def rate_limit_pause(report, job_id):
     if isinstance(retry_ms, (int, float)) and not isinstance(retry_ms, bool) and retry_ms > 0:
         wait = min(dt.timedelta(milliseconds=retry_ms), MAX_RATE_LIMIT_PAUSE)
     until = (dt.datetime.now(dt.timezone.utc) + wait).strftime('%Y-%m-%dT%H:%M:%SZ')
-    current = paused()
-    if current and current > until:
-        until = current  # never shorten an existing pause
-    atomic(pause_path(), {'until': until, 'job': job_id, 'at': utc()})
+    with cooldown_write():
+        current = paused()
+        if current and current > until:
+            until = current  # never shorten an existing pause
+        atomic(pause_path(), {'until': until, 'job': job_id, 'at': utc()})
     return until
 
 
@@ -158,11 +174,12 @@ def remember_provider_limit(provider, report):
             until = max(until, min(end, now + dt.timedelta(days=7)))
         except ValueError:
             pass
-    state = provider_cooldowns()
-    stamp = until.astimezone(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    state[provider] = max(state.get(provider, ''), stamp)
-    atomic(ROOT / 'state/repair/provider-cooldowns.json', state)
-    return state[provider]
+    with cooldown_write():
+        state = provider_cooldowns()
+        stamp = until.astimezone(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        state[provider] = max(state.get(provider, ''), stamp)
+        atomic(ROOT / 'state/repair/provider-cooldowns.json', state)
+        return state[provider]
 
 
 def dispatch_paused(config):
@@ -594,9 +611,10 @@ def triage_phase(config, dry_run=False):
 
 
 def drain(config):
-    """Automatic inbox drain, minor-only items after critical/major items. Items run serially: one item
-    worktree at a time, serial findings within it (see README for why)."""
+    """Automatic inbox drain, minor-only items after critical/major items. Items use isolated worker
+    processes up to the configured cap, with serial findings within each item."""
     repair = config['repair']
+    worker_limit(config)  # validate before triage or any provider spend
     until = dispatch_paused(config)
     if until:
         print('repair drain paused: provider rate limit until ' + until)
@@ -633,39 +651,104 @@ def drain(config):
                     and pending(job_id) and job.get('finding', {}).get('severity') in ('critical', 'major')):
                 return 0
         return 1
-    for item in sorted(groups, key=priority):
-        job_ids = groups[item]
-        if blocked(repair):
-            print('repair drain paused: GLM peak blackout')
-            return
-        # Re-read the queue per item: the tick may harvest or the tip may move
-        # while an earlier item runs.
-        queue_path = ROOT / 'state/queue.json'
-        queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
-        jobs = []
-        for job_id in job_ids:
-            status, job, reason = drain_job(ROOT, config, queue, job_id)
-            if not job or job.get('item') != item:
+    drain_items(config, groups, sorted(groups, key=priority))
+
+
+def drain_item(config, item, job_ids):
+    if blocked(config['repair']) or dispatch_paused(config):
+        return 'rate-limit'
+    # Re-read the queue per item: the tick may harvest or the tip may move
+    # while an earlier item runs.
+    queue_path = ROOT / 'state/queue.json'
+    queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
+    jobs = []
+    for job_id in job_ids:
+        status, job, reason = drain_job(ROOT, config, queue, job_id)
+        if not job or job.get('item') != item:
+            continue
+        if status == 'stale':
+            mark_stale(job, reason)
+            print('repair ' + job_id + ': stale, not dispatched: ' + reason)
+            # It stays in its run's chain; process() returns the terminal result.
+            jobs.append(job)
+        elif status == 'run':
+            jobs.append(job)
+        elif reason != 'no queued tick-owned repair run':
+            print('repair ' + job_id + ': skipped: ' + reason)
+    if not any(pending(job['job']) for job in jobs):
+        return None
+    try:
+        return process_item(config, jobs)
+    except Exception as exc:  # a failed item must not stop other items
+        print('repair item ' + item + ' failed: ' + str(exc)[:300], flush=True)
+        return None
+
+
+def worker_limit(config):
+    limit = config['repair'].get('max_concurrent_items', 1)
+    if type(limit) is not int or not 1 <= limit <= 10:
+        raise ValueError('repair.max_concurrent_items must be an integer from 1 to 10')
+    return limit
+
+
+def drain_items(config, groups, order):
+    """One coordinator owns admission; forked items have private CQ_* environments.
+
+    Never kill paid workers: on abort or admission failure, reap admitted children
+    before releasing service.lock. The service's existing systemd cgroup remains
+    the owner of emergency shutdown and its existing drain deadline.
+    """
+    limit = worker_limit(config)
+    active = {}
+    stopped = False
+    try:
+        for item in order:
+            while len(active) >= limit:
+                stopped = reap_item(active) or stopped
+            if stopped or blocked(config['repair']) or dispatch_paused(config):
+                break
+            if limit == 1:
+                if drain_item(config, item, groups[item]) == 'rate-limit':
+                    break
                 continue
-            if status == 'stale':
-                mark_stale(job, reason)
-                print('repair ' + job_id + ': stale, not dispatched: ' + reason)
-                # It stays in its run's chain; process() returns the terminal result.
-                jobs.append(job)
-            elif status == 'run':
-                jobs.append(job)
-            elif reason != 'no queued tick-owned repair run':
-                print('repair ' + job_id + ': skipped: ' + reason)
-        if not any(pending(job['job']) for job in jobs):
-            continue
-        try:
-            outcome = process_item(config, jobs)
-        except Exception as exc:  # one bad item must not stop the drain
-            print('repair item ' + item + ' failed: ' + str(exc)[:300])
-            continue
-        if outcome == 'rate-limit':
-            print('repair drain stopped: provider rate limit until ' + str(paused()))
-            return
+            # Linearize admission against provider pause writes under the same
+            # existing lock. Neither parent nor child retains it during work.
+            with cooldown_write():
+                if dispatch_paused(config):
+                    break
+                pid = os.fork()
+            if pid == 0:
+                try:
+                    outcome = drain_item(config, item, groups[item])
+                    code = 2 if outcome == 'rate-limit' else 0
+                except BaseException:
+                    code = 1
+                # Do not run the coordinator's finally/atexit handlers in a child.
+                try:
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                finally:
+                    os._exit(code)
+            active[pid] = item
+    finally:
+        while active:
+            try:
+                reap_item(active)
+            except KeyboardInterrupt:
+                continue  # keep ownership until every admitted child has exited
+
+
+def reap_item(active):
+    """Poll only our own children; never reap or terminate unrelated work."""
+    while True:
+        for pid, item in list(active.items()):
+            found, status = os.waitpid(pid, os.WNOHANG)
+            if found:
+                del active[pid]
+                if status:
+                    print('repair item ' + item + ': worker exit status ' + str(status), flush=True)
+                return status != 0
+        time.sleep(0.1)
 
 
 def process_item(config, jobs):

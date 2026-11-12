@@ -64,9 +64,16 @@ critical/major work before items with none, oldest first within each class. With
 critical/major findings precede minors. Minor jobs require a lowercase 64-character hexadecimal `canonical_finding_id`
 and a matching delivered triage receipt; ordinary minor, trivial, info and none jobs are skipped. It
 owns `state/repair/`, uses one worktree per item and serial findings within that
-item, and runs items serially: the drivers' `CQ_*` session correlation is
-process environment, so concurrent items would need per-dispatch environments
-first. It never writes the queue, pushes or calls the GitHub API; each drain
+item. `repair.max_concurrent_items` admits 1–10 process-isolated item workers
+(default 1 when absent, shipped config 10). Findings within an item remain serial.
+The coordinator retains `service.lock` until all admitted children exit; each
+child has a private `CQ_*` process environment. Provider cooldown updates reuse
+the existing `tick.lock` only during the short read/modify/write. A pause stops
+new admission; paid in-flight work finishes naturally. No worker is killed to
+make a slot. This is independent of review `max_inflight`. Existing deployment
+overlays remain serial until explicitly setting `repair.max_concurrent_items`
+to 10 in a subsequent reviewed deployment; the frozen c6 target is unchanged.
+It never writes the queue, pushes or calls the GitHub API; each drain
 pass starts with `git fetch --prune origin` in the review clone (a failed fetch
 skips the pass). A job is drained only while its tick-owned repair run is
 `queued`. A job not yet started is skipped as `STALE` (terminal, no model call)

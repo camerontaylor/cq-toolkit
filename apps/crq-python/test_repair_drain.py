@@ -78,6 +78,114 @@ class RepairDrainTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def test_concurrent_items_are_bounded_and_environment_isolated(self):
+        self.config['repair']['max_concurrent_items'] = 10
+        stats = self.root / 'workers.json'
+        atomic(stats, {'active': 0, 'peak': 0, 'finished': []})
+        def worker(config, item, jobs):
+            with service.correlation({'run': item, 'job': item}, False):
+                with service.cooldown_write():
+                    data = json.loads(stats.read_text())
+                    data['active'] += 1
+                    data['peak'] = max(data['peak'], data['active'])
+                    atomic(stats, data)
+                time.sleep(0.1)
+                with service.cooldown_write():
+                    data = json.loads(stats.read_text())
+                    data['active'] -= 1
+                    data['finished'].append([item, os.environ['CQ_RUN_ID']])
+                    atomic(stats, data)
+        names = [str(n) for n in range(14)]
+        with mock.patch.object(service, 'drain_item', side_effect=worker), mock.patch.object(service, 'blocked', return_value=False):
+            service.drain_items(self.config, {n: [] for n in names}, names)
+        data = json.loads(stats.read_text())
+        self.assertGreater(data['peak'], 1)
+        self.assertLessEqual(data['peak'], 10)
+        self.assertEqual(data['active'], 0)
+        self.assertEqual(sorted(data['finished']), sorted([[n, n] for n in names]))
+
+    def test_concurrent_pause_stops_admission_and_drains_paid_worker(self):
+        self.config['repair']['max_concurrent_items'] = 2
+        def worker(config, item, jobs):
+            if item == 'pause':
+                service.rate_limit_pause({}, item)
+                return 'rate-limit'
+            time.sleep(0.1)
+            (self.root / item).touch()
+        names = ['pause', 'paid', 'never']
+        with mock.patch.object(service, 'drain_item', side_effect=worker), mock.patch.object(service, 'blocked', return_value=False):
+            service.drain_items(self.config, {n: [] for n in names}, names)
+        self.assertFalse((self.root / 'never').exists())
+        self.assertIsNotNone(service.paused())
+
+    def test_fork_failure_reaps_admitted_worker_before_returning(self):
+        self.config['repair']['max_concurrent_items'] = 2
+        fork = os.fork
+        calls = []
+        def launch():
+            calls.append(True)
+            if len(calls) == 2:
+                raise OSError('fixture fork failure')
+            return fork()
+        def worker(config, item, jobs):
+            time.sleep(0.1)
+            (self.root / 'finished').touch()
+        with mock.patch.object(service.os, 'fork', side_effect=launch), mock.patch.object(service, 'drain_item', side_effect=worker), mock.patch.object(service, 'blocked', return_value=False):
+            with self.assertRaisesRegex(OSError, 'fixture fork failure'):
+                service.drain_items(self.config, {'a': [], 'b': []}, ['a', 'b'])
+        self.assertTrue((self.root / 'finished').exists())
+
+    def test_worker_crash_stops_further_admission_and_reaps_other_worker(self):
+        self.config['repair']['max_concurrent_items'] = 2
+        def worker(config, item, jobs):
+            if item == 'crash':
+                os._exit(9)
+            time.sleep(0.1)
+            (self.root / item).touch()
+        names = ['crash', 'paid', 'never']
+        with mock.patch.object(service, 'drain_item', side_effect=worker), mock.patch.object(service, 'blocked', return_value=False):
+            service.drain_items(self.config, {n: [] for n in names}, names)
+        self.assertTrue((self.root / 'paid').exists())
+        self.assertFalse((self.root / 'never').exists())
+
+    def test_interrupt_drains_admitted_children_without_new_admission(self):
+        self.config['repair']['max_concurrent_items'] = 2
+        reap = service.reap_item
+        calls = []
+        def interrupted(active):
+            calls.append(True)
+            if len(calls) == 1:
+                raise KeyboardInterrupt()
+            return reap(active)
+        def worker(config, item, jobs):
+            time.sleep(0.1)
+            (self.root / item).touch()
+        names = ['a', 'b', 'never']
+        with mock.patch.object(service, 'reap_item', side_effect=interrupted), mock.patch.object(service, 'drain_item', side_effect=worker), mock.patch.object(service, 'blocked', return_value=False):
+            with self.assertRaises(KeyboardInterrupt):
+                service.drain_items(self.config, {n: [] for n in names}, names)
+        self.assertTrue((self.root / 'a').exists())
+        self.assertTrue((self.root / 'b').exists())
+        self.assertFalse((self.root / 'never').exists())
+
+    def test_concurrency_config_refuses_invalid_limits(self):
+        for limit in (True, 0, 11, 2.5, '10', None):
+            self.config['repair']['max_concurrent_items'] = limit
+            with self.assertRaisesRegex(ValueError, 'max_concurrent_items'):
+                service.drain_items(self.config, {}, [])
+
+    def test_concurrent_provider_updates_do_not_lose_other_provider(self):
+        pids = []
+        for provider in ('zai', 'deepseek'):
+            pid = os.fork()
+            if pid == 0:
+                service.remember_provider_limit(provider, {'retry_after_ms': 60000})
+                os._exit(0)
+            pids.append(pid)
+        for pid in pids:
+            self.assertEqual(os.waitpid(pid, 0)[1], 0)
+        self.assertEqual(set(service.provider_cooldowns()), {'zai', 'deepseek'})
+
     def test_harvest_writeback_maps_nonfixed_outcomes(self):
         c = SimpleNamespace(STATE=self.root / 'state', CONFIG=self.config, iso=lambda: 'now')
         job = {'job': 'job', 'canonical_finding_id': 'finding'}
