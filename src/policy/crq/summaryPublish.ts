@@ -164,16 +164,16 @@ export function publishSummary(
     if (!pyTruthy(item['title']) && pyTruthy(repo) && ghPr !== null) {
       // `type(pr) is int`: JSON integers only (a lossless JsonNumber int is
       // still Python's int; a float lexeme never qualifies). The gh seam
-      // returns null for a failed process; the producer swallows those.
+      // returns null for a FAILED process: the producer's except arm skips
+      // the assignment entirely, so the cached falsy title is retained
+      // (audit klwA). A SUCCESSFUL call always assigns:
+      // `item["title"] = item["title"] or (output.strip() or None)` — a
+      // truthy trimmed title wins, and a blank/whitespace output normalizes
+      // to null, replacing the cached falsy exactly as Python does.
       const stdout = effects.ghTitle(repo as string, ghPr);
-      const fetched = stdout === null ? null : stdout.trim();
-      // Python `item["title"] = item["title"] or (gh_title(...) or None)`:
-      // the assignment substitutes only when the lookup YIELDS something
-      // truthy. A failed or blank gh call yields falsy and `or` falls
-      // through to the EXISTING falsy title, so '' / {} / 0 / false survive
-      // (audit klwA); only a null pr title keeps its cache-miss None here.
-      if (fetched !== null && fetched !== '') {
-        item['title'] = fetched;
+      if (stdout !== null) {
+        const fetched = stdout.trim();
+        item['title'] = fetched === '' ? null : fetched;
       }
     }
   }

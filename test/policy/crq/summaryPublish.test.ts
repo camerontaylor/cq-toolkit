@@ -604,6 +604,51 @@ describe('publish-full oracle replay through publishSummary', () => {
     expect(result.text).toContain('"title":{}');
   });
 
+  it('a successful blank gh output normalizes the cached falsy title to null', () => {
+    // Round-3 P2 (corroborated by external Codex thread at the gh seam): on
+    // SUCCESS the producer always assigns
+    // `item["title"] = item["title"] or (output.strip() or None)`, so a
+    // blank/whitespace gh output normalizes to null and REPLACES the cached
+    // FALSY title ({}/''/0/false reach gh; a whitespace-only title is truthy
+    // and never gets there). Only the command-FAILURE path skips assignment
+    // and keeps the cached falsy (klwA). The previous guard skipped
+    // assignment on blank success too, keeping the cached value where
+    // Python publishes null.
+    const previous = '{"last_tick":"x","pending_items":[{"repo":"r","pr":5,"title":{}}]}';
+    const core = {
+      last_tick: 'x',
+      pending_items: [{ repo: 'r', pr: 5, title: null }],
+      starts_cap: 8,
+      generated_at: 'g',
+    };
+    const queue = { items: [], starts: [], last_tick: 'x' } as unknown as CrqRecord;
+    const result = publishSummary(
+      core,
+      queue,
+      {},
+      {},
+      {
+        root: '/state',
+        xdgStateHome: '/xdg',
+        now: 0,
+        previousBytes: new TextEncoder().encode(previous),
+        inbox: {
+          entries: [],
+          readResult: () => null,
+          hasResult: () => false,
+          hasProgress: () => false,
+        },
+        triageRows: [],
+        systemd: { error: 'x' },
+        systemdClock: { realtime: 0, monotonic: 0 },
+        ghTitle: () => '  \t ',
+        readReceipt: () => null,
+      },
+    );
+    expect(result.text).toContain('"title":null');
+    expect(result.text).not.toContain('"title":{}');
+  });
+
   it('preserves integer-like context_error key order byte-exactly', () => {
     // Audit igxr (reproduced at c00f2109): Python dicts keep insertion order
     // for integer-like string keys (json.loads preserves the raw lexeme
