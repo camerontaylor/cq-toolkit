@@ -124,6 +124,8 @@ export interface Scenario {
   openInResult?: () => Promise<OpResult<PrOpenReport>>;
   /** The findings-section body edit throws. */
   ghEditThrows?: string;
+  /** Hits the probe publication scanner returns (the findings-compose refusal). */
+  probePublicationHits?: { component: string; ruleId: string }[];
   /** The red final check returns this non-failed status instead. */
   finalCheckStatus?: 'budget-exhausted';
   /** The final check's ledger record says passed although the leg failed. */
@@ -360,6 +362,10 @@ export async function run(repo: TestRepo, scenario: Scenario) {
       publicationProbeRoots.push(root);
       if (scenario.defaultProbePublication?.probeScannerFor !== undefined)
         return scenario.defaultProbePublication.probeScannerFor(root);
+      // A probe hit scenario: the findings compose scans under the probe
+      // root's rules, so the probe scanner carries the hits.
+      if (scenario.probePublicationHits !== undefined)
+        return stubScanner(scenario.probePublicationHits);
       return stubScanner();
     },
     ...(scenario.injectedOpenOwnsForge === true

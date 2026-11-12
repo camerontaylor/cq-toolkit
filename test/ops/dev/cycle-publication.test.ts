@@ -237,6 +237,37 @@ describe('dev.cycle', () => {
     },
   );
 
+  test('a stopped-run draft whose findings section trips the denylist scan refuses the body edit', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const opens: PrOpenInput[] = [];
+    const { gh, bodies } = ghFake();
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      address: structuredStopAddress(
+        state,
+        'budget',
+        'review.address: token or wall budget exhausted; report: /tmp/r.json',
+      ),
+      open: openFake(opens),
+      gh,
+      // The round-cap findings compose scans under the author root's rules:
+      // a hit refuses the body edit while the draft itself stays open.
+      publicationScanner: stubScanner([{ component: 'pr-body', ruleId: 'author-secret' }]),
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(opens).toHaveLength(1);
+    expect(result).toMatchObject({
+      status: 'needs-human',
+      reason:
+        'dev.cycle (pr body): draft PR #42 is open but the findings section could not be composed — PR publication refused by denylist scan: author-secret at line 1',
+    });
+    expect(bodies).toEqual([]);
+  });
+
   test('a stopped-run draft whose findings section cannot be composed says the draft is open without it', async () => {
     const state = await seed(repo);
     await seedReadyLedger(state);
