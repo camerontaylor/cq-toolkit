@@ -760,7 +760,7 @@ def switch(root, overlay, raw, target, tag):
         # Same tick lock spans drift check, checkout, render and audit.
         record(root, overlay, raw, destination, 'switch-render', previous_sha=previous, tag=tag)
         atomic_bytes(root / CONFIG, destination)
-        if git(root, 'status', '--porcelain', '--untracked-files=all') != ' M ' + CONFIG:
+        if git(root, 'status', '--porcelain', '--untracked-files=all') not in ('', ' M ' + CONFIG):
             raise ValueError('post-switch status must contain only rendered config')
     return target
 
