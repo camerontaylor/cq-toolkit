@@ -663,11 +663,12 @@ export const registry: OpRegistryEntry[] = [
     inputSchema: ReviewAddressManyInputSchema,
     importer: async (wiring) =>
       (await import('./addressMany.js')).makeReviewAddressMany({
-        drivers: createDriverFactory(
-          wiring?.onDeprecatedAlias !== undefined
+        drivers: createDriverFactory({
+          ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-            : {},
-        ),
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        }),
       }) as Op<unknown, unknown>,
   },
   {
@@ -736,11 +737,12 @@ export const registry: OpRegistryEntry[] = [
     importer: async (wiring) => {
       const { makeReviewAddress } = await import('./address.js');
       return makeReviewAddress({
-        drivers: createDriverFactory(
-          wiring?.onDeprecatedAlias !== undefined
+        drivers: createDriverFactory({
+          ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-            : {},
-        ),
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        }),
       }) as Op<unknown, unknown>;
     },
   },
@@ -751,11 +753,12 @@ export const registry: OpRegistryEntry[] = [
       import('./run.js').then(
         (m) =>
           m.makeReviewRun({
-            drivers: createDriverFactory(
-              wiring?.onDeprecatedAlias !== undefined
+            drivers: createDriverFactory({
+              ...(wiring?.onDeprecatedAlias !== undefined
                 ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-                : {},
-            ),
+                : {}),
+              ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+            }),
           }) as Op<unknown, unknown>,
       ),
   },
@@ -787,14 +790,15 @@ export const registry: OpRegistryEntry[] = [
     // lane through the factory.
     importer: async (wiring) =>
       (await import('./fixReviewItem.js')).makeFixReviewItem({
-        drivers: createDriverFactory(
+        drivers: createDriverFactory({
           // Dispatch wiring (PR #238 review P2): the host's alias-notice
           // sink rides the factory config; absent (every library caller),
           // the library default — one stderr line — is unchanged.
-          wiring?.onDeprecatedAlias !== undefined
+          ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-            : {},
-        ),
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        }),
       }) as Op<unknown, unknown>,
   },
   {
@@ -807,11 +811,12 @@ export const registry: OpRegistryEntry[] = [
     // it never spawns git (crq verifies the binding around the call).
     importer: async (wiring) =>
       (await import('./fixFinding.js')).makeFixFinding({
-        drivers: createDriverFactory(
-          wiring?.onDeprecatedAlias !== undefined
+        drivers: createDriverFactory({
+          ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-            : {},
-        ),
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        }),
       }) as Op<unknown, unknown>,
   },
   {
