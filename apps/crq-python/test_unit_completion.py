@@ -305,9 +305,9 @@ class ReadTests(CompletionFixture):
             port.read(UNIT, "python", 100)
 
     def test_runtime_mismatch_refuses(self):
-        port = self.port()
-        self.baseline(invocation="1" * 32, exit_monotonic=100)
         self.unit_path.write_bytes(_node_unit())
+        port = self.port(service_sha256=_sha256(_node_unit()))
+        self.baseline(invocation="1" * 32, exit_monotonic=100)
         self.source.complete("2" * 32, 200)
         with self.assertRaises(completion.CompletionRefused):
             port.read(UNIT, "python", 100)
