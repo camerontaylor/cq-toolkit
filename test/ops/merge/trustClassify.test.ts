@@ -237,9 +237,17 @@ describe('classify trust defaults are independent per key', () => {
     });
   });
 
-  test('a comma-only trust list counts as unset, the way the acceptance flow reads it', () => {
+  test('a comma-only trust list activates the conservative defaults, the way the acceptance flow reads it', () => {
     const t = (v: Record<string, string>) => resolveClassifyTrust('t', undefined, env(v));
-    expect(t({ CQ_MERGE_ACCEPT_REVIEW_STATES: ',' })).toEqual({});
+    // The key IS present, so policy mode is on and every field takes its
+    // conservative default. Returning {} would drop the classifier into its
+    // permissive legacy mode, which trusts reviewers the acceptance flow
+    // would reject.
+    expect(t({ CQ_MERGE_ACCEPT_REVIEW_STATES: ',' })).toEqual({
+      trustedBots: [],
+      trustedAssociations: ['OWNER', 'MEMBER', 'COLLABORATOR'],
+      acceptReviewStates: ['APPROVED'],
+    });
     const commaOnly = {
       CQ_MERGE_ACCEPT_REVIEW_STATES: ' , ',
       CQ_MERGE_TRUSTED_BOTS: 'good[bot]',
