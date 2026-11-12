@@ -3099,6 +3099,30 @@ class GuestBaselineSelectionTests(unittest.TestCase):
                 self.assertEqual(guest.baseline(), {"mode": "base"})
 
 
+class ProductionProvenanceRepairTests(unittest.TestCase):
+    """Regressions for validator lookups over the retained raw tree."""
+
+    def test_raw_extraction_preserves_group_writable_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            source = root / "artifact"
+            source.write_text("mode evidence")
+            source.chmod(0o664)
+            archive = root / "raw.tar.gz"
+            with tarfile.open(archive, "w:gz") as tar:
+                tar.add(str(source), arcname="artifact")
+            destination = root / "raw"
+            harness.extract_raw_archive(archive, destination)
+            mode = (destination / "artifact").stat().st_mode & 0o777
+            self.assertEqual(mode, 0o664)
+
+    def test_phase_record_accepts_plain_record_name(self):
+        record = {"sha256": "a" * 64, "outcome": "pending"}
+        self.assertIs(harness._phase_record({"record": record}), record)
+        self.assertIs(harness._phase_record({"record_after": record}), record)
+        self.assertEqual(harness._phase_record({}), {})
+
+
 class ProductionHarnessCheckTests(unittest.TestCase):
     """Synthetic production recover evidence through the real host checks."""
 

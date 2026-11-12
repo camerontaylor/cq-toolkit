@@ -629,7 +629,14 @@ def extract_raw_archive(raw_path, destination):
                     member.name) is not None
                 and member.linkname == "/dev/null"):
             return member
-        return tarfile.data_filter(member, dest_path)
+        filtered = tarfile.data_filter(member, dest_path)
+        if filtered is not None and (member.isfile() or member.isdir()):
+            # data_filter clears group/other write. The artefact manifest and
+            # the packageability check compare exact modes, so keep the
+            # recorded permission bits while still using the safe filter for
+            # paths, links and special files.
+            filtered.mode = member.mode & 0o777
+        return filtered
 
     with tarfile.open(raw_path, "r:gz") as archive:
         if not hasattr(tarfile, "data_filter"):
@@ -4548,6 +4555,11 @@ def cmd_run(args):
     return 0 if not problems else 1
 
 
+def _phase_record(phase):
+    """The retained record summary, whether named after or plain."""
+    return phase.get("record_after") or phase.get("record") or {}
+
+
 def _retained_record_problem(summary, raw_root, directory, label, problems):
     if not isinstance(summary, dict) or not summary:
         problems.append(label + " has no retained record summary")
@@ -5036,6 +5048,7 @@ def _verify_production_raw(report, raw_root, problems, phases):
     template_dir = (raw_root / "checkout" / "apps" / "crq-python"
                     / "ops" / "systemd")
     renders = raw_root / "production" / "renders"
+    node_service = None
     for template_name, unit_name in (
             ("crq-watchdog.service", PROD_UNIT),
             ("crq-watchdog.timer", PROD_TIMER)):
@@ -5050,6 +5063,13 @@ def _verify_production_raw(report, raw_root, problems, phases):
         if expected.encode() != render_path.read_bytes():
             problems.append("production render is not derived from the "
                             "retained source template: " + unit_name)
+        if unit_name == PROD_UNIT:
+            command = raw_prepare.unit_command(
+                unit_name, PROD_NODE_RUNTIME,
+                home="/home/%s" % vm.GUEST_USER)
+            node_service = raw_prepare.render_service_text(
+                unit_name, template_path.read_text(), runner_root,
+                command=command).encode()
     service_render = renders / PROD_UNIT
     if service_render.is_file():
         exec_start = next(
@@ -5084,10 +5104,11 @@ def _verify_production_raw(report, raw_root, problems, phases):
                             "the baseline")
 
     drained = phases.get("production-switch-drained") or {}
+    recovery = phases.get("production-recover-drained") or {}
     ambiguity = phases.get("production-switch-ambiguity") or {}
     coherence = phases.get("production-refuse-coherence") or {}
     outside = phases.get("production-refuse-outside") or {}
-    _retained_record_problem(drained.get("record_after"), raw_root,
+    _retained_record_problem(recovery.get("record_after"), raw_root,
                              "records-prod-drained",
                              "production drained recovery", problems)
     _retained_record_problem(ambiguity.get("record"), raw_root,
@@ -5103,7 +5124,7 @@ def _verify_production_raw(report, raw_root, problems, phases):
             outside_path.read_bytes()) != outside_sha:
         problems.append("outside record copy contradicts the refusal phase")
     if outside_path is not None and outside_sha != (
-            drained.get("record_before") or {}).get("sha256"):
+            _phase_record(drained)).get("sha256"):
         problems.append("outside record copy is not the interrupted drained "
                         "record")
     coherence_path = _raw_record(raw_root / "records-prod-coherence",
@@ -5140,9 +5161,7 @@ def _verify_production_raw(report, raw_root, problems, phases):
         problems.append("raw final unit directory retains an invalid "
                         "staged service")
     elif staged.is_file():
-        node_render = renders / PROD_UNIT
-        if not node_render.is_file() \
-                or staged.read_bytes() != node_render.read_bytes():
+        if node_service is None or staged.read_bytes() != node_service:
             problems.append("raw final staged service is not the node render")
 
     state_dir = raw_root / "checkout" / "apps" / "crq-python" / "state"
