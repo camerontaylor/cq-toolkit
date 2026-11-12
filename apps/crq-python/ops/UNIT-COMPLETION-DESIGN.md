@@ -28,6 +28,10 @@ Evidence must bind:
   the baseline invocation, and is not already returned.
 * **Sequence**: `ExecMainExitTimestampMonotonic` is a `CLOCK_MONOTONIC`
   microsecond integer, strictly greater than the previous sequence.
+* **Baseline**: only a stable `inactive` state (including a masked unit) may
+  record a prior successful exit as the baseline. `active`, `activating`,
+  `reloading`, `deactivating` and other states refuse; a transitioning state
+  is never a prior-success baseline.
 * **Success**: `Result=success`, `ExecMainStatus=0`, `ActiveState=inactive`,
   `SubState=dead`. Other `Result` values refuse.
 * **Boot**: the baseline and completion boot IDs match. A boot change during the
@@ -114,12 +118,14 @@ def boot_id() -> str
 
 `SystemdJournalSource` is the live read-only implementation. It runs
 `systemctl --user show` and `journalctl --user --user-unit` with bounded output.
-It is not constructed by tests. A parent-owned factory is the only place that
-may bind it later.
+Both stdout and stderr are drained concurrently and each is bounded by
+`max_bytes` while it is read, so an oversize stream refuses without buffering
+the full output. It is not constructed by tests. A parent-owned factory is the
+only place that may bind it later.
 
 The provider is pure over the injected source. Tests use a fake source and real
-temporary unit files. The source command tests use an injected runner and never
-invoke `systemctl` or `journalctl`.
+temporary unit files. The source command tests use an injected process factory
+and never invoke `systemctl` or `journalctl`.
 
 ## Minimal adapter proposal
 

@@ -21,7 +21,9 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+import os
 import re
+import selectors
 import shlex
 import subprocess
 import time
@@ -280,45 +282,132 @@ def read_boot_id() -> str:
     return value
 
 
+def _stop_process(process: subprocess.Popen) -> None:
+    """Terminate and reap only the child this provider owns."""
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _read_bounded(process: subprocess.Popen, *, timeout: float,
+                  max_bytes: int) -> tuple[bytes, bytes]:
+    """Read both child streams without buffering past the byte bound.
+
+    The selector drains stdout and stderr concurrently so a full stderr pipe
+    cannot deadlock the child. Exceeding either stream bound refuses and the
+    caller reaps the owned child. The timeout is measured over the whole read.
+    """
+    deadline = time.monotonic() + timeout
+    if process.stdout is None or process.stderr is None:
+        raise CompletionUnavailable("systemd read has no output streams")
+    streams = {
+        process.stdout: bytearray(),
+        process.stderr: bytearray(),
+    }
+    try:
+        with selectors.DefaultSelector() as selector:
+            for stream in streams:
+                selector.register(stream, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(process.args, timeout)
+                for key, _ in selector.select(remaining):
+                    stream = key.fileobj
+                    buffer = streams[stream]
+                    try:
+                        chunk = os.read(stream.fileno(), 65536)
+                    except InterruptedError:
+                        continue
+                    if chunk == b"":
+                        selector.unregister(stream)
+                        continue
+                    if len(buffer) + len(chunk) > max_bytes:
+                        raise CompletionRefused(
+                            "systemd read exceeds the byte bound")
+                    buffer.extend(chunk)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(process.args, timeout)
+            process.wait(timeout=remaining)
+    except CompletionError:
+        raise
+    except subprocess.TimeoutExpired:
+        raise
+    except (OSError, ValueError) as exc:
+        raise CompletionUnavailable("systemd read failed") from exc
+    return bytes(streams[process.stdout]), bytes(streams[process.stderr])
+
+
 class SystemdJournalSource:
     """Read-only ``systemctl show`` and ``journalctl`` source.
 
     The source is intentionally not constructed by tests. It is the live
     binding used later by a parent-owned factory. Every command is read-only and
-    bounded. The unit name is validated before it reaches a command line.
+    bounded: ``max_bytes`` applies to each of stdout and stderr while both are
+    drained concurrently. The unit name is validated before it reaches a
+    command line.
     """
 
     def __init__(self, *, user: bool = True,
                  systemctl: str = "systemctl",
                  journalctl: str = "journalctl",
-                 runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+                 popen: Callable[..., subprocess.Popen] = subprocess.Popen,
                  timeout: float = 10.0,
                  max_bytes: int = 256 * 1024,
                  max_records: int = 256) -> None:
         self.user = user
         self.systemctl = systemctl
         self.journalctl = journalctl
-        self.runner = runner
+        self.popen = popen
         self.timeout = timeout
         self.max_bytes = max_bytes
         self.max_records = max_records
 
     def _run(self, command: list[str]) -> str:
+        process = None
         try:
-            result = self.runner(command, capture_output=True, text=True,
-                                 timeout=self.timeout)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise CompletionUnavailable("systemd read failed: "
-                                        + str(exc)[:160]) from exc
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()
-            raise CompletionUnavailable(
-                "systemd read returned %d: %s"
-                % (result.returncode, detail[:200]))
-        output = result.stdout or ""
-        if len(output.encode("utf-8")) > self.max_bytes:
-            raise CompletionRefused("systemd read exceeds the byte bound")
-        return output
+            process = self.popen(
+                command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE)
+        except OSError as exc:
+            raise CompletionUnavailable("systemd read failed") from exc
+        try:
+            out, err = _read_bounded(process, timeout=self.timeout,
+                                     max_bytes=self.max_bytes)
+            if process.returncode != 0:
+                raise CompletionUnavailable(
+                    "systemd read returned %d" % process.returncode)
+            try:
+                output = out.decode("utf-8")
+                err.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise CompletionRefused(
+                    "systemd read is not valid UTF-8") from exc
+            return output
+        except CompletionError:
+            raise
+        except subprocess.TimeoutExpired as exc:
+            raise CompletionUnavailable("systemd read timed out") from exc
+        finally:
+            _stop_process(process)
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
 
     def _unit(self, unit: str) -> None:
         if UNIT_RE.fullmatch(unit) is None:
@@ -437,9 +526,9 @@ class SystemdJournalCompletionPort:
         """Return the baseline completed-invocation monotonic sequence.
 
         A masked or never-run unit has no completed invocation, so the baseline
-        is 0. An active unit is not a stable baseline and refuses. The baseline
-        invocation ID is retained only as a distinctness hint; retention across
-        mask, reload or unload is not assumed.
+        is 0. An active or transitioning unit is not a stable baseline and
+        refuses. The baseline invocation ID is retained only as a distinctness
+        hint; retention across mask, reload or unload is not assumed.
         """
         self._unit_and_runtime(unit, self.expected.runtime)
         show = self._show(unit)
@@ -447,8 +536,8 @@ class SystemdJournalCompletionPort:
         if fragment.resolve() != (self.unit_dir / unit).resolve():
             raise CompletionRefused("installed unit path does not match the selected unit")
         active = show["ActiveState"]
-        if active in ("active", "activating", "reloading"):
-            raise CompletionRefused("unit is active; no stable baseline")
+        if active != "inactive":
+            raise CompletionRefused("unit is not in a stable inactive state")
         invocation = show["InvocationID"]
         if invocation and HEX32_RE.fullmatch(invocation) is None:
             raise CompletionRefused("baseline InvocationID is malformed")

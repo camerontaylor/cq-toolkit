@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -72,6 +73,7 @@ class FakeSource:
         self.records_data = []
         self.records_boot = boot
         self.records_calls = 0
+        self.records_error = None
         self.show_calls = 0
 
     def complete(self, invocation, exit_monotonic, *,
@@ -95,6 +97,8 @@ class FakeSource:
 
     def records(self, unit, *, after_monotonic):
         self.records_calls += 1
+        if self.records_error is not None:
+            raise self.records_error
         return {"boot_id": self.records_boot,
                 "records": list(self.records_data)}
 
@@ -163,6 +167,19 @@ class SequenceTests(CompletionFixture):
         self.source.complete("1" * 32, 100, active="active", sub="start")
         with self.assertRaises(completion.CompletionRefused):
             self.port().sequence(UNIT)
+
+    def test_deactivating_unit_refuses_baseline(self):
+        self.source.complete("1" * 32, 100, active="deactivating",
+                             sub="stop-sigterm")
+        with self.assertRaises(completion.CompletionRefused):
+            self.port().sequence(UNIT)
+
+    def test_transitional_states_refuse_baseline(self):
+        for active in ("activating", "reloading", "deactivating"):
+            with self.subTest(active=active):
+                self.source.complete("1" * 32, 100, active=active)
+                with self.assertRaises(completion.CompletionRefused):
+                    self.port().sequence(UNIT)
 
     def test_failed_prior_invocation_refuses_baseline(self):
         self.source.complete("1" * 32, 100, result="exit-code", status="1",
@@ -348,6 +365,15 @@ class WitnessTests(CompletionFixture):
     def test_strict_mode_refuses_missing_witness(self):
         with self.assertRaises(completion.CompletionRefused):
             self.read_with_records([], require=True)
+
+    def test_strict_mode_propagates_journal_unavailable(self):
+        port = self.port(require_journal_witness=True)
+        self.baseline(invocation="1" * 32, exit_monotonic=100)
+        self.source.complete("2" * 32, 200)
+        self.source.records_error = completion.CompletionUnavailable(
+            "journal unavailable")
+        with self.assertRaises(completion.CompletionUnavailable):
+            port.read(UNIT, "python", 100)
 
     def test_foreign_unit_witness_is_ignored(self):
         evidence = self.read_with_records([{
@@ -584,20 +610,30 @@ class ParserTests(unittest.TestCase):
             with self.assertRaises(completion.CompletionRefused):
                 completion.parse_runtime_from_unit(path)
 
+    def popen_for(self, script, *, calls=None, processes=None):
+        def popen(command, **kwargs):
+            if calls is not None:
+                calls.append((command, kwargs))
+            process = subprocess.Popen(
+                [sys.executable, "-c", script], **kwargs)
+            if processes is not None:
+                processes.append(process)
+            return process
+        return popen
+
+    def source_for(self, script, *, calls=None, processes=None,
+                   max_bytes=256 * 1024, timeout=2.0):
+        return completion.SystemdJournalSource(
+            popen=self.popen_for(script, calls=calls, processes=processes),
+            max_bytes=max_bytes, timeout=timeout)
+
     def test_source_show_builds_read_only_command(self):
         calls = []
-
-        class Result:
-            returncode = 0
-            stdout = "LoadState=loaded\n"
-            stderr = ""
-
-        def runner(command, **kwargs):
-            calls.append((command, kwargs))
-            return Result()
-
-        source = completion.SystemdJournalSource(runner=runner)
-        source.show(UNIT, ["LoadState"])
+        source = self.source_for(
+            "import sys; sys.stdout.write('LoadState=loaded\\n')",
+            calls=calls)
+        self.assertEqual(source.show(UNIT, ["LoadState"]),
+                         {"LoadState": "loaded"})
         command = calls[0][0]
         self.assertIn("show", command)
         self.assertIn("--user", command)
@@ -607,19 +643,10 @@ class ParserTests(unittest.TestCase):
 
     def test_source_records_builds_read_only_user_unit_command(self):
         calls = []
-
-        class Result:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
-        def runner(command, **kwargs):
-            calls.append((command, kwargs))
-            return Result()
-
-        source = completion.SystemdJournalSource(runner=runner)
+        source = self.source_for("pass", calls=calls)
         with mock.patch.object(completion, "read_boot_id", return_value=BOOT):
-            source.records(UNIT, after_monotonic=1)
+            response = source.records(UNIT, after_monotonic=1)
+        self.assertEqual(response["records"], [])
         command = calls[0][0]
         self.assertIn("--user-unit", command)
         self.assertIn("--output=json", command)
@@ -627,20 +654,69 @@ class ParserTests(unittest.TestCase):
         self.assertNotIn("stop", command)
         self.assertNotIn("mask", command)
 
-    def test_source_rejects_nonzero_exit(self):
-        class Result:
-            returncode = 1
-            stdout = ""
-            stderr = "no journal"
-
-        source = completion.SystemdJournalSource(runner=lambda *a, **k: Result())
-        with self.assertRaises(completion.CompletionUnavailable):
+    def test_source_rejects_nonzero_exit_without_echoing_stderr(self):
+        processes = []
+        source = self.source_for(
+            "import sys; sys.stderr.write('secret\\n'); sys.exit(1)",
+            processes=processes)
+        with self.assertRaises(completion.CompletionUnavailable) as raised:
             source.show(UNIT, ["LoadState"])
+        self.assertNotIn("secret", str(raised.exception))
+        self.assertIsNotNone(processes[0].poll())
 
     def test_source_rejects_invalid_unit_name(self):
-        source = completion.SystemdJournalSource()
+        source = completion.SystemdJournalSource(
+            popen=lambda *a, **k: self.fail("invalid unit must not run"))
         with self.assertRaises(completion.CompletionRefused):
             source.show("--help", ["LoadState"])
+
+    def test_source_accepts_output_at_the_exact_bound(self):
+        source = self.source_for(
+            "import sys; sys.stdout.write('A=12345\\n')", max_bytes=8)
+        self.assertEqual(source.show(UNIT, ["A"]), {"A": "12345"})
+
+    def test_source_refuses_stdout_over_the_bound(self):
+        processes = []
+        source = self.source_for(
+            "import sys; sys.stdout.write('A=123456\\n')",
+            processes=processes, max_bytes=8)
+        with self.assertRaises(completion.CompletionRefused):
+            source.show(UNIT, ["A"])
+        self.assertIsNotNone(processes[0].poll())
+
+    def test_source_refuses_stderr_over_the_bound(self):
+        processes = []
+        source = self.source_for(
+            "import sys; sys.stderr.write('x' * 9)",
+            processes=processes, max_bytes=8)
+        with self.assertRaises(completion.CompletionRefused):
+            source.show(UNIT, ["A"])
+        self.assertIsNotNone(processes[0].poll())
+
+    def test_source_drains_both_streams_without_deadlock(self):
+        source = self.source_for(
+            "import sys; sys.stderr.write('e' * 65536); "
+            "sys.stdout.write('A=1\\n')",
+            max_bytes=128 * 1024)
+        self.assertEqual(source.show(UNIT, ["A"]), {"A": "1"})
+
+    def test_source_timeout_refuses_and_reaps(self):
+        processes = []
+        source = self.source_for(
+            "import time; time.sleep(5)", processes=processes, timeout=0.2)
+        with self.assertRaises(completion.CompletionUnavailable):
+            source.show(UNIT, ["A"])
+        self.assertIsNotNone(processes[0].poll())
+
+    def test_source_refuses_invalid_utf8(self):
+        processes = []
+        source = self.source_for(
+            "import sys; sys.stdout.buffer.write(b'\\xff')",
+            processes=processes)
+        with self.assertRaises(completion.CompletionRefused) as raised:
+            source.show(UNIT, ["A"])
+        self.assertIn("UTF-8", str(raised.exception))
+        self.assertIsNotNone(processes[0].poll())
 
 
 if __name__ == "__main__":
