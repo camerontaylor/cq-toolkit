@@ -287,7 +287,18 @@ export const registry: OpRegistryEntry[] = [
                 configuredReviewers = policy.reviewers;
               }
             }
-            const drivers = driverFactory.createDriverFactory();
+            const drivers = driverFactory.createDriverFactory({
+              // The dispatch wiring's snapshot wins when supplied (a direct
+              // importer call with explicit wiring outside a run); inside a
+              // run the wiring IS the run snapshot, so this is identical to
+              // the run-context fallback. Absent = the library default. The
+              // narration sink rides the same way (the CLI's `--json` mode
+              // keeps stderr empty through it).
+              ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+              ...(wiring?.onDeprecatedAlias !== undefined
+                ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+                : {}),
+            });
             return m.makeDevReview({
               effects: dev,
               scanSecrets,
@@ -338,16 +349,17 @@ export const registry: OpRegistryEntry[] = [
     // Every construction is inert (closure-only; processes spawn only when
     // an effect is CALLED), so resolving the entry never touches env, the
     // network, or the filesystem.
-    importer: () =>
+    importer: (wiring) =>
       Promise.all([
         import('./cycle.js'),
+        import('../../driver/factory.js'),
         import('./effects.js'),
         import('../../adapters/forge-github/ghEffects.js'),
         import('../dev/denylist.js'),
         import('../pr/registry.js'),
         import('node:fs/promises'),
       ]).then(
-        ([m, effects, ghEffects, denylist, prRegistry, fs]) =>
+        ([m, driverFactory, effects, ghEffects, denylist, prRegistry, fs]) =>
           (async (input: DevCycleCompositionInput) => {
             const dev = effects.makeSubprocessDevEffects(input.repoRoot);
             // The secret scanner a check leg binds: the SAME two-layer
@@ -382,6 +394,21 @@ export const registry: OpRegistryEntry[] = [
             return m.makeDevCycle({
               effects: dev,
               gh: ghEffects.makeSubprocessPrEffects(input.repoRoot),
+              // The dispatch wiring's snapshot, when explicitly supplied: the
+              // default factory the review/address legs resolve roles through
+              // reads it instead of the ambient environment. Absent, no
+              // drivers key is bound and the cycle's library default
+              // (deps.drivers ?? createDriverFactory()) stands.
+              ...(wiring?.cqEnv !== undefined
+                ? {
+                    drivers: driverFactory.createDriverFactory({
+                      cqEnv: wiring.cqEnv,
+                      ...(wiring.onDeprecatedAlias !== undefined
+                        ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+                        : {}),
+                    }),
+                  }
+                : {}),
               ...(scanSecrets === undefined ? {} : { scanSecrets }),
               publicationScanner: publicationLoaded.scanner,
               effectsFor: (root: string) => effects.makeSubprocessDevEffects(root),
