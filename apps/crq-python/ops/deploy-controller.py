@@ -83,7 +83,7 @@ def _load_helper(path: Path, expected_sha256: str | None = None):
 
 
 def _load_live_binding(path: Path | None = None):
-    """Load the unwired live binding only when a production unit switch runs.
+    """Load the live binding only when a production unit switch runs.
 
     The module imports this controller under a private name for its injected
     port types. ``production_adapter`` recovers the loaded controller module

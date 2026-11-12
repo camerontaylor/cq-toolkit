@@ -171,6 +171,7 @@
         "src/ops/dev/effects.ts",
         "src/ops/dev/internal/snapshot.ts",
         "src/ops/sweep/unit.ts",
+        "src/queue-runner/crq.ts",
         "src/sandbox/launcher.ts",
         "src/selfhost/self-merge-prs.ts",
         "src/shared/proc.ts"

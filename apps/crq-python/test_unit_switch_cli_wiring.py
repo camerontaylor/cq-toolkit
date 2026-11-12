@@ -18,7 +18,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from test_deploy_controller_fixtures import OPS, dc
+from test_deploy_controller_fixtures import OPS, dc, host
+from test_unit_adapter import _node_artifact
 from test_unit_switch_factory import BOOT, FactoryFixture, NODE_RUNTIME, UNIT
 
 
@@ -176,6 +177,59 @@ class ControllerUnitSwitchWiringTests(FactoryFixture):
             self.assertEqual(evidence["boot_id"], BOOT)
         self.assertEqual((self.unit_dir / UNIT).read_bytes(),
                          expected["bytes"])
+        current = self.lock.stat()
+        self.assertEqual((current.st_dev, current.st_ino),
+                         (observed.st_dev, observed.st_ino),
+                         "the controller must reuse its existing shared lock")
+        self.assertEqual(current.st_mode & 0o777, 0o600)
+
+    def test_cli_completes_a_real_python_to_node_watchdog_switch(self):
+        unit = "crq-watchdog.service"
+        sha = "c" * 40
+        runtime = "node:" + sha
+        artifact = _node_artifact(self.base, sha, capabilities=["watchdog"])
+        self.systemd.active[unit] = "inactive"
+        self.systemd.active["crq-watchdog.timer"] = "active"
+        self.systemd.prior(unit, "c" * 32, 900)
+        observed = self.write_lock(0o600)
+        code, stdout, stderr = self.run_cli(
+            systemd=self.systemd,
+            args=("switch", "--unit", unit, "--runtime", runtime))
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(stderr, "")
+        record = json.loads(stdout)
+        self.assertEqual(record, self.records()[0],
+                         "stdout must be exactly the persisted record")
+        self.assertEqual(record["unit"], unit)
+        self.assertEqual(record["runtime"], runtime)
+        self.assertEqual(record["prior_runtime"], "python")
+        self.assertEqual(record["outcome"], "completed")
+        expected = host.render_service(
+            self.root, unit, runtime, sha=self.before,
+            artifact_root=str(artifact))
+        self.assertEqual((self.unit_dir / unit).read_bytes(),
+                         expected["bytes"])
+        completions = record["completions"]
+        self.assertEqual(len(completions), 2)
+        self.assertLess(completions[0]["sequence"],
+                        completions[1]["sequence"])
+        for evidence in completions:
+            self.assertEqual(evidence["unit"], unit)
+            self.assertEqual(evidence["runtime"], runtime)
+            self.assertTrue(evidence["success"])
+            self.assertEqual(evidence["service_sha256"], expected["sha256"])
+            self.assertEqual(evidence["source_sha"], self.before)
+            self.assertEqual(evidence["template_blob_oid"],
+                             expected["template_blob_oid"])
+            self.assertEqual(evidence["artifact_source_sha"], sha)
+            self.assertEqual(
+                evidence["artifact_content_sha256"],
+                expected["artifact"]["observed_content_sha256"])
+            self.assertEqual(
+                evidence["crq_js_sha256"],
+                expected["artifact"]["crq_js_sha256"])
+            self.assertEqual(evidence["witness"], "manager")
+            self.assertEqual(evidence["boot_id"], BOOT)
         current = self.lock.stat()
         self.assertEqual((current.st_dev, current.st_ino),
                          (observed.st_dev, observed.st_ino),

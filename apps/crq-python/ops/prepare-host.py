@@ -442,6 +442,10 @@ def _package_runner():
     return _PACKAGE_RUNNER
 
 
+CAPABILITY_NAME = 'dist/queue-runner/capabilities.json'
+CAPABILITY_SCHEMA_VERSION = 1
+
+
 def artifact_identity(artifact_root, runtime):
     """Read-only whole-artifact identity check for a packaged node runner.
 
@@ -451,6 +455,11 @@ def artifact_identity(artifact_root, runtime):
     or establish authenticity. The returned identity is integrity of the
     observed bytes against the manifest, and the manifest is still
     self-declared provenance.
+
+    The optional inventoried capability declaration is data for the existing
+    adapter capability check. It carries no separate source proof: the
+    manifest's source commit and this artifact's whole-tree inventory bind it.
+    An artifact without the declaration declares no commands.
     """
     if runtime == 'python':
         return None
@@ -492,6 +501,46 @@ def artifact_identity(artifact_root, runtime):
                   if item['path'] == 'dist/queue-runner/crq.js'), None)
     if entry is None or entry['type'] != 'file':
         raise ValueError('artifact lacks the runner entry point')
+    capability_entry = next((item for item in observed
+                             if item['path'] == CAPABILITY_NAME), None)
+    capabilities = []
+    if capability_entry is not None:
+        if capability_entry['type'] != 'file':
+            raise ValueError(
+                'artifact capability declaration is not a regular file')
+        try:
+            capability_raw = (root / CAPABILITY_NAME).read_bytes()
+        except OSError as exc:
+            raise ValueError(
+                'artifact capability declaration is unreadable') from exc
+        if hashlib.sha256(capability_raw).hexdigest() \
+                != capability_entry['sha256']:
+            raise ValueError(
+                'artifact capability declaration changed after inventory')
+        try:
+            declaration = json.loads(capability_raw)
+        except ValueError as exc:
+            raise ValueError(
+                'artifact capability declaration is invalid') from exc
+        if not isinstance(declaration, dict) or set(declaration) != {
+                'schema_version', 'commands'}:
+            raise ValueError(
+                'artifact capability declaration has unexpected fields')
+        if declaration.get('schema_version') != CAPABILITY_SCHEMA_VERSION:
+            raise ValueError(
+                'artifact capability schema version is unsupported')
+        commands = declaration.get('commands')
+        if not isinstance(commands, list) or not all(
+                isinstance(command, str) for command in commands):
+            raise ValueError(
+                'artifact capability commands must be a list of strings')
+        if len(set(commands)) != len(commands):
+            raise ValueError(
+                'artifact capability commands contain duplicates')
+        if not set(commands) <= set(UNIT_COMMANDS.values()):
+            raise ValueError(
+                'artifact capability declares an unknown unit command')
+        capabilities = sorted(commands)
     facts = manifest['provenance']['runtime']
     return {
         'kind': 'node',
@@ -506,6 +555,7 @@ def artifact_identity(artifact_root, runtime):
         'platform': facts['platform'],
         'arch': facts['arch'],
         'crq_js_sha256': entry['sha256'],
+        'capabilities': capabilities,
         'verification': 'whole-artifact-inventory-matched',
         'authenticity': 'not-established',
     }
