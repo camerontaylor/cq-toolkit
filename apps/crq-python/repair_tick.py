@@ -286,6 +286,26 @@ def repair_provenance(c, record, run):
     return lines
 
 
+def record_terminal_failure(c, q, item, record, verdicts, expected, job_id, exc):
+    """Shared terminal path for a deterministic repair artifact defect: it can
+    never pass on a later tick, so record the failure instead of blocking the
+    item on a retried identical result."""
+    failure = {'job': job_id, 'item': item['id'], 'verdict': 'FAILED',
+               'reason': 'invalid repair result: ' + str(exc)[:300],
+               'finding': expected['finding']}
+    record['verdicts'] = verdicts + [failure]
+    record.update(state='failed', error=str(exc)[:300])
+    if item['kind'] == review_receipt.KIND:
+        item['state'] = 'done'
+        item['repair_outcome'] = record['state']
+        item['last_error'] = None
+    else:
+        item['state'] = 'repair_failed'
+        item['last_error'] = 'repair_failed; needs human'
+    c.save_queue(q)  # terminal identity before authoritative write-back
+    mark_finding_outcome(c, expected, failure)
+
+
 def harvest(c, q, item, dry=False):
     messages = []
     for run, record in item.get('repair_runs', {}).items():
@@ -377,34 +397,34 @@ def harvest(c, q, item, dry=False):
                 # A deterministic artifact defect can never pass on a later tick,
                 # so record it as a terminal failure instead of blocking the item.
                 if not dry:
-                    failure = {'job': job_id, 'item': item['id'], 'verdict': 'FAILED',
-                               'reason': 'invalid repair result: ' + str(exc)[:300],
-                               'finding': expected['finding']}
-                    record['verdicts'] = verdicts + [failure]
-                    record.update(state='failed', error=str(exc)[:300])
-                    if item['kind'] == review_receipt.KIND:
-                        item['state'] = 'done'
-                        item['repair_outcome'] = record['state']
-                        item['last_error'] = None
-                    else:
-                        item['state'] = 'repair_failed'
-                        item['last_error'] = 'repair_failed; needs human'
-                    c.save_queue(q)  # terminal identity before authoritative write-back
-                    mark_finding_outcome(c, expected, failure)
+                    record_terminal_failure(c, q, item, record, verdicts, expected, job_id, exc)
                 break
             if result.get('verdict') == 'FIXED':
                 # Later findings move the shared HEAD; validate each immutable
                 # claimed range through a separate detached verification worktree.
-                check_wt, branch = c.make_worktree('verify-' + job_id, commits[-1])
-                try:
-                    verify(check_wt, predecessor, commits, job_id)
-                    from importlib import util
-                    spec = util.spec_from_file_location('crq_repair_service', c.ROOT / 'crq_repair.py')
-                    module = util.module_from_spec(spec)
-                    spec.loader.exec_module(module)
-                    module.mechanical(c.CONFIG, check_wt, predecessor, commits, job_id, path.parent)
-                finally:
-                    c.remove_worktree(check_wt, branch)
+                # Dry runs create no worktrees, so they skip this verification.
+                if not dry:
+                    try:
+                        check_wt, branch = c.make_worktree('verify-' + job_id, commits[-1])
+                        try:
+                            verify(check_wt, predecessor, commits, job_id)
+                            from importlib import util
+                            spec = util.spec_from_file_location('crq_repair_service', c.ROOT / 'crq_repair.py')
+                            module = util.module_from_spec(spec)
+                            spec.loader.exec_module(module)
+                            module.mechanical(c.CONFIG, check_wt, predecessor, commits, job_id, path.parent)
+                        finally:
+                            c.remove_worktree(check_wt, branch)
+                    except ValueError as exc:
+                        # A rejected claimed range is deterministic (duplicate
+                        # commits, oversize or flagged diff), so record the same
+                        # terminal failure as a defective result artifact. A
+                        # hack-detector CLI failure is environmental: keep it on
+                        # the retry path, as RuntimeError from git() already is.
+                        if str(exc).startswith('hack detector did not pass: unreadable output'):
+                            raise
+                        record_terminal_failure(c, q, item, record, verdicts, expected, job_id, exc)
+                        break
                 predecessor = commits[-1]
             if not dry:
                 mark_finding_outcome(c, expected, result)
