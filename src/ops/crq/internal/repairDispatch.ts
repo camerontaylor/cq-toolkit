@@ -674,6 +674,15 @@ interface PriorArtifact {
  * names this plan, fold order, then the last `job-finished` (a later
  * `quarantine-released` deletes it). The match is op id plus the manifest's
  * exact `inputsHash`; a stale tip cannot match by run name alone.
+ *
+ * The latest terminal decides, exactly as it does for the kernel. If it is
+ * not a genuine `review.fixFinding` artifact, this returns no eligible
+ * result and the caller classifies the next attempt as fresh. That covers
+ * both this bridge's invocation guard and a plain kernel pre-dispatch
+ * failure (missing/throwing registry, schema/import failure, or an op body
+ * that rejected): the kernel will not replay those, so looking behind them
+ * to an older success would advertise a replay that cannot happen. It also
+ * keeps a guard refusal from granting resume eligibility.
  */
 async function findPriorArtifact(input: {
   readonly journalDir: string;
@@ -710,15 +719,17 @@ async function findPriorArtifact(input: {
     for (const run of ordered) {
       for (const event of run.events) {
         if (event.type === 'job-finished') {
-          // A bridge invocation-guard refusal means the repair op never ran.
-          // It is journal evidence of a refused dispatch, not a terminal
-          // attempt that makes a later resume eligible.
-          if (!isInvocationGuardResult(event.result)) replay.set(event.jobId, event);
+          replay.set(event.jobId, event);
         } else if (event.type === 'quarantine-released') replay.delete(event.jobId);
       }
     }
     const prior = replay.get(input.jobId);
-    if (prior === undefined || prior.opId !== input.op || prior.inputsHash !== input.inputsHash) {
+    if (
+      prior === undefined ||
+      prior.opId !== input.op ||
+      prior.inputsHash !== input.inputsHash ||
+      !isGenuineRepairTerminal(prior.result)
+    ) {
       return { ok: true, value: {} };
     }
     return { ok: true, value: { result: prior.result } };
@@ -770,14 +781,6 @@ export async function planRepairDispatch(
   const currentTip = content.currentTip;
   const sourceSha256 = content.sourceSha256;
 
-  const scans = scanState({
-    context: input.context,
-    binding: prepared.binding,
-    guidance: prepared.guidance,
-    sourceSha256,
-  });
-  if (!scans.ok) return scans;
-
   const plan: Plan = {
     id: `crq-repair-dispatch-${prepared.binding.job}`,
     jobs: [
@@ -812,14 +815,29 @@ export async function planRepairDispatch(
         : 'resumed'
       : 'fresh';
 
-  const atTip = currentTip === prepared.binding.sourceSha;
-  if (attempt !== 'retained-ok') {
+  // Retained-ok replays the existing artifact without invoking the op, so it
+  // is scan-free. Every other attempt needs explicit scan evidence; a failed
+  // scan is refused before its clean/unverified shape is interpreted.
+  let scans: 'clean' | 'unverified';
+  if (attempt === 'retained-ok') {
+    scans = 'unverified';
+  } else {
     const failedScan = failedScanRefusal(input.context);
     if (failedScan !== undefined) return refusal(failedScan);
+    const scanStateResult = scanState({
+      context: input.context,
+      binding: prepared.binding,
+      guidance: prepared.guidance,
+      sourceSha256,
+    });
+    if (!scanStateResult.ok) return scanStateResult;
+    scans = scanStateResult.value;
   }
+
+  const atTip = currentTip === prepared.binding.sourceSha;
   if (attempt === 'fresh') {
     if (!atTip) return refusal('source-not-current-tip');
-    if (scans.value !== 'clean') return refusal('scan-unverified');
+    if (scans !== 'clean') return refusal('scan-unverified');
   }
 
   return {
@@ -844,11 +862,11 @@ export async function planRepairDispatch(
       },
       preconditions: {
         selection: 'caller-asserted',
-        scans: scans.value,
+        scans,
         binding: 'verified',
         sourceBlob: 'verified',
       },
-      remainingGates: gatesFor(attempt, scans.value),
+      remainingGates: gatesFor(attempt, scans),
     },
   };
 }
@@ -1289,6 +1307,22 @@ function isInvocationGuardResult(
   return (
     result !== undefined && result.status === 'failed' && result.error.startsWith(GUARD_PREFIX)
   );
+}
+
+/**
+ * Only an artifact that satisfies the canonical envelope and the op's typed
+ * report guard is evidence that `review.fixFinding` actually produced a
+ * terminal result. `executeOp` journals plain `failed` results for
+ * pre-dispatch failures (no registry entry, throwing importer, schema
+ * rejection) and for detached op failures that never returned an OpResult;
+ * those are not worker attempts and must not make a later resume eligible.
+ */
+function isGenuineRepairTerminal(result: OpResultArtifact<unknown>): boolean {
+  try {
+    return parseFixFindingArtifactText(JSON.stringify(result)).ok;
+  } catch {
+    return false;
+  }
 }
 
 function guardRefusalOf(

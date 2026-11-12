@@ -669,6 +669,150 @@ describe('repair dispatch bridge', () => {
     expect(retryScripted.invocations).toHaveLength(0);
   });
 
+  test('a guard refusal after a retained ok makes the next resume fresh, matching kernel replay', async () => {
+    const journalDir = await tempJournal();
+    const first = await freshRun({ journalDir, opResults: [completeWorker(FIXED)] });
+    runOk(first.run);
+
+    let prepared = preparedJobText;
+    const mutable: RepairHarvestEffects = {
+      ...effects(),
+      readPreparedJob: async () => prepared,
+    };
+    const guardPlan = await planRepairDispatch(
+      { context: context(), attempt: { journalDir, resume: false } },
+      mutable,
+    );
+    planOk(guardPlan);
+    expect(guardPlan.value.attempt).toBe('fresh');
+
+    const changed = withPreparedJob((job) => {
+      job['mechanical_evidence'] = 'changed after the successful artifact';
+    });
+    const guardedOp = scriptedFindingOp([completeWorker(FIXED)]);
+    const mutatingRegistry: OpRegistryView = {
+      get: (name) =>
+        name === 'review.fixFinding'
+          ? ({
+              name: 'review.fixFinding',
+              inputSchema: FixFindingInputSchema,
+              importer: async () => {
+                prepared = changed;
+                return guardedOp.op as unknown as Op<never, never>;
+              },
+            } as OpRegistryEntry<never, never>)
+          : undefined,
+    };
+
+    const guarded = await runRepairDispatch(
+      guardPlan.value,
+      { resume: false, registry: mutatingRegistry },
+      mutable,
+    );
+    expect(guarded.ok).toBe(false);
+    if (!guarded.ok) expect(guarded.refusal).toBe('prepared-job-changed');
+    expect(guardedOp.invocations).toHaveLength(0);
+
+    // The newer guard terminal is the latest kernel replay record, so the
+    // older success is not replayable. Planning must not advertise
+    // retained-ok; a clean same-tip resume is a fresh attempt and runs once.
+    prepared = preparedJobText;
+    const blocked = await planRepairDispatch(
+      {
+        context: context({
+          scans: { source: { verdict: 'unverified', reason: 'scan not rerun' } },
+        }),
+        attempt: { journalDir, resume: true },
+      },
+      effects({ tip: OTHER }),
+    );
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.refusal).toBe('source-not-current-tip');
+
+    const retryPlan = await planRepairDispatch(
+      { context: context(), attempt: { journalDir, resume: true } },
+      effects(),
+    );
+    planOk(retryPlan);
+    expect(retryPlan.value.attempt).toBe('fresh');
+
+    const retryOp = scriptedFindingOp([completeWorker(FIXED)]);
+    const retry = await runRepairDispatch(
+      retryPlan.value,
+      { resume: true, registry: registryFor(retryOp.op) },
+      harvestEffects(),
+    );
+    runOk(retry);
+    expect(retryOp.invocations).toHaveLength(1);
+  });
+
+  test('kernel pre-dispatch failures do not grant resume eligibility', async () => {
+    const failures: Array<{ readonly label: string; readonly registry: OpRegistryView }> = [
+      { label: 'missing entry', registry: { get: () => undefined } },
+      {
+        label: 'throwing importer',
+        registry: {
+          get: (name) =>
+            name === 'review.fixFinding'
+              ? ({
+                  name: 'review.fixFinding',
+                  inputSchema: FixFindingInputSchema,
+                  importer: async () => {
+                    throw new Error('registry importer unavailable');
+                  },
+                } as unknown as OpRegistryEntry<never, never>)
+              : undefined,
+        },
+      },
+    ];
+
+    for (const failure of failures) {
+      const journalDir = await tempJournal();
+      const plan = await planRepairDispatch(
+        { context: context(), attempt: { journalDir, resume: false } },
+        effects(),
+      );
+      planOk(plan);
+
+      const run = await runRepairDispatch(
+        plan.value,
+        { resume: false, registry: failure.registry },
+        effects(),
+      );
+      if (run.ok) throw new Error(`${failure.label}: expected a refusal`);
+      const result = run.run?.jobs[0]?.result;
+      expect(result?.status, failure.label).toBe('failed');
+      expect(result === undefined ? true : 'report' in result, failure.label).toBe(false);
+
+      const finished = await journalFinished(journalDir);
+      expect(finished, failure.label).toHaveLength(1);
+      const journaled = finished[0]?.event.result;
+      expect(journaled === undefined ? true : 'report' in journaled, failure.label).toBe(false);
+
+      // The kernel will not replay this latest plain failure. A moved tip and
+      // unverified scans must therefore fail fresh-attempt validation rather
+      // than being admitted as a resumed worker retry.
+      const refused = await planRepairDispatch(
+        {
+          context: context({
+            scans: { source: { verdict: 'unverified', reason: 'scan not rerun' } },
+          }),
+          attempt: { journalDir, resume: true },
+        },
+        effects({ tip: OTHER }),
+      );
+      expect(refused.ok, failure.label).toBe(false);
+      if (!refused.ok) expect(refused.refusal, failure.label).toBe('source-not-current-tip');
+
+      const clean = await planRepairDispatch(
+        { context: context(), attempt: { journalDir, resume: true } },
+        effects(),
+      );
+      planOk(clean);
+      expect(clean.value.attempt, failure.label).toBe('fresh');
+    }
+  });
+
   test('a new non-ok terminal after a retained-ok plan refuses at invocation, not by spending', async () => {
     const journalDir = await tempJournal();
     const first = await freshRun({ journalDir, opResults: [completeWorker(FIXED)] });
@@ -885,6 +1029,18 @@ describe('repair dispatch bridge', () => {
     expect(freshFailed.ok).toBe(false);
     if (!freshFailed.ok) expect(freshFailed.refusal).toBe('scan-failed');
 
+    const guidanceOnlyFailed = await planRepairDispatch(
+      {
+        context: context({
+          scans: { guidance: { verdict: 'failed', reason: 'guidance secret scan failed' } },
+        }),
+        attempt: { journalDir: await tempJournal(), resume: false },
+      },
+      effects(),
+    );
+    expect(guidanceOnlyFailed.ok).toBe(false);
+    if (!guidanceOnlyFailed.ok) expect(guidanceOnlyFailed.refusal).toBe('scan-failed');
+
     const journalDir = await tempJournal();
     const first = await freshRun({
       journalDir,
@@ -895,7 +1051,10 @@ describe('repair dispatch bridge', () => {
     const sourceFailed = await planRepairDispatch(
       {
         context: context({
-          scans: { source: { verdict: 'failed', reason: 'secret scan failed' } },
+          scans: {
+            source: { verdict: 'failed', reason: 'secret scan failed' },
+            guidance: { verdict: 'failed', reason: 'guidance secret scan failed' },
+          },
         }),
         attempt: { journalDir, resume: true },
       },
@@ -938,7 +1097,10 @@ describe('repair dispatch bridge', () => {
     const retainedPlan = await planRepairDispatch(
       {
         context: context({
-          scans: { source: { verdict: 'failed', reason: 'secret scan failed' } },
+          scans: {
+            source: { verdict: 'failed', reason: 'secret scan failed' },
+            guidance: { verdict: 'failed', reason: 'guidance secret scan failed' },
+          },
         }),
         attempt: { journalDir: retainedJournal, resume: true },
       },
