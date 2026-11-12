@@ -116,6 +116,15 @@ function spawnAndCollect(
     opts.signal?.addEventListener('abort', killGroup, { once: true });
 
     let spawnError: unknown;
+    // `close` waits for BOTH pipes, so a backgrounded descendant (`cmd &`) that
+    // inherits stdout/stderr can delay it past the command's own exit. Record
+    // the real code at `exit` — only while no kill of ours has happened yet —
+    // so a timeout or abort landing in that gap cannot relabel a finished
+    // command as `killed` and drop the exit it actually reached.
+    let exitedCleanly: number | undefined;
+    child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+      if (!killedByUs && signal === null && code !== null) exitedCleanly = code;
+    });
     child.on('error', (e: unknown) => {
       spawnError ??= e;
     });
@@ -127,6 +136,10 @@ function spawnAndCollect(
       const stderr = Buffer.concat(err.chunks).toString('utf8');
       if (spawnError !== undefined && child.pid === undefined) {
         settle({ kind: 'spawn-error', error: spawnError });
+      } else if (exitedCleanly !== undefined) {
+        // The command finished on its own before any kill of ours: its exit is
+        // the truth, whatever the (possibly late) close reports.
+        settle({ kind: 'exit', code: exitedCleanly, stdout, stderr, overflowed });
       } else if (killedByUs || signal !== null || code === null) {
         settle({ kind: 'killed', stdout, stderr, overflowed });
       } else {

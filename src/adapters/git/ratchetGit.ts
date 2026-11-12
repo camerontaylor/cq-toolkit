@@ -822,20 +822,25 @@ export async function gitLsRemoteRef(
     ['ls-remote', '--end-of-options', url, `refs/heads/${ref}`],
     env,
   );
-  const output = redactSecrets(`${res.stdout.toString('utf8')}${res.stderr}`.trim(), secrets);
+  // The ref listing is stdout ONLY: git writes non-fatal warnings (e.g.
+  // `warning: redirecting to ...` on a renamed repo) to stderr even when the
+  // call succeeds, and folding those into the parsed text would fake a second
+  // ref row or a bogus oid. The combined text is for error MESSAGES only.
+  const listing = redactSecrets(res.stdout.toString('utf8').trim(), secrets);
+  const output = redactSecrets(`${res.stdout.toString('utf8')}\n${res.stderr}`.trim(), secrets);
   if (res.timedOut) {
     throw new Error(`ratchet git: ls-remote timed out after ${EXEC_TIMEOUT_MS}ms`);
   }
-  if (!res.ok || res.code !== 0) {
+  if (!res.ok) {
     throw new Error(`ratchet git: ls-remote failed: ${output || `exit ${String(res.code)}`}`);
   }
-  if (output === '') return null;
-  if (output.includes('\n')) {
+  if (listing === '') return null;
+  if (listing.includes('\n')) {
     throw new Error(`ratchet git: ls-remote matched multiple refs for '${ref}'`);
   }
-  const oid = output.split('\t', 1)[0] ?? '';
+  const oid = listing.split('\t', 1)[0] ?? '';
   if (!OID.test(oid)) {
-    throw new Error(`ratchet git: ls-remote returned no commit oid ('${output}')`);
+    throw new Error(`ratchet git: ls-remote returned no commit oid ('${listing}')`);
   }
   return oid;
 }

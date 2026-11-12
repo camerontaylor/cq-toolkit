@@ -2024,6 +2024,8 @@ def main(argv=None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     parser = _JsonArgumentParser(description=__doc__)
+    # Machine mode is needed before the parse, because a usage error is the
+    # one failure that never produces a namespace to read --json from.
     parser.json_mode = "--json" in argv
     parser.add_argument("--root", required=True, type=Path,
                         help="deployment checkout root (full monorepo)")
@@ -2037,9 +2039,8 @@ def main(argv=None) -> int:
                         help="owner-pinned sha256 of the helper; a mismatch refuses "
                              "before import, lock and preflight")
     parser.add_argument("--json", action="store_true",
-                        help="machine mode: argument failures emit the JSON error "
-                             "artifact on stdout (exit 2) instead of argparse's "
-                             "usage text on stderr")
+                        help="machine mode: every error emits one JSON artifact "
+                             "on stdout (exit 2) and keeps stderr empty")
     sub = parser.add_subparsers(dest="operation", required=True)
     switch = sub.add_parser("switch", help="preflight, drain, switch, verify, journal")
     switch.add_argument("--unit", choices=sorted(UNIT_RUNTIMES))
