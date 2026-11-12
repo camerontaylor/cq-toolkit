@@ -78,3 +78,61 @@ it('executes the built CLI dry-run against a queue without changing its bytes', 
   expect(shadow.mutations[0]?.value).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
   expect(await readFile(join(root, 'queue.json'), 'utf8')).toBe(queue);
 });
+
+describe('operator-live command seam (D1)', () => {
+  it('keeps the operator-live set separate from the unit live set', async () => {
+    const { LIVE_OPERATOR_COMMANDS } = await import('../../src/queue-runner/runner.js');
+    const { LIVE_UNIT_COMMANDS } = await import('../../src/queue-runner/capabilities.js');
+    expect([...LIVE_OPERATOR_COMMANDS]).toEqual(['repair-prepare']);
+    for (const command of LIVE_OPERATOR_COMMANDS) {
+      expect([...LIVE_UNIT_COMMANDS]).not.toContain(command);
+    }
+  });
+
+  it('forwards argv to the operator handler and preserves its exit code', async () => {
+    const seen: string[][] = [];
+    const result = await run(
+      ['repair-prepare', 'crq-historical-F1', '--source-sha', 'a'.repeat(40)],
+      {
+        shadowRoot: '/unused',
+        tick: 'x',
+        operatorLive: async (command, args) => {
+          seen.push([command, ...args]);
+          return { artifact: { status: 'failed', error: 'tick lock busy' }, exitCode: 3 };
+        },
+      },
+    );
+    expect(seen).toEqual([['repair-prepare', 'crq-historical-F1', '--source-sha', 'a'.repeat(40)]]);
+    expect(result).toEqual({
+      artifact: { status: 'failed', error: 'tick lock busy' },
+      exitCode: 3,
+    });
+  });
+
+  it('refuses an operator command without a handler', async () => {
+    const result = await run(['repair-prepare', 'crq-historical-F1'], {
+      shadowRoot: '/unused',
+      tick: 'x',
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.artifact).toEqual({
+      status: 'failed',
+      error: 'repair-prepare is not implemented',
+    });
+  });
+
+  it('leaves unit live commands refusing arguments and mapping non-ok to 1', async () => {
+    expect((await run(['watchdog', 'extra'], { shadowRoot: '/unused', tick: 'x' })).exitCode).toBe(
+      2,
+    );
+    const failed = await run(['watchdog'], {
+      shadowRoot: '/unused',
+      tick: 'x',
+      live: async () => ({ status: 'failed', error: 'alert failed' }),
+    });
+    expect(failed).toEqual({
+      artifact: { status: 'failed', error: 'alert failed' },
+      exitCode: 1,
+    });
+  });
+});

@@ -97,7 +97,8 @@ jobs:
         run: |
           set -euo pipefail
           gitleaks git --no-banner --redact --config "$GITLEAKS_CONFIG" --log-opts="$RANGE --diff-merges=remerge" .
-          for commit in $(git rev-list --min-parents=3 "$RANGE"); do
+          octopus=$(git rev-list --min-parents=3 "$RANGE")
+          for commit in $octopus; do
             gitleaks git --no-banner --redact --config "$GITLEAKS_CONFIG" --log-opts="-1 $commit --diff-merges=first-parent" .
           done
       - name: Scan commit messages

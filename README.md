@@ -172,6 +172,12 @@ per-package rescue cap 10. There is no token budget default:
 `budgets.run.maxTokens` when absent. Bulk query defaults are computed by the forge consumer
 from the current user and repository at run time.
 
+Review addressing coordinates each PR and edited checkout with persistent
+local slot locks. Legacy registry files remain read-only hints; an incomplete
+checkout requires [attended recovery](docs/review-address-checkout-recovery.md).
+See the [review operations guide](src/ops/review/README.md) for platform and
+writer-lifetime limits.
+
 Partition review stops dispatching after two failures in completion order with no
 success between them; already-running sessions finish. With concurrency, the set of
 later sessions dispatched can therefore vary with provider timing. A deterministic

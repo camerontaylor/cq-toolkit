@@ -68,7 +68,12 @@ def invoke(config, role, job, wt, directory):
                 return _budget_stop()
             if status.returncode:
                 raise RuntimeError('judge status unavailable; outcome unknown')
-            info = json.loads(status.stdout[status.stdout.index('{'):])
+            try:
+                info, _ = json.JSONDecoder().raw_decode(status.stdout[status.stdout.index('{'):])
+                if not isinstance(info, dict):
+                    raise ValueError('status is not an object')
+            except ValueError:
+                raise RuntimeError('judge status unavailable; outcome unknown') from None
             if info.get('Status', info.get('status')) in ('idle', 'error', 'closed'):
                 try:
                     logs = command(['paseo', '--host', endpoint, 'logs', agent, '--filter',

@@ -1,0 +1,508 @@
+{
+  "schema": "cq.crq-a1-status-vector/v1",
+  "family": "numeric-lineage",
+  "note": "numeric reuse lineage dict-key parity",
+  "cases": [
+    {
+      "name": "numeric-int-id-and-reused-from",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "receipt_id": "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091",
+              "id": 1,
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "95f1b48dc1c08b0eb66e24bff7470a2fa18cc512cf074d6e58af364889bf7071",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "8e2069666ea67ebe91f07557b8e957c1b6f0cfc4e82b7e40f638557a10627b9d"
+              }
+            },
+            {
+              "receipt_id": "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091",
+              "id": "reused",
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "95f1b48dc1c08b0eb66e24bff7470a2fa18cc512cf074d6e58af364889bf7071",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "8e2069666ea67ebe91f07557b8e957c1b6f0cfc4e82b7e40f638557a10627b9d",
+                "captured_at": "later",
+                "base": "cccccccccccccccccccccccccccccccccccccccc"
+              },
+              "reused_from": 1
+            }
+          ]
+        },
+        "receipt_bytes": {
+          "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091": "eyJjYXB0dXJlIjp7ImVxdWl2YWxlbmNlIjoiOGUyMDY5NjY2ZWE2N2ViZTkxZjA3NTU3YjhlOTU3YzFiNmYwY2ZjNGU4MmI3ZTQwZjYzODU1N2ExMDYyN2I5ZCIsInBhdGhzIjpbeyJkaXNwb3NpdGlvbiI6ImluY2x1ZGVkIiwicGF0aCI6IngucHkifV0sInBvbGljeSI6ImFmZmVjdGVkLWN1cnJlbnQtYWRkaXRpb25zLXYxIiwicHJvamVjdGlvbiI6ImN1cnJlbnQtYWZmZWN0ZWQtZmlsZXMvZnVsbC1maWxlLWFkZGl0aW9uLXByb2plY3Rpb24iLCJyZXZpZXdlciI6ImNvZGVyYWJiaXQtcmV2aWV3LWFnZW50LWNvbW1pdHRlZC12MSIsInJldmlld2VyX3ZlcnNpb24iOiJmaXh0dXJlIiwic2NvcGVfZGlnZXN0IjoiOTVmMWI0OGRjMWMwOGIwZWI2NmUyNGJmZjc0NzBhMmZhMThjYzUxMmNmMDc0ZDZlNThhZjM2NDg4OWJmNzA3MSIsInRhcmdldCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJ0cmVlIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiJ9LCJjbGFzc2lmaWNhdGlvbiI6eyJjb3VudGVkIjp0cnVlLCJvdXRjb21lIjoiY29tcGxldGVkIn0sImNvdW50ZWQiOnRydWUsIm91dGNvbWUiOiJ0ZXJtaW5hbC13aXRoLWZpbmRpbmdzIiwic291cmNlIjp7InByIjoxLCJyZXBvIjoib3duZXIvcmVwbyJ9LCJ2ZXJzaW9uIjoxfQ=="
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 2,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        },
+        "bytes": "{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":2,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false}"
+      }
+    },
+    {
+      "name": "numeric-int-float-equivalent-id",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "receipt_id": "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091",
+              "id": 1,
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "95f1b48dc1c08b0eb66e24bff7470a2fa18cc512cf074d6e58af364889bf7071",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "8e2069666ea67ebe91f07557b8e957c1b6f0cfc4e82b7e40f638557a10627b9d"
+              }
+            },
+            {
+              "receipt_id": "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091",
+              "id": "reused",
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "95f1b48dc1c08b0eb66e24bff7470a2fa18cc512cf074d6e58af364889bf7071",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "8e2069666ea67ebe91f07557b8e957c1b6f0cfc4e82b7e40f638557a10627b9d",
+                "captured_at": "later",
+                "base": "cccccccccccccccccccccccccccccccccccccccc"
+              },
+              "reused_from": 1.0
+            }
+          ]
+        },
+        "receipt_bytes": {
+          "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091": "eyJjYXB0dXJlIjp7ImVxdWl2YWxlbmNlIjoiOGUyMDY5NjY2ZWE2N2ViZTkxZjA3NTU3YjhlOTU3YzFiNmYwY2ZjNGU4MmI3ZTQwZjYzODU1N2ExMDYyN2I5ZCIsInBhdGhzIjpbeyJkaXNwb3NpdGlvbiI6ImluY2x1ZGVkIiwicGF0aCI6IngucHkifV0sInBvbGljeSI6ImFmZmVjdGVkLWN1cnJlbnQtYWRkaXRpb25zLXYxIiwicHJvamVjdGlvbiI6ImN1cnJlbnQtYWZmZWN0ZWQtZmlsZXMvZnVsbC1maWxlLWFkZGl0aW9uLXByb2plY3Rpb24iLCJyZXZpZXdlciI6ImNvZGVyYWJiaXQtcmV2aWV3LWFnZW50LWNvbW1pdHRlZC12MSIsInJldmlld2VyX3ZlcnNpb24iOiJmaXh0dXJlIiwic2NvcGVfZGlnZXN0IjoiOTVmMWI0OGRjMWMwOGIwZWI2NmUyNGJmZjc0NzBhMmZhMThjYzUxMmNmMDc0ZDZlNThhZjM2NDg4OWJmNzA3MSIsInRhcmdldCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJ0cmVlIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiJ9LCJjbGFzc2lmaWNhdGlvbiI6eyJjb3VudGVkIjp0cnVlLCJvdXRjb21lIjoiY29tcGxldGVkIn0sImNvdW50ZWQiOnRydWUsIm91dGNvbWUiOiJ0ZXJtaW5hbC13aXRoLWZpbmRpbmdzIiwic291cmNlIjp7InByIjoxLCJyZXBvIjoib3duZXIvcmVwbyJ9LCJ2ZXJzaW9uIjoxfQ=="
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 2,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        },
+        "bytes": "{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":2,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false}"
+      }
+    },
+    {
+      "name": "numeric-bool-equivalent-id",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "receipt_id": "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091",
+              "id": true,
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "95f1b48dc1c08b0eb66e24bff7470a2fa18cc512cf074d6e58af364889bf7071",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "8e2069666ea67ebe91f07557b8e957c1b6f0cfc4e82b7e40f638557a10627b9d"
+              }
+            },
+            {
+              "receipt_id": "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091",
+              "id": "reused",
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "95f1b48dc1c08b0eb66e24bff7470a2fa18cc512cf074d6e58af364889bf7071",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "8e2069666ea67ebe91f07557b8e957c1b6f0cfc4e82b7e40f638557a10627b9d",
+                "captured_at": "later",
+                "base": "cccccccccccccccccccccccccccccccccccccccc"
+              },
+              "reused_from": 1
+            }
+          ]
+        },
+        "receipt_bytes": {
+          "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091": "eyJjYXB0dXJlIjp7ImVxdWl2YWxlbmNlIjoiOGUyMDY5NjY2ZWE2N2ViZTkxZjA3NTU3YjhlOTU3YzFiNmYwY2ZjNGU4MmI3ZTQwZjYzODU1N2ExMDYyN2I5ZCIsInBhdGhzIjpbeyJkaXNwb3NpdGlvbiI6ImluY2x1ZGVkIiwicGF0aCI6IngucHkifV0sInBvbGljeSI6ImFmZmVjdGVkLWN1cnJlbnQtYWRkaXRpb25zLXYxIiwicHJvamVjdGlvbiI6ImN1cnJlbnQtYWZmZWN0ZWQtZmlsZXMvZnVsbC1maWxlLWFkZGl0aW9uLXByb2plY3Rpb24iLCJyZXZpZXdlciI6ImNvZGVyYWJiaXQtcmV2aWV3LWFnZW50LWNvbW1pdHRlZC12MSIsInJldmlld2VyX3ZlcnNpb24iOiJmaXh0dXJlIiwic2NvcGVfZGlnZXN0IjoiOTVmMWI0OGRjMWMwOGIwZWI2NmUyNGJmZjc0NzBhMmZhMThjYzUxMmNmMDc0ZDZlNThhZjM2NDg4OWJmNzA3MSIsInRhcmdldCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJ0cmVlIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiJ9LCJjbGFzc2lmaWNhdGlvbiI6eyJjb3VudGVkIjp0cnVlLCJvdXRjb21lIjoiY29tcGxldGVkIn0sImNvdW50ZWQiOnRydWUsIm91dGNvbWUiOiJ0ZXJtaW5hbC13aXRoLWZpbmRpbmdzIiwic291cmNlIjp7InByIjoxLCJyZXBvIjoib3duZXIvcmVwbyJ9LCJ2ZXJzaW9uIjoxfQ=="
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 2,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        },
+        "bytes": "{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":2,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false}"
+      }
+    },
+    {
+      "name": "numeric-adjacent-bigint-lineage",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "receipt_id": "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091",
+              "id": 9007199254740993,
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "95f1b48dc1c08b0eb66e24bff7470a2fa18cc512cf074d6e58af364889bf7071",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "8e2069666ea67ebe91f07557b8e957c1b6f0cfc4e82b7e40f638557a10627b9d"
+              }
+            },
+            {
+              "receipt_id": "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091",
+              "id": 9007199254740992,
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "95f1b48dc1c08b0eb66e24bff7470a2fa18cc512cf074d6e58af364889bf7071",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "8e2069666ea67ebe91f07557b8e957c1b6f0cfc4e82b7e40f638557a10627b9d",
+                "captured_at": "later",
+                "base": "cccccccccccccccccccccccccccccccccccccccc"
+              },
+              "reused_from": 9007199254740993
+            },
+            {
+              "receipt_id": "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091",
+              "id": "reused",
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "95f1b48dc1c08b0eb66e24bff7470a2fa18cc512cf074d6e58af364889bf7071",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "8e2069666ea67ebe91f07557b8e957c1b6f0cfc4e82b7e40f638557a10627b9d",
+                "captured_at": "later",
+                "base": "cccccccccccccccccccccccccccccccccccccccc"
+              },
+              "reused_from": 9007199254740992
+            }
+          ]
+        },
+        "receipt_bytes": {
+          "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091": "eyJjYXB0dXJlIjp7ImVxdWl2YWxlbmNlIjoiOGUyMDY5NjY2ZWE2N2ViZTkxZjA3NTU3YjhlOTU3YzFiNmYwY2ZjNGU4MmI3ZTQwZjYzODU1N2ExMDYyN2I5ZCIsInBhdGhzIjpbeyJkaXNwb3NpdGlvbiI6ImluY2x1ZGVkIiwicGF0aCI6IngucHkifV0sInBvbGljeSI6ImFmZmVjdGVkLWN1cnJlbnQtYWRkaXRpb25zLXYxIiwicHJvamVjdGlvbiI6ImN1cnJlbnQtYWZmZWN0ZWQtZmlsZXMvZnVsbC1maWxlLWFkZGl0aW9uLXByb2plY3Rpb24iLCJyZXZpZXdlciI6ImNvZGVyYWJiaXQtcmV2aWV3LWFnZW50LWNvbW1pdHRlZC12MSIsInJldmlld2VyX3ZlcnNpb24iOiJmaXh0dXJlIiwic2NvcGVfZGlnZXN0IjoiOTVmMWI0OGRjMWMwOGIwZWI2NmUyNGJmZjc0NzBhMmZhMThjYzUxMmNmMDc0ZDZlNThhZjM2NDg4OWJmNzA3MSIsInRhcmdldCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJ0cmVlIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiJ9LCJjbGFzc2lmaWNhdGlvbiI6eyJjb3VudGVkIjp0cnVlLCJvdXRjb21lIjoiY29tcGxldGVkIn0sImNvdW50ZWQiOnRydWUsIm91dGNvbWUiOiJ0ZXJtaW5hbC13aXRoLWZpbmRpbmdzIiwic291cmNlIjp7InByIjoxLCJyZXBvIjoib3duZXIvcmVwbyJ9LCJ2ZXJzaW9uIjoxfQ=="
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 3,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        },
+        "bytes": "{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":3,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false}"
+      }
+    },
+    {
+      "name": "numeric-unhashable-reused-from-is-unverified",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "receipt_id": "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091",
+              "id": 1,
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "95f1b48dc1c08b0eb66e24bff7470a2fa18cc512cf074d6e58af364889bf7071",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "8e2069666ea67ebe91f07557b8e957c1b6f0cfc4e82b7e40f638557a10627b9d"
+              }
+            },
+            {
+              "receipt_id": "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091",
+              "id": "reused",
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "95f1b48dc1c08b0eb66e24bff7470a2fa18cc512cf074d6e58af364889bf7071",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "8e2069666ea67ebe91f07557b8e957c1b6f0cfc4e82b7e40f638557a10627b9d",
+                "captured_at": "later",
+                "base": "cccccccccccccccccccccccccccccccccccccccc"
+              },
+              "reused_from": [
+                1
+              ]
+            }
+          ]
+        },
+        "receipt_bytes": {
+          "e48cd38d1b80acca932b3cd8b836037cb7246243578db9f90c1ab9879c904091": "eyJjYXB0dXJlIjp7ImVxdWl2YWxlbmNlIjoiOGUyMDY5NjY2ZWE2N2ViZTkxZjA3NTU3YjhlOTU3YzFiNmYwY2ZjNGU4MmI3ZTQwZjYzODU1N2ExMDYyN2I5ZCIsInBhdGhzIjpbeyJkaXNwb3NpdGlvbiI6ImluY2x1ZGVkIiwicGF0aCI6IngucHkifV0sInBvbGljeSI6ImFmZmVjdGVkLWN1cnJlbnQtYWRkaXRpb25zLXYxIiwicHJvamVjdGlvbiI6ImN1cnJlbnQtYWZmZWN0ZWQtZmlsZXMvZnVsbC1maWxlLWFkZGl0aW9uLXByb2plY3Rpb24iLCJyZXZpZXdlciI6ImNvZGVyYWJiaXQtcmV2aWV3LWFnZW50LWNvbW1pdHRlZC12MSIsInJldmlld2VyX3ZlcnNpb24iOiJmaXh0dXJlIiwic2NvcGVfZGlnZXN0IjoiOTVmMWI0OGRjMWMwOGIwZWI2NmUyNGJmZjc0NzBhMmZhMThjYzUxMmNmMDc0ZDZlNThhZjM2NDg4OWJmNzA3MSIsInRhcmdldCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJ0cmVlIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiJ9LCJjbGFzc2lmaWNhdGlvbiI6eyJjb3VudGVkIjp0cnVlLCJvdXRjb21lIjoiY29tcGxldGVkIn0sImNvdW50ZWQiOnRydWUsIm91dGNvbWUiOiJ0ZXJtaW5hbC13aXRoLWZpbmRpbmdzIiwic291cmNlIjp7InByIjoxLCJyZXBvIjoib3duZXIvcmVwbyJ9LCJ2ZXJzaW9uIjoxfQ=="
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 1,
+            "proven_terminal": 1,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        },
+        "bytes": "{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":1,\"proven_terminal\":1,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false}"
+      }
+    }
+  ]
+}

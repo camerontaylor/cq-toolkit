@@ -232,22 +232,26 @@ describe('op subcommands (I1 stream + exit-code contract)', () => {
     expect(out).toContain('--help');
   });
 
-  test('dev.review union help lists both cycle and admission fields', async () => {
+  test('dev.review help lists the cycle fields only', async () => {
     const { code, out } = await capture(['dev.review', '--help'], {
       opsRoot: fileURLToPath(new URL('../../src/ops/', import.meta.url)),
     });
     expect(code).toBe(0);
     for (const flag of [
       '--repoRoot=',
+      '--action=',
+      '--target=',
+      '--base=',
       '--reviewer=',
       '--uncommitted=',
-      '--requestId=',
-      '--head=',
-      '--cycle=',
+      '--includeIntegration=',
+      '--testFiles=',
     ])
       expect(out).toContain(flag);
-    expect(out).toContain('input alternative 1');
-    expect(out).toContain('input alternative 2');
+    // S2b-ii retired the author-admission branch: no admission flags survive.
+    expect(out).not.toContain('--requestId=');
+    expect(out).not.toContain('--cycle=');
+    expect(out).not.toContain('input alternative');
     expect(out).not.toContain('does not expose a field list');
   });
 

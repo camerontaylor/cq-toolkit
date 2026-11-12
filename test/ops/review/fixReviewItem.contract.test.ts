@@ -139,6 +139,60 @@ describe('the fix outcome contract (PR #336 incident; PR #343)', () => {
     }
   });
 
+  // The reason bytes are the externally observed mapping: the Python cq driver
+  // (crq_repair/drivers/cq.py) classifies from the stable token at this exact
+  // position, so pin whole strings rather than fragments.
+  describe('the no-outcome reason is the externally observed mapping (crq token)', () => {
+    test.each(['needs_human', 'no_outcome'] as const)(
+      '%s → exact reason carrying the worker disposition token',
+      async (disposition) => {
+        const summary = 'A maintainer must choose.';
+        const { op } = scriptedOp([
+          completeWorker({ disposition, summary, commits: [], evidence: [] }),
+        ]);
+        expect(await op(baseInput())).toEqual({
+          status: 'needs-human',
+          reason: `fixReviewItem: no outcome to post — worker disposition ${disposition}: ${summary}`,
+        });
+      },
+    );
+
+    test('evidence-missing keeps the legacy prose and no worker disposition token', async () => {
+      const { op } = scriptedOp([completeWorker({ ...UNCHANGED, evidence: [] })]);
+      expect(await op(baseInput())).toEqual({
+        status: 'needs-human',
+        reason:
+          'fixReviewItem: no outcome to post — disposition unchanged_with_reason cites no evidence',
+      });
+    });
+
+    test('legacy changed:false keeps the legacy prose byte-for-byte', async () => {
+      const { op } = scriptedOp([
+        completeWorker({ changed: false, summary: NO_CHANGE, commits: [] }),
+      ]);
+      expect(await op(baseInput())).toEqual({
+        status: 'needs-human',
+        reason:
+          'fixReviewItem: no outcome to post — a legacy no-change contract carries no disposition or evidence',
+      });
+    });
+
+    test('the parser reason is capped at 200 chars before the session suffix', async () => {
+      const summary = 'r'.repeat(300);
+      const { op } = scriptedOp([
+        completeWorker(
+          { disposition: 'needs_human', summary, commits: [], evidence: [] },
+          { sessionId: 'sess-9' },
+        ),
+      ]);
+      const parsed = `worker disposition needs_human: ${summary}`;
+      expect(await op(baseInput())).toEqual({
+        status: 'needs-human',
+        reason: `${NO_OUTCOME_REASON} — ${parsed.slice(0, 200)} (session sess-9)`,
+      });
+    });
+  });
+
   test.each([
     ['an unknown disposition', { ...UNCHANGED, disposition: 'done' }],
     ['commits on unchanged_with_reason', { ...UNCHANGED, commits: ['a'.repeat(40)] }],

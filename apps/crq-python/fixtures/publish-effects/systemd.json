@@ -1,0 +1,531 @@
+{
+  "name": "systemd",
+  "description": "status_summary.systemd_activity over patched probe output",
+  "cases": [
+    {
+      "name": "probe-unavailable",
+      "source": "status_summary.systemd_activity",
+      "input": {
+        "output": null,
+        "probe_error": true,
+        "realtime": 1794225600.0,
+        "monotonic": 500.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "timers": {
+            "crq-tick.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-watchdog.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-slot.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-backfill.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            },
+            "crq-repair.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemctl user show unavailable"
+            }
+          },
+          "services": {}
+        },
+        "bytes": "{\"timers\":{\"crq-tick.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-watchdog.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-slot.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-backfill.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"},\"crq-repair.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemctl user show unavailable\"}},\"services\":{}}"
+      }
+    },
+    {
+      "name": "loaded-and-active",
+      "source": "status_summary.systemd_activity",
+      "input": {
+        "output": "Id=crq-tick.timer\nLoadState=loaded\nActiveState=active\nLastTriggerUSec=@1700000000\nNextElapseUSecRealtime=@1794225000\n\nId=crq-watchdog.timer\nLoadState=not-found\nActiveState=inactive\n",
+        "probe_error": false,
+        "realtime": 1794225600.0,
+        "monotonic": 500.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "timers": {
+            "crq-tick.timer": {
+              "active": true,
+              "active_state": "active",
+              "load_state": "loaded",
+              "last_trigger": "2023-11-14T22:13:20Z",
+              "next_elapse": "2026-11-09T11:50:00Z"
+            },
+            "crq-watchdog.timer": {
+              "active": false,
+              "active_state": "inactive",
+              "load_state": "not-found",
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit not loaded"
+            },
+            "crq-slot.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-backfill.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-repair.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            }
+          },
+          "services": {}
+        },
+        "bytes": "{\"timers\":{\"crq-tick.timer\":{\"active\":true,\"active_state\":\"active\",\"load_state\":\"loaded\",\"last_trigger\":\"2023-11-14T22:13:20Z\",\"next_elapse\":\"2026-11-09T11:50:00Z\"},\"crq-watchdog.timer\":{\"active\":false,\"active_state\":\"inactive\",\"load_state\":\"not-found\",\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit not loaded\"},\"crq-slot.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-backfill.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-repair.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"}},\"services\":{}}"
+      }
+    },
+    {
+      "name": "monotonic-month-year",
+      "source": "status_summary.systemd_activity",
+      "input": {
+        "output": "Id=crq-watchdog.timer\nLoadState=loaded\nActiveState=active\nLastTriggerUSec=@1700000000\nNextElapseUSecMonotonic=1month 2d 3h\n\nId=crq-tick.timer\nLoadState=loaded\nActiveState=active\nLastTriggerUSec=@1700000000\nNextElapseUSecMonotonic=1y 2month 13h 30min",
+        "probe_error": false,
+        "realtime": 1794225600.0,
+        "monotonic": 500.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "timers": {
+            "crq-tick.timer": {
+              "active": true,
+              "active_state": "active",
+              "load_state": "loaded",
+              "last_trigger": "2023-11-14T22:13:20Z",
+              "next_elapse": "2028-01-10T04:21:40Z"
+            },
+            "crq-watchdog.timer": {
+              "active": true,
+              "active_state": "active",
+              "load_state": "loaded",
+              "last_trigger": "2023-11-14T22:13:20Z",
+              "next_elapse": "2026-12-12T01:21:40Z"
+            },
+            "crq-slot.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-backfill.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-repair.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            }
+          },
+          "services": {}
+        },
+        "bytes": "{\"timers\":{\"crq-tick.timer\":{\"active\":true,\"active_state\":\"active\",\"load_state\":\"loaded\",\"last_trigger\":\"2023-11-14T22:13:20Z\",\"next_elapse\":\"2028-01-10T04:21:40Z\"},\"crq-watchdog.timer\":{\"active\":true,\"active_state\":\"active\",\"load_state\":\"loaded\",\"last_trigger\":\"2023-11-14T22:13:20Z\",\"next_elapse\":\"2026-12-12T01:21:40Z\"},\"crq-slot.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-backfill.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-repair.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"}},\"services\":{}}"
+      }
+    },
+    {
+      "name": "fractional-stamps-truncate",
+      "source": "status_summary.systemd_activity",
+      "input": {
+        "output": "Id=crq-tick.timer\nLoadState=loaded\nActiveState=active\nLastTriggerUSec=@1700000000.5\nNextElapseUSecRealtime=@1794225999.999\n",
+        "probe_error": false,
+        "realtime": 1794225600.0,
+        "monotonic": 500.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "timers": {
+            "crq-tick.timer": {
+              "active": true,
+              "active_state": "active",
+              "load_state": "loaded",
+              "last_trigger": "2023-11-14T22:13:20Z",
+              "next_elapse": "2026-11-09T12:06:39Z"
+            },
+            "crq-watchdog.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-slot.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-backfill.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-repair.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            }
+          },
+          "services": {}
+        },
+        "bytes": "{\"timers\":{\"crq-tick.timer\":{\"active\":true,\"active_state\":\"active\",\"load_state\":\"loaded\",\"last_trigger\":\"2023-11-14T22:13:20Z\",\"next_elapse\":\"2026-11-09T12:06:39Z\"},\"crq-watchdog.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-slot.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-backfill.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-repair.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"}},\"services\":{}}"
+      }
+    },
+    {
+      "name": "huge-stamp-is-unavailable",
+      "source": "status_summary.systemd_activity",
+      "input": {
+        "output": "Id=crq-tick.timer\nLoadState=loaded\nActiveState=active\nLastTriggerUSec=@99999999999999999999\n",
+        "probe_error": false,
+        "realtime": 1794225600.0,
+        "monotonic": 500.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "timers": {
+            "crq-tick.timer": {
+              "active": true,
+              "active_state": "active",
+              "load_state": "loaded",
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd timer timestamp unavailable"
+            },
+            "crq-watchdog.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-slot.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-backfill.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-repair.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            }
+          },
+          "services": {}
+        },
+        "bytes": "{\"timers\":{\"crq-tick.timer\":{\"active\":true,\"active_state\":\"active\",\"load_state\":\"loaded\",\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd timer timestamp unavailable\"},\"crq-watchdog.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-slot.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-backfill.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-repair.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"}},\"services\":{}}"
+      }
+    },
+    {
+      "name": "bad-timespan-is-unavailable",
+      "source": "status_summary.systemd_activity",
+      "input": {
+        "output": "Id=crq-tick.timer\nLoadState=loaded\nActiveState=active\nLastTriggerUSec=@1700000000\nNextElapseUSecMonotonic=5quux\n",
+        "probe_error": false,
+        "realtime": 1794225600.0,
+        "monotonic": 500.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "timers": {
+            "crq-tick.timer": {
+              "active": true,
+              "active_state": "active",
+              "load_state": "loaded",
+              "last_trigger": "2023-11-14T22:13:20Z",
+              "next_elapse": null,
+              "error": "systemd timer timestamp unavailable"
+            },
+            "crq-watchdog.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-slot.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-backfill.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-repair.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            }
+          },
+          "services": {}
+        },
+        "bytes": "{\"timers\":{\"crq-tick.timer\":{\"active\":true,\"active_state\":\"active\",\"load_state\":\"loaded\",\"last_trigger\":\"2023-11-14T22:13:20Z\",\"next_elapse\":null,\"error\":\"systemd timer timestamp unavailable\"},\"crq-watchdog.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-slot.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-backfill.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-repair.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"}},\"services\":{}}"
+      }
+    },
+    {
+      "name": "empty-realtime-falls-back-to-monotonic",
+      "source": "status_summary.systemd_activity",
+      "input": {
+        "output": "Id=crq-tick.timer\nLoadState=loaded\nActiveState=active\nLastTriggerUSec=\nNextElapseUSecRealtime=0\nNextElapseUSecMonotonic=2h\n",
+        "probe_error": false,
+        "realtime": 1794225600.0,
+        "monotonic": 500.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "timers": {
+            "crq-tick.timer": {
+              "active": true,
+              "active_state": "active",
+              "load_state": "loaded",
+              "last_trigger": null,
+              "next_elapse": "2026-11-09T13:51:40Z"
+            },
+            "crq-watchdog.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-slot.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-backfill.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-repair.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            }
+          },
+          "services": {}
+        },
+        "bytes": "{\"timers\":{\"crq-tick.timer\":{\"active\":true,\"active_state\":\"active\",\"load_state\":\"loaded\",\"last_trigger\":null,\"next_elapse\":\"2026-11-09T13:51:40Z\"},\"crq-watchdog.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-slot.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-backfill.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-repair.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"}},\"services\":{}}"
+      }
+    },
+    {
+      "name": "missing-unit-stays-observed-unavailable",
+      "source": "status_summary.systemd_activity",
+      "input": {
+        "output": "Id=crq-slot.timer\nLoadState=loaded\nActiveState=active\n",
+        "probe_error": false,
+        "realtime": 1794225600.0,
+        "monotonic": 500.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "timers": {
+            "crq-tick.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-watchdog.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-slot.timer": {
+              "active": true,
+              "active_state": "active",
+              "load_state": "loaded",
+              "last_trigger": null,
+              "next_elapse": null
+            },
+            "crq-backfill.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-repair.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            }
+          },
+          "services": {}
+        },
+        "bytes": "{\"timers\":{\"crq-tick.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-watchdog.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-slot.timer\":{\"active\":true,\"active_state\":\"active\",\"load_state\":\"loaded\",\"last_trigger\":null,\"next_elapse\":null},\"crq-backfill.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-repair.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"}},\"services\":{}}"
+      }
+    },
+    {
+      "name": "unexpected-last-trigger-format",
+      "source": "status_summary.systemd_activity",
+      "input": {
+        "output": "Id=crq-tick.timer\nLoadState=loaded\nActiveState=active\nLastTriggerUSec=2026-11-09T12:00:00Z\n",
+        "probe_error": false,
+        "realtime": 1794225600.0,
+        "monotonic": 500.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "timers": {
+            "crq-tick.timer": {
+              "active": true,
+              "active_state": "active",
+              "load_state": "loaded",
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd timer timestamp unavailable"
+            },
+            "crq-watchdog.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-slot.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-backfill.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            },
+            "crq-repair.timer": {
+              "active": null,
+              "active_state": null,
+              "load_state": null,
+              "last_trigger": null,
+              "next_elapse": null,
+              "error": "systemd unit observation unavailable"
+            }
+          },
+          "services": {}
+        },
+        "bytes": "{\"timers\":{\"crq-tick.timer\":{\"active\":true,\"active_state\":\"active\",\"load_state\":\"loaded\",\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd timer timestamp unavailable\"},\"crq-watchdog.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-slot.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-backfill.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"},\"crq-repair.timer\":{\"active\":null,\"active_state\":null,\"load_state\":null,\"last_trigger\":null,\"next_elapse\":null,\"error\":\"systemd unit observation unavailable\"}},\"services\":{}}"
+      }
+    }
+  ]
+}

@@ -170,19 +170,30 @@ describe('main — peak-aware driver credential (fail closed)', () => {
     // The workflow pins ONE epoch-ms per step so its two node processes (the
     // --print-driver-key-env handshake and the run) cannot straddle a
     // selection boundary. The injected clock here would pick the OTHER window,
-    // so a consulted clock would prove the pin was ignored.
+    // so a consulted clock would prove the pin was ignored. It is also a
+    // counter: the entry snapshot is the ONLY pin source (runStartInstant has
+    // no ambient raw fallback to disagree with it), so neither path may
+    // consult deps.nowMs for the run instant.
     const pinned = Date.parse('2026-10-12T07:00:00Z'); // peak
     vi.stubEnv('CQ_SELFHOST_NOW_MS', String(pinned));
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     process.argv = ['node', 'self-review-loop.js', '--print-driver-key-env'];
+    let reads = 0;
+    const injectedClock = () => {
+      reads += 1;
+      return at('2026-10-12T12:00:00Z');
+    };
     await main({
       ...baseDeps(
         fakeGh([]),
         fakeLoop([], async () => fakeOutcome(1)),
       ),
-      nowMs: () => at('2026-10-12T12:00:00Z'),
+      nowMs: injectedClock,
     });
     expect(write).toHaveBeenCalledWith(PEAK_KEY);
+    // Handshake path: the pinned snapshot decided; the injected clock was
+    // never consulted.
+    expect(reads).toBe(0);
     write.mockRestore();
     // … and the same pin decides the driver the sweep dispatches through.
     const journalRoot = tempJournalRoot();
@@ -198,18 +209,26 @@ describe('main — peak-aware driver credential (fail closed)', () => {
     vi.stubEnv('OPENCODE_GO_API_KEY', 'peak-key');
     vi.stubEnv('OPENCODE_GO_BASE_URL', 'https://go-wire.invalid/v1');
     vi.stubEnv('ZAI_API_KEY', 'present-but-not-selected');
+    reads = 0;
     await main({
       ...baseDeps(
         fakeGh([pullRow(7)]),
         fakeLoop(calls, async (pr) => fakeOutcome(pr)),
       ),
-      nowMs: () => at('2026-10-12T12:00:00Z'),
+      nowMs: injectedClock,
     });
     expect(calls[0]?.opts.driver).toEqual(SelfhostPeak.driver);
     expect(calls[0]?.opts.runOptions?.journalDir).toBe(join(journalRoot, `7-${String(pinned)}`));
+    // Run path: the journal stamp above came from the pinned snapshot, not
+    // the clock. The ONE injected read left is the loop's own per-PR
+    // opts.nowMs snapshot — never a second run-instant read.
+    expect(reads).toBe(1);
   });
 
   test('a malformed CQ_SELFHOST_NOW_MS fails loud at the entry (exit 2) instead of falling back', async () => {
+    // The entry snapshot's registry epoch-ms parser is the only validation:
+    // runStartInstant carries no ambient raw parse of its own, so a bad pin
+    // dies here, before any effect, on both the handshake and the run path.
     process.argv = ['node', 'self-review-loop.js', '--print-driver-key-env'];
     vi.stubEnv('CQ_SELFHOST_NOW_MS', 'not-a-number');
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);

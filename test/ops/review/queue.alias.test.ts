@@ -5,7 +5,6 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import * as queueClient from '../../../src/ops/review/internal/queueClient.js';
 import type { QueueTransport } from '../../../src/ops/review/internal/queueProtocol.js';
 import { makeQueueOps } from '../../../src/ops/review/queue.js';
-import { registry } from '../../../src/ops/review/registry.js';
 import { pendingStatus, ref } from './queue.helpers.js';
 
 afterEach(async () => {
@@ -38,14 +37,6 @@ describe('public queue local alias classification', () => {
       expect(dispatched).not.toHaveBeenCalled();
     },
   );
-  test('malformed alias is reachable as failed through the review registry', async () => {
-    vi.stubEnv('CQ_QUEUE_SSH_ALIAS', 'host;id');
-    for (const name of ['review.enqueue', 'review.queueStatus', 'review.report']) {
-      const op = await registry.find((entry) => entry.name === name)!.importer();
-      const input = name === 'review.report' ? { ...ref, evidenceDir: 'evidence' } : ref;
-      expect(await op(input)).toMatchObject({ status: 'failed' });
-    }
-  });
   test.each(['invalid queue SSH alias', 'queue delivery unknown: timeout'])(
     'injected transport failure keeps its indeterminate verdict: %s',
     async (detail) => {

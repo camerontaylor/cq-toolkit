@@ -183,13 +183,17 @@ observable, fail-stopped steps. It is not deployed and grants no new
 authority: the owner approval, tag and target requirements of this document
 are unchanged, and the controller starts nothing.
 
-One JSON artifact on stdout, narration on stderr; exit 0 switched/healthy,
-1 health observation failed, 2 refused with deployment surfaces unchanged
-(before helper entry, or a helper refusal recorded as `refused_no_change`), 3
-`recovery_required` (mutation occurred or cannot be excluded).
+One JSON artifact on stdout, narration on stderr; exit 0
+switched/healthy/recovered, 1 health observation failed, 2 refused with
+deployment surfaces unchanged (before helper entry, or a helper refusal
+recorded as `refused_no_change`), 3 `recovery_required` (mutation occurred or
+cannot be excluded).
 Exit 3 emits structured recovery evidence on stdout and narration on stderr; it
 never claims the switch was undone. The controller lock
-is `state/controller.lock`, distinct from the runner's tick lock.
+is `state/controller.lock`, distinct from the runner's tick lock. The
+controller creates it mode 0600 and normalises an existing lock it owns to
+0600, never trusting the ambient umask; the live binding refuses a group- or
+world-writable lock.
 
 Helper identity: the controller reads `--helper` (default
 `<root>/apps/crq-python/ops/prepare-host.py`) once, computes its sha256 and
@@ -210,6 +214,11 @@ python3 /srv/crq-deploy/apps/crq-python/ops/deploy-controller.py --root /srv/crq
 python3 /srv/crq-deploy/apps/crq-python/ops/deploy-controller.py --root /srv/crq-deploy \
   --overlay /private/host.json --record-dir /private/crq-deploy-records \
   health --interval-seconds 1500
+# Recover one retained pre-activation unit intent (see below):
+python3 /srv/crq-deploy/apps/crq-python/ops/deploy-controller.py --root /srv/crq-deploy \
+  --overlay /private/host.json --record-dir /private/crq-deploy-records \
+  --expect-helper-sha256 REVIEWED_HELPER_SHA256 \
+  recover --record /private/crq-deploy-records/controller-FULL32HEX.json
 ```
 
 Ordering and guarantees:
@@ -311,6 +320,45 @@ Ordering and guarantees:
    advancement, receipt readability and receipt validity are distinct
    checks; advancement alone is not acceptance.
 
+### Unit switch and unit recovery
+
+`switch --unit UNIT --runtime RUNTIME` and `recover --record PATH` are the
+per-unit entry points. Both compose the same production adapter through
+`ops/unit-live-binding.py` under the controller's own lock; tests replace only
+the systemd, journal and identity ports. Neither path has run against a live
+host, and neither enables production use.
+
+`recover --record` consumes one retained `controller-<32hex>.json` unit record
+whose `operation` is `unit_switch`, whose outcome is `pending` or
+`recovery_required`, and whose `snapshot.runtime` equals its recorded
+`prior_runtime`. The unit and prior runtime come from that record, validated
+under the lock: there is no caller-supplied unit or runtime and no second
+record read. The controller composes the adapter for the **prior** runtime,
+because the abandoned target's artifact may no longer be installed and the
+retained snapshot is authoritative for the bytes, modes, ownership and
+activation that are restored. A composition failure (unavailable binding,
+unverifiable artifact, missing completion witness on this checkout) is an
+ordinary refusal before any unit mutation or journal write.
+
+Exit codes for `recover`:
+
+* 0 — recovery completed. The record is now `outcome: rolled_back` at the
+  `restore_activation_pending` phase, and stdout is exactly that persisted
+  record.
+* 2 — refused with no unit or record change: unreadable, malformed,
+  unsupported-schema or incoherent record, a record outside `--record-dir`, an
+  unfinished checkout or other unit transaction, live/ambiguous queue-owned
+  work, or adapter composition failure. stdout is the usual `error` artifact.
+* 3 — activation ambiguity. A record at `activation_pending` or
+  `restore_activation_pending` is not recovered automatically: the controller
+  still stops and drains the unit's owned work, prints the retained record with
+  `record_path` and `reason` on stdout, and leaves the record bytes unchanged.
+  Inspect runtime evidence before deciding what happened.
+
+`recover` adds no automatic recovery path, boot hook, retry, flag, store or
+lock. Unit records are retained: only the pending intent is replaced by its
+terminal outcome, and no completed or rolled-back record is rewritten.
+
 The deploy journal (schema 1) is the only validated rollback input: it
 records `prior_head`, the prior target's own annotated approval tag
 (`prior_tag`), and the compatibility evidence at the top level. When no
@@ -347,16 +395,23 @@ if record storage is unavailable. Do not rerun blindly, restore queue snapshots,
 or infer automatic rollback permission from a pending/recovery receipt.
 
 Records are never rewritten after their outcome is final (only the pending
-intent is replaced by its outcome); resolution notes are separate files. To
-close a stale `recovery_required` record (for
-example one written before `refused_no_change` existed, such as a pre-checkout
-tag refusal), verify the physical state against the record's prior identity:
-HEAD equals `prior_head`, config bytes match `prior_config_sha256` (and any
-retained baselines), and unit enablement and preserved state are unchanged.
-Then write a separate `OPERATOR-RESOLUTION.md` beside the retained record that
-names the record, the observations and the decision. Earlier intent, recovery
-and refusal records are not consumed by a later preflight, so they do not block
-a separately approved switch.
+intent is replaced by its outcome). A single symmetric preflight classifies
+every `controller-*.json` record by its producer-specific operation, outcome and
+minimum identity. `deploy_pending`/`rollback_pending` and pending or
+recovery-required unit switches block both seams. Completed `deploy`/`rollback`
+(including the first producer's outcome-less completed journals),
+`deploy_refused`/`rollback_refused`, and completed/rolled-back unit switches are
+history and do not block. A `recovery_required` record is not history even when
+its retained `prior_state` still matches HEAD, config bytes, checkout status,
+installed CRQ user units and preserved state: those digests do not cover unit
+metadata, activation or live work, so a recovery record remains unfinished (or
+an unsupported legacy record when its producer identity is incomplete).
+Classification reads only the record, so a later unrelated transaction cannot
+turn accepted history into a blocker. `recover_unit` excludes exactly the record
+it is recovering. Every pre-existing record's bytes are unchanged. The guard
+still only sees the supplied `--record-dir`; a second directory and older
+binaries can bypass it, and the lock is checkout-local. Production
+reconciliation of the actual record root and old callers remains parent-owned.
 
 A completed journal is written only after the checks and durable completion
 write succeed. Pending/recovery/unknown outcomes are not rollback inputs;

@@ -29,7 +29,7 @@ import type {
   KernelRunLinkedJournalEvent,
   ProvenanceRecord,
 } from '../../kernel/types.js';
-import { inboundParentWorkId } from '../../driver/correlation-env.js';
+import { inboundParentWorkIdFromSnapshot } from '../../driver/correlation-env.js';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
 import type { Usage } from '../../driver/types.js';
 import { createGovernor, currentJobContext } from '../../kernel/governor.js';
@@ -75,6 +75,7 @@ import {
 import { makePortableReviewScanner, type DiffSecretScanner } from '../dev/denylist.js';
 import { makeSubprocessDevEffects } from '../dev/effects.js';
 import { processEnv } from '../../config/process-env.js';
+import type { CqEnv } from '../../config/env.js';
 
 export type FixRunInput = z.input<typeof FixRunInputSchema>;
 export interface FixRunReport {
@@ -136,6 +137,14 @@ export interface FixRunDeps {
    * opening its own (memory-only fixtures). Production callers omit this.
    */
   observationWriter?: ObservationWriter;
+  /**
+   * The dispatch wiring's CqEnv snapshot. A direct importer call with
+   * explicit wiring outside a run passes it here so provenance identity and
+   * config resolve from the ENTRY snapshot, never an ambient re-read. Inside
+   * a run the wiring IS the run snapshot; absent, the composition resolves
+   * the enclosing run snapshot (or one fresh read) at entry.
+   */
+  cqEnv?: CqEnv;
 }
 
 /** The composition observation surface makeFixRun exposes to its report. */
@@ -224,6 +233,7 @@ async function captureProvenance(
   startedAt: string,
   base: string,
   configText: string,
+  cqEnv: CqEnv,
 ): Promise<{ provenance: ProvenanceRecord; correlation: CorrelationRecord }> {
   const execFileAsync = promisify(execFile);
   const git = async (args: string[]): Promise<string> => {
@@ -239,8 +249,8 @@ async function captureProvenance(
     git(['rev-parse', '--verify', `${base}^{commit}`]),
     readFile(new URL('../../../package.json', import.meta.url), 'utf8').catch(() => '{}'),
   ]);
-  // The resolved snapshot: a blank CQ_PRODUCER_VERSION is unset (registry contract).
-  const cqEnv = currentCqEnv();
+  // The resolved snapshot (the composition's ENTRY snapshot, passed in): a
+  // blank CQ_PRODUCER_VERSION is unset (registry contract).
   const envVersion = cqEnv.values['CQ_PRODUCER_VERSION'];
   const version =
     (typeof envVersion === 'string' ? envVersion : undefined) ??
@@ -262,8 +272,11 @@ async function captureProvenance(
   };
   // parentWorkId is a UUID per CorrelationRecordSchema: only a genuinely
   // UUID-shaped inbound id persists; the paseo:<id> link form (and any other
-  // non-UUID evidence) stays null rather than failing the header.
-  const inboundParent = inboundParentWorkId(processEnv()) ?? null;
+  // non-UUID evidence) stays null rather than failing the header. The
+  // explicit CQ_* tiers come from the ENTRY snapshot, so ambient drift after
+  // entry cannot move them; only the foreign PASEO_AGENT_ID fallback is a
+  // live read (it is not part of the CQ_* registry).
+  const inboundParent = inboundParentWorkIdFromSnapshot(cqEnv, processEnv()) ?? null;
   const correlation: CorrelationRecord = {
     workId: randomUUID(),
     parentWorkId: inboundParent !== null && UUID_PATTERN.test(inboundParent) ? inboundParent : null,
@@ -327,6 +340,11 @@ export async function resolveFixPrBase(
 export function makeFixRun(deps: FixRunDeps = {}) {
   return async (input: FixRunInput): Promise<FixRunResult> => {
     const start = Date.now();
+    // The composition's ENTRY snapshot: the dispatch wiring's CqEnv when the
+    // host supplied it, else the enclosing run's snapshot (or one fresh read
+    // for a direct library call). Resolved before any await, so an ambient
+    // change after entry cannot move provenance identity or config.
+    const cqEnv = deps.cqEnv ?? currentCqEnv();
     const parentSignal = currentJobContext()?.signal;
     const repoRoot = resolve(input.repoRoot);
     const runPrefix = input.runPrefix ?? `cq/fix-${randomUUID()}`;
@@ -593,6 +611,15 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           observationFailure(error);
         }
       }
+      // ADR-0008 T13: attempt-observation failures a unit could not hand to the
+      // writer are evidence about THIS composition's stream, so fold them into
+      // the observation status before it closes. Doing it here (rather than only
+      // where the unit rows are assembled) means no exit path can close the
+      // stream while `status` still claims `durable`/`unavailable` over
+      // incomplete observation evidence. Folding is idempotent — the status is
+      // set, not accumulated — so a failure already folded elsewhere is safe.
+      for (const unit of collected.values())
+        for (const failure of unit.observationFailures ?? []) observationFailure(failure);
       await closeObservation();
       if (observation !== undefined) {
         const writer = observation.writer;
@@ -805,6 +832,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         new Date(start).toISOString(),
         config.base,
         configText,
+        cqEnv,
       );
       const { provenance } = captured;
       // An injected writer owns the stream's identities; adopt its workId.
@@ -944,7 +972,13 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       try {
         report.run = await runPlan(
           plan,
-          { concurrency: input.concurrency ?? 1, stopOnError: false, journalDir, maxTokens },
+          {
+            concurrency: input.concurrency ?? 1,
+            stopOnError: false,
+            journalDir,
+            maxTokens,
+            cqEnv,
+          },
           view,
           {
             governor: createGovernor({ maxTokens, perJobWallClockMs: policy.budgets.unit.wallMs }),
@@ -958,8 +992,10 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       }
       // ADR-0008: link every RETURNED kernel run explicitly after the
       // runPlan result — never a guessed link. The kernelRunId is the run's
-      // actual v3 run id; the descriptor list comes from the T29
-      // foldObservations join surface so a fold can resolve the link.
+      // actual run id; the descriptor list comes from the T29
+      // foldObservations join surface so a fold can resolve the link (its
+      // workId join resolves for v3 descriptors and stays unknown with the
+      // journal version named for v1/v2 descriptors — T04).
       // A descriptor read is observation, not verdict: its failure is
       // indeterminate evidence and never changes the run's own result.
       try {
@@ -1169,7 +1205,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
                   { ...template, input: { ...assembly, packages }, dependsOn: [tracker.id] },
                 ],
               },
-              { concurrency: 1, stopOnError: false, journalDir },
+              { concurrency: 1, stopOnError: false, journalDir, cqEnv },
               view,
               parentSignal === undefined
                 ? undefined

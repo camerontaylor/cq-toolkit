@@ -82,6 +82,45 @@ def _load_helper(path: Path, expected_sha256: str | None = None):
     return module, digest
 
 
+def _load_live_binding(path: Path | None = None):
+    """Load the live binding only when a production unit switch runs.
+
+    The module imports this controller under a private name for its injected
+    port types. ``production_adapter`` recovers the loaded controller module
+    from the supplied ``Effects`` object, so refusal identity stays at this
+    seam. Nothing here creates a lock, a store, a capability flag or a gate.
+
+    The production call site passes no path and gets one cached module for the
+    binding beside this file. An explicit path is a distinct cache entry, so a
+    caller cannot be handed a stale module for a path it did not ask to load;
+    an unreadable, missing or unresolvable binding refuses as this seam.
+    """
+    if path is None:
+        path = Path(__file__).with_name("unit-live-binding.py")
+        name = "crq_unit_live_binding_cli"
+    else:
+        path = Path(path)
+        name = "crq_unit_live_binding_cli_" + hashlib.sha256(
+            str(path).encode("utf-8", "surrogateescape")).hexdigest()[:16]
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise Refused("live unit binding is unavailable: " + str(path)[:200])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except (OSError, ImportError, SyntaxError) as exc:
+        sys.modules.pop(name, None)
+        raise Refused("live unit binding is unavailable: " + str(exc)[:200]) from exc
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
 LOCK_NAME = "controller.lock"
 JOURNAL_SCHEMA = 1
 
@@ -109,6 +148,19 @@ def now_iso() -> str:
 
 class Refused(Exception):
     """A controller refusal: nothing was changed; the reason is terminal."""
+
+
+class QueueDrainRefused(Refused):
+    """A fail-closed queue ownership refusal before any unit mutation.
+
+    ``drain`` is the exact observation the controller acted on so the caller
+    can retain the blocked item identities without parsing prose. The
+    controller never signals or kills a process.
+    """
+
+    def __init__(self, message: str, drain: dict):
+        super().__init__(message)
+        self.drain = drain
 
 
 class NoChangeRefused(Refused):
@@ -217,12 +269,19 @@ class Effects:
 
         self.state_dir().mkdir(parents=True, exist_ok=True)
         path = self.state_dir() / LOCK_NAME
-        with path.open("a") as handle:
+        # An explicit mode, never the ambient umask: the live binding refuses
+        # a group- or world-writable lock, so a writer that trusts a 002 umask
+        # can create a lock its own reader rejects.
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(descriptor, "a") as handle:
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as exc:
                 raise Refused("controller lock busy: another controller run holds "
                               + LOCK_NAME + " (" + str(exc) + ")") from None
+            # O_CREAT never narrows an existing file: normalise a lock this
+            # controller owns (a former 0664 umask artefact) to 0600.
+            os.chmod(path, 0o600)
             yield
 
     # -- journal ----------------------------------------------------------
@@ -466,6 +525,35 @@ def drain_check(effects: Effects, liveness) -> dict:
             blocked.append({"item": item.get("id"), "state": state,
                             "run": run_id})
     return {"blocked": blocked, "drained": not blocked}
+
+
+def runner_queue_drain(effects: Effects) -> dict:
+    """The controller's queue drain bound to the runner's own liveness probe.
+
+    This is the existing ``drain_check`` driven by ``_runner_liveness`` (which
+    executes the checkout's actual ``crq.run_liveness``), never a second
+    ownership model. It only observes; no process or state is signalled.
+    """
+    return drain_check(effects, _runner_liveness(effects))
+
+
+def queue_drain_gate(effects: Effects) -> dict:
+    """Refuse a unit transaction while recorded queue work is live/ambiguous.
+
+    Callers invoke this before any unit mutation or journal write, so a
+    refusal leaves installed units, activation, preserved queue bytes and
+    retained records unchanged. Both the switch and recovery entry points call
+    it independently; the guest adapter observes the same queue again after its
+    systemd fence. That second point-in-time observation narrows the dispatch
+    window but does not close it.
+    """
+    drain = runner_queue_drain(effects)
+    if not drain["drained"]:
+        raise QueueDrainRefused(
+            "queue-owned work is alive or ambiguous; refusing unit "
+            "transaction before activation: "
+            + json.dumps(drain["blocked"], sort_keys=True)[:400], drain)
+    return drain
 
 
 # ------------------------------------------------------------- preservation
@@ -1197,6 +1285,15 @@ def _refuse_if_unchanged(effects: Effects, identity: dict, state: dict,
                           + where, refused) from exc
 
 
+def runner_units_stopped(helper_module, root):
+    """Freeze new dispatch before observing the drain, using the helper's check."""
+    try:
+        helper_module.inactive(root)
+    except Exception as exc:
+        raise Refused("runner units must be stopped before checking drain: "
+                      + (str(exc) or type(exc).__name__)[:200]) from exc
+
+
 def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
                 overlay_path: Path, helper_sha256: str | None = None) -> dict:
     """Preflight -> drain -> durable intent -> helper -> proofs -> completion.
@@ -1206,10 +1303,11 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
     """
     with effects.controller_lock():
         effects.record_preflight()
-        refuse_unfinished_unit_switches(effects)
+        refuse_unfinished_transactions(effects)
         pre = preflight(effects, target, tag)
         prior_tag = prior_tag_for(effects, pre["state"]["prior_head"])
         plan = {"preflight": pre, "steps": [], "helper_sha256": helper_sha256}
+        runner_units_stopped(helper_module, effects.root)
         drain = drain_check(effects, _runner_liveness(effects))
         plan["steps"].append({"step": "drain", **drain})
         if not drain["drained"]:
@@ -1258,15 +1356,25 @@ def _completion(adapter, unit, runtime, previous):
     return evidence
 
 
-def recover_unit(effects, adapter, path):
-    """Restore a pre-activation intent; activation ambiguity requires investigation."""
-    if adapter is None:
+def recover_unit(effects, adapter, path, *, adapter_factory=None):
+    """Restore a pre-activation intent; activation ambiguity requires investigation.
+
+    ``adapter_factory(unit, prior_runtime)`` is a composition callback used by
+    the production CLI. It is invoked under the controller lock with values the
+    controller validated from the one retained record, after the read-only
+    queue-drain gate and before snapshot validation, so composition cannot race
+    a second record read. Recovery composes for the record's OWN prior runtime:
+    the snapshot is authoritative for bytes, modes, ownership and activation,
+    and the abandoned target's artifact need not still be installed.
+    """
+    if adapter is None and adapter_factory is None:
         raise Refused("no unit recovery adapter")
     path = Path(path)
     with effects.controller_lock():
         effects.record_preflight()
         if path.parent != effects.record_dir or path.is_symlink():
             raise Refused("invalid controller transaction record path")
+        refuse_unfinished_transactions(effects, exclude=path)
         try:
             record = json.loads(path.read_text())
         except (OSError, ValueError) as exc:
@@ -1282,7 +1390,9 @@ def recover_unit(effects, adapter, path):
                 or not _unit_runtime(record.get("runtime"))
                 or not _unit_runtime(record.get("prior_runtime"))
                 or record["runtime"] == record["prior_runtime"]
-                or "snapshot" not in record or "state" not in record
+                or not isinstance(record.get("snapshot"), dict)
+                or record["snapshot"].get("runtime") != record["prior_runtime"]
+                or "state" not in record
                 or record.get("phase") not in ("snapshot", "drained", "activation_pending", "restore_activation_pending")
                 or (record["phase"] == "snapshot" and record.get("state") is not None)
                 or (record["phase"] in ("drained", "activation_pending") and not isinstance(record.get("state"), dict))
@@ -1292,6 +1402,14 @@ def recover_unit(effects, adapter, path):
                            and not _hex(_HEX64, record["state"]["preserved/" + rel]))
                        for rel in PRESERVED))):
             raise Refused("invalid unit recovery record")
+        # Recovery re-observes ownership itself; it never assumes the switch's
+        # drain or a prior crash left the queue empty. Refusal happens before
+        # re-fencing, restore or any journal rewrite.
+        queue_drain_gate(effects)
+        if adapter_factory is not None:
+            adapter = adapter_factory(record["unit"], record["prior_runtime"])
+        if adapter is None:
+            raise Refused("no unit recovery adapter")
         adapter.validate_snapshot(record["unit"], record["snapshot"])
         try:
             adapter.stop_and_drain(record["unit"])
@@ -1311,20 +1429,277 @@ def recover_unit(effects, adapter, path):
         return completed
 
 
-def refuse_unfinished_unit_switches(effects):
-    """Do not start a new transaction while an interrupted one needs recovery."""
-    for path in effects.record_dir.glob("controller-*.json"):
-        if path.is_symlink() or not path.is_file():
-            raise Refused("invalid controller journal entry: " + path.name)
-        try:
-            record = json.loads(path.read_text())
-        except (OSError, ValueError) as exc:
-            raise Refused("unreadable controller journal entry: " + path.name) from exc
-        if not isinstance(record, dict):
-            raise Refused("invalid controller journal entry: " + path.name)
-        if (record.get("operation") == "unit_switch"
-                and record.get("outcome") not in ("completed", "rolled_back")):
+_TX_RE = re.compile(r"[0-9a-f]{32}")
+_PHASES = ("snapshot", "drained", "activation_pending",
+           "restore_activation_pending")
+_UNIT_TERMINAL_PHASES = {"completed": "activation_pending",
+                         "rolled_back": "restore_activation_pending"}
+
+
+def _tx_id(value):
+    return _hex(_TX_RE, value)
+
+
+def _tag(value):
+    return isinstance(value, str) and TAG_RE.fullmatch(value) is not None
+
+
+def _tag_or_none(value):
+    return value is None or _tag(value)
+
+
+def _hex64_or_none(value):
+    return value is None or _hex(_HEX64, value)
+
+
+def _plan_shape(value):
+    return (isinstance(value, dict)
+            and isinstance(value.get("preflight"), dict)
+            and isinstance(value.get("steps"), list))
+
+
+def _checkout_identity(record):
+    """The minimum identity every checkout intent/outcome writer emits."""
+    return (
+        _tx_id(record.get("transaction_id"))
+        and _text(record.get("at"))
+        and record.get("intended_operation") in ("deploy", "rollback")
+        and isinstance(record.get("prior_state"), dict)
+        and _hex(SHA_RE, record.get("prior_head"))
+        and _hex64_or_none(record.get("prior_config_sha256"))
+        and _tag_or_none(record.get("prior_tag"))
+        and _hex(SHA_RE, record.get("target"))
+        and _tag(record.get("tag"))
+        and _hex64_or_none(record.get("helper_sha256"))
+        and record.get("automatic_rollback_permitted") is False
+        and isinstance(record.get("rollback_compatibility"), dict)
+    )
+
+
+def _checkout_refusal_shape(record):
+    return (
+        _checkout_identity(record)
+        and _text(record.get("failed_phase"))
+        and _text(record.get("reason"))
+        and isinstance(record.get("observations"), dict)
+        and isinstance(record.get("record_path"), str)
+        and isinstance(record.get("record_persisted"), bool)
+    )
+
+
+def _checkout_recovery_shape(record):
+    return (
+        _checkout_identity(record)
+        and _text(record.get("failed_phase"))
+        and _text(record.get("reason"))
+        and isinstance(record.get("record_path"), str)
+        and isinstance(record.get("record_persisted"), bool)
+        and ("observed_head" not in record
+             or _hex(SHA_RE, record["observed_head"]))
+        and ("head_observation_error" not in record
+             or isinstance(record["head_observation_error"], str))
+        and ("record_write_error" not in record
+             or isinstance(record["record_write_error"], str))
+    )
+
+
+def _completed_deploy_shape(record):
+    return (
+        _tx_id(record.get("transaction_id"))
+        and _text(record.get("at"))
+        and _hex(SHA_RE, record.get("prior_head"))
+        and _hex64_or_none(record.get("prior_config_sha256"))
+        and _tag_or_none(record.get("prior_tag"))
+        and _hex(SHA_RE, record.get("target"))
+        and _tag(record.get("tag"))
+        and _hex64_or_none(record.get("helper_sha256"))
+        and isinstance(record.get("rollback_compatibility"), dict)
+        and isinstance(record.get("automatic_rollback_permitted"), bool)
+        and _plan_shape(record.get("plan"))
+    )
+
+
+def _legacy_completed_deploy_shape(record):
+    return _text(record.get("at")) and _plan_shape(record.get("plan"))
+
+
+def _completed_rollback_shape(record):
+    return (
+        _tx_id(record.get("transaction_id"))
+        and _text(record.get("at"))
+        and _hex(SHA_RE, record.get("to"))
+        and _tag(record.get("tag"))
+        and _hex64_or_none(record.get("helper_sha256"))
+    )
+
+
+def _legacy_completed_rollback_shape(record):
+    return (
+        _text(record.get("at"))
+        and _hex(SHA_RE, record.get("to"))
+        and _tag(record.get("tag"))
+    )
+
+
+def _completion_shape(value):
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("unit"), str)
+        and _unit_runtime(value.get("runtime"))
+        and value.get("success") is True
+        and type(value.get("sequence")) is int
+    )
+
+
+def _unit_switch_identity(record):
+    state = record.get("state")
+    phase = record.get("phase")
+    return (
+        _tx_id(record.get("transaction_id"))
+        and _text(record.get("at"))
+        and isinstance(record.get("unit"), str)
+        and record["unit"] in UNIT_RUNTIMES
+        and _unit_runtime(record.get("runtime"))
+        and _unit_runtime(record.get("prior_runtime"))
+        and record["runtime"] != record["prior_runtime"]
+        and "snapshot" in record
+        and (state is None or isinstance(state, dict))
+        and phase in _PHASES
+        and ((phase == "snapshot" and state is None)
+             or (phase in ("drained", "activation_pending")
+                 and isinstance(state, dict))
+             or (phase == "restore_activation_pending"
+                 and (state is None or isinstance(state, dict))))
+    )
+
+
+def _unit_switch_shape(record, outcome):
+    if not _unit_switch_identity(record):
+        return False
+    terminal_phase = _UNIT_TERMINAL_PHASES.get(outcome)
+    if terminal_phase is not None and record.get("phase") != terminal_phase:
+        return False
+    if outcome == "pending":
+        return True
+    if outcome == "completed":
+        completions = record.get("completions")
+        return (
+            isinstance(completions, list)
+            and len(completions) == 2
+            and all(_completion_shape(item) for item in completions)
+            and all(item["unit"] == record["unit"] for item in completions)
+            and all(item["runtime"] == record["runtime"] for item in completions)
+            and completions[0]["sequence"] < completions[1]["sequence"]
+        )
+    if outcome == "rolled_back":
+        # switch_unit's rollback path records a reason (possibly empty for a
+        # bare KeyboardInterrupt); recover_unit's successful recovery path
+        # writes the same identity without one.
+        return "reason" not in record or isinstance(record.get("reason"), str)
+    if outcome == "recovery_required":
+        return (_text(record.get("reason"))
+                and isinstance(record.get("record_path"), str))
+    return False
+
+
+def _classify_record(path):
+    """Classify one retained controller record by its producer-specific shape.
+
+    Classification depends only on the retained record, never on later host
+    state: a record cannot become a blocker (or cease to be one) because an
+    unrelated transaction changed a unit or the checkout. Pending intents and
+    unresolved recovery records are unfinished. Completed/refused history is
+    finished only when it matches the minimum identity its producer wrote.
+    Unreadable, malformed, unknown, unsupported-schema and unsupported-legacy
+    records raise ``Refused`` naming the record; prose notes are never read.
+    """
+    if path.is_symlink() or not path.is_file():
+        raise Refused("invalid controller journal entry: " + path.name)
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise Refused("unreadable controller journal entry: " + path.name) from exc
+    if not isinstance(record, dict):
+        raise Refused("invalid controller journal entry: " + path.name)
+    if (type(record.get("schema_version")) is not int
+            or record["schema_version"] != JOURNAL_SCHEMA):
+        raise Refused("unsupported controller journal schema: " + path.name)
+    operation = record.get("operation")
+    outcome = record.get("outcome")
+    if operation == "unit_switch":
+        if outcome not in ("pending", "completed", "rolled_back",
+                          "recovery_required"):
+            raise Refused("invalid unit switch outcome: " + path.name)
+        if not _unit_switch_shape(record, outcome):
+            raise Refused("invalid unit switch journal: " + path.name)
+        if outcome in ("pending", "recovery_required"):
+            return "unfinished", operation
+        return "finished", operation
+    if operation == "deploy":
+        if outcome is None:
+            if not _legacy_completed_deploy_shape(record):
+                raise Refused("invalid completed checkout journal: " + path.name)
+            return "finished", operation
+        if outcome == "completed":
+            if not _completed_deploy_shape(record):
+                raise Refused("invalid completed checkout journal: " + path.name)
+            return "finished", operation
+        raise Refused("invalid checkout journal outcome: " + path.name)
+    if operation == "rollback":
+        if outcome is None:
+            if not _legacy_completed_rollback_shape(record):
+                raise Refused("invalid completed checkout journal: " + path.name)
+            return "finished", operation
+        if outcome == "completed":
+            if not _completed_rollback_shape(record):
+                raise Refused("invalid completed checkout journal: " + path.name)
+            return "finished", operation
+        raise Refused("invalid checkout journal outcome: " + path.name)
+    if operation in ("deploy_pending", "rollback_pending"):
+        if outcome != "pending" or not _checkout_identity(record):
+            raise Refused("invalid pending checkout journal: " + path.name)
+        return "unfinished", operation
+    if operation in ("deploy_refused", "rollback_refused"):
+        if outcome != "refused_no_change" or not _checkout_refusal_shape(record):
+            raise Refused("invalid refused checkout journal: " + path.name)
+        return "finished", operation
+    if operation == "recovery_required":
+        if outcome != "recovery_required":
+            raise Refused("invalid checkout recovery journal: " + path.name)
+        if not _checkout_recovery_shape(record):
+            raise Refused("unsupported legacy checkout recovery record "
+                          "(no verifiable producer identity): " + path.name)
+        return "unfinished", operation
+    raise Refused("unknown controller journal operation: " + path.name)
+
+
+def refuse_unfinished_transactions(effects, exclude=None):
+    """Symmetric unfinished-transaction guard for both controller seams.
+
+    A pending or unresolved checkout transaction blocks unit switch/recovery,
+    and a pending or unresolved unit transaction blocks checkout deploy/
+    rollback. ``exclude`` names exactly the record the caller is about to
+    recover, so a legitimate recovery does not block itself. Completed,
+    refused/no-change and completed/rolled-back unit history does not block.
+    A ``recovery_required`` record is never resolved from stored digests: those
+    do not cover unit metadata, activation or live work. It remains unfinished
+    (or unsupported legacy when its producer identity is incomplete). The guard
+    only reads records; record bytes are unchanged.
+    """
+    for path in sorted(effects.record_dir.glob("controller-*.json")):
+        if exclude is not None and path.resolve() == exclude.resolve():
+            continue
+        status, operation = _classify_record(path)
+        if status == "finished":
+            continue
+        if operation == "unit_switch":
             raise Refused("unfinished unit switch requires recovery: " + path.name)
+        if operation in ("deploy_pending", "rollback_pending"):
+            raise Refused("unfinished checkout switch requires recovery: " + path.name)
+        if operation == "recovery_required":
+            raise Refused("unresolved checkout recovery requires out-of-band "
+                          "reconciliation: " + path.name)
+        raise Refused("unfinished controller transaction: " + path.name)
 
 
 def switch_unit(effects, adapter, unit, runtime):
@@ -1342,7 +1717,10 @@ def switch_unit(effects, adapter, unit, runtime):
         raise Refused("no runtime-bound completion evidence provider for unit")
     with effects.controller_lock():
         effects.record_preflight()
-        refuse_unfinished_unit_switches(effects)
+        refuse_unfinished_transactions(effects)
+        # No journal entry, snapshot or unit mutation precedes this gate: an
+        # alive/ambiguous recorded run refuses the transaction as-is.
+        queue_drain_gate(effects)
         prior = adapter.preflight(unit, runtime)
         if not isinstance(prior, dict) or not _unit_runtime(prior.get("runtime")):
             raise Refused("invalid prior runtime")
@@ -1397,9 +1775,10 @@ def switch_unit(effects, adapter, unit, runtime):
 
 
 def prior_tag_for(effects: Effects, sha: str) -> str | None:
-    """The annotated crq-runner/ tag that peels to ``sha`` in this checkout,
-    or None when no such tag exists. Read-only; used to record the prior
-    target's own approval tag in the deploy journal."""
+    """The annotated crq-runner/ tag matching ``TAG_RE`` that peels to
+    ``sha`` in this checkout, or None when no such tag exists. Read-only;
+    used to record the prior target's own approval tag in the deploy
+    journal."""
     listing = effects.git("tag", "--list", "crq-runner/*",
                           "--format=%(refname:short) %(objecttype)")
     candidates = []
@@ -1408,6 +1787,8 @@ def prior_tag_for(effects: Effects, sha: str) -> str | None:
         if len(parts) != 2 or parts[1] != "tag":
             continue  # lightweight tags are not owner-approval artifacts
         tag = parts[0]
+        if not TAG_RE.fullmatch(tag):
+            continue  # off-shape names are not recordable prior_tag values
         if effects.git("rev-parse", "refs/tags/" + tag + "^{commit}") == sha:
             candidates.append(tag)
     if len(candidates) == 1:
@@ -1515,7 +1896,7 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
     (schema-incompatible prior target)."""
     with effects.controller_lock():
         effects.record_preflight()
-        refuse_unfinished_unit_switches(effects)
+        refuse_unfinished_transactions(effects)
         record = rollback_target(prior)
         if effects.git("rev-parse", "HEAD") != record["deployed"]:
             raise Refused("prior record does not describe the current deployment")
@@ -1524,18 +1905,22 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
                           "provably read (explicit schema marker or author_* state "
                           "keys); operator recovery required (never restore old queue "
                           "snapshots or start incompatible binaries)")
+        runner_units_stopped(helper_module, effects.root)
+        drain = drain_check(effects, _runner_liveness(effects))
+        if not drain["drained"]:
+            raise Refused("cannot roll back with live/ambiguous reviews: "
+                          + json.dumps(drain["blocked"])[:400])
         # The journal predates any state written by the newly deployed runner.
-        # Recheck the live queue for the recorded prior reader under this lock.
+        # Recheck the live queue for the recorded prior reader under this lock,
+        # only after the units are stopped and drained: a tick still finishing
+        # before the fence could otherwise add author_* keys between this check
+        # and captured_state below.
         live_compatibility = compatibility_record(effects, record["prior_head"])
         if not rollback_compatible(live_compatibility):
             raise Refused("rollback disabled: current queue state the prior target "
                           "cannot provably read; operator recovery required "
                           "(never restore old queue snapshots or start "
                           "incompatible binaries)")
-        drain = drain_check(effects, _runner_liveness(effects))
-        if not drain["drained"]:
-            raise Refused("cannot roll back with live/ambiguous reviews: "
-                          + json.dumps(drain["blocked"])[:400])
         state = captured_state(effects)
         prior_tag = prior_tag_for(effects, state["prior_head"])
         overlay, raw = helper_module.load_overlay(overlay_path)
@@ -1589,6 +1974,10 @@ def main(argv=None) -> int:
                               help="owner-approved rollback to the recorded prior target")
     rollback.add_argument("--prior-record", required=True, type=Path,
                           help="a controller journal entry naming the prior target")
+    recover = sub.add_parser(
+        "recover", help="restore one retained pre-activation unit intent")
+    recover.add_argument("--record", required=True, type=Path,
+                         help="retained controller unit record to recover")
     health = sub.add_parser("health",
                             help="two advancing completed-tick observations")
     health.add_argument("--interval-seconds", type=int, required=True,
@@ -1612,7 +2001,16 @@ def main(argv=None) -> int:
         if args.operation == "switch" and (args.unit or args.runtime):
             if not args.unit or not args.runtime or args.sha or args.tag:
                 raise Refused("unit switch requires --unit and --runtime only")
-            switch_unit(effects, None, args.unit, args.runtime)
+            overlay, _raw = helper_module.load_overlay(args.overlay)
+            live = _load_live_binding()
+            try:
+                adapter, _selection = live.production_adapter(
+                    effects, overlay, unit=args.unit, runtime=args.runtime)
+            except (live.LiveBindingRefused, live.factory.FactoryRefused,
+                    live.completion.CompletionError) as exc:
+                raise Refused(str(exc)[:400]) from exc
+            record = switch_unit(effects, adapter, args.unit, args.runtime)
+            print(json.dumps(record, indent=2, sort_keys=True))
         elif args.operation == "switch":
             if not args.sha or not args.tag:
                 raise Refused("checkout switch requires --sha and --tag")
@@ -1629,6 +2027,22 @@ def main(argv=None) -> int:
                                    helper_sha256)
             print(json.dumps({"operation": "rollback", **result}, indent=2,
                              sort_keys=True))
+        elif args.operation == "recover":
+            overlay, _raw = helper_module.load_overlay(args.overlay)
+
+            def adapter_factory(unit, prior_runtime):
+                live = _load_live_binding()
+                try:
+                    adapter, _selection = live.production_adapter(
+                        effects, overlay, unit=unit, runtime=prior_runtime)
+                except (live.LiveBindingRefused, live.factory.FactoryRefused,
+                        live.completion.CompletionError) as exc:
+                    raise Refused(str(exc)[:400]) from exc
+                return adapter
+
+            record = recover_unit(effects, None, args.record,
+                                  adapter_factory=adapter_factory)
+            print(json.dumps(record, indent=2, sort_keys=True))
         else:
             first_observation = True
 
