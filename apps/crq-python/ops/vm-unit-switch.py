@@ -336,12 +336,37 @@ def prepare_run(state, image, recorder, tools):
             "port": vm.free_port(), "started_at": vm.utc_now()}
 
 
-def upload_files(run, recorder, mode="base", commit=None):
+def committed_blob(commit, name):
+    """The committed bytes of one proof script at `commit`, or a refusal.
+
+    The report declares `commit` as the source, so the bytes that reach the
+    guest must be THAT commit's bytes. Reading them back from Git is what
+    makes that checkable: a checkout change between validation and the read
+    would otherwise upload unvalidated content under validated provenance.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(REPO), "cat-file", "blob",
+         "%s:apps/crq-python/ops/%s" % (commit, name)],
+        capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError("could not read %s at %s: %s" % (
+            name, commit,
+            (result.stderr or b"").decode("utf-8", "replace").strip()[:400]))
+    return result.stdout
+
+
+def upload_files(run, recorder, commit, mode="base"):
     source_commit_check(REPO, commit, mode)
     provenance = {}
     for name in uploads_for(mode):
         source = OPS / name
         data = source.read_bytes()
+        # The uploaded bytes must be the validated commit's bytes (F1): compare
+        # the exact bytes going to the guest, not the checkout they came from.
+        if data != committed_blob(commit, name):
+            raise RuntimeError(
+                "%s changed after the validated commit %s; refusing to upload "
+                "bytes the report would attribute to that commit" % (name, commit))
         local_sha = sha256_bytes(data)
         remote = ("cat > /home/%s/proof-bin/%s && chmod 700 /home/%s/proof-bin/%s"
                   % (vm.GUEST_USER, name, vm.GUEST_USER, name))
@@ -4153,7 +4178,7 @@ def cmd_run(args):
         recorder = vm.Recorder(run_dir)
         boot = vm.boot(run, recorder, args.tools, vm.host_stamp())
         boot["ssh"] = vm.wait_ssh(run, recorder)
-        uploads = upload_files(run, recorder, args.mode, commit)
+        uploads = upload_files(run, recorder, commit, args.mode)
         provenance["uploads"] = uploads
         provenance["guest_report"] = guest_artifact.name
         phases = {}
