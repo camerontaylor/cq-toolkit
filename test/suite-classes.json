@@ -1,4 +1,5 @@
 {
+  "test/adapters/crq/repairPreparation.test.ts": "process",
   "test/adapters/crq/repairScan.test.ts": "pure",
   "test/adapters/crq/summarySource.test.ts": "process",
   "test/adapters/forge-github/forge.test.ts": "pure",
@@ -747,6 +748,7 @@
   "test/policy/crq/utc.test.ts": "pure",
   "test/policy/crq/vectors.test.ts": "pure",
   "test/policy/queue/settle-state.test.ts": "pure",
+  "test/queue-runner/repairPrepare.live.test.ts": "process",
   "test/sandbox/config.test.ts": "pure",
   "test/sandbox/launcher.test.ts": "process",
   "test/sandbox/seatbelt-live.test.ts": "live",

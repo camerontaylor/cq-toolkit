@@ -198,6 +198,65 @@
       }
     },
     {
+      "name": "production-shaped-queue-values",
+      "source": "crq_repair.atomic",
+      "input": {
+        "value": {
+          "items": [
+            {
+              "id": "pr-9007199254740993",
+              "pr": 9007199254740993,
+              "kind": "merged",
+              "state": "done",
+              "ratio": 0.1,
+              "weight": 1.0,
+              "runs": {
+                "10": {
+                  "round": 2,
+                  "nested": {
+                    "empty": {},
+                    "list": []
+                  }
+                },
+                "2": {
+                  "round": 1,
+                  "canonical_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                }
+              },
+              "notes": [
+                "\u96ea",
+                "\ud83d\ude00",
+                "\u007f"
+              ],
+              "empty": {},
+              "nested": {
+                "a": {
+                  "b": [
+                    1,
+                    2.5,
+                    null,
+                    false
+                  ]
+                }
+              }
+            }
+          ],
+          "paused": false,
+          "cooldown_until": null,
+          "rl_backoff_min": 15,
+          "counter": 9223372036854775808,
+          "tiny": 5e-324
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "text": "{\n  \"items\": [\n    {\n      \"id\": \"pr-9007199254740993\",\n      \"pr\": 9007199254740993,\n      \"kind\": \"merged\",\n      \"state\": \"done\",\n      \"ratio\": 0.1,\n      \"weight\": 1.0,\n      \"runs\": {\n        \"10\": {\n          \"round\": 2,\n          \"nested\": {\n            \"empty\": {},\n            \"list\": []\n          }\n        },\n        \"2\": {\n          \"round\": 1,\n          \"canonical_id\": \"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"\n        }\n      },\n      \"notes\": [\n        \"\\u96ea\",\n        \"\\ud83d\\ude00\",\n        \"\\u007f\"\n      ],\n      \"empty\": {},\n      \"nested\": {\n        \"a\": {\n          \"b\": [\n            1,\n            2.5,\n            null,\n            false\n          ]\n        }\n      }\n    }\n  ],\n  \"paused\": false,\n  \"cooldown_until\": null,\n  \"rl_backoff_min\": 15,\n  \"counter\": 9223372036854775808,\n  \"tiny\": 5e-324\n}\n",
+          "sha256": "413e63b874d05475dfa71155f189b9b0efe2b0eb9207157b7b6478b9e3633161"
+        }
+      }
+    },
+    {
       "name": "empty-containers-and-scalars",
       "source": "crq_repair.atomic",
       "input": {

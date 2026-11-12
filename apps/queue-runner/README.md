@@ -27,6 +27,30 @@ verified, inventoried `node:` artifact tree and requires the selected command
 to appear there; an absent or malformed declaration declares no live commands.
 Every other live command still refuses for a Node target.
 
+`repair-prepare` is operator-only and deliberately outside the live unit
+capability set: it never appears in `capabilities.json`, and the unit adapters
+still declare only `watchdog`. Run it by hand:
+
+```
+crq repair-prepare <historical-job> --source-sha <sha> \
+  --revalidation <evidence.json> --runner-root <clone-config-dir> \
+  --state-root <state-dir> [--instructions-file <path>]
+```
+
+All roots are explicit; no environment variable and no working-directory
+default is consulted, so the command works from any directory. It holds the
+real `tick.lock`, writes the job and then the queue atomically, and hands a
+canonical finding to the finding inbox. Refusals and failed effects print one
+JSON artifact and exit 1, an unconfirmed effect exits 1 with an
+`indeterminate` artifact, a busy `tick.lock` prints `tick lock busy` and exits
+3 (Python parity), and usage errors exit 2. It does not dispatch, enqueue or
+harvest; those remain caller gates.
+
+Run it against a copied state root before the declared cutover, never live
+CRQ state: the queue write re-serializes the parsed `queue.json`, and the
+first production-shaped run is the observation that decides whether that
+rewrite is acceptable.
+
 Planners must not perform mutations themselves; later ports must preserve the
 shared locking contract.
 
