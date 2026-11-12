@@ -25,6 +25,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from crq_repair import bounded
@@ -55,9 +56,72 @@ GIT_CONFIG = (
     "core.safecrlf=false",
 )
 
+# A fixture generator must never inherit the caller's repository routing or
+# config-injection environment. These variables can redirect `git init/add`
+# at the caller's HEAD/index/object store even when cwd is a temp directory,
+# so clear every routing/config knob before applying the fixed oracle env.
+GIT_ROUTING_VARS = frozenset(
+    {
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+        "GIT_CONFIG",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_SYSTEM_NOSCOPE",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_PREFIX",
+        "GIT_QUARANTINE_PATH",
+    }
+)
+
+
+def _git_environment() -> dict[str, str]:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in GIT_ROUTING_VARS
+        and not key.startswith("GIT_CONFIG_KEY_")
+        and not key.startswith("GIT_CONFIG_VALUE_")
+    }
+    env.update(GIT_ENV)
+    # Ignore host/global and system config entirely; the explicit `-c`
+    # overrides above are the only config the oracle accepts.
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    return env
+
+
+@contextmanager
+def _clean_git_environment():
+    """Run production git reads with the same scrubbed env as the oracle."""
+    saved = dict(os.environ)
+    try:
+        for key in list(os.environ):
+            if (
+                key in GIT_ROUTING_VARS
+                or key.startswith("GIT_CONFIG_KEY_")
+                or key.startswith("GIT_CONFIG_VALUE_")
+            ):
+                del os.environ[key]
+        os.environ.update(GIT_ENV)
+        os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
+        os.environ["GIT_CONFIG_SYSTEM"] = os.devnull
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
 
 def _git(root: Path, *args: str) -> str:
-    env = {**os.environ, **GIT_ENV}
+    env = _git_environment()
     result = subprocess.run(
         ["git", *GIT_CONFIG, *args],
         cwd=root,
@@ -282,7 +346,8 @@ def _render_case(case: dict) -> dict:
             del job["finding"]
 
         try:
-            snapshot = bounded.source_snapshot({"clone": str(root)}, job)
+            with _clean_git_environment():
+                snapshot = bounded.source_snapshot({"clone": str(root)}, job)
         except (ValueError, RuntimeError, KeyError) as error:
             expected = {"ok": False, "error": str(error)}
         else:

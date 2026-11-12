@@ -12,7 +12,10 @@
  * resume retained-ok skip, resume non-ok re-dispatch, `resume: true` without a
  * matching retained artifact, unverified resumed scans, aborted/budget typed
  * harvest, negative binding echo, prepared-job change, the op-owned 32768
- * bound, and read-only journal/prepared-state probes.
+ * bound, and read-only journal/prepared-state probes. Adversarial additions
+ * cover path normalization without digest rewrite, a pre-run source-hash
+ * change, a mechanical/retry payload change made inside the kernel lease, a
+ * new non-ok terminal after a retained-ok plan, and exact-run A/B harvest.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, readdir, readFile, rm, unlink } from 'node:fs/promises';
@@ -22,12 +25,14 @@ import { afterEach, describe, expect, test } from 'vitest';
 import type { WorkerResult } from '../../../src/driver/types.js';
 import { openRunLog } from '../../../src/kernel/journal.js';
 import { makeManifest } from '../../../src/kernel/manifest.js';
+import { runPlan } from '../../../src/kernel/runner.js';
 import type { JournalEvent } from '../../../src/kernel/types.js';
 import type { Op, OpRegistryEntry } from '../../../src/kernel/types.js';
 import type { OpRegistryView } from '../../../src/kernel/runner.js';
 import {
   harvestRepairArtifact,
   harvestRepairDispatch,
+  harvestRepairRunArtifact,
   planRepairDispatch,
   readRetainedRepairArtifact,
   runRepairDispatch,
@@ -541,6 +546,189 @@ describe('repair dispatch bridge', () => {
     expect(existsSync(journalDir)).toBe(false);
   });
 
+  test('a source text change between planning and invocation refuses before the kernel writes', async () => {
+    const journalDir = await tempJournal();
+    const scripted = scriptedFindingOp([completeWorker(FIXED)]);
+    const plan = await planRepairDispatch(
+      { context: context(), attempt: { journalDir, resume: false } },
+      effects(),
+    );
+    planOk(plan);
+
+    const run = await runRepairDispatch(
+      plan.value,
+      { resume: false, registry: registryFor(scripted.op) },
+      harvestEffects({ sourceText: `${sourceText}\n// changed after the scan\n` }),
+    );
+    expect(run.ok).toBe(false);
+    if (!run.ok) expect(run.refusal).toBe('scan-source-hash-mismatch');
+    expect(scripted.invocations).toHaveLength(0);
+    expect(existsSync(journalDir)).toBe(false);
+  });
+
+  test('normalizes a non-canonical finding path without rewriting the finding digest', async () => {
+    const journalDir = await tempJournal();
+    const changed = withPreparedJob((job) => {
+      const finding = job['finding'] as Record<string, unknown>;
+      finding['path'] = 'src/./lock.ts';
+      job['finding_sha256'] = receiptJsonDigest(finding);
+    });
+    const plan = await planRepairDispatch(
+      { context: context(), attempt: { journalDir, resume: false } },
+      effects({ preparedJobText: changed }),
+    );
+    planOk(plan);
+
+    const input = plan.value.plan.jobs[0]?.input as {
+      readonly item: { readonly path: string };
+      readonly binding: { readonly findingSha256: string };
+    };
+    const parsed = parseJsonValue(changed);
+    if (!(parsed instanceof JsonObject)) throw new Error('changed prepared job is not an object');
+    const finding = parsed.get('finding');
+    if (!(finding instanceof JsonObject))
+      throw new Error('changed prepared finding is not an object');
+    expect(input.item.path).toBe('src/lock.ts');
+    expect(input.binding.findingSha256).toBe(receiptJsonDigest(toPlainJson(finding)));
+  });
+
+  test('the invocation guard refuses mechanical/retry payload changes made after preflight, inside the lease', async () => {
+    const journalDir = await tempJournal();
+    let prepared = preparedJobText;
+    const mutable: RepairHarvestEffects = {
+      ...effects(),
+      readPreparedJob: async () => prepared,
+    };
+    const plan = await planRepairDispatch(
+      { context: context(), attempt: { journalDir, resume: false } },
+      mutable,
+    );
+    planOk(plan);
+
+    const changed = withPreparedJob((job) => {
+      job['mechanical_evidence'] = 'changed mechanical evidence after planning';
+      job['fix_instructions'] = 'changed retry instructions after planning';
+    });
+    const scripted = scriptedFindingOp([completeWorker(FIXED)]);
+    const mutatingRegistry: OpRegistryView = {
+      get: (name) =>
+        name === 'review.fixFinding'
+          ? ({
+              name: 'review.fixFinding',
+              inputSchema: FixFindingInputSchema,
+              importer: async () => {
+                prepared = changed;
+                return scripted.op as unknown as Op<never, never>;
+              },
+            } as OpRegistryEntry<never, never>)
+          : undefined,
+    };
+
+    const run = await runRepairDispatch(
+      plan.value,
+      { resume: false, registry: mutatingRegistry },
+      mutable,
+    );
+    expect(run.ok).toBe(false);
+    if (!run.ok) {
+      expect(run.refusal).toBe('prepared-job-changed');
+      const result = run.run?.jobs[0]?.result;
+      expect(result?.status).toBe('failed');
+      if (result?.status === 'failed') {
+        expect(result.error).toContain('prepared-job-changed');
+      }
+    }
+    expect(scripted.invocations).toHaveLength(0);
+  });
+
+  test('a new non-ok terminal after a retained-ok plan refuses at invocation, not by spending', async () => {
+    const journalDir = await tempJournal();
+    const first = await freshRun({ journalDir, opResults: [completeWorker(FIXED)] });
+    runOk(first.run);
+
+    const plan = await planRepairDispatch(
+      { context: context(), attempt: { journalDir, resume: true } },
+      effects(),
+    );
+    planOk(plan);
+    expect(plan.value.attempt).toBe('retained-ok');
+
+    const appended = scriptedFindingOp([completeWorker(undefined, { stopReason: 'aborted' })]);
+    const appendedRun = await runPlan(
+      plan.value.plan,
+      { concurrency: 1, stopOnError: true, journalDir, resume: false },
+      registryFor(appended.op),
+    );
+    expect(appendedRun.jobs[0]?.result.status).toBe('indeterminate');
+
+    const second = scriptedFindingOp([completeWorker(FIXED)]);
+    const run = await runRepairDispatch(
+      plan.value,
+      { resume: true, registry: registryFor(second.op) },
+      harvestEffects(),
+    );
+    expect(run.ok).toBe(false);
+    if (!run.ok) {
+      expect(run.refusal).toBe('attempt-inconsistent');
+      const result = run.run?.jobs[0]?.result;
+      expect(result?.status).toBe('failed');
+      if (result?.status === 'failed') {
+        expect(result.error).toContain('attempt-inconsistent');
+      }
+    }
+    expect(second.invocations).toHaveLength(0);
+  });
+
+  test('harvests the exact run artifact, not the latest run with the same input', async () => {
+    const journalDir = await tempJournal();
+    const first = await freshRun({ journalDir, opResults: [completeWorker(FIXED)] });
+    runOk(first.run);
+    const second = await freshRun({
+      journalDir,
+      opResults: [completeWorker(undefined, { stopReason: 'aborted' })],
+    });
+    runOk(second.run);
+
+    const firstArtifact = await harvestRepairRunArtifact(
+      first.plan,
+      first.run.value.run.runId,
+      harvestEffects(),
+    );
+    expect(firstArtifact.ok).toBe(true);
+    if (firstArtifact.ok) expect(firstArtifact.value.harvest.status).toBe('ok');
+
+    const staleSource = await harvestRepairRunArtifact(
+      first.plan,
+      first.run.value.run.runId,
+      harvestEffects({ sourceText: `${sourceText}\n// changed before harvest\n` }),
+    );
+    expect(staleSource.ok).toBe(false);
+    if (!staleSource.ok) expect(staleSource.refusal).toBe('scan-source-hash-mismatch');
+
+    const changedPrepared = withPreparedJob((job) => {
+      job['mechanical_evidence'] = 'changed before harvest';
+    });
+    const stalePrepared = await harvestRepairRunArtifact(
+      first.plan,
+      first.run.value.run.runId,
+      harvestEffects({ preparedJobText: changedPrepared }),
+    );
+    expect(stalePrepared.ok).toBe(false);
+    if (!stalePrepared.ok) expect(stalePrepared.refusal).toBe('prepared-job-changed');
+
+    const secondArtifact = await harvestRepairRunArtifact(
+      first.plan,
+      second.run.value.run.runId,
+      harvestEffects(),
+    );
+    expect(secondArtifact.ok).toBe(true);
+    if (secondArtifact.ok) expect(secondArtifact.value.harvest.status).toBe('indeterminate');
+
+    const latest = await harvestRepairDispatch(first.plan, harvestEffects());
+    expect(latest.ok).toBe(true);
+    if (latest.ok) expect(latest.value.harvest.status).toBe('indeterminate');
+  });
+
   test('resume skips a matching retained ok artifact even after the tip moves', async () => {
     const journalDir = await tempJournal();
     const first = await freshRun({ journalDir, opResults: [completeWorker(FIXED)] });
@@ -599,7 +787,14 @@ describe('repair dispatch bridge', () => {
       harvestEffects(),
     );
     expect(run.ok).toBe(false);
-    if (!run.ok) expect(run.refusal).toBe('attempt-inconsistent');
+    if (!run.ok) {
+      expect(run.refusal).toBe('attempt-inconsistent');
+      const result = run.run?.jobs[0]?.result;
+      expect(result?.status).toBe('failed');
+      if (result?.status === 'failed') {
+        expect(result.error).toContain('attempt-inconsistent');
+      }
+    }
     expect(second.invocations).toHaveLength(0);
   });
 

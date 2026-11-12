@@ -27,11 +27,17 @@
  *   retained terminal artifact permits a resumed/retained attempt.
  * - A resumed (non-ok) attempt may run at the pinned source after the tip
  *   moves; a fresh attempt may not.
+ * - The dispatch payload (prepared job, normalized finding path, source text,
+ *   caller guidance and request context) is rebuilt to one manifest
+ *   `inputsHash` at planning, again before the run, and once more inside the
+ *   kernel's plan lease by the registry op wrapper. Any dispatch-relevant
+ *   change is refused; the attempt class is re-folded under that same lease.
  * - The 32768 serialized invocation bound stays with `review.fixFinding`.
  *   This module never measures, precomputes or fakes it.
- * - Harvest parses the actual artifact through the canonical kernel schema
- *   and the op's typed report guard, re-reads the durable prepared job and
- *   re-observes the current tip/blob. It returns typed fields; it never
+ * - Harvest is scoped to the exact `RunReport.runId` (not the latest run for
+ *   the same input), parses the actual artifact through the canonical kernel
+ *   schema and the op's typed report guard, re-reads the durable prepared job
+ *   and re-observes the current tip/blob. It returns typed fields; it never
  *   infers a status from prose and never mutates the journal or state.
  */
 import {
@@ -65,6 +71,7 @@ import type { RepairRequestRefusal } from '../../../policy/crq/repairRequest.js'
 import type {
   FixFindingBinding,
   FixFindingFailureClass,
+  FixFindingInput,
   FixFindingReport,
 } from '../../review/fixFinding.js';
 import {
@@ -200,6 +207,15 @@ export interface RepairDispatchPlan {
   readonly journalDir: string;
   /** The existing kernel plan: exactly one `review.fixFinding` job. */
   readonly plan: Plan;
+  /**
+   * The caller-owned request context the plan was built from. The invocation
+   * wrapper rebuilds the request from current durable state and requires the
+   * rebuilt input hash to equal `inputHash`, so any dispatch-relevant payload
+   * change (including mechanical evidence and retry instructions) is refused.
+   */
+  readonly requestContext: RepairRequestContext;
+  /** The manifest `inputsHash` of the planned job, byte-for-byte. */
+  readonly inputHash: string;
   readonly binding: FixFindingBinding;
   readonly path: string;
   readonly source: {
@@ -410,6 +426,130 @@ async function loadPreparedJob(
   return readPreparedRepairJobText(jobId, text);
 }
 
+interface DispatchContent {
+  readonly prepared: PreparedRepairJob;
+  readonly currentTip: string;
+  readonly blobOid: string;
+  readonly sourceSha256: string;
+  readonly input: FixFindingInput;
+  readonly inputHash: string;
+}
+
+type ReadDispatchContentResult =
+  | { readonly ok: true; readonly value: DispatchContent }
+  | { readonly ok: false; readonly refusal: RepairDispatchRefusal };
+
+/**
+ * Rebuild the exact dispatch request from current durable state and the
+ * current source. This is the single definition of "the payload worth
+ * dispatching": the prepared job (including `mechanical_evidence` and
+ * `fix_instructions`), the normalized finding path, the pinned blob, the
+ * full source text hash, the caller's guidance, and the caller-owned request
+ * context. Any difference changes the manifest `inputsHash`, so callers can
+ * compare one hash rather than enumerating fields.
+ */
+async function readDispatchContent(
+  prepared: PreparedRepairJob,
+  requestContext: RepairRequestContext,
+  effects: RepairHarvestEffects,
+): Promise<ReadDispatchContentResult> {
+  let currentTip: string;
+  try {
+    currentTip = await effects.git.currentTip();
+  } catch {
+    return refusal('source-tip-unreadable');
+  }
+  let blobOid: string;
+  try {
+    blobOid = await effects.git.blobOid(prepared.binding.sourceSha, prepared.path);
+  } catch {
+    return refusal('source-blob-unreadable');
+  }
+  if (blobOid !== prepared.binding.sourceBlobSha) return refusal('source-blob-mismatch');
+
+  let sourceText: string;
+  try {
+    sourceText = await effects.git.showFile(`${prepared.binding.sourceSha}:${prepared.path}`);
+  } catch {
+    return refusal('source-content-unreadable');
+  }
+  const sourceSha256 = utf8Sha256(sourceText);
+
+  const snapshot = buildRepairSnapshot({
+    job: prepared.job,
+    blobOid,
+    sourceText,
+  });
+  if (!snapshot.ok) return refusal(snapshot.refusal);
+
+  const request = buildRepairRequest({
+    prepared: {
+      job: normalizedRequestJob(prepared),
+      snapshot: snapshot.snapshot,
+      binding: prepared.binding,
+      ...(prepared.guidance === undefined ? {} : { scannedGuidance: prepared.guidance }),
+    },
+    context: requestContext,
+  });
+  if (!request.ok) return refusal(request.refusal);
+
+  const inputHash = inputHashForJob('review.fixFinding', request.value.input);
+  if (inputHash === undefined) return refusal('attempt-inconsistent');
+  return {
+    ok: true,
+    value: {
+      prepared,
+      currentTip,
+      blobOid,
+      sourceSha256,
+      input: request.value.input,
+      inputHash,
+    },
+  };
+}
+
+async function readDispatchContentForJob(
+  jobId: string,
+  requestContext: RepairRequestContext,
+  effects: RepairHarvestEffects,
+): Promise<ReadDispatchContentResult> {
+  const prepared = await loadPreparedJob(jobId, effects);
+  if (!prepared.ok) return prepared;
+  return readDispatchContent(prepared.value, requestContext, effects);
+}
+
+/**
+ * The finding digest is canonical over the prepared finding, including the
+ * caller's original path. Normalize ONLY the path handed to
+ * `buildRepairRequest`/the snapshot; never rewrite the job or its digest.
+ */
+function normalizedRequestJob(prepared: PreparedRepairJob): JsonObject {
+  const finding = prepared.job.get('finding');
+  if (!(finding instanceof JsonObject)) return prepared.job;
+  const rawPath = finding.get('path');
+  if (typeof rawPath !== 'string' || rawPath === prepared.path) return prepared.job;
+  const normalizedFinding = new JsonObject(
+    finding.entries.map(([key, value]) => [key, key === 'path' ? prepared.path : value] as const),
+  );
+  return new JsonObject(
+    prepared.job.entries.map(
+      ([key, value]) => [key, key === 'finding' ? normalizedFinding : value] as const,
+    ),
+  );
+}
+
+function inputHashForJob(op: string, input: unknown): string | undefined {
+  try {
+    const manifest = makeManifest({
+      id: 'repair-dispatch-revalidation',
+      jobs: [{ id: 'job', op, input }],
+    });
+    return manifest.jobs[0]?.inputsHash;
+  } catch {
+    return undefined;
+  }
+}
+
 function selectionRefusal(input: {
   readonly context: RepairDispatchCallerContext;
   readonly prepared: PreparedRepairJob;
@@ -597,27 +737,11 @@ export async function planRepairDispatch(
   const bindingRefusal = selectionRefusal({ context: input.context, prepared });
   if (bindingRefusal !== undefined) return refusal(bindingRefusal);
 
-  let currentTip: string;
-  try {
-    currentTip = await effects.git.currentTip();
-  } catch {
-    return refusal('source-tip-unreadable');
-  }
-  let blobOid: string;
-  try {
-    blobOid = await effects.git.blobOid(prepared.binding.sourceSha, prepared.path);
-  } catch {
-    return refusal('source-blob-unreadable');
-  }
-  if (blobOid !== prepared.binding.sourceBlobSha) return refusal('source-blob-mismatch');
-
-  let sourceText: string;
-  try {
-    sourceText = await effects.git.showFile(`${prepared.binding.sourceSha}:${prepared.path}`);
-  } catch {
-    return refusal('source-content-unreadable');
-  }
-  const sourceSha256 = utf8Sha256(sourceText);
+  const contentResult = await readDispatchContent(prepared, input.context.requestContext, effects);
+  if (!contentResult.ok) return contentResult;
+  const content = contentResult.value;
+  const currentTip = content.currentTip;
+  const sourceSha256 = content.sourceSha256;
 
   const scans = scanState({
     context: input.context,
@@ -627,36 +751,19 @@ export async function planRepairDispatch(
   });
   if (!scans.ok) return scans;
 
-  const snapshot = buildRepairSnapshot({
-    job: prepared.job,
-    blobOid,
-    sourceText,
-  });
-  if (!snapshot.ok) return refusal(snapshot.refusal);
-
-  const request = buildRepairRequest({
-    prepared: {
-      job: prepared.job,
-      snapshot: snapshot.snapshot,
-      binding: prepared.binding,
-      ...(prepared.guidance === undefined ? {} : { scannedGuidance: prepared.guidance }),
-    },
-    context: input.context.requestContext,
-  });
-  if (!request.ok) return refusal(request.refusal);
-
   const plan: Plan = {
     id: `crq-repair-dispatch-${prepared.binding.job}`,
     jobs: [
       {
         id: prepared.binding.job,
         op: 'review.fixFinding',
-        input: request.value.input,
+        input: content.input,
       },
     ],
   };
   const manifestJob = planJob(plan);
   if (manifestJob === undefined) return refusal('attempt-inconsistent');
+  if (manifestJob.inputsHash !== content.inputHash) return refusal('attempt-inconsistent');
 
   const prior: { readonly ok: true; readonly value: PriorArtifact } | { readonly ok: false } = input
     .attempt.resume
@@ -693,6 +800,8 @@ export async function planRepairDispatch(
       resume: input.attempt.resume,
       journalDir: input.attempt.journalDir,
       plan,
+      requestContext: input.context.requestContext,
+      inputHash: content.inputHash,
       binding: prepared.binding,
       path: prepared.path,
       source: {
@@ -871,6 +980,14 @@ export async function harvestRepairDispatch(
   dispatch: RepairDispatchPlan,
   effects: RepairHarvestEffects,
 ): Promise<RepairArtifactReadResult> {
+  const content = await readDispatchContentForJob(
+    dispatch.binding.job,
+    dispatch.requestContext,
+    effects,
+  );
+  if (!content.ok) return content;
+  const stale = contentRefusal(content.value, dispatch);
+  if (stale !== undefined) return refusal(stale);
   return readRetainedRepairArtifact(
     {
       journalDir: dispatch.journalDir,
@@ -883,14 +1000,111 @@ export async function harvestRepairDispatch(
 }
 
 /**
- * Revalidate the dispatch immediately before the kernel run. The plan's
- * snapshot/input hash is not a promise that the prepared job, guidance, blob
- * or source text still agree; a stale plan must not dispatch. Fresh attempts
- * also require the tip to remain current. Resumed/retained attempts may run
- * at the pinned source after the tip moves, but the blob and text must still
- * match the plan's source hash.
+ * The exact run's retained `job-finished` artifact. Unlike the all-run
+ * replay fold used for a standalone retained read, this is scoped to ONE
+ * `RunReport.runId`: the caller gets run A's artifact even when run B, later
+ * and with the opposite outcome, is the newest run for the same plan/input.
  */
-async function revalidateBeforeRun(
+async function readExactRunArtifact(input: {
+  readonly journalDir: string;
+  readonly runId: string;
+  readonly plan: Plan;
+  readonly jobId: string;
+  readonly op: string;
+  readonly inputsHash: string;
+}): Promise<
+  | { readonly ok: true; readonly result: OpResultArtifact<unknown> }
+  | { readonly ok: false; readonly refusal: RepairDispatchRefusal }
+> {
+  let events: readonly JournalEvent[];
+  try {
+    events = await openRunLog(input.journalDir).read(input.runId);
+  } catch {
+    return refusal('journal-unreadable');
+  }
+  const started = events.find(
+    (event): event is Extract<JournalEvent, { type: 'run-started' }> =>
+      event.type === 'run-started',
+  );
+  if (started === undefined || started.planId !== input.plan.id) {
+    return refusal('attempt-inconsistent');
+  }
+  let finished: Extract<JournalEvent, { type: 'job-finished' }> | undefined;
+  for (const event of events) {
+    if (event.type === 'job-finished' && event.jobId === input.jobId) finished = event;
+  }
+  if (finished === undefined) return refusal('retained-artifact-missing');
+  if (finished.opId !== input.op || finished.inputsHash !== input.inputsHash) {
+    return refusal('attempt-inconsistent');
+  }
+  return { ok: true, result: finished.result };
+}
+
+function contentRefusal(
+  content: DispatchContent,
+  dispatch: RepairDispatchPlan,
+): RepairDispatchRefusal | undefined {
+  if (!sameBinding(content.prepared.binding, dispatch.binding)) return 'prepared-job-changed';
+  if (content.prepared.path !== dispatch.path) return 'prepared-job-changed';
+  if (content.blobOid !== dispatch.binding.sourceBlobSha) return 'source-blob-mismatch';
+  if (content.sourceSha256 !== dispatch.source.sourceSha256) return 'scan-source-hash-mismatch';
+  if (content.inputHash !== dispatch.inputHash) return 'prepared-job-changed';
+  return undefined;
+}
+
+/**
+ * Harvest the artifact belonging to exactly `runId`, after re-rebuilding the
+ * dispatch payload. The exact run event must carry this plan's op and input
+ * hash; an ok artifact must still echo the complete binding.
+ */
+export async function harvestRepairRunArtifact(
+  dispatch: RepairDispatchPlan,
+  runId: string,
+  effects: RepairHarvestEffects,
+): Promise<RepairArtifactReadResult> {
+  const manifestJob = planJob(dispatch.plan);
+  if (manifestJob === undefined || dispatch.plan.jobs[0]?.id !== dispatch.binding.job) {
+    return refusal('attempt-inconsistent');
+  }
+  if (manifestJob.inputsHash !== dispatch.inputHash) return refusal('attempt-inconsistent');
+  const exact = await readExactRunArtifact({
+    journalDir: dispatch.journalDir,
+    runId,
+    plan: dispatch.plan,
+    jobId: dispatch.binding.job,
+    op: manifestJob.op,
+    inputsHash: manifestJob.inputsHash,
+  });
+  if (!exact.ok) return refusal(exact.refusal);
+
+  const content = await readDispatchContentForJob(
+    dispatch.binding.job,
+    dispatch.requestContext,
+    effects,
+  );
+  if (!content.ok) return content;
+  const stale = contentRefusal(content.value, dispatch);
+  if (stale !== undefined) return refusal(stale);
+
+  return harvestRepairArtifact(
+    {
+      expectedBinding: dispatch.binding,
+      path: dispatch.path,
+      artifactJson: JSON.stringify(exact.result),
+    },
+    effects,
+  );
+}
+
+/**
+ * Preflight the dispatch immediately before the kernel run. This is a fast,
+ * non-atomic refusal of a stale plan; it deliberately does NOT re-classify
+ * the attempt, because that decision must be made under the kernel's plan
+ * lease at invocation (see `revalidateAtInvocation`). The full rebuilt
+ * payload hash catches mechanical evidence, retry instructions, prepared
+ * guidance and request-context changes that a guidance-only check misses.
+ */
+async function preflightBeforeRun(
   dispatch: RepairDispatchPlan,
   effects: RepairHarvestEffects,
 ): Promise<RepairDispatchRefusal | undefined> {
@@ -898,44 +1112,58 @@ async function revalidateBeforeRun(
   if (!prepared.ok) return prepared.refusal;
   if (!sameBinding(prepared.value.binding, dispatch.binding)) return 'prepared-job-changed';
   if (prepared.value.path !== dispatch.path) return 'prepared-job-changed';
+  const content = await readDispatchContentForJob(
+    dispatch.binding.job,
+    dispatch.requestContext,
+    effects,
+  );
+  if (!content.ok) return content.refusal;
+  const stale = contentRefusal(content.value, dispatch);
+  if (stale !== undefined) return stale;
+  if (dispatch.attempt === 'fresh') {
+    if (content.value.currentTip !== dispatch.binding.sourceSha) {
+      return 'source-not-current-tip';
+    }
+    if (dispatch.preconditions.scans !== 'clean') return 'scan-unverified';
+  }
+  return undefined;
+}
 
-  const input = dispatch.plan.jobs[0]?.input as { readonly instructions?: unknown } | undefined;
-  const plannedGuidance =
-    input !== undefined && typeof input.instructions === 'string' ? input.instructions : undefined;
-  if (prepared.value.guidance !== plannedGuidance) return 'prepared-job-changed';
+const GUARD_PREFIX = 'repair-dispatch-guard:';
 
-  let currentTip: string;
-  try {
-    currentTip = await effects.git.currentTip();
-  } catch {
-    return 'source-tip-unreadable';
-  }
-  let blobOid: string;
-  try {
-    blobOid = await effects.git.blobOid(dispatch.binding.sourceSha, dispatch.path);
-  } catch {
-    return 'source-blob-unreadable';
-  }
-  if (blobOid !== dispatch.binding.sourceBlobSha) return 'source-blob-mismatch';
+/**
+ * The attempt class is a journal fold, not a plan promise. Re-fold inside
+ * the kernel's own plan lease (this runs from the registry `op.run` wrapper,
+ * after the kernel has acquired the lease and decided not to replay), so a
+ * non-ok terminal that appeared after planning is seen at the exact moment
+ * the kernel would invoke. A new `ok` terminal is refused rather than paid
+ * for, and a retained-ok plan whose artifact vanished is refused instead of
+ * turning into an unplanned fresh dispatch.
+ */
+async function revalidateAtInvocation(
+  dispatch: RepairDispatchPlan,
+  effects: RepairHarvestEffects,
+  actualInput: unknown,
+): Promise<RepairDispatchRefusal | undefined> {
+  const prepared = await loadPreparedJob(dispatch.binding.job, effects);
+  if (!prepared.ok) return prepared.refusal;
+  if (!sameBinding(prepared.value.binding, dispatch.binding)) return 'prepared-job-changed';
+  if (prepared.value.path !== dispatch.path) return 'prepared-job-changed';
+  const content = await readDispatchContentForJob(
+    dispatch.binding.job,
+    dispatch.requestContext,
+    effects,
+  );
+  if (!content.ok) return content.refusal;
+  const stale = contentRefusal(content.value, dispatch);
+  if (stale !== undefined) return stale;
 
-  let sourceText: string;
-  try {
-    sourceText = await effects.git.showFile(`${dispatch.binding.sourceSha}:${dispatch.path}`);
-  } catch {
-    return 'source-content-unreadable';
-  }
-  if (utf8Sha256(sourceText) !== dispatch.source.sourceSha256) {
-    return 'scan-source-hash-mismatch';
-  }
-  if (dispatch.attempt === 'fresh' && currentTip !== dispatch.binding.sourceSha) {
-    return 'source-not-current-tip';
-  }
-
-  if (!dispatch.resume) {
-    return dispatch.attempt === 'fresh' ? undefined : 'attempt-inconsistent';
-  }
   const manifestJob = planJob(dispatch.plan);
   if (manifestJob === undefined) return 'attempt-inconsistent';
+  if (inputHashForJob(manifestJob.op, actualInput) !== dispatch.inputHash) {
+    return 'attempt-inconsistent';
+  }
+
   const prior = await findPriorArtifact({
     journalDir: dispatch.journalDir,
     plan: dispatch.plan,
@@ -944,13 +1172,69 @@ async function revalidateBeforeRun(
     inputsHash: manifestJob.inputsHash,
   });
   if (!prior.ok) return 'journal-unreadable';
-  const nowAttempt: RepairAttempt =
+  const currentAttempt: RepairAttempt =
     prior.value.result === undefined
       ? 'fresh'
       : prior.value.result.status === 'ok'
         ? 'retained-ok'
         : 'resumed';
-  return nowAttempt === dispatch.attempt ? undefined : 'attempt-inconsistent';
+
+  if (dispatch.attempt === 'retained-ok') return 'attempt-inconsistent';
+  if (dispatch.resume && currentAttempt === 'retained-ok') return 'attempt-inconsistent';
+  if (dispatch.attempt === 'fresh' || currentAttempt === 'fresh') {
+    if (content.value.currentTip !== dispatch.binding.sourceSha) {
+      return 'source-not-current-tip';
+    }
+    if (dispatch.preconditions.scans !== 'clean') return 'scan-unverified';
+  }
+  return undefined;
+}
+
+/**
+ * Compose the guard with the existing registry entry so the op the kernel
+ * actually invokes is wrapped. No second lock: the kernel's plan lease is
+ * already held when this wrapper runs, and a retained-ok replay never calls
+ * the importer at all (so reuse stays idempotent and scan-free).
+ */
+function withInvocationGuard(
+  dispatch: RepairDispatchPlan,
+  registry: OpRegistryView,
+  effects: RepairHarvestEffects,
+): OpRegistryView {
+  const entry = registry.get('review.fixFinding');
+  if (entry === undefined) return registry;
+  return {
+    get(name) {
+      if (name !== 'review.fixFinding') return registry.get(name);
+      return {
+        ...entry,
+        importer: async (wiring) => {
+          const op = await entry.importer(wiring);
+          return async (input) => {
+            const guard = await revalidateAtInvocation(dispatch, effects, input);
+            if (guard !== undefined) {
+              return { status: 'failed', error: `${GUARD_PREFIX}${guard}` };
+            }
+            return op(input);
+          };
+        },
+      };
+    },
+  };
+}
+
+/**
+ * Recognise only this bridge's invocation-guard marker. The wrapper writes
+ * values from `RepairDispatchRefusal`; the cast is the trust boundary at
+ * which the kernel's plain failed result is mapped back to the typed union.
+ */
+function guardRefusalOf(
+  result: OpResultArtifact<unknown> | undefined,
+): RepairDispatchRefusal | undefined {
+  if (result === undefined || result.status !== 'failed') return undefined;
+  if (!result.error.startsWith(GUARD_PREFIX)) return undefined;
+  const value = result.error.slice(GUARD_PREFIX.length);
+  return value.length === 0 ? 'attempt-inconsistent' : (value as RepairDispatchRefusal);
 }
 
 /**
@@ -966,6 +1250,15 @@ export async function runRepairDispatch(
 ): Promise<RunRepairDispatchResult> {
   if (options.resume !== dispatch.resume) return refusal('attempt-inconsistent');
   if (dispatch.plan.jobs.length !== 1) return refusal('attempt-inconsistent');
+  const manifestJob = planJob(dispatch.plan);
+  if (
+    manifestJob === undefined ||
+    manifestJob.op !== 'review.fixFinding' ||
+    manifestJob.inputsHash !== dispatch.inputHash ||
+    dispatch.plan.jobs[0]?.id !== dispatch.binding.job
+  ) {
+    return refusal('attempt-inconsistent');
+  }
   if (dispatch.attempt === 'fresh') {
     if (dispatch.preconditions.scans !== 'clean') return refusal('scan-unverified');
     if (!dispatch.source.atTip) return refusal('source-not-current-tip');
@@ -973,8 +1266,8 @@ export async function runRepairDispatch(
     return refusal('attempt-inconsistent');
   }
 
-  const revalidation = await revalidateBeforeRun(dispatch, effects);
-  if (revalidation !== undefined) return refusal(revalidation);
+  const preflight = await preflightBeforeRun(dispatch, effects);
+  if (preflight !== undefined) return refusal(preflight);
 
   const run = await runPlan(
     dispatch.plan,
@@ -984,10 +1277,13 @@ export async function runRepairDispatch(
       journalDir: dispatch.journalDir,
       resume: options.resume,
     },
-    options.registry,
+    withInvocationGuard(dispatch, options.registry, effects),
   );
 
-  const retained = await harvestRepairDispatch(dispatch, effects);
+  const guard = guardRefusalOf(run.jobs[0]?.result);
+  if (guard !== undefined) return { ...refusal(guard), run };
+
+  const retained = await harvestRepairRunArtifact(dispatch, run.runId, effects);
   if (!retained.ok) return { ...refusal(retained.refusal), run };
   return {
     ok: true,
