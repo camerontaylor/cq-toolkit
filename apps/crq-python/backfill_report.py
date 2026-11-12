@@ -125,7 +125,9 @@ def summary(repo, ranked, queue, original=None, *, findings_root=None):
     # An empty {} baseline is provided evidence too: validate its digest rather
     # than silently omitting baseline accounting (falsy-but-present values).
     if original is not None:
-        if original["id"] != ledger.digest({k: v for k, v in original.items() if k != "id"}):
+        # A baseline without an id (an empty {} included) is malformed evidence:
+        # report it through the module's error type, never a bare KeyError.
+        if "id" not in original or original["id"] != ledger.digest({k: v for k, v in original.items() if k != "id"}):
             raise ledger.IntegrityError("baseline hash mismatch")
         baseline_result = {"id": original["id"], "target": original["target"], "surviving_T1_debt": 0,
                            "baseline_T1_reviewed_since": 0, "baseline_T1_removed_or_superseded": 0,
