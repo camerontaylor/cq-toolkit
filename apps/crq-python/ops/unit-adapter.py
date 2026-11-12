@@ -892,7 +892,11 @@ class ProductionUnitAdapter:
             self.refuse("unit already selects requested runtime")
         observed = self._observe_activators(unit, inventory)
         completion_window = self._completion_budget(unit, inventory, observed)
-        commands = self.capability.commands(runtime)
+        try:
+            commands = self.capability.commands(runtime)
+        except Exception as exc:
+            self.refuse("runtime capability observation failed: "
+                        + (str(exc) or type(exc).__name__)[:200])
         if not isinstance(commands, (set, frozenset)):
             self.refuse("runtime command capability is not declared")
         command = _prepare_host().UNIT_COMMANDS[unit]
@@ -902,13 +906,9 @@ class ProductionUnitAdapter:
         if runtime == "python":
             self._check_python_entry(rendered)
         self._rendered[(unit, runtime)] = rendered
-        if self._completion_port is None:
-            self.refuse("no runtime-bound completion provider")
         if self.queue_drain is None:
             self.refuse("no recorded queue drain observation provider")
-        sequence = self._completion_port.sequence(unit)
-        if type(sequence) is not int or sequence < 0:
-            self.refuse("completion provider returned an invalid sequence")
+        sequence = self.sequence(unit)
         self._requested_runtime = runtime
         return {
             "runtime": prior,
@@ -944,6 +944,9 @@ class ProductionUnitAdapter:
         bound = inventory[unit]["timer_bound_seconds"]
         if type(bound) is not int or bound <= 0:
             self.refuse("declared timer schedule has no bounded repeat interval")
+        if inventory[unit]["service_type"] == "simple":
+            self.refuse("simple service completion has no declared execution "
+                        "bound; preflight refuses this topology")
         service_timeout = inventory[unit]["service_timeout_seconds"]
         if type(service_timeout) is not int or service_timeout <= 0:
             self.refuse("declared service start timeout is not bounded")
@@ -1543,6 +1546,36 @@ class ProductionUnitAdapter:
         if self._runtime_from_unit(service) != snapshot["runtime"]:
             self.refuse("restored service runtime does not match the snapshot")
         restore_order = []
+        desired_service = snapshot["activators"]["service_active"]
+        if desired_service == "active":
+            self._ok(
+                self._run("start", unit,
+                          timeout=self._service_start_timeout(unit, inventory)),
+                "restore service activation")
+        elif desired_service == "inactive":
+            result = self._run("stop", unit, timeout=60)
+            if result.get("timeout") or result.get("rc") not in (0, 5):
+                self.refuse("restore service stop did not complete")
+            self._run("reset-failed", unit, timeout=60)
+        else:
+            self.refuse("snapshot service active state is unsupported")
+        service_observed = self._show(unit, ["ActiveState", "LoadState"])
+        if desired_service == "active":
+            if service_observed["LoadState"] != "loaded":
+                self.refuse("restored service did not remain loaded")
+            if service_observed["ActiveState"] == "failed":
+                self.refuse("restored service is failed")
+            if inventory[unit]["service_type"] == "simple":
+                if service_observed["ActiveState"] != "active":
+                    self.refuse("restored simple service is not active: "
+                                + str(service_observed["ActiveState"]))
+            elif service_observed["ActiveState"] not in ("active", "inactive"):
+                self.refuse("restored service active state is not a running "
+                            "or completed state: "
+                            + str(service_observed["ActiveState"]))
+        elif service_observed["ActiveState"] not in ("inactive", "failed"):
+            self.refuse("restored service active state does not match the snapshot")
+        restore_order.append("service")
         for role, name in self._activator_units(unit, inventory):
             desired = snapshot["activators"][role + "_active"]
             desired_enabled = snapshot["activators"][role + "_unit_file_state"]
@@ -1565,38 +1598,8 @@ class ProductionUnitAdapter:
                 self.refuse("restored " + role
                             + " enablement does not match the snapshot")
             restore_order.append(role)
-        desired_service = snapshot["activators"]["service_active"]
-        if desired_service == "active":
-            self._ok(self._run(
-                "start", unit,
-                timeout=self._service_start_timeout(unit, inventory)),
-                     "restore service activation")
-        elif desired_service == "inactive":
-            result = self._run("stop", unit, timeout=60)
-            if result.get("timeout") or result.get("rc") not in (0, 5):
-                self.refuse("restore service stop did not complete")
-            self._run("reset-failed", unit, timeout=60)
-        else:
-            self.refuse("snapshot service active state is unsupported")
-        observed = self._show(unit, ["ActiveState", "LoadState"])
-        if desired_service == "active":
-            if observed["LoadState"] != "loaded":
-                self.refuse("restored service did not remain loaded")
-            if observed["ActiveState"] == "failed":
-                self.refuse("restored service is failed")
-            if inventory[unit]["service_type"] == "simple":
-                if observed["ActiveState"] != "active":
-                    self.refuse("restored simple service is not active: "
-                                + str(observed["ActiveState"]))
-            elif observed["ActiveState"] not in ("active", "inactive"):
-                self.refuse("restored service active state is not a running "
-                            "or completed state: "
-                            + str(observed["ActiveState"]))
-        elif observed["ActiveState"] not in ("inactive", "failed"):
-            self.refuse("restored service active state does not match the snapshot")
-        restore_order.append("service")
         self.last_restore_order = restore_order
-        return {"service": observed, "restore_order": restore_order}
+        return {"service": service_observed, "restore_order": restore_order}
 
     # -- small filesystem effects ---------------------------------------
     def _fsync_dir(self, path):

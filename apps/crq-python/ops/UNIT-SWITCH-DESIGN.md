@@ -119,8 +119,11 @@ declared bound exceeds the supported maximum or the caller's deadline is below
 it. An inactive timer has no bounded second invocation and refuses before
 snapshot or mutation; the 6-hour backfill and 45-minute publisher shapes exceed
 the default supported maximum, and an oneshot without a declared start timeout
-(the watchdog template) has no bounded completion and refuses. The verified
-Node artifact tree must also
+(the watchdog template) has no bounded completion and refuses. A
+`Type=simple` service has no declared invocation execution bound either, so
+preflight refuses that topology rather than treating its startup timeout as a
+completion bound; restore still rejects a failed simple service if a recovery
+snapshot supplies one. The verified Node artifact tree must also
 resolve to the rendered canonical ExecStart tree; an alternate tree that
 passes manifest verification is rejected. Staged mode, ownership and xattrs are
 validated before the atomic release, so a tampered staged file refuses while
@@ -142,6 +145,13 @@ transaction will not install. Service start commands use the declared
 than a fixed 60-second command timeout; the same applies to the restore service
 start. A blocking `systemctl start` for a healthy 10-minute oneshot therefore
 does not fail the transaction at 60 seconds.
+
+Restore applies the saved service active/inactive policy and verifies it before
+releasing any timer or path activator. A timer or path that then starts the
+service is a normal new activation and is not stopped by the recovery. This
+avoids killing a path-triggered publisher run after the path is restarted.
+Injected capability and completion-sequence failures are converted to refusals
+in preflight, so a port exception cannot bypass the adapter's error type.
 
 ## Proposed stable-manager sequence
 

@@ -152,8 +152,11 @@ class LiveIdentity:
 class FakeCapability:
     def __init__(self, mapping):
         self.mapping = mapping
+        self.fail = None
 
     def commands(self, runtime):
+        if self.fail == "commands":
+            raise RuntimeError("capability unavailable")
         return self.mapping.get(runtime)
 
 
@@ -212,6 +215,7 @@ class FakeSystemd:
         self.incomplete_discovery = False
         self.calls = []
         self.service_start_delay = 0
+        self.activator_starts_service = False
         self.post_start_state = {}
         self._services = {entry["service"] for entry in inventory.values()}
         for entry in inventory.values():
@@ -296,6 +300,11 @@ class FakeSystemd:
                         "stderr": "", "timeout": True}
             if unit in self.active:
                 self.active[unit] = self.post_start_state.get(unit, "active")
+            if self.activator_starts_service:
+                service = self._service_for_activator(unit)
+                if service is not None:
+                    self.active[service] = self.post_start_state.get(
+                        service, "active")
             return {"argv": list(args), "rc": 0, "stdout": "",
                     "stderr": "", "timeout": False}
         if args and args[0] == "stop":
@@ -338,6 +347,12 @@ class FakeSystemd:
         if self.fail == "jobs":
             raise RuntimeError("jobs unavailable")
         return list(self.jobs_lines)
+
+    def _service_for_activator(self, unit):
+        for entry in self.inventory.values():
+            if entry.get("timer") == unit or entry.get("path") == unit:
+                return entry["service"]
+        return None
 
     def cgroup_pids(self, unit):
         if self.fail == "cgroup":
@@ -625,6 +640,30 @@ class AdapterTests(AdapterFixture):
         with self.assertRaisesRegex(
                 dc.Refused,
                 "installed timer does not match the pinned schedule"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_simple_service_completion(self):
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(
+                dc.Refused,
+                "simple service completion has no declared execution bound"):
+            self.adapter.preflight("crq-repair.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_capability_port_failure(self):
+        self.capability.fail = "commands"
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "runtime capability observation failed"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_completion_sequence_port_failure(self):
+        self.completion.fail = "sequence"
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "completion sequence failed"):
             self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
         self.assertEqual(_tree(self.unit_dir), before)
 
@@ -980,7 +1019,56 @@ class AdapterTests(AdapterFixture):
         self.assertEqual(service.stat().st_mode & 0o7777, 0o600)
         self.assertFalse(Path(staged["staged"]).exists())
         self.assertEqual(self.fake.active["crq-tick.timer"], "active")
-        self.assertEqual(recovery.last_restore_order, ["timer", "service"])
+        self.assertEqual(recovery.last_restore_order, ["service", "timer"])
+
+    def test_restore_activation_applies_service_policy_before_timer(self):
+        current = self.make_adapter()
+        snapshot = current.snapshot("crq-tick.service")
+        current.validate_snapshot("crq-tick.service", snapshot)
+        current.stop_and_drain("crq-tick.service")
+        current.restore("crq-tick.service", snapshot)
+        self.fake.activator_starts_service = True
+        calls = len(self.fake.calls)
+        result = current.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(result["restore_order"], ["service", "timer"])
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+        after = self.fake.calls[calls:]
+        timer_start = next(
+            index for index, call in enumerate(after)
+            if call[:2] == ["start", "crq-tick.timer"])
+        service_stops = [
+            index for index, call in enumerate(after)
+            if call[:2] == ["stop", "crq-tick.service"]]
+        self.assertTrue(service_stops)
+        self.assertLess(max(service_stops), timer_start)
+        self.assertFalse(any(
+            call[:2] == ["stop", "crq-tick.service"]
+            for call in after[timer_start:]))
+
+    def test_restore_activation_applies_service_policy_before_path(self):
+        current = self.make_adapter()
+        snapshot = current.snapshot("crq-publisher.service")
+        current.validate_snapshot("crq-publisher.service", snapshot)
+        current.stop_and_drain("crq-publisher.service")
+        current.restore("crq-publisher.service", snapshot)
+        self.fake.activator_starts_service = True
+        calls = len(self.fake.calls)
+        result = current.restore_activation("crq-publisher.service", snapshot)
+        self.assertEqual(result["restore_order"],
+                         ["service", "timer", "path"])
+        self.assertEqual(self.fake.active["crq-publisher.service"], "active")
+        after = self.fake.calls[calls:]
+        path_start = next(
+            index for index, call in enumerate(after)
+            if call[:2] == ["start", "crq-publisher.path"])
+        service_stops = [
+            index for index, call in enumerate(after)
+            if call[:2] == ["stop", "crq-publisher.service"]]
+        self.assertTrue(service_stops)
+        self.assertLess(max(service_stops), path_start)
+        self.assertFalse(any(
+            call[:2] == ["stop", "crq-publisher.service"]
+            for call in after[path_start:]))
 
     def test_restore_refuses_without_mask(self):
         current, _prior, snapshot = self.switch_ready(
@@ -996,18 +1084,14 @@ class AdapterTests(AdapterFixture):
 
     def test_restore_activation_refuses_failed_simple_service(self):
         self.fake.active["crq-repair.service"] = "active"
-        current, _prior, snapshot = self.switch_ready(
-            "crq-repair.service", NODE_RUNTIME)
+        current = self.make_adapter()
+        snapshot = current.snapshot("crq-repair.service")
+        current.validate_snapshot("crq-repair.service", snapshot)
         current.stop_and_drain("crq-repair.service")
-        current.install("crq-repair.service", NODE_RUNTIME)
-        current.start("crq-repair.service")
-        recovery = self.make_adapter()
-        recovery.validate_snapshot("crq-repair.service", snapshot)
-        recovery.stop_and_drain("crq-repair.service")
-        recovery.restore("crq-repair.service", snapshot)
+        current.restore("crq-repair.service", snapshot)
         self.fake.post_start_state["crq-repair.service"] = "failed"
         with self.assertRaisesRegex(dc.Refused, "restored service is failed"):
-            recovery.restore_activation("crq-repair.service", snapshot)
+            current.restore_activation("crq-repair.service", snapshot)
 
     def test_restore_activation_command_timeout_covers_service_budget(self):
         self.fake.active["crq-tick.service"] = "active"
