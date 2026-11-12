@@ -1215,15 +1215,19 @@ def cmd_run(args) -> int:
                 print("cleanup after failed run did not complete: %s"
                       % cleanup_error, file=sys.stderr)
         raise
+    cleanup = None
+    if not args.keep:
+        try:
+            cleanup = stop_owned_process(run, purge=False)
+        except Exception as cleanup_error:
+            print("cleanup after run did not complete: %s" % cleanup_error,
+                  file=sys.stderr)
+            cleanup = {"stopped": False, "error": str(cleanup_error)}
     print(json.dumps({"run": run["run_id"], "path": run["path"],
-                      "problems": problems, "checks": report["checks"]},
+                      "problems": problems, "checks": report["checks"],
+                      "cleanup": cleanup},
                      indent=2, sort_keys=True))
-    if args.keep:
-        return 0 if not problems else 1
-    cleanup = stop_owned_process(run, purge=False)
-    if not cleanup["stopped"]:
-        print(json.dumps({"cleanup": cleanup, "problems": problems},
-                         indent=2, sort_keys=True))
+    if cleanup is not None and not cleanup["stopped"]:
         return 1
     return 0 if not problems else 1
 
