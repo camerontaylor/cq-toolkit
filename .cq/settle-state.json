@@ -1990,19 +1990,6 @@
           "by": "self-merge-prs:observe"
         }
       ]
-    },
-    "1598": {
-      "tuple": {
-        "head": "0a178029f1385066fd5ec54ef1d60d19c733fa49",
-        "base": "33ce906f861f7d40eabe77f9986227203c2267dc",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-12T06:17:24.079Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
     }
   }
 }
