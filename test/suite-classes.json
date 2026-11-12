@@ -744,6 +744,7 @@
   "test/policy/crq/repairHarvest.test.ts": "pure",
   "test/policy/crq/repairRequest.test.ts": "pure",
   "test/policy/crq/repairRequestContext.test.ts": "pure",
+  "test/policy/crq/repairSelection.test.ts": "pure",
   "test/policy/crq/repairSnapshot.test.ts": "pure",
   "test/policy/crq/schemas.test.ts": "pure",
   "test/policy/crq/statusSummary.test.ts": "pure",
