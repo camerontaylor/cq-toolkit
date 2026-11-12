@@ -290,6 +290,21 @@ def harvest(c, q, item, dry=False):
     messages = []
     for run, record in item.get('repair_runs', {}).items():
         if record['state'] in ('published', 'done', 'failed', 'stale'):
+            # A terminal local failure can outlive a failed ledger write. Replay
+            # retained FAILED outcomes through the ledger's idempotent event chain.
+            if not dry and record['state'] == 'failed':
+                for result in record.get('verdicts', []):
+                    if (result.get('verdict') != 'FAILED'
+                            or not result.get('reason', '').startswith('invalid repair result: ')):
+                        continue
+                    if result.get('job') not in record['jobs'] or result.get('item') != item['id']:
+                        raise ValueError('terminal repair outcome identity mismatch')
+                    expected = json.loads((c.STATE / 'repair/inbox' / (result['job'] + '.json')).read_text())
+                    if expected.get('job') != result['job'] or expected.get('item') != item['id']:
+                        raise ValueError('terminal repair job identity mismatch')
+                    if expected.get('canonical_finding_id'):
+                        c.save_queue(q)  # also retry any prior failed terminal save
+                        mark_finding_outcome(c, expected, result)
             if not dry and record.get('verdicts') and hasattr(c, 'WT_ROOT') and hasattr(c, 'CLONE'):
                 from crq_repair.retain import cleanup_harvested
                 for result in record['verdicts']:
@@ -362,7 +377,10 @@ def harvest(c, q, item, dry=False):
                 # A deterministic artifact defect can never pass on a later tick,
                 # so record it as a terminal failure instead of blocking the item.
                 if not dry:
-                    mark_finding_outcome(c, expected, {'verdict': 'FAILED', 'reason': 'invalid repair result: ' + str(exc)[:300]})
+                    failure = {'job': job_id, 'item': item['id'], 'verdict': 'FAILED',
+                               'reason': 'invalid repair result: ' + str(exc)[:300],
+                               'finding': expected['finding']}
+                    record['verdicts'] = verdicts + [failure]
                     record.update(state='failed', error=str(exc)[:300])
                     if item['kind'] == review_receipt.KIND:
                         item['state'] = 'done'
@@ -371,6 +389,8 @@ def harvest(c, q, item, dry=False):
                     else:
                         item['state'] = 'repair_failed'
                         item['last_error'] = 'repair_failed; needs human'
+                    c.save_queue(q)  # terminal identity before authoritative write-back
+                    mark_finding_outcome(c, expected, failure)
                 break
             if result.get('verdict') == 'FIXED':
                 # Later findings move the shared HEAD; validate each immutable

@@ -692,6 +692,7 @@ def _harvest_case(name, prepared, result, *, allow_legacy):
             STATE=root / "state",
             CONFIG={"repair": {}},
             iso=lambda: ISO,
+            save_queue=lambda q: atomic(root / "state" / "queue.json", q),
         )
         repair_tick.harvest(service, queue, item)
         record = item["repair_runs"][run]
