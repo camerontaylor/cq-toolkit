@@ -1294,6 +1294,7 @@ ${wanted}`;
     ((review.get('comments') as JsonValue[]).length > 0 || review.has('commit_id'))
   ) {
     const fallback = buildReview(meta, findings, null);
+    review = fallback;
     if (fingerprint) {
       if (
         pythonTruthy(meta.has('local_review') ? (meta.get('local_review') as JsonValue) : null) &&
