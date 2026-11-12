@@ -452,15 +452,23 @@ class SubprocessSystemd:
             if entry["type"] == "other":
                 unsupported.append("declared path is not a file or symlink: " + path)
 
+        entries = []
         try:
-            entries = list(self.unit_dir.iterdir())
+            with os.scandir(self.unit_dir) as scan:
+                for entry in scan:
+                    entries.append(Path(entry.path))
+                    if len(entries) > MAX_UNIT_ENTRIES:
+                        return {
+                            "complete": False, "supported": False,
+                            "error": "unit directory exceeds the scan bound",
+                            "paths": paths,
+                            "units": {name: {} for name in sorted(units)},
+                            "foreign": foreign, "jobs": []}
         except OSError as exc:
             return {"complete": False, "supported": False,
                     "error": "unit directory is unreadable: " + str(exc)[:160],
                     "paths": paths, "units": {name: {} for name in sorted(units)},
                     "foreign": foreign, "jobs": []}
-        if len(entries) > MAX_UNIT_ENTRIES:
-            error = "unit directory exceeds the scan bound"
         declared_set = {str(path) for path in declared}
         prefix = unit.split(".")[0]
         for entry in sorted(entries):

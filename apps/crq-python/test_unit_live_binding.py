@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from test_deploy_controller_fixtures import ControllerFixture, dc
 from test_unit_adapter import LiveIdentity, _write
@@ -326,6 +327,14 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["complete"], False)
         self.assertEqual(evidence["supported"], False)
         self.assertIn("user bus is unavailable", evidence["error"])
+
+    def test_unit_directory_scan_bound_is_incomplete(self):
+        declared = self.declare()
+        with mock.patch.object(live, "MAX_UNIT_ENTRIES", 1):
+            evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("scan bound", evidence["error"])
 
     def test_malformed_job_line_is_incomplete(self):
         declared = self.declare()
