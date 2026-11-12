@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { readCqEnv } from '../../../src/config/env.js';
+import { runWithCqEnv } from '../../../src/config/run-env.js';
 import { AiSdkDriver } from '../../../src/driver/ai-sdk/index.js';
 import { SessionBoundError } from '../../../src/driver/errors.js';
 import * as factory from '../../../src/driver/factory.js';
 import * as cycleModule from '../../../src/ops/dev/cycle.js';
+import * as managed from '../../../src/ops/dev/managedReview.js';
+import * as queue from '../../../src/ops/review/internal/queueClient.js';
 import { SessionStore } from '../../../src/harness/session.js';
 import { registry } from '../../../src/ops/dev/registry.js';
 
@@ -46,6 +49,49 @@ describe('dev registry driver snapshot wiring (issue 1185)', () => {
       spy.mockRestore();
     }
   });
+
+  test.each(['explicit', 'missing', 'run', 'ambient'] as const)(
+    'dev.review managed alias respects the %s snapshot at transport resolution',
+    async (source) => {
+      vi.stubEnv('CQ_QUEUE_SSH_ALIAS', 'ambient-at-construction');
+      const configured = vi.spyOn(managed, 'makeManagedReviewSubmit');
+      const transport = async () => 'offline fixture';
+      const ssh = vi.spyOn(queue, 'sshQueueTransport').mockReturnValue(transport);
+      const wiring =
+        source === 'explicit' || source === 'missing'
+          ? {
+              cqEnv: readCqEnv(
+                source === 'explicit' ? { CQ_QUEUE_SSH_ALIAS: 'explicit-snapshot' } : {},
+              ),
+            }
+          : undefined;
+      await dispatch('dev.review', wiring);
+      expect(ssh).not.toHaveBeenCalled();
+      expect(configured).toHaveBeenCalledOnce();
+      const resolveTransport = configured.mock.calls[0]?.[0];
+      if (resolveTransport === undefined) throw new Error('managed transport binding missing');
+      vi.stubEnv('CQ_QUEUE_SSH_ALIAS', 'ambient-at-submit');
+      const runEnv = readCqEnv({ CQ_QUEUE_SSH_ALIAS: 'run-snapshot' });
+      if (source === 'missing') {
+        expect(() => runWithCqEnv(runEnv, resolveTransport)).toThrow(
+          'Configure CQ_QUEUE_SSH_ALIAS for review-v1',
+        );
+        expect(ssh).not.toHaveBeenCalled();
+      } else {
+        expect(source === 'run' ? runWithCqEnv(runEnv, resolveTransport) : resolveTransport()).toBe(
+          transport,
+        );
+        expect(ssh).toHaveBeenCalledExactlyOnceWith(
+          source === 'explicit'
+            ? 'explicit-snapshot'
+            : source === 'run'
+              ? 'run-snapshot'
+              : 'ambient-at-submit',
+          'review-v1',
+        );
+      }
+    },
+  );
 
   test('dev.cycle binds its default factory to the supplied wiring snapshot', async () => {
     const cqEnv = readCqEnv({ CQ_SESSION_LOGS: 'off' });

@@ -43,10 +43,11 @@ import { QueueConfigurationError } from '../review/internal/queueClient.js';
  * S2b-i: read the queue SSH alias lazily (at submit, never at registry
  * resolution, keeping entry construction inert). Missing configuration is a
  * construction-time QueueConfigurationError only when the managed path
- * actually submits.
+ * actually submits. An explicit dispatch snapshot takes precedence; otherwise
+ * resolve the enclosing run snapshot (or ambient fallback) at that time.
  */
-function reviewAlias(): string {
-  const alias = currentCqEnv().values['CQ_QUEUE_SSH_ALIAS'];
+function reviewAlias(cqEnv = currentCqEnv()): string {
+  const alias = cqEnv.values['CQ_QUEUE_SSH_ALIAS'];
   if (typeof alias !== 'string' || alias === '')
     throw new QueueConfigurationError('Configure CQ_QUEUE_SSH_ALIAS for review-v1');
   return alias;
@@ -361,7 +362,7 @@ export const registry: OpRegistryEntry[] = [
               // identity (plan D1). The closure reads the alias only when the
               // managed path actually submits.
               managedSubmit: managed.makeManagedReviewSubmit(
-                () => queueClient.sshQueueTransport(reviewAlias(), 'review-v1'),
+                () => queueClient.sshQueueTransport(reviewAlias(wiring?.cqEnv), 'review-v1'),
                 () => resolveForgeRepo(dev),
               ),
             })(input);
