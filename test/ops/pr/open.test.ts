@@ -267,6 +267,7 @@ describe('pr.open', () => {
     if (result.status === 'failed') {
       expect(result.error).toContain('denylist gate at createPr');
       expect(result.error).toContain('denylist scan failed');
+      expect(result.error).toContain('synthetic scanner fault');
     }
     expect(calls.map((call) => call.effect)).toEqual(['searchPrByHead']);
   });

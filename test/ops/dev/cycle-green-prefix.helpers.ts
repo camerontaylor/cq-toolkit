@@ -11,6 +11,7 @@ import { basename, dirname, join } from 'node:path';
 import { makeDevCycle } from '../../../src/ops/dev/cycle.js';
 import type { DevCheckInput, DevCheckReport } from '../../../src/ops/dev/check.js';
 import type { DevEffects } from '../../../src/ops/dev/effects.js';
+import type { DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
 import { makeSubprocessDevEffects } from '../../../src/ops/dev/effects.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
 import { DEV_LEDGER_VERSION, type DevCheckRecord } from '../../../src/ops/dev/record.js';
@@ -19,7 +20,7 @@ import type { PrOpenInput, PrOpenReport } from '../../../src/ops/pr/open.js';
 import type { ReviewAddressReport } from '../../../src/ops/review/address.js';
 import type { AddressFix } from '../../../src/ops/review/addressWorker.js';
 import type { OpResult } from '../../../src/kernel/types.js';
-import { checkRecord } from './fakes.js';
+import { checkRecord, stubScanner } from './fakes.js';
 import { repoEffects, type TestRepo } from './repo.js';
 
 export const BRANCH = 'feature/x';
@@ -90,6 +91,15 @@ export interface Scenario {
     scanSecrets?: true;
     scanSecretsFor?: (root: string) => never;
   };
+  /**
+   * Use the DEFAULT probe publication leg (no openIn): the harness still
+   * wires a stub author scanner, and the probe-root factory is the
+   * scenario's `probeScannerFor` (omit it for the unbindable-probe refusal).
+   * The factory's received roots are recorded for the root-binding assertion.
+   */
+  defaultProbePublication?: {
+    probeScannerFor?: (root: string) => DiffSecretScanner | undefined;
+  };
   /** Advance Date.now by this much inside each (green) probe. */
   probeAdvanceMs?: number;
   /** The remote reports another head after the push (verification fails). */
@@ -130,6 +140,7 @@ export async function run(repo: TestRepo, scenario: Scenario) {
   const installs: string[] = [];
   const probeRoots: string[] = [];
   const probeSteps: DevCheckInput[] = [];
+  const publicationProbeRoots: string[] = [];
   let pushedSha: string | undefined;
   let authorChecks = 0;
   const bodies: string[] = [];
@@ -339,27 +350,41 @@ export async function run(repo: TestRepo, scenario: Scenario) {
             );
           },
         }),
+    // The publication scanners the default legs bind (production always
+    // carries them; the findings-section composes scan under their rules).
+    // A scenario using the DEFAULT probe publication leg overrides the
+    // factory (or omits it for the unbindable-probe refusal); otherwise the
+    // stub factory records its root and returns a clean scanner.
+    publicationScanner: stubScanner(),
+    publicationScannerFor: (root: string) => {
+      publicationProbeRoots.push(root);
+      if (scenario.defaultProbePublication?.probeScannerFor !== undefined)
+        return scenario.defaultProbePublication.probeScannerFor(root);
+      return stubScanner();
+    },
     ...(scenario.injectedOpenOwnsForge === true
       ? {}
-      : {
-          openIn: (effects: DevEffects, root: string) => async (input: PrOpenInput) => {
-            opens.push({ input, root });
-            if (scenario.openInResult !== undefined) return scenario.openInResult();
-            const read = await readWorkState(effects, { target: 'main' });
-            if (!read.ok) throw new Error(read.reason);
-            const value: PrOpenReport = {
-              number: 77,
-              url: 'https://example.invalid/pull/77',
-              created: true,
-              base: input.target ?? 'main',
-              head: read.state.head,
-              branch: read.state.branch,
-              evidenceClass: 'author',
-              ready: false,
-            };
-            return { status: 'ok', value };
-          },
-        }),
+      : scenario.defaultProbePublication !== undefined
+        ? {}
+        : {
+            openIn: (effects: DevEffects, root: string) => async (input: PrOpenInput) => {
+              opens.push({ input, root });
+              if (scenario.openInResult !== undefined) return scenario.openInResult();
+              const read = await readWorkState(effects, { target: 'main' });
+              if (!read.ok) throw new Error(read.reason);
+              const value: PrOpenReport = {
+                number: 77,
+                url: 'https://example.invalid/pull/77',
+                created: true,
+                base: input.target ?? 'main',
+                head: read.state.head,
+                branch: read.state.branch,
+                evidenceClass: 'author',
+                ready: false,
+              };
+              return { status: 'ok', value };
+            },
+          }),
   });
   const result = await op({
     repoRoot: repo.root,
@@ -381,6 +406,7 @@ export async function run(repo: TestRepo, scenario: Scenario) {
     installs,
     probeRoots,
     probeSteps,
+    publicationProbeRoots,
     bodies,
     probeDir,
     probeParent,
