@@ -90,8 +90,14 @@ def _capture_document(paths: List[Dict[str, Any]], **overrides: Any) -> Dict[str
         "reviewer": REVIEWER,
         "reviewer_version": "fixture",
     }
-    capture["equivalence"] = review_receipt.current_equivalence(capture)
+    # Overrides land before the equivalence identity: the equivalence binds
+    # the FINAL capture (target/tree/scope included), not the template. The
+    # bounded case below overrides only `target` and expects every receipt to
+    # verify; computing equivalence first made each receipt self-inconsistent
+    # (equivalence of target-only fields vs. identity of TARGET) and merged_current
+    # demoted all 34 receipts to unverified instead of 32 captured + 2 omitted.
     capture.update(overrides)
+    capture["equivalence"] = review_receipt.current_equivalence(capture)
     return capture
 
 
