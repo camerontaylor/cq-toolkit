@@ -443,13 +443,53 @@ function decodeGitQuotedPath(raw: string, source: string): string {
   }
 }
 
+function splitHeaderPaths(raw: string, source: string): [string, string] | undefined {
+  const tokens: string[] = [];
+  let index = 0;
+  while (index < raw.length) {
+    if (raw[index] === ' ') {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    if (raw[index] === '"') {
+      index += 1;
+      while (index < raw.length) {
+        if (raw[index] === '\\') {
+          index += 2;
+          continue;
+        }
+        if (raw[index] === '"') {
+          index += 1;
+          break;
+        }
+        index += 1;
+      }
+    } else {
+      while (index < raw.length && raw[index] !== ' ') index += 1;
+    }
+    tokens.push(raw.slice(start, index));
+  }
+  // An UNQUOTED path containing a space (a hand-written or foreign patch)
+  // cannot be split reliably; leave the b-side unknown and let the
+  // ---/+++ headers attribute it. Git always quotes such paths itself.
+  if (tokens.length !== 2) return undefined;
+  return [
+    decodeGitQuotedPath(tokens[0] as string, source),
+    decodeGitQuotedPath(tokens[1] as string, source),
+  ];
+}
+
 export function addedLineComponents(patch: string, source: string): ScanComponentInput[] {
   let path: string | undefined;
+  let addedPath: string | undefined;
   let inHeader = false;
   const added = new Map<string, string[]>();
   for (const rawLine of patch.split('\n')) {
     const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
     if (line.startsWith('diff --git')) {
+      const split = splitHeaderPaths(line.slice('diff --git '.length), source);
+      addedPath = split?.[1].replace(/^b\//, '');
       path = undefined;
       inHeader = true;
       continue;
@@ -459,6 +499,17 @@ export function addedLineComponents(patch: string, source: string): ScanComponen
       continue;
     }
     if (inHeader) {
+      // A header-only EMPTY new file has no ---/+++ hunk headers at all
+      // (review P2 tOU-, PR #1641): git emits `new file mode` + `index`
+      // only, so the b-side of the diff --git line is the sole path.
+      if (line.startsWith('new file mode')) {
+        if (addedPath === undefined) {
+          throw new Error(
+            `${source}: an added file has no parsable diff --git path — refusing the unattributable component`,
+          );
+        }
+        if (!added.has(addedPath)) added.set(addedPath, []);
+      }
       if (line.startsWith('+++ ') || line.startsWith('--- ')) {
         const candidate = decodeGitQuotedPath(line.slice(4).replace(/\t.*$/, ''), source);
         path = candidate === '/dev/null' ? undefined : candidate.replace(/^[ab]\//, '');

@@ -646,6 +646,42 @@ describe('the publication gate vs refs/replace substitutions (review P1 p528)', 
   });
 });
 
+describe('the publication gate vs credential-shaped filenames (review P2 tOU-)', () => {
+  test('an EMPTY new file named with a token is refused — header-only diffs register the path', async () => {
+    const f = await publicationFixture();
+    try {
+      const fakeToken = ['ghp', 'emptyfilename123456'].join('_');
+      const driver = new GitWorkerDriver(
+        { origin: f.origin, repoRoot: f.repoRoot },
+        async (worktree) => {
+          // No content: git emits only diff --git / new file mode / index.
+          await writeFile(join(worktree, fakeToken), '');
+          await gitIn(worktree, 'add', '-A');
+          await gitIn(worktree, 'commit', '--quiet', '-m', 'resolve: add empty marker');
+        },
+      );
+      const { scanner } = recordingScan(tokenScanner);
+      const op = makeResolveConflictOp({
+        effects: f.effects,
+        drivers: {
+          resolve: (): ResolvedDriver => ({ driver, lane: 'ai-sdk', modelSpec: MODEL_SPEC }),
+        },
+        loadPrompt: fakeLoadPrompt,
+        scan: scanner,
+      });
+      const result = await run(f, op);
+      expect(result.status, JSON.stringify(result, null, 2)).toBe('needs-human');
+      if (result.status === 'needs-human') {
+        expect(result.reason).toContain('github-pat');
+        expect(result.reason).toContain(`path ${fakeToken}`);
+      }
+      expect(f.pushes).toEqual([]);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('the publication gate vs commit-encoding headers (review P1 sMLw)', () => {
   test('a commit created under i18n.commitEncoding=UTF-16LE declares a non-UTF-8 encoding — the gate refuses without pushing', async () => {
     const f = await publicationFixture();

@@ -671,11 +671,11 @@ describe('addedLineComponents — one component per changed path of ADDED lines'
   });
 
   test('an EMPTY added file is still a component: the path is published and scanned', () => {
+    // Git emits NO ---/+++ headers for a header-only empty new file.
     const patch = [
       'diff --git a/ghp_abcdefghijklmnopqrs b/ghp_abcdefghijklmnopqrs',
       'new file mode 100644',
-      '--- /dev/null',
-      '+++ b/ghp_abcdefghijklmnopqrs',
+      'index 0000000..e69de29',
     ].join('\n');
     const components = addedLineComponents(patch, 'gate');
     expect(components).toEqual([
