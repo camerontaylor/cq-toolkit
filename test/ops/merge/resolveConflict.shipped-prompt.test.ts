@@ -18,6 +18,7 @@ import {
   FakeDriver,
   factoryOf,
   firstInvocation,
+  scanClean,
 } from './resolveConflict.helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -62,19 +63,25 @@ describe('the shipped conflict prompt', () => {
       'Using it as a merge SOURCE is correct and required when it is the base',
     );
     expect(collapsed).toContain('git merge FETCH_HEAD');
-    // The acted-verification propagation wait (found live in F5's drill:
-    // refs/pull/N/head moves ASYNCHRONOUSLY after a push, so an agent that
-    // reports acted on an instantaneous verification reads as a false
-    // indeterminate). The prompt must carry the bounded poll, the exact
-    // ls-remote shape with the RENDERED pr number, and the fail-closed
-    // bound-expiry behavior — and it must come AFTER the push step.
-    expect(collapsed).toContain('git ls-remote origin refs/pull/44/head');
-    expect(collapsed).toContain('poll, bounded (at most ~30 seconds)');
-    expect(collapsed).toContain('do NOT report `acted` on an unobservable push');
-    const pushAt = collapsed.indexOf('git push origin HEAD:feat/topic');
-    const lsRemoteAt = collapsed.indexOf('git ls-remote origin refs/pull/44/head');
-    expect(pushAt).toBeGreaterThanOrEqual(0);
-    expect(lsRemoteAt).toBeGreaterThan(pushAt);
+    // THE NO-PUSH PUBLICATION CONTRACT (issue #1193 — the worker no longer
+    // pushes; the op scans and publishes): the prompt must withhold the
+    // push entirely, name the single allowed network use (the base
+    // fetch), and redefine `acted` as a LOCAL commit with NOTHING pushed.
+    expect(collapsed).toContain('You have NO push step');
+    expect(collapsed).toContain(
+      'the caller runs a secret scan and pushes the resolved branch itself',
+    );
+    expect(collapsed).toContain('Do not run `git push` (any form)');
+    expect(collapsed).toContain('do not run `git ls-remote`');
+    expect(collapsed).toContain('STOP THERE. Do not push.');
+    expect(collapsed).toContain(
+      'the merge commit was created on the worktree branch and NOTHING was pushed',
+    );
+    // And the OLD push instructions are gone outright — no push refspec,
+    // no propagation poll.
+    expect(collapsed).not.toContain('git push origin HEAD:feat/topic');
+    expect(collapsed).not.toContain('git ls-remote origin refs/pull/44/head');
+    expect(collapsed).not.toContain('poll, bounded');
   });
 
   test('the DEFAULT loader reads the same file: the default op renders it verbatim', async () => {
@@ -86,6 +93,7 @@ describe('the shipped conflict prompt', () => {
     const op = makeResolveConflictOp({
       effects,
       drivers: factoryOf(driver),
+      scan: scanClean,
     });
 
     const result = await op({ ...baseInput(), conflictFiles: ['src/a.ts'] });
