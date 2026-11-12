@@ -54,7 +54,12 @@ import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
 import type { Usage, WorkerResult } from '../../driver/types.js';
-import { composeSection, mdSafe, type PrEffects } from '../pr/assemblePrs.js';
+import {
+  composeSection,
+  mdSafe,
+  scanPublicationForUpload,
+  type PrEffects,
+} from '../pr/assemblePrs.js';
 import { makeSubprocessPrEffects } from '../../adapters/forge-github/ghEffects.js';
 import type { PrOpenInput, PrOpenReport } from '../pr/open.js';
 import { makePrOpen } from '../pr/open.js';
@@ -393,6 +398,24 @@ export interface DevCycleDeps {
   gh?: PrEffects;
   /** The secret scanner the default check leg binds (registry parity with dev.check). */
   scanSecrets?: DiffSecretScanner;
+  /**
+   * The publication scanner the DEFAULT pr.open legs bind (registry parity
+   * with pr.open): scanned before every forge publication. Built for one
+   * checkout ROOT — the probe/tmp worktree never runs under another tree's
+   * rules.
+   */
+  publicationScanner?: DiffSecretScanner;
+  /**
+   * The publication scanner for a probe/tmp worktree, built from THAT
+   * checkout's own configuration. When the author's check scans with a
+   * configured scanner but none can be bound to the probe root, the default
+   * probe publication leg has no scanner and fails closed (same rule as
+   * scanSecretsFor for the probe check leg).
+   */
+  publicationScannerFor?: (
+    root: string,
+    effects: DevEffects,
+  ) => DiffSecretScanner | undefined | Promise<DiffSecretScanner | undefined>;
   drivers?: DriverFactory;
   /** The git transport the push leg binds (tests script it). */
   git?: GhFn;
@@ -481,7 +504,11 @@ function makeDevCycleCore(
     const open =
       deps.open ??
       ((step: PrOpenInput) =>
-        makePrOpen(deps.effects, gh ?? makeSubprocessPrEffects(input.repoRoot))(step));
+        makePrOpen(
+          deps.effects,
+          gh ?? makeSubprocessPrEffects(input.repoRoot),
+          deps.publicationScanner,
+        )(step));
     const git =
       deps.git ?? makeGhRunner({ bin: 'git', cwd: input.repoRoot, timeoutMs: 10 * 60 * 1000 });
 
@@ -1154,6 +1181,17 @@ function makeDevCycleCore(
             kind: 'none',
             attribution: `${scanned} — the reserve ran out during the publication binding (${String(-left())}ms into the publication margin) — nothing published`,
           };
+        // Bind the probe publication leg BEFORE the push (the point of no
+        // return): building it is inert (a scanner load, no forge write), so
+        // a refusal to bind leaves nothing published — no dangling branch on
+        // the remote, and cleanup releases the local branch and worktree.
+        const bound = await probeOpenFor(tmpEffects, tmp);
+        if (bound === undefined)
+          return {
+            kind: 'none',
+            attribution: `${scanned} — no PR payload denylist scanner could be bound to the probe worktree at '${tmp}' (a probe never publishes under another tree's rules) — nothing published`,
+          };
+        const { open: openPub, scanner: probeScanner } = bound;
         pushAttempted = true;
         const pushedPub = await publishHead(pub, G);
         if (!pushedPub.ok)
@@ -1164,10 +1202,6 @@ function makeDevCycleCore(
               reason: `dev.cycle (push): ${pushedPub.reason}; the remote may carry '${pub}', and the local branch is kept`,
             },
           };
-        const openPub = (
-          deps.openIn ??
-          ((effects) => makePrOpen(effects, gh ?? makeSubprocessPrEffects(input.repoRoot)))
-        )(tmpEffects, tmp);
         const openResult = await openPub({
           repoRoot: tmp,
           target,
@@ -1183,6 +1217,17 @@ function makeDevCycleCore(
         const pr = openResult.value;
         const dropped = droppedFixes(report, chain, G);
         if (gh !== undefined) {
+          // The findings section carries model-produced text (finding excerpts,
+          // attempt reasons), so the compose scans under the probe root's own
+          // rules before the body write — the same gate pr.open applies.
+          if (probeScanner === undefined)
+            return {
+              kind: 'published',
+              result: {
+                status: 'needs-human',
+                reason: `dev.cycle (pr body): draft PR #${String(pr.number)} is open at ${G} but the findings section was refused — no PR payload denylist scanner is configured for the probe worktree`,
+              },
+            };
           try {
             const composed = composeSection(
               await gh.getPrBody(pr.number),
@@ -1195,6 +1240,7 @@ function makeDevCycleCore(
                 authorLedger,
               }),
             );
+            await scanPublicationForUpload(probeScanner, undefined, composed);
             await gh.editPrBody(pr.number, composed);
           } catch (err) {
             return {
@@ -1232,6 +1278,44 @@ function makeDevCycleCore(
         return makeDevCheck(effects, await deps.scanSecretsFor(root, effects));
       if (deps.scanSecrets !== undefined) return undefined;
       return makeDevCheck(effects);
+    }
+
+    /**
+     * The probe worktree's publication leg, built fresh for its CURRENT
+     * checkout: an injected `openIn`, else makePrOpen with a publication
+     * scanner bound to that root (`publicationScannerFor`). When the author
+     * scans publications with a configured scanner but none can be bound to
+     * the probe root, there is no leg (undefined): a probe must never
+     * publish under another tree's rules. The bound scanner rides along so
+     * the findings-section compose below scans under the same root's rules.
+     */
+    async function probeOpenFor(
+      effects: DevEffects,
+      root: string,
+    ): Promise<
+      | {
+          open: (step: PrOpenInput) => Promise<OpResult<PrOpenReport>>;
+          scanner: DiffSecretScanner | undefined;
+        }
+      | undefined
+    > {
+      if (deps.openIn !== undefined) {
+        const scanner =
+          deps.publicationScannerFor === undefined
+            ? deps.publicationScanner
+            : await deps.publicationScannerFor(root, effects);
+        return { open: deps.openIn(effects, root), scanner };
+      }
+      const scanner =
+        deps.publicationScannerFor === undefined
+          ? undefined
+          : await deps.publicationScannerFor(root, effects);
+      if (scanner === undefined && deps.publicationScanner !== undefined) return undefined;
+      return {
+        open: (step: PrOpenInput) =>
+          makePrOpen(effects, gh ?? makeSubprocessPrEffects(input.repoRoot), scanner)(step),
+        scanner,
+      };
     }
 
     // -------- the round-cap / not-ready publication (shared) -------------
@@ -1299,12 +1383,23 @@ function makeDevCycleCore(
       // production gh (which would edit an unrelated PR). A fault here
       // fails the op — the PR is open, its body is missing the round cap's
       // evidence, and the reason says so.
+      // The findings section carries model-produced text (finding excerpts,
+      // attempt reasons), so the compose scans under the author root's own
+      // rules before the body write — the same gate pr.open applies. The
+      // refusal keeps the existing truthful shape: the draft is open, only
+      // the findings section is missing.
       if (addressReport !== undefined && gh !== undefined) {
+        if (deps.publicationScanner === undefined)
+          return {
+            status: 'needs-human',
+            reason: `dev.cycle (pr body): draft PR #${String(pr.number)} is open but the findings section was refused — no PR payload denylist scanner is configured`,
+          };
         try {
           const composed = composeSection(
             await gh.getPrBody(pr.number),
             renderFindingsSection(addressReport),
           );
+          await scanPublicationForUpload(deps.publicationScanner, undefined, composed);
           await gh.editPrBody(pr.number, composed);
         } catch (err) {
           return {

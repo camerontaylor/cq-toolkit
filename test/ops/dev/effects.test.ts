@@ -101,7 +101,7 @@ test('a spawn fault on the first read resolves through every public op as needs-
         owner: 'test',
         evidence: [],
       }),
-    () => makePrOpen(effects, {} as PrEffects)({ repoRoot: '/missing' }),
+    () => makePrOpen(effects, {} as PrEffects, stubScanner())({ repoRoot: '/missing' }),
   ];
   for (const run of operations) {
     const result = await run();
