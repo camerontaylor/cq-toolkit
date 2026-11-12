@@ -265,28 +265,33 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     ).toThrow(UnsafeMergeArgsError);
   });
 
-  test('round-193: the base-ref read shape passes; broader gh pr view shapes are refused', () => {
-    expect(safeArgs(['pr', 'view', '7', '--json', 'baseRefName'])).toEqual([
+  test('round-193 + round-1193-r3: the base-ref read shape passes (tip OID added); broader gh pr view shapes are refused', () => {
+    expect(safeArgs(['pr', 'view', '7', '--json', 'baseRefName,baseRefOid'])).toEqual([
       'pr',
       'view',
       '7',
       '--json',
-      'baseRefName',
+      'baseRefName,baseRefOid',
     ]);
-    // A different json field, a multi-field list, a missing pr number, a
-    // trailing flag, and a non-numeric pr are all unknown — the read stays
-    // exactly one shape.
+    // A different json field, a field list without the OID, a missing pr
+    // number, a trailing flag, and a non-numeric pr are all unknown — the
+    // read stays exactly one shape.
     expect(() => safeArgs(['pr', 'view', '7', '--json', 'headRefName'])).toThrow(
       /refused: unknown argv shape/,
     );
     expect(() => safeArgs(['pr', 'view', '7', '--json', 'baseRefName,headRefName'])).toThrow(
       UnsafeMergeArgsError,
     );
-    expect(() => safeArgs(['pr', 'view', '--json', 'baseRefName'])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['pr', 'view', '7', '--json', 'baseRefName', '--jq', '.'])).toThrow(
+    expect(() => safeArgs(['pr', 'view', '7', '--json', 'baseRefName'])).toThrow(
       UnsafeMergeArgsError,
     );
-    expect(() => safeArgs(['pr', 'view', 'abc', '--json', 'baseRefName'])).toThrow(
+    expect(() => safeArgs(['pr', 'view', '--json', 'baseRefName,baseRefOid'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() =>
+      safeArgs(['pr', 'view', '7', '--json', 'baseRefName,baseRefOid', '--jq', '.']),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['pr', 'view', 'abc', '--json', 'baseRefName,baseRefOid'])).toThrow(
       UnsafeMergeArgsError,
     );
   });
@@ -359,17 +364,39 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     ]);
   });
 
-  test('realMergeEffects.readBaseRef reads exactly `gh pr view <n> --json baseRefName` (injected runner)', async () => {
+  test('realMergeEffects.readBaseRef reads exactly `gh pr view <n> --json baseRefName,baseRefOid` (injected runner)', async () => {
     const ghCalls: string[][] = [];
     const effects = realMergeEffects({
       repoRoot: '/repo',
       run: async (args: string[]) => {
         ghCalls.push(args);
-        return { code: 0, stdout: '{"baseRefName":"main"}\n', stderr: '' };
+        return {
+          code: 0,
+          stdout:
+            '{"baseRefName":"main","baseRefOid":"1111222233334444555566667777888899990000"}\n',
+          stderr: '',
+        };
       },
     });
-    expect(await effects.readBaseRef(7)).toEqual({ ok: true, baseRefName: 'main' });
-    expect(ghCalls).toEqual([['pr', 'view', '7', '--json', 'baseRefName']]);
+    const tip = '1111222233334444555566667777888899990000';
+    expect(await effects.readBaseRef(7)).toEqual({
+      ok: true,
+      baseRefName: 'main',
+      baseTipSha: tip,
+    });
+    expect(ghCalls).toEqual([['pr', 'view', '7', '--json', 'baseRefName,baseRefOid']]);
+
+    // An OID that is not full 40-hex is OMITTED (the gate refuses a
+    // merge parent it cannot verify), never guessed.
+    const shortOid = realMergeEffects({
+      repoRoot: '/repo',
+      run: async () => ({
+        code: 0,
+        stdout: '{"baseRefName":"main","baseRefOid":"abc123"}\n',
+        stderr: '',
+      }),
+    });
+    expect(await shortOid.readBaseRef(7)).toEqual({ ok: true, baseRefName: 'main' });
 
     // A nonzero exit, unparseable JSON, and a missing/empty field all fail
     // closed as { ok: false } — never a guessed base.
@@ -563,5 +590,55 @@ describe('safeArgs round-1193-r2: the topology read shape (rev-list --parents)',
       gitRun: async () => ({ code: 128, stdout: '', stderr: 'bad object' }),
     });
     expect(await missing.commitParents(resolved)).toEqual({ ok: false });
+  });
+});
+
+describe('safeArgs round-1193-r3: the ancestry read shape (merge-base --is-ancestor)', () => {
+  const parent = sha('a');
+  const tip = sha('b');
+
+  test('the EXACT shape passes — --is-ancestor plus two full 40-hex shas', () => {
+    expect(safeArgs(['-C', '/repo', 'merge-base', '--is-ancestor', parent, tip])).toEqual([
+      '-C',
+      '/repo',
+      'merge-base',
+      '--is-ancestor',
+      parent,
+      tip,
+    ]);
+  });
+
+  test('every deviation is an unknown shape', () => {
+    expect(() => safeArgs(['merge-base', parent, tip])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['merge-base', '--is-ancestor', 'abc123', tip])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['merge-base', '--is-ancestor', parent, 'refs/heads/main'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['merge-base', '--is-ancestor', parent])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['merge-base', '--is-ancestor', '--all', parent, tip])).toThrow(
+      UnsafeMergeArgsError,
+    );
+  });
+
+  test('realMergeEffects.isAncestor routes the exact argv (injected runner — zero processes)', async () => {
+    const gitCalls: string[][] = [];
+    const effects = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async (args: string[]) => {
+        gitCalls.push(args);
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    });
+    const answer = await effects.isAncestor(parent, tip);
+    expect(answer).toEqual({ code: 0, stdout: '', stderr: '' });
+    expect(gitCalls).toEqual([['-C', '/repo', 'merge-base', '--is-ancestor', parent, tip]]);
+    // Exit 1 is a NOT-ancestor ANSWER, not a fault.
+    const no = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async () => ({ code: 1, stdout: '', stderr: '' }),
+    });
+    expect((await no.isAncestor(parent, tip)).code).toBe(1);
   });
 });

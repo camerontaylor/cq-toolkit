@@ -493,6 +493,7 @@ export const innerEffects = (forge: Forge) => {
     pushRef: () => Promise.resolve(ok),
     diffPatch: () => Promise.resolve(ok),
     commitParents: () => Promise.resolve({ ok: true, parents: [] }),
+    isAncestor: () => Promise.resolve(ok),
   };
   return { effects, mergeCalls };
 };

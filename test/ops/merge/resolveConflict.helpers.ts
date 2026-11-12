@@ -201,12 +201,29 @@ export class FakeMergeEffects implements MergeEffects {
     return { code: 0, stdout: '', stderr: '' };
   }
 
-  async readBaseRef(pr: number): Promise<{ ok: boolean; baseRefName?: string }> {
-    // The resolve op never reads a base ref — only executeMerges does. The
-    // method exists to satisfy the seam; absent an explicit entry it answers
-    // the trunk (a stacked scenario seeds baseRefs).
+  /** The forge base tip the publication gate verifies a merge parent
+   * against (issue #1193, shape B); null models a forge answer with no
+   * usable OID (the gate must refuse). */
+  baseTipSha: string | null = 'd'.repeat(40);
+  /** isAncestor's exit code for the gate's ancestry read; 0 = the second
+   * parent IS public base history, 1 = not. */
+  ancestorCode: 0 | 1 = 1;
+
+  async readBaseRef(
+    pr: number,
+  ): Promise<{ ok: boolean; baseRefName?: string; baseTipSha?: string }> {
+    // The resolve op's gate reads the base ref on MERGE-shaped resolutions
+    // (shape B) to verify the second parent is public base history;
+    // executeMerges reads it before every merge action. Absent an explicit
+    // entry it answers the trunk (a stacked scenario seeds baseRefs).
     this.calls.push(`readBase:${String(pr)}`);
-    return { ok: true, baseRefName: this.baseRefs.get(pr) ?? 'main' };
+    const baseTip = this.baseTipSha === null ? {} : { baseTipSha: this.baseTipSha };
+    return { ok: true, baseRefName: this.baseRefs.get(pr) ?? 'main', ...baseTip };
+  }
+
+  async isAncestor(ancestor: string, descendant: string): Promise<GhResult> {
+    this.calls.push(`ancestor:${ancestor}->${descendant}`);
+    return { code: this.ancestorCode, stdout: '', stderr: '' };
   }
 
   async worktreePrepare(pr: number, ref: string): Promise<{ path: string }> {

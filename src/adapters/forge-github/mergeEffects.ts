@@ -138,7 +138,7 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
   const unknown = (): UnsafeMergeArgsError =>
     new UnsafeMergeArgsError(
       args,
-      'refused: unknown argv shape — the merge family executes only its ten documented shapes (rev-parse, rev-list, fetch, worktree add/list/remove, push, gh pr merge, gh pr edit, gh pr view, diff)',
+      'refused: unknown argv shape — the merge family executes only its eleven documented shapes (rev-parse, rev-list, merge-base, fetch, worktree add/list/remove, push, gh pr merge, gh pr edit, gh pr view, diff)',
     );
   const sub = rest[0];
   switch (sub) {
@@ -275,6 +275,24 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
       }
       return args;
     }
+    case 'merge-base': {
+      // The ancestry read (review P1 round 3, PR #1628): the publication
+      // gate must decide whether a merge resolution's second parent is
+      // PUBLIC base history. EXACT shape: `merge-base --is-ancestor
+      // <40hex> <40hex>` — both endpoints are the validated merge parent
+      // and the forge-read base tip; exit 0 = ancestor, exit 1 = not,
+      // anything else = fault.
+      const tail = rest.slice(1);
+      if (
+        tail.length !== 3 ||
+        tail[0] !== '--is-ancestor' ||
+        !/^[0-9a-f]{40}$/i.test(tail[1] ?? '') ||
+        !/^[0-9a-f]{40}$/i.test(tail[2] ?? '')
+      ) {
+        throw unknown();
+      }
+      return args;
+    }
     case 'pr': {
       // The three gh shapes: the merge (I3's only method, optionally pinned
       // by `--match-head-commit`), the retarget, and the base-ref read
@@ -325,7 +343,7 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
         typeof prNum === 'string' &&
         /^\d+$/.test(prNum) &&
         flag === '--json' &&
-        base === 'baseRefName'
+        base === 'baseRefName,baseRefOid'
       ) {
         return args;
       }
@@ -371,16 +389,21 @@ export interface MergeEffects {
   fetchRef(ref: string): Promise<GhResult>;
   /**
    * Re-read PR `pr`'s forge base ref — the branch it currently targets
-   * (`gh pr view <pr> --json baseRefName` in the real implementation;
-   * review-debt #193). executeMerges calls it before each MERGE action and
-   * compares the answer against the base the plan was built on: a retarget
-   * between plan and run moves the base WITHOUT touching the head, so the
-   * head-SHA pin alone cannot catch it. Resolves `{ ok: true, baseRefName }`
-   * when the forge answers with a non-empty ref; `{ ok: false }` when the
-   * read failed or the payload was unreadable — never throws for a failed
-   * read (each caller decides its own fail-closed policy).
+   * AND that branch's current tip commit (`gh pr view <pr> --json
+   * baseRefName,baseRefOid` in the real implementation; review-debt
+   * #193, tip added for the publication gate's topology proof — review
+   * P1 round 3). executeMerges calls it before each MERGE action and
+   * compares the answer against the base the plan was built on: a
+   * retarget between plan and run moves the base WITHOUT touching the
+   * head, so the head-SHA pin alone cannot catch it. Resolves
+   * `{ ok: true, baseRefName, baseTipSha? }` when the forge answers with
+   * a non-empty ref (`baseTipSha` present only when the forge answered a
+   * full 40-hex OID); `{ ok: false }` when the read failed or the
+   * payload was unreadable — never throws for a failed read (each caller
+   * decides its own fail-closed policy). The gate treats a missing
+   * baseTipSha as "the second parent cannot be verified" and refuses.
    */
-  readBaseRef(pr: number): Promise<{ ok: boolean; baseRefName?: string }>;
+  readBaseRef(pr: number): Promise<{ ok: boolean; baseRefName?: string; baseTipSha?: string }>;
   /** Prepare a throwaway worktree for the PR's merge flow, checked out at
    * `ref`. Resolves with the worktree path; throws when the worktree cannot
    * be created (a missing tree is not a merge outcome). */
@@ -443,6 +466,15 @@ export interface MergeEffects {
    * never shows.
    */
   commitParents(sha: string): Promise<{ ok: boolean; parents?: string[] }>;
+  /**
+   * Whether `ancestor` is an ancestor of `descendant` (review P1 round 3
+   * — the publication gate's public-history check): `git -C <repoRoot>
+   * merge-base --is-ancestor <sha> <sha>`, both endpoints full 40-hex
+   * shas behind the safeArgs-pinned shape. Resolves with the exit code:
+   * 0 = ancestor, 1 = not an ancestor (both are ANSWERS); any other exit
+   * is a fault the caller refuses on.
+   */
+  isAncestor(ancestor: string, descendant: string): Promise<GhResult>;
 }
 
 /**
@@ -558,8 +590,9 @@ export interface RealMergeEffectsOpts {
  *   - mergePr:      `gh pr merge <pr> --merge` (plus
  *                   `--match-head-commit <sha>` when the caller pins the head)
  *   - retargetBase: `gh pr edit <pr> --base <newBase>`
- *   - readBaseRef:  `gh pr view <pr> --json baseRefName` (the forge
- *                   base-ref read — review-debt #193)
+ *   - readBaseRef:  `gh pr view <pr> --json baseRefName,baseRefOid` (the
+ *                   forge base-ref read + the base tip — review-debt #193,
+ *                   tip for the gate's topology proof, review P1 round 3)
  *   - pushRef:      `git -C <fromPath> push origin <src:dst>` (an explicit
  *                   refspec — round 2: bare/symbolic forms are refused)
  *   - diffPatch:    `git -C <repoRoot> diff <HARDENED_DIFF_FLAGS>
@@ -567,8 +600,11 @@ export interface RealMergeEffectsOpts {
  *                   hardened read-only patch read behind the resolver's
  *                   pre-push scan, #1193)
  *   - commitParents: `git -C <repoRoot> rev-list --parents -n 1 <sha>`
- *                   (the gate's topology proof — exactly one parent on
- *                   the validated baseline, review P1 round 2)
+ *                   (the gate's topology proof — one commit on the
+ *                   validated baseline, or a merge of it with public base
+ *                   history — review P1 rounds 2-3)
+ *   - isAncestor:    `git -C <repoRoot> merge-base --is-ancestor <sha>
+ *                   <sha>` (is the merge parent public base history?)
  */
 export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   // Absolute everywhere (prWorktree doctrine): mkdir resolves from the
@@ -625,9 +661,11 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   // field is `{ ok: false }` — fail closed, never a guessed base. The
   // parsed ref is TRIMMED (a whitespace-padded value must not false-`stale`
   // at the consumer) and an empty-after-trim value is `{ ok: false }`.
-  const readBaseRef = async (pr: number): Promise<{ ok: boolean; baseRefName?: string }> => {
+  const readBaseRef = async (
+    pr: number,
+  ): Promise<{ ok: boolean; baseRefName?: string; baseTipSha?: string }> => {
     if (!Number.isInteger(pr) || pr <= 0) return { ok: false };
-    const result = await gh(['pr', 'view', String(pr), '--json', 'baseRefName']);
+    const result = await gh(['pr', 'view', String(pr), '--json', 'baseRefName,baseRefOid']);
     if (result.code !== 0) return { ok: false };
     let parsed: unknown;
     try {
@@ -635,15 +673,28 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     } catch {
       return { ok: false };
     }
-    const raw =
+    const record =
       typeof parsed === 'object' && parsed !== null
-        ? (parsed as { baseRefName?: unknown }).baseRefName
+        ? (parsed as { baseRefName?: unknown; baseRefOid?: unknown })
         : undefined;
+    const raw = record?.baseRefName;
     if (typeof raw !== 'string') return { ok: false };
     const baseRefName = raw.trim();
     if (baseRefName === '') return { ok: false };
-    return { ok: true, baseRefName };
+    // The base tip rides along when the forge answered a full 40-hex OID;
+    // anything else is omitted — the gate refuses to verify a second
+    // parent against an unshaped answer.
+    const rawTip = record?.baseRefOid;
+    const baseTipSha =
+      typeof rawTip === 'string' && /^[0-9a-f]{40}$/i.test(rawTip) ? rawTip : undefined;
+    return { ok: true, baseRefName, ...(baseTipSha !== undefined ? { baseTipSha } : {}) };
   };
+
+  // The ancestry read (review P1 round 3): the argv shape is pinned by
+  // safeArgs to --is-ancestor plus two 40-hex shas. Exit 0/1 are both
+  // ANSWERS (ancestor / not); any other exit is a fault.
+  const isAncestor = (ancestor: string, descendant: string): Promise<GhResult> =>
+    git(['-C', repoRoot, 'merge-base', '--is-ancestor', ancestor, descendant]);
 
   // The worktree root's base dir, derived LAZILY (first prepare, then
   // cached) from git's COMMON dir (round 2): a linked worktree's .git is a
@@ -744,5 +795,6 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     pushRef,
     diffPatch,
     commitParents,
+    isAncestor,
   };
 }

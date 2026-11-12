@@ -38,6 +38,7 @@ describe('makeForge (the one Forge binding)', () => {
           'commitParents',
           'diffPatch',
           'fetchRef',
+          'isAncestor',
           'mergePr',
           'pushRef',
           'readBaseRef',

@@ -1413,6 +1413,7 @@ export function gateMergeEffects(
     pushRef: (ref, fromPath) => effects.pushRef(ref, fromPath),
     diffPatch: (from, to) => effects.diffPatch(from, to),
     commitParents: (sha) => effects.commitParents(sha),
+    isAncestor: (ancestor, descendant) => effects.isAncestor(ancestor, descendant),
     mergePr: async (pr, opts): Promise<GhResult> => {
       const base = pinnedBase.get(pr);
       pinnedBase.delete(pr);

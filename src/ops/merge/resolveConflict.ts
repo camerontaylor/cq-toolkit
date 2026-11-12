@@ -113,12 +113,28 @@
 //           'indeterminate' (no commit was created — callers assume
 //           neither success nor failure, the old unverifiable-acted
 //           posture), a validating THROW → 'failed' (totality);
-//        3. effects.diffPatch reads the zero-context patch
+//        3. the publication TOPOLOGY is proven (review P1 rounds 2-3).
+//           The prompt's own flow — fetch the base, merge FETCH_HEAD,
+//           one normal merge commit — is a TWO-PARENT merge, so two
+//           shapes are publishable: (A) exactly one parent equal to the
+//           validated baseline, or (B) exactly two parents with
+//           parent[0] === baseline — a merge of the prepared head with
+//           the base — accepted only when the second parent is PUBLIC
+//           base history: the forge-read base tip (readBaseRef's
+//           baseTipSha) or an ancestor of it (isAncestor — the base may
+//           have advanced after the worker's fetch). Everything else —
+//           parent[0] ≠ baseline (the add-then-remove intermediate),
+//           >2 parents, zero parents, unreadable topology, a second
+//           parent that is not public, an unreadable forge base state —
+//           refuses ('refusing to publish unscanned history') BEFORE
+//           the diff read and any push; plumbing THROWS are 'failed'
+//           (totality);
+//        4. effects.diffPatch reads the zero-context patch
 //           baseline..resolvedSha — EXACTLY the content the publication
 //           push adds beyond the head's current public state. Nonzero or
 //           throwing → 'failed' (the change is UNSCANNABLE — a partial
 //           patch is never scanned, and unscannable is never published);
-//        4. the patch's ADDED lines (what a push publishes; removed
+//        5. the patch's ADDED lines (what a push publishes; removed
 //           lines leave the forge) are scanned through the
 //           DiffSecretScanner seam (deps.scan; default
 //           makeRepoDiffScanner(repoRoot) — the repo's own
@@ -828,18 +844,26 @@ export function makeResolveConflictOp(
             };
           }
           // Gate rung 3: prove the publication TOPOLOGY before the
-          // payload scan means anything (review P1, PR #1628 round 2):
-          // the endpoint diff baseline..resolution covers ALL pushed
-          // content ONLY IF the resolution commit is EXACTLY ONE commit
-          // whose sole parent IS the baseline. A merge commit's second
-          // parent, or an intermediate commit that adds a credential and
-          // a tip commit that removes it, ride the push while leaving the
-          // endpoint diff clean — unscannable history. A worker that
-          // reports acted is believed about the TIP commit only; the
-          // prompt's single-commit requirement is ENFORCED here, not
-          // assumed. Unreadable topology, two parents, zero parents, or
-          // a parent that is not the validated baseline → refuse,
-          // fail-closed, nothing pushed.
+          // payload scan means anything (review P1, PR #1628 rounds 2-3).
+          // The endpoint diff baseline..resolution covers ALL pushed
+          // content ONLY for two shapes — and the PROMPT'S OWN FLOW
+          // (fetch the base, merge FETCH_HEAD, one normal merge commit)
+          // is the merge shape, so it must be ACCEPTED, not refused:
+          //   A) exactly one parent, equal to the validated baseline (a
+          //      single resolution commit stacked on the prepared head);
+          //   B) exactly two parents with parent[0] === baseline — a
+          //      merge of the prepared head with the base — ACCEPTED ONLY
+          //      when the second parent is PUBLIC base history: equal to
+          //      the forge-read base tip, or an ancestor of it (a base
+          //      tip the worker fetched before the base advanced is still
+          //      public). Everything else is unscannable history and
+          //      refuses BEFORE the diff read and any push: parent[0] ≠
+          //      baseline (the add-a-credential-then-remove-it
+          //      intermediate), >2 parents, zero parents, an unreadable
+          //      topology, or a second parent that is not public. A
+          //      worker reporting acted is believed about the TIP commit
+          //      only; the base side is verified against the FORGE
+          //      (readBaseRef's baseTipSha), never a local ref.
           let topology: { ok: boolean; parents?: string[] };
           try {
             topology = await effects.commitParents(resolution.sha);
@@ -855,11 +879,61 @@ export function makeResolveConflictOp(
               reason: `conflict agent reported acted but the resolution commit's topology could not be read for pr ${input.pr} — refusing to publish unscanned history; NOTHING was pushed${sessionSuffix(result)}`,
             };
           }
-          if (topology.parents.length !== 1 || (topology.parents[0] as string) !== baselineSha) {
+          const parents = topology.parents;
+          const firstOnBaseline = parents.length >= 1 && parents[0] === baselineSha;
+          const singleCommitShape = parents.length === 1 && firstOnBaseline;
+          const mergeShape = parents.length === 2 && firstOnBaseline;
+          if (!singleCommitShape && !mergeShape) {
             return {
               status: 'needs-human',
-              reason: `resolution is not a single commit on the prepared baseline (parents: ${topology.parents.join(', ') || 'none'}; expected exactly one equal to ${baselineSha}) for pr ${input.pr} — refusing to publish unscanned history; NOTHING was pushed${sessionSuffix(result)}`,
+              reason: `resolution topology is not publishable (parents: ${parents.join(', ') || 'none'}; expected one commit on the prepared baseline ${baselineSha}, or a merge of it with public base history) for pr ${input.pr} — refusing to publish unscanned history; NOTHING was pushed${sessionSuffix(result)}`,
             };
+          }
+          if (mergeShape) {
+            // Shape B: the second parent must be PUBLIC base history,
+            // verified against the FORGE's answer, never a local ref the
+            // worker could have mutated.
+            const secondParent = parents[1] as string;
+            let base: { ok: boolean; baseRefName?: string; baseTipSha?: string };
+            try {
+              base = await effects.readBaseRef(input.pr);
+            } catch (err) {
+              return {
+                status: 'failed',
+                error: `resolveConflict: reading the forge base state for pr ${input.pr} threw: ${errorMessage(err)}${sessionSuffix(result)}`,
+              };
+            }
+            if (!base.ok || base.baseTipSha === undefined) {
+              return {
+                status: 'needs-human',
+                reason: `the merge resolution's second parent ${secondParent} cannot be verified as public base history (the forge base state for pr ${input.pr} is unreadable or lacks a tip OID) — refusing to publish unscanned history; NOTHING was pushed${sessionSuffix(result)}`,
+              };
+            }
+            if (secondParent !== base.baseTipSha) {
+              // Not the current tip: public only if an ancestor of it
+              // (the base advanced between the worker's fetch and now).
+              let ancestry: GhResult;
+              try {
+                ancestry = await effects.isAncestor(secondParent, base.baseTipSha);
+              } catch (err) {
+                return {
+                  status: 'failed',
+                  error: `resolveConflict: reading the ancestry of the merge parent ${secondParent} for pr ${input.pr} threw: ${errorMessage(err)}${sessionSuffix(result)}`,
+                };
+              }
+              if (ancestry.code !== 0 && ancestry.code !== 1) {
+                return {
+                  status: 'failed',
+                  error: `resolveConflict: the ancestry read of the merge parent ${secondParent} for pr ${input.pr} failed (exit ${ancestry.code})${stderrSuffix(ancestry.stderr)} — refusing to publish unverified history${sessionSuffix(result)}`,
+                };
+              }
+              if (ancestry.code !== 0) {
+                return {
+                  status: 'needs-human',
+                  reason: `the merge resolution's second parent ${secondParent} is not public base history (forge base tip ${base.baseTipSha} for pr ${input.pr}) — refusing to publish unscanned history; NOTHING was pushed${sessionSuffix(result)}`,
+                };
+              }
+            }
           }
           // Gate rung 4: read the resolved change — the zero-context
           // patch of exactly what the publication push would add beyond

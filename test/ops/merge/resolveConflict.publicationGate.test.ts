@@ -1,13 +1,17 @@
-// Review P1 round 2 on PR #1628 (issue #1193's publication gate): the
-// endpoint diff baseline..resolution proves the payload ONLY IF the
-// resolution is EXACTLY ONE commit whose sole parent is the baseline — a
-// worker that commits a credential and then commits its removal, or
-// resolves through a merge commit, pushes unscanned history behind a clean
-// endpoint diff. This file drives the REAL op over REAL git (bare origin +
-// clone + the family's real worktree lifecycle); the "worker" is a fixture
-// Driver that executes git inside the invocation's workspace (exactly where
-// the real agent works) and reports acted. Temporary repos are created per
-// test in mkdtemp dirs and removed in finally.
+// Review P1 on PR #1628 (issue #1193's publication gate) and its round-3
+// redesign: the endpoint diff baseline..resolution proves the payload ONLY
+// for two publication shapes — (A) exactly one commit on the prepared
+// baseline, or (B) the PROMPT'S OWN FLOW (fetch the base, merge
+// FETCH_HEAD, one normal merge commit): a two-parent merge with
+// parent[0] === baseline whose second parent is PUBLIC base history (the
+// forge-read base tip, or an ancestor of it for the older-base race).
+// This file drives the REAL op over REAL git (bare origin + clone + the
+// family's real worktree lifecycle); the "worker" is a fixture Driver that
+// executes git inside the invocation's workspace — exactly where the real
+// agent works — and reports acted. readBaseRef is stubbed to answer from
+// the fixture's bare origin (the fixture IS the forge); isAncestor runs
+// for real. Temporary repos are created per test in mkdtemp dirs and
+// removed in finally.
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -23,16 +27,22 @@ import { MODEL_SPEC, fakeLoadPrompt, recordingScan, scanClean } from './resolveC
 
 const git = promisify(execFile);
 const gitIn = async (cwd: string, ...args: string[]): Promise<string> =>
-  (await git('git', args, { cwd })).stdout;
+  (await git('git', args, { cwd })).stdout.trim();
+
+interface FixtureCtx {
+  origin: string;
+  repoRoot: string;
+}
 
 /** A fixture worker: runs the scripted git steps INSIDE the prepared
- * worktree (the invocation's workspace binding — where the real agent
- * works), then reports the scripted decision. */
+ * worktree (the invocation's workspace binding), with the fixture's
+ * origin/repoRoot in context, then reports the scripted decision. */
 class GitWorkerDriver implements Driver {
   readonly invocations: OpInvocation[] = [];
 
   constructor(
-    private readonly steps: (worktree: string) => Promise<void>,
+    private readonly ctx: FixtureCtx,
+    private readonly steps: (worktree: string, ctx: FixtureCtx) => Promise<void>,
     private readonly decision: 'acted' | 'escalate' = 'acted',
   ) {}
 
@@ -40,7 +50,7 @@ class GitWorkerDriver implements Driver {
     this.invocations.push(invocation);
     const worktree = invocation.workspace?.path;
     if (worktree === undefined) throw new Error('fixture worker: no workspace binding');
-    await this.steps(worktree);
+    await this.steps(worktree, this.ctx);
     return {
       model: invocation.modelSpec.model,
       structuredOutput: { decision: this.decision, summary: 'fixture worker' },
@@ -55,18 +65,29 @@ class GitWorkerDriver implements Driver {
 const commitAll = async (worktree: string, message: string): Promise<string> => {
   await gitIn(worktree, 'add', '-A');
   await gitIn(worktree, 'commit', '--quiet', '-m', message);
-  return (await gitIn(worktree, 'rev-parse', 'HEAD')).trim();
+  return gitIn(worktree, 'rev-parse', 'HEAD');
 };
 
-/** A bare origin + a clone (the repoRoot) with one baseline commit pushed
- * to refs/pull/44/head. The effects are the REAL merge effects over the
- * clone, with pushRef and diffPatch wrapped in recording spies (the
- * publication verdicts are observed, not performed). */
+/** The exact prompt flow (steps 1 of conflict.default.md): refresh the
+ * base, merge FETCH_HEAD. */
+const promptMerge = async (worktree: string): Promise<void> => {
+  await gitIn(worktree, 'fetch', 'origin', 'main');
+  await gitIn(worktree, 'merge', '--no-edit', 'FETCH_HEAD');
+};
+
+/** A bare origin + a clone (the repoRoot): one baseline commit pushed to
+ * refs/pull/44/head, then main advanced one commit on the forge (the
+ * diverged base every merge resolution merges), plus an unpushed stray
+ * commit the wrong-parent scenario can stack on. The effects are the REAL
+ * merge effects over the clone — isAncestor and diffPatch run for real —
+ * with pushRef/diffPatch wrapped in recording spies and readBaseRef
+ * answered from the bare origin (the fixture IS the forge). */
 async function publicationFixture(): Promise<{
   root: string;
   repoRoot: string;
+  origin: string;
   baseline: string;
-  strayCommit: string;
+  baseTip: () => Promise<string>;
   pushes: string[];
   diffCalls: string[];
   effects: MergeEffects;
@@ -78,18 +99,36 @@ async function publicationFixture(): Promise<{
   await git('git', ['clone', '--quiet', origin, repoRoot]);
   await gitIn(repoRoot, 'config', 'user.email', 'fixture@localhost');
   await gitIn(repoRoot, 'config', 'user.name', 'fixture');
+  // The COMMON ANCESTOR C on main.
   await writeFile(join(repoRoot, 'base.txt'), 'baseline\n');
   await gitIn(repoRoot, 'add', '-A');
-  await gitIn(repoRoot, 'commit', '--quiet', '-m', 'baseline');
-  const baseline = (await gitIn(repoRoot, 'rev-parse', 'HEAD')).trim();
-  // The PR head truth on the forge.
-  await gitIn(repoRoot, 'push', '--quiet', 'origin', `HEAD:refs/pull/44/head`);
-  // An unrelated commit the wrong-parent scenario can stack on (never the
-  // baseline).
-  await writeFile(join(repoRoot, 'stray.txt'), 'unrelated\n');
-  await gitIn(repoRoot, 'add', '-A');
-  await gitIn(repoRoot, 'commit', '--quiet', '-m', 'stray upstream work');
-  const strayCommit = (await gitIn(repoRoot, 'rev-parse', 'HEAD')).trim();
+  await gitIn(repoRoot, 'commit', '--quiet', '-m', 'common ancestor');
+  const ancestor = await gitIn(repoRoot, 'rev-parse', 'HEAD');
+  // The PR LINE: one PR commit P on top of C, pushed as the pull ref —
+  // the pre-dispatch baseline the worktree prepares at.
+  await writeFile(join(repoRoot, 'pr.txt'), 'pr work\n');
+  await gitIn(repoRoot, 'add', 'pr.txt');
+  const prTree = await gitIn(repoRoot, 'write-tree');
+  const baseline = await gitIn(repoRoot, 'commit-tree', prTree, '-p', ancestor, '-m', 'pr work');
+  await gitIn(repoRoot, 'update-ref', 'refs/heads/prline', baseline);
+  await gitIn(repoRoot, 'push', '--quiet', 'origin', 'refs/heads/prline:refs/pull/44/head');
+  // The BASE LINE: main advances one base-side commit M on the forge —
+  // parented on C, so P and M have DIVERGED (a merge is non-ff).
+  await writeFile(join(repoRoot, 'main-side.txt'), 'base work\n');
+  await gitIn(repoRoot, 'add', 'main-side.txt');
+  const baseTree = await gitIn(repoRoot, 'write-tree');
+  const baseCommit = await gitIn(
+    repoRoot,
+    'commit-tree',
+    baseTree,
+    '-p',
+    ancestor,
+    '-m',
+    'base-side work',
+  );
+  await gitIn(repoRoot, 'push', '--quiet', 'origin', `${baseCommit}:refs/heads/main`);
+
+  const baseTip = async (): Promise<string> => gitIn(origin, 'rev-parse', 'refs/heads/main');
 
   const real = realMergeEffects({ repoRoot, protectedBranch: 'main' });
   const pushes: string[] = [];
@@ -104,40 +143,46 @@ async function publicationFixture(): Promise<{
       diffCalls.push(`${from}..${to}`);
       return real.diffPatch(from, to);
     },
+    readBaseRef: async (pr) => {
+      // The fixture IS the forge: answer the base ref + its current tip
+      // from the bare origin (the trusted read realMergeEffects performs
+      // against gh in production).
+      void pr;
+      return { ok: true, baseRefName: 'main', baseTipSha: await baseTip() };
+    },
   };
-  return { root, repoRoot, baseline, strayCommit, pushes, diffCalls, effects };
+  return { root, repoRoot, origin, baseline, baseTip, pushes, diffCalls, effects };
 }
 
-/** The op assembled over the fixture: real effects, the scripted worker,
- * the shipped prompt template stand-in, and a stub scanner (the topology
- * is what this file tests — the payload scan is the push-scan file's). */
 const fixtureOp = (effects: MergeEffects, driver: Driver) =>
   makeResolveConflictOp({
     effects,
     drivers: {
-      resolve: (): ResolvedDriver => ({
-        driver,
-        lane: 'ai-sdk',
-        modelSpec: MODEL_SPEC,
-      }),
+      resolve: (): ResolvedDriver => ({ driver, lane: 'ai-sdk', modelSpec: MODEL_SPEC }),
     },
     loadPrompt: fakeLoadPrompt,
     scan: scanClean,
   });
 
-describe('the publication gate topology proof (real git, review P1 round 2)', () => {
-  test('(a) a two-commit resolution (secret added then removed) REFUSES — the endpoint diff is clean but the history is not; NOTHING pushed, scan never ran', async () => {
+const run = (
+  f: Awaited<ReturnType<typeof publicationFixture>>,
+  op: ReturnType<typeof makeResolveConflictOp>,
+): ReturnType<ReturnType<typeof makeResolveConflictOp>> =>
+  op({
+    pr: 44,
+    repoRoot: f.repoRoot,
+    headBranch: 'feat/topic',
+    baseBranch: 'main',
+    modelSpec: MODEL_SPEC,
+  });
+
+describe('the publication gate topology proof (real git, review P1 rounds 2-3)', () => {
+  test('(a) the EXACT PROMPT SHAPE — fetch a diverged base, merge FETCH_HEAD, two-parent merge [baseline, baseTip] — is ACCEPTED, scanned, pushed', async () => {
     const f = await publicationFixture();
     try {
-      const driver = new GitWorkerDriver(async (worktree) => {
-        // Commit 1 carries the credential; commit 2 removes it. The
-        // baseline..tip endpoint diff is EMPTY — the exact evasion the
-        // topology rung exists for.
-        await writeFile(join(worktree, 'base.txt'), 'baseline\nconst token = "sk-live-hidden";\n');
-        await commitAll(worktree, 'add credential');
-        await writeFile(join(worktree, 'base.txt'), 'baseline\n');
-        await commitAll(worktree, 'remove credential');
-      });
+      const driver = new GitWorkerDriver({ origin: f.origin, repoRoot: f.repoRoot }, (worktree) =>
+        promptMerge(worktree),
+      );
       const { scanner, lastComponents } = recordingScan(scanClean);
       const op = makeResolveConflictOp({
         effects: f.effects,
@@ -147,98 +192,14 @@ describe('the publication gate topology proof (real git, review P1 round 2)', ()
         loadPrompt: fakeLoadPrompt,
         scan: scanner,
       });
-
-      const result = await op({
-        pr: 44,
-        repoRoot: f.repoRoot,
-        headBranch: 'feat/topic',
-        baseBranch: 'main',
-        modelSpec: MODEL_SPEC,
-      });
-      expect(result.status).toBe('needs-human');
-      if (result.status === 'needs-human') {
-        expect(result.reason).toContain('not a single commit on the prepared baseline');
-        expect(result.reason).toContain('refusing to publish unscanned history');
-        expect(result.reason).toContain('NOTHING was pushed');
-      }
-      expect(f.pushes).toEqual([]);
-      // The topology rung precedes the payload scan: the endpoint diff was
-      // never even read (it would have been clean — that is the evasion).
-      expect(f.diffCalls).toEqual([]);
-      expect(lastComponents()).toBeUndefined();
-    } finally {
-      await rm(f.root, { recursive: true, force: true });
-    }
-  });
-
-  test('(b) a MERGE-COMMIT resolution refuses — two parents is unscannable history', async () => {
-    const f = await publicationFixture();
-    try {
-      const driver = new GitWorkerDriver(async (worktree) => {
-        await writeFile(join(worktree, 'base.txt'), 'baseline\nresolved\n');
-        await commitAll(worktree, 'resolve');
-        // Fold the resolution into a merge commit (two parents) via
-        // plumbing — the shape a base-merge resolution would produce.
-        const tree = (await gitIn(worktree, 'rev-parse', 'HEAD^{tree}')).trim();
-        const first = await gitIn(worktree, 'rev-parse', 'HEAD');
-        const merge = (
-          await gitIn(
-            worktree,
-            'commit-tree',
-            tree,
-            '-p',
-            first.trim(),
-            '-p',
-            f.baseline,
-            '-m',
-            'merge resolution',
-          )
-        ).trim();
-        await gitIn(worktree, 'update-ref', 'refs/heads/cq-merge/pr-44', merge);
-      });
-      const op = fixtureOp(f.effects, driver);
-
-      const result = await op({
-        pr: 44,
-        repoRoot: f.repoRoot,
-        headBranch: 'feat/topic',
-        baseBranch: 'main',
-        modelSpec: MODEL_SPEC,
-      });
-      expect(result.status).toBe('needs-human');
-      if (result.status === 'needs-human') {
-        expect(result.reason).toContain('not a single commit on the prepared baseline');
-        expect(result.reason).toContain('parents: '); // the actual parents are named
-      }
-      expect(f.pushes).toEqual([]);
-    } finally {
-      await rm(f.root, { recursive: true, force: true });
-    }
-  });
-
-  test('(c) a SINGLE commit on the prepared baseline with a clean diff still publishes (behavior preserved)', async () => {
-    const f = await publicationFixture();
-    try {
-      const driver = new GitWorkerDriver(async (worktree) => {
-        await writeFile(join(worktree, 'base.txt'), 'baseline\nresolved cleanly\n');
-        await commitAll(worktree, 'resolve');
-      });
-      const op = fixtureOp(f.effects, driver);
-
-      const result = await op({
-        pr: 44,
-        repoRoot: f.repoRoot,
-        headBranch: 'feat/topic',
-        baseBranch: 'main',
-        modelSpec: MODEL_SPEC,
-      });
-      expect(result.status).toBe('ok');
-      if (result.status === 'ok') {
-        expect(result.value.decision).toBe('acted');
-      }
-      // The op pushed exactly once, to the head branch, the resolution
-      // sha it validated.
-      const resolution = (await gitIn(f.repoRoot, 'rev-parse', 'refs/heads/cq-merge/pr-44')).trim();
+      const result = await run(f, op);
+      expect(result.status, JSON.stringify(result, null, 2)).toBe('ok');
+      if (result.status === 'ok') expect(result.value.decision).toBe('acted');
+      // The merge parent was verified against the forge tip; the payload
+      // was read and scanned; exactly one publication push happened.
+      const resolution = await gitIn(f.repoRoot, 'rev-parse', 'refs/heads/cq-merge/pr-44');
+      expect(f.diffCalls).toEqual([`${f.baseline}..${resolution}`]);
+      expect(lastComponents()).toBeDefined();
       expect(f.pushes).toHaveLength(1);
       expect(f.pushes[0]).toContain(`${resolution}:refs/heads/feat/topic`);
     } finally {
@@ -246,41 +207,177 @@ describe('the publication gate topology proof (real git, review P1 round 2)', ()
     }
   });
 
-  test('(d) a single commit whose PARENT is not the baseline refuses', async () => {
+  test('(b) a two-commit resolution (secret added then removed) REFUSES — the endpoint diff is clean but the history is not; NOTHING pushed, scan never ran', async () => {
     const f = await publicationFixture();
     try {
-      const driver = new GitWorkerDriver(async (worktree) => {
-        await writeFile(join(worktree, 'base.txt'), 'baseline\nresolved\n');
-        await gitIn(worktree, 'add', '-A');
-        const tree = (await gitIn(worktree, 'write-tree')).trim();
-        const forged = (
-          await gitIn(
-            worktree,
-            'commit-tree',
-            tree,
-            '-p',
-            f.strayCommit,
-            '-m',
-            'resolve on the wrong parent',
-          )
-        ).trim();
-        await gitIn(worktree, 'update-ref', 'refs/heads/cq-merge/pr-44', forged);
+      const driver = new GitWorkerDriver(
+        { origin: f.origin, repoRoot: f.repoRoot },
+        async (worktree) => {
+          // Commit 1 carries the credential; commit 2 removes it. The
+          // baseline..tip endpoint diff is EMPTY — the evasion the
+          // topology rung exists for (parent[0] is the intermediate
+          // commit, not the baseline).
+          await writeFile(
+            join(worktree, 'base.txt'),
+            'baseline\nconst token = "sk-live-hidden";\n',
+          );
+          await commitAll(worktree, 'add credential');
+          await writeFile(join(worktree, 'base.txt'), 'baseline\n');
+          await commitAll(worktree, 'remove credential');
+        },
+      );
+      const { scanner, lastComponents } = recordingScan(scanClean);
+      const op = makeResolveConflictOp({
+        effects: f.effects,
+        drivers: {
+          resolve: (): ResolvedDriver => ({ driver, lane: 'ai-sdk', modelSpec: MODEL_SPEC }),
+        },
+        loadPrompt: fakeLoadPrompt,
+        scan: scanner,
       });
-      const op = fixtureOp(f.effects, driver);
-
-      const result = await op({
-        pr: 44,
-        repoRoot: f.repoRoot,
-        headBranch: 'feat/topic',
-        baseBranch: 'main',
-        modelSpec: MODEL_SPEC,
-      });
+      const result = await run(f, op);
       expect(result.status).toBe('needs-human');
       if (result.status === 'needs-human') {
-        expect(result.reason).toContain('not a single commit on the prepared baseline');
-        expect(result.reason).toContain(f.strayCommit.slice(0, 12));
+        expect(result.reason).toContain('resolution topology is not publishable');
+        expect(result.reason).toContain('refusing to publish unscanned history');
+        expect(result.reason).toContain('NOTHING was pushed');
       }
       expect(f.pushes).toEqual([]);
+      // The topology rung precedes the payload scan: the endpoint diff
+      // was never even read (it would have been clean — that is the
+      // evasion).
+      expect(f.diffCalls).toEqual([]);
+      expect(lastComponents()).toBeUndefined();
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('(c) a merge whose second parent is NOT public (a local secret-bearing commit) refuses — even with a clean endpoint diff', async () => {
+    const f = await publicationFixture();
+    try {
+      const driver = new GitWorkerDriver(
+        { origin: f.origin, repoRoot: f.repoRoot },
+        async (worktree) => {
+          // Forge a LOCAL base-side commit carrying a secret: parented on
+          // the baseline, never pushed, invisible to the forge.
+          await writeFile(
+            join(worktree, 'secret-side.txt'),
+            'const token = "sk-live-local-base";\n',
+          );
+          await gitIn(worktree, 'add', '-A');
+          const secretTree = await gitIn(worktree, 'write-tree');
+          const secret = await gitIn(
+            worktree,
+            'commit-tree',
+            secretTree,
+            '-p',
+            f.baseline,
+            '-m',
+            'local base commit with a secret',
+          );
+          // Then merge it into the resolution: parents [baseline, secret].
+          await writeFile(join(worktree, 'base.txt'), 'baseline\nresolved cleanly\n');
+          await gitIn(worktree, 'add', '-A');
+          const resolvedTree = await gitIn(worktree, 'write-tree');
+          const merge = await gitIn(
+            worktree,
+            'commit-tree',
+            resolvedTree,
+            '-p',
+            f.baseline,
+            '-p',
+            secret,
+            '-m',
+            'merge the local base',
+          );
+          await gitIn(worktree, 'update-ref', 'refs/heads/cq-merge/pr-44', merge);
+        },
+      );
+      const { scanner, lastComponents } = recordingScan(scanClean);
+      const op = makeResolveConflictOp({
+        effects: f.effects,
+        drivers: {
+          resolve: (): ResolvedDriver => ({ driver, lane: 'ai-sdk', modelSpec: MODEL_SPEC }),
+        },
+        loadPrompt: fakeLoadPrompt,
+        scan: scanner,
+      });
+      const result = await run(f, op);
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human') {
+        expect(result.reason).toContain('is not public base history');
+        expect(result.reason).toContain('NOTHING was pushed');
+      }
+      expect(f.pushes).toEqual([]);
+      expect(f.diffCalls).toEqual([]);
+      expect(lastComponents()).toBeUndefined();
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('(d) a SINGLE commit on the prepared baseline with a clean diff still publishes (behavior preserved)', async () => {
+    const f = await publicationFixture();
+    try {
+      const driver = new GitWorkerDriver(
+        { origin: f.origin, repoRoot: f.repoRoot },
+        async (worktree) => {
+          await writeFile(join(worktree, 'base.txt'), 'baseline\nresolved cleanly\n');
+          await commitAll(worktree, 'resolve');
+        },
+      );
+      const op = fixtureOp(f.effects, driver);
+      const result = await run(f, op);
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') expect(result.value.decision).toBe('acted');
+      // The op pushed exactly once, to the head branch, the resolution
+      // sha it validated.
+      const resolution = await gitIn(f.repoRoot, 'rev-parse', 'refs/heads/cq-merge/pr-44');
+      expect(f.pushes).toHaveLength(1);
+      expect(f.pushes[0]).toContain(`${resolution}:refs/heads/feat/topic`);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('(e) a merge with an OLDER public base tip (ancestor of the current forge tip) is ACCEPTED', async () => {
+    const f = await publicationFixture();
+    try {
+      const driver = new GitWorkerDriver(
+        { origin: f.origin, repoRoot: f.repoRoot },
+        async (worktree, ctx) => {
+          // The worker fetched the base and merged it — while the base
+          // was at its then-current tip.
+          await promptMerge(worktree);
+          // The base then ADVANCED on the forge (built on the CURRENT
+          // forge tip via plumbing, so the ancestry relation is real and
+          // both tips stay local to repoRoot for the real ancestry read):
+          // the worker's merge parent is now one BEHIND the forge.
+          await gitIn(ctx.repoRoot, 'fetch', 'origin', 'main');
+          const currentTip = await gitIn(ctx.repoRoot, 'rev-parse', 'FETCH_HEAD');
+          await writeFile(join(ctx.repoRoot, 'later.txt'), 'later base work\n');
+          await gitIn(ctx.repoRoot, 'add', 'later.txt');
+          const laterTree = await gitIn(ctx.repoRoot, 'write-tree');
+          const later = await gitIn(
+            ctx.repoRoot,
+            'commit-tree',
+            laterTree,
+            '-p',
+            currentTip,
+            '-m',
+            'later base-side work',
+          );
+          await gitIn(ctx.repoRoot, 'push', '--quiet', 'origin', `${later}:refs/heads/main`);
+        },
+      );
+      const op = fixtureOp(f.effects, driver);
+      const result = await run(f, op);
+      // The older tip is public history (an ancestor of the forge tip):
+      // accepted.
+      expect(result.status, JSON.stringify(result, null, 2)).toBe('ok');
+      expect(f.pushes).toHaveLength(1);
+      expect(f.pushes[0]).toContain(':refs/heads/feat/topic');
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }

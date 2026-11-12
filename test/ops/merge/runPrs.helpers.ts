@@ -217,6 +217,9 @@ export class FakeMergeEffects implements MergeEffects {
     // answers with — a resolution stacked directly on the prepared head.
     return { ok: true, parents: ['b'.repeat(40)] };
   }
+  async isAncestor(): Promise<GhResult> {
+    return { code: 1, stdout: '', stderr: '' };
+  }
   async pushRef(ref: string, fromPath: string): Promise<GhResult> {
     this.calls.push(`push:${ref}@${fromPath}`);
     return OK;

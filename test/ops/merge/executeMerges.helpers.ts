@@ -252,6 +252,9 @@ export class FakeMergeEffects implements MergeEffects {
   async commitParents(): Promise<{ ok: boolean; parents?: string[] }> {
     return { ok: true, parents: [] };
   }
+  async isAncestor(): Promise<GhResult> {
+    return { code: 1, stdout: '', stderr: '' };
+  }
   async pushRef(ref: string, fromPath: string): Promise<GhResult> {
     this.calls.push(`push:${ref}@${fromPath}`);
     const pr = prOfRef(ref);
