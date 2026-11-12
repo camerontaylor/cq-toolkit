@@ -144,6 +144,20 @@ describe('queue alias reads the CqEnv snapshot, not the ambient env', () => {
     })();
     expect(oldGuardTransport).toBeInstanceOf(Error);
     expect((oldGuardTransport as Error).message).toBe('invalid queue SSH alias');
+    // Discriminating representation: the snapshot records EXPRESSION in
+    // present[] (so an operator exporting '   ' is visible in provenance) but
+    // resolves value=undefined, source='default' — the same triple the empty
+    // string gets. Any rule that failed-closed whitespace-only but passed the
+    // empty string would have to branch on representation the snapshot does
+    // not carry, reintroducing the old guard's '' vs '   ' inconsistency.
+    const blankSnap = readCqEnv({ CQ_QUEUE_SSH_ALIAS: '   ' });
+    const emptySnap = readCqEnv({ CQ_QUEUE_SSH_ALIAS: '' });
+    expect(blankSnap.values['CQ_QUEUE_SSH_ALIAS']).toBeUndefined();
+    expect(blankSnap.sources['CQ_QUEUE_SSH_ALIAS']).toBe('default');
+    expect(blankSnap.present).toContain('CQ_QUEUE_SSH_ALIAS');
+    expect(emptySnap.values['CQ_QUEUE_SSH_ALIAS']).toBeUndefined();
+    expect(emptySnap.sources['CQ_QUEUE_SSH_ALIAS']).toBe('default');
+    expect(emptySnap.present).toContain('CQ_QUEUE_SSH_ALIAS');
     const blank = makeQueueOps(undefined, readCqEnv({ CQ_QUEUE_SSH_ALIAS: '   ' }));
     await expect(blank.queueStatus(ref)).resolves.toMatchObject({ status: 'needs-human' });
     // ' fixture ' came from the padded op dispatch; '   ' is ONLY the old-guard
