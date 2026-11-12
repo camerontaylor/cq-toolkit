@@ -775,8 +775,7 @@ async function removeLockedPrWorktree(
   // The UPDATE still happens only after git actually removed the tree.
   const metadata = await opts.registry.read(opts.pr);
   const entryPath = metadata?.state === 'bound' ? metadata.checkoutPath : undefined;
-  const entryMatches =
-    entryPath !== undefined && (await canonicalize(entryPath)) === canonicalPath;
+  const entryMatches = entryPath !== undefined && (await canonicalize(entryPath)) === canonicalPath;
   phase.checkoutMutation = true;
   checkoutWriterContext()!.markCheckoutMutation();
   const removeArgs = ['-C', repoRoot, 'worktree', 'remove', requestedPath];
