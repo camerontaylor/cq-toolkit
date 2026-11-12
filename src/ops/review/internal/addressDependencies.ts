@@ -168,8 +168,10 @@ export async function assertAddressDependencyMetadata(
     const fields = Object.fromEntries(
       Object.entries(parsed).filter(([key]) => !descriptiveManifestFields.has(key)),
     );
-    if (Object.keys(parsed.scripts ?? {}).some((key) => installLifecycleScripts.has(key)))
-      fields.scripts = parsed.scripts;
+    const lifecycle = Object.fromEntries(
+      Object.entries(parsed.scripts ?? {}).filter(([key]) => installLifecycleScripts.has(key)),
+    );
+    if (Object.keys(lifecycle).length) fields.scripts = lifecycle;
     return fields;
   };
   const compare = async (path: string, manifest = false) => {
