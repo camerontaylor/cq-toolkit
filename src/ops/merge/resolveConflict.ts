@@ -1065,6 +1065,31 @@ export function makeResolveConflictOp(
               error: `resolveConflict: the resolution commit's message for pr ${input.pr} exceeds the ${String(MESSAGE_SCAN_BOUND)}-character scan bound — refusing to publish an unscannable commit message${sessionSuffix(result)}`,
             };
           }
+          // The commit's IDENTITY headers are published content too
+          // (review P2 vEcv, PR #1641): author/committer name+email ride
+          // the commit object but appear in no patch line and not in %B,
+          // so a denylisted identity would otherwise publish unscanned.
+          let identity: GhResult;
+          try {
+            identity = await effects.readCommitIdentity(resolution.sha);
+          } catch (err) {
+            return {
+              status: 'failed',
+              error: `resolveConflict: reading the resolution commit's identity ${resolution.sha} for pr ${input.pr} threw: ${errorMessage(err)}${sessionSuffix(result)}`,
+            };
+          }
+          if (identity.code !== 0) {
+            return {
+              status: 'failed',
+              error: `resolveConflict: the resolution commit's identity ${resolution.sha} for pr ${input.pr} is unreadable (exit ${identity.code})${stderrSuffix(identity.stderr)} — refusing to publish an unscannable commit identity${sessionSuffix(result)}`,
+            };
+          }
+          if (identity.stdout.length > MESSAGE_SCAN_BOUND) {
+            return {
+              status: 'failed',
+              error: `resolveConflict: the resolution commit's identity for pr ${input.pr} exceeds the ${String(MESSAGE_SCAN_BOUND)}-character scan bound — refusing to publish an unscannable commit identity${sessionSuffix(result)}`,
+            };
+          }
           // Gate rung 6: scan the patch's ADDED lines AND the commit
           // message through the SAME denylist seam (one call, one
           // verdict). ANY hit refuses; so does a scanner FAULT (a gate
@@ -1076,6 +1101,11 @@ export function makeResolveConflictOp(
           scanInputs.push({
             component: `commit message ${resolution.sha.slice(0, 12)}`,
             text: message.stdout,
+            path: '',
+          });
+          scanInputs.push({
+            component: `commit identity ${resolution.sha.slice(0, 12)}`,
+            text: identity.stdout,
             path: '',
           });
           let components: ComponentScan[];

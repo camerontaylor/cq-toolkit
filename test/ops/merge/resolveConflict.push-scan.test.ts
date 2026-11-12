@@ -186,6 +186,13 @@ describe('the publication gate (issue #1193): scan BEFORE any push, fail closed'
         text: 'fix: resolve conflict with main\n',
         path: '',
       },
+      {
+        // Author/committer name+email ride the commit object and no patch
+        // line (review P2 vEcv) — scanned as their own component.
+        component: `commit identity ${String(effects.resolutionSha).slice(0, 12)}`,
+        text: 'Fixture <fixture@localhost>\nFixture <fixture@localhost>\n',
+        path: '',
+      },
     ]);
   });
 

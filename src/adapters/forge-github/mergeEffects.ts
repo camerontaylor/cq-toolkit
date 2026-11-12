@@ -298,15 +298,18 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
       // hide an ASCII token from the UTF-8 decoder), one
       // validateRef-derived sha.
       const tail = rest.slice(1);
-      // Two shapes, both exact: the message read
-      // (`log -1 --encoding=UTF-8 --format=%B <40hex>`) and the
-      // declared-encoding read (`log -1 --format=%e <40hex>`, review P1
-      // sMLw — a non-UTF-8 commit encoding must be refused, not recoded).
+      // Three shapes, all exact: the message read
+      // (`log -1 --encoding=UTF-8 --format=%B <40hex>`), the identity read
+      // (`log -1 --encoding=UTF-8 --format=%an <%ae>%n%cn <%ce> <40hex>`,
+      // review P2 vEcv — the pushed commit carries its author/committer
+      // headers, so they are scan input too) and the declared-encoding read
+      // (`log -1 --format=%e <40hex>`, review P1 sMLw — a non-UTF-8 commit
+      // encoding must be refused, not recoded).
       if (
         (tail.length === 4 &&
           tail[0] === '-1' &&
           tail[1] === '--encoding=UTF-8' &&
-          tail[2] === '--format=%B' &&
+          (tail[2] === '--format=%B' || tail[2] === '--format=%an <%ae>%n%cn <%ce>') &&
           /^[0-9a-f]{40}$/i.test(tail[3] ?? '')) ||
         (tail.length === 3 &&
           tail[0] === '-1' &&
@@ -551,6 +554,14 @@ export interface MergeEffects {
    * rather than trust the recoded text.
    */
   readCommitEncoding(sha: string): Promise<GhResult>;
+  /**
+   * The commit's IDENTITY headers (`git log -1 --encoding=UTF-8
+   * --format=%an <%ae>%n%cn <%ce> <sha>`, review P2 vEcv, PR #1641): the
+   * author and committer name/email ride the push in the commit object but
+   * appear in no patch line and not in %B, so a denylisted identity would
+   * otherwise publish unscanned. One line per role, raw as stored.
+   */
+  readCommitIdentity(sha: string): Promise<GhResult>;
   /**
    * Whether one full 40-hex object exists LOCALLY (`git cat-file -e
    * <sha>`, review P2 ntJj): the ancestry read needs the forge's base tip
@@ -835,6 +846,9 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   const readCommitEncoding = (sha: string): Promise<GhResult> =>
     git(['-C', repoRoot, 'log', '-1', '--format=%e', sha]);
 
+  const readCommitIdentity = (sha: string): Promise<GhResult> =>
+    git(['-C', repoRoot, 'log', '-1', '--encoding=UTF-8', '--format=%an <%ae>%n%cn <%ce>', sha]);
+
   // The object-presence read (review P2 ntJj): exit 0 = local, anything
   // else = absent-or-unreadable (the caller fetches and re-checks).
   const objectExists = (sha: string): Promise<GhResult> =>
@@ -955,6 +969,7 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     isAncestor,
     readCommitMessage,
     readCommitEncoding,
+    readCommitIdentity,
     objectExists,
     fetchBaseBranch,
   };

@@ -46,6 +46,7 @@ describe('makeForge (the one Forge binding)', () => {
           'readBaseRef',
           'readCommitMessage',
           'readCommitEncoding',
+          'readCommitIdentity',
           'retargetBase',
           'validateRef',
           'worktreePrepare',

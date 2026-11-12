@@ -736,6 +736,20 @@ describe('addedLineComponents — one component per changed path of ADDED lines'
     ]);
   });
 
+  test('a C-quoted pathname with an internal b/ after a quote is not refused (review P2 vEcm)', () => {
+    // Real git header: the a-side slice before the first ` b/` ends inside
+    // an escape (\" b/bar), so decoding that speculative separator throws;
+    // the true split is the ` "b/` between the two quoted tokens.
+    const patch = [
+      'diff --git "a/foo\\" b/bar" "b/foo\\" b/bar"',
+      'new file mode 100644',
+      'index 0000000..e69de29',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate').map((entry) => entry.component)).toContain(
+      'path foo" b/bar',
+    );
+  });
+
   test('an empty patch yields zero components (nothing to scan is clean)', () => {
     expect(addedLineComponents('', 'gate')).toEqual([]);
   });

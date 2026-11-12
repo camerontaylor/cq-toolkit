@@ -454,8 +454,17 @@ function newFilePath(raw: string, source: string): string | undefined {
   for (let i = raw.indexOf(' b/'); i !== -1; i = raw.indexOf(' b/', i + 1)) candidates.push(i);
   for (let i = raw.indexOf(' "b/'); i !== -1; i = raw.indexOf(' "b/', i + 1)) candidates.push(i);
   for (const index of candidates.sort((a, b) => a - b)) {
-    const aSide = decodeGitQuotedPath(raw.slice(0, index), source).replace(/^a\//, '');
-    const bSide = decodeGitQuotedPath(raw.slice(index + 1), source).replace(/^b\//, '');
+    // A candidate inside a C-quoted a-side splits an escape sequence, so
+    // decoding it throws (review P2 vEcm: `foo" b/bar`). Speculative
+    // separators are allowed to fail; only the true pair must decode.
+    let aSide: string;
+    let bSide: string;
+    try {
+      aSide = decodeGitQuotedPath(raw.slice(0, index), source).replace(/^a\//, '');
+      bSide = decodeGitQuotedPath(raw.slice(index + 1), source).replace(/^b\//, '');
+    } catch {
+      continue;
+    }
     if (aSide !== '' && aSide === bSide) return bSide;
   }
   return undefined;

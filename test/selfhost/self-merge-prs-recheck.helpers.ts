@@ -369,6 +369,14 @@ export class RecordingMergeEffects implements MergeEffects {
     return { code: 0, stdout: '', stderr: '' };
   }
 
+  async readCommitIdentity(): Promise<GhResult> {
+    return {
+      code: 0,
+      stdout: 'Fixture <fixture@localhost>\nFixture <fixture@localhost>\n',
+      stderr: '',
+    };
+  }
+
   async objectExists(): Promise<GhResult> {
     return { code: 0, stdout: '', stderr: '' };
   }

@@ -1416,6 +1416,7 @@ export function gateMergeEffects(
     isAncestor: (ancestor, descendant) => effects.isAncestor(ancestor, descendant),
     readCommitMessage: (sha) => effects.readCommitMessage(sha),
     readCommitEncoding: (sha) => effects.readCommitEncoding(sha),
+    readCommitIdentity: (sha) => effects.readCommitIdentity(sha),
     objectExists: (sha) => effects.objectExists(sha),
     fetchBaseBranch: (branch) => effects.fetchBaseBranch(branch),
     mergePr: async (pr, opts): Promise<GhResult> => {

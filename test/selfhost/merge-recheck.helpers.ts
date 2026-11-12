@@ -496,6 +496,7 @@ export const innerEffects = (forge: Forge) => {
     isAncestor: () => Promise.resolve(ok),
     readCommitMessage: () => Promise.resolve(ok),
     readCommitEncoding: () => Promise.resolve(ok),
+    readCommitIdentity: () => Promise.resolve(ok),
     objectExists: () => Promise.resolve(ok),
     fetchBaseBranch: () => Promise.resolve(ok),
   };

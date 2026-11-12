@@ -517,6 +517,11 @@ describe('the publication gate message scan and locality fetch (review P2 ntJt/n
       const effects: MergeEffects = {
         ...f.effects,
         readCommitEncoding: async () => ({ code: 0, stdout: '', stderr: '' }),
+        readCommitIdentity: async () => ({
+          code: 0,
+          stdout: 'Fixture <fixture@localhost>\nFixture <fixture@localhost>\n',
+          stderr: '',
+        }),
         readCommitMessage: async () => ({ code: 1, stdout: '', stderr: 'fatal: bad object' }),
       };
       const op = fixtureOp(effects, driver);
@@ -765,6 +770,53 @@ describe('the publication gate vs commit-encoding headers (review P1 sMLw)', () 
         expect(result.reason).toContain('declares commit-message encoding');
         expect(result.reason).toContain('NOT pushed');
         expect(result.reason).not.toContain(fakeToken);
+      }
+      expect(f.pushes).toEqual([]);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the publication gate vs commit identities (review P2 vEcv)', () => {
+  test('a denylisted author email on the resolution commit is scanned — the gate refuses without pushing', async () => {
+    const f = await publicationFixture();
+    try {
+      const driver = new GitWorkerDriver(
+        { origin: f.origin, repoRoot: f.repoRoot },
+        async (worktree) => {
+          await writeFile(join(worktree, 'base.txt'), 'baseline\nresolved cleanly\n');
+          // The identity lives in the commit object: no patch line and no
+          // %B text carries it, so only a dedicated read can scan it.
+          await gitIn(worktree, 'config', 'user.email', 'bot@internal.webfront.app');
+          await gitIn(worktree, 'config', 'user.name', 'clean worker');
+          await gitIn(worktree, 'add', '-A');
+          await gitIn(worktree, 'commit', '--quiet', '-m', 'resolve cleanly');
+        },
+      );
+      const identityScanner: DiffSecretScanner = (components) =>
+        scanComponents(components, [
+          {
+            id: 'webfront-host',
+            description: 'internal webfront hostname',
+            regex: 'webfront\\.app',
+          },
+        ]);
+      const op = makeResolveConflictOp({
+        effects: f.effects,
+        drivers: {
+          resolve: (): ResolvedDriver => ({ driver, lane: 'ai-sdk', modelSpec: MODEL_SPEC }),
+        },
+        loadPrompt: fakeLoadPrompt,
+        scan: identityScanner,
+      });
+      const result = await run(f, op);
+      expect(result.status, JSON.stringify(result, null, 2)).toBe('needs-human');
+      if (result.status === 'needs-human') {
+        expect(result.reason).toContain('NOT pushed');
+        // The rule is named; the matched address is never quoted.
+        expect(result.reason).toContain('webfront-host');
+        expect(result.reason).not.toContain('bot@internal');
       }
       expect(f.pushes).toEqual([]);
     } finally {
