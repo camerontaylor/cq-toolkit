@@ -236,12 +236,15 @@ def _timer_bound_seconds(text: str) -> int | None:
             if parsed is None:
                 return None
             intervals.append(parsed)
-    accuracy = 0
+    accuracies = []
     for value in _section_values(text, "Timer", "AccuracySec"):
         parsed = _duration_seconds(value)
         if parsed is None:
             return None
-        accuracy = max(accuracy, parsed)
+        accuracies.append(parsed)
+    # systemd defaults AccuracySec to 1min when a timer declares none, so a
+    # timer without the key can fire up to 60 s after its interval.
+    accuracy = max(accuracies, default=60)
     if not intervals:
         return None
     return max(intervals) + accuracy

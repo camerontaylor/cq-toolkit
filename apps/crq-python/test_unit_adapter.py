@@ -510,11 +510,12 @@ class InventoryTests(unittest.TestCase):
     def test_declared_inventory_parses_schedules(self):
         inventory = adapter_mod.declared_inventory(self.root, self.sha)
         self.assertEqual(inventory["crq-tick.service"]["timer_bound_seconds"],
-                         12 * 60)
+                         12 * 60 + 60)
         self.assertEqual(inventory["crq-slot.service"]["timer_bound_seconds"],
                          61)
         self.assertEqual(
-            inventory["crq-backfill.service"]["timer_bound_seconds"], 6 * 3600)
+            inventory["crq-backfill.service"]["timer_bound_seconds"],
+            6 * 3600 + 60)
         self.assertEqual(
             inventory["crq-publisher.service"]["timer_bound_seconds"], 65)
         self.assertEqual(inventory["crq-repair.service"]["service_type"],
