@@ -1,7 +1,6 @@
 import type { FailureSet } from '../gates/checkRunner.js';
 import { regressionGate } from '../gates/regressionGate.js';
 import { hackDetector } from '../gates/hackDetector.js';
-import { expectationChangesOf, type ExpectationChange } from '../gates/expectationChanges.js';
 import { commitGate } from '../gates/commitGate.js';
 import { classifyStagePaths } from '../sweep/stagePaths.js';
 
@@ -18,16 +17,6 @@ export interface ValidationVerdict {
   final?: FailureSet;
   /** Affirmative novel-failure/count/test-total regression, never a probe fault or lack of progress. */
   regression?: true;
-  /**
-   * Test expectations the diff rewrote in place (#1198), one
-   * `{file, line, before, after}` per rewritten assertion line. This is the
-   * contract item 10 oracle-dispute observation: evidence for the independent
-   * reviewer (Giles Q32), NEVER a gate input — no gate reads it and no
-   * verdict is computed from it, so a reported expectation change neither
-   * fails the attempt nor passes it silently through a gate. Absent when the
-   * diff rewrote no test expectation (no entry, never an empty entry).
-   */
-  expectationChanges?: ExpectationChange[];
 }
 export interface ValidationInput {
   baseline: FailureSet;
@@ -54,18 +43,11 @@ export async function validateFix(input: ValidationInput): Promise<ValidationVer
   let final: FailureSet | undefined;
   let related: FailureSet | undefined;
   let regression = false;
-  // The oracle-dispute observation rides the verdict, computed once up front
-  // so it survives every early gate refusal: an attempt refused by the
-  // related gate must still report the expectation it rewrote. It never
-  // enters `gates` and no step consumes it — the tamper verdict stays
-  // exclusively the hack detector's (#1198's no-gate decision).
-  const expectations = expectationChangesOf(input.diff);
   const finish = (verdict: ValidationVerdict['verdict']): ValidationVerdict => ({
     verdict,
     gates,
     ...(regression ? { regression: true as const } : {}),
     ...(final === undefined ? {} : { final }),
-    ...(expectations.length === 0 ? {} : { expectationChanges: expectations }),
   });
   const step = async (gate: FixGate, run: () => Promise<string | undefined>, human = false) => {
     const start = Date.now();

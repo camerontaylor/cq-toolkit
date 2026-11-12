@@ -330,6 +330,217 @@ export function scanComponents(
   }));
 }
 
+/**
+ * Parse a unified diff into ONE COMPONENT PER CHANGED PATH carrying that
+ * path's ADDED lines (issue #1193 — the conflict resolver's pre-push scan
+ * input). Added lines are what a git push PUBLISHES: the diff's '+' side
+ * is exactly the content the forge will newly hold, while removed lines
+ * leave the forge — so a resolution that DELETES a secret must not be
+ * refused for it. One component per path, `component` and `path` both the
+ * repo-relative name, so path-scoped rules apply exactly as they would
+ * after commit and hit evidence names the file.
+ *
+ * The patch is parsed on LF boundaries (a trailing CR is a CRLF
+ * terminator, any other byte stays in the payload); paths come from the
+ * `---`/`+++` header lines, a trailing TAB stripped (git appends one when
+ * a path contains spaces), `/dev/null` marking the absent side of an
+ * add/delete. Git's C-quoted pathname form (core.quotePath —
+ * `"b/config/s\303\251cret.txt"`) is DECODED before the a/ b/ side prefix
+ * is stripped, so path-scoped rules see the real path; an undecodable
+ * pathname throws (review P2, PR #1628). FAULT-CLOSED: a body '+' line
+ * before any path is attributed throws naming `source` — a line the
+ * parser cannot attribute is UNSCANNABLE content, and unscannable content
+ * must fault, never pass silently. Lines the parser reads but carries no
+ * '+' (headers, context, removed lines, hunk prologue) are skipped by
+ * construction, not ignored evidence. A patch produced WITHOUT the
+ * hardened diff flags leaves binary files with no '+' lines and no
+ * component — the publication gate's caller therefore feeds this parser a
+ * HARDENED patch (`--text`, shared/gitHarden.ts), which diffs binary
+ * content as text and lets the scan see the bytes.
+ */
+/**
+ * Git's C-quote letter escapes (`quote.c`'s cq_lookup): `\\`, `\"`, and
+ * the C control-letter forms; every other non-printable or non-ASCII byte
+ * is `\NNN` octal.
+ */
+const GIT_C_ESCAPES: Record<string, number> = {
+  a: 0x07,
+  b: 0x08,
+  f: 0x0c,
+  n: 0x0a,
+  r: 0x0d,
+  t: 0x09,
+  v: 0x0b,
+  '\\': 0x5c,
+  '"': 0x22,
+};
+
+const utf8 = new TextEncoder();
+
+/**
+ * Decode Git's C-quoted pathname form (`core.quotePath`, review P2 on PR
+ * #1628; literal-UTF-8 tolerance added for review P2 p52p on #1641): git
+ * wraps unusual pathnames in double quotes and escapes non-ASCII and
+ * control bytes as `\NNN` octal (plus the C letter escapes) — the raw
+ * quoted string is NOT the path, and feeding it to the scan verbatim
+ * would let a path-scoped rule (`^config/`) miss content under an
+ * unusual-but-scoped name. Literal UTF-8 inside the quotes is also
+ * decoded (the core.quotePath=false form — git quotes for the `"` but
+ * leaves UTF-8 raw; the publication gate pins quotePath on, so this is
+ * tolerance for foreign patches). Unquoted lines pass through as-is. A
+ * quoted form that does not decode cleanly — an unknown escape, bytes
+ * that are not valid UTF-8 — THROWS naming `source`: a path the parser
+ * cannot name is a component the gate cannot attribute, and
+ * unattributable content must fault, never pass under a mangled name.
+ */
+function decodeGitQuotedPath(raw: string, source: string): string {
+  if (!raw.startsWith('"') || !raw.endsWith('"')) return raw;
+  const inner = raw.slice(1, -1);
+  const bytes: number[] = [];
+  let index = 0;
+  while (index < inner.length) {
+    const ch = inner[index] as string;
+    if (ch !== '\\') {
+      const code = inner.codePointAt(index) as number;
+      // Literal non-ASCII inside the quotes is the core.quotePath=false
+      // form (git C-quotes for the `"` but leaves UTF-8 raw — review P2
+      // p52p, PR #1641): accept it, re-encoded into the byte stream so
+      // octal escapes and literal UTF-8 mix losslessly. The publication
+      // gate additionally pins quotePath on, so this is tolerance for
+      // foreign patches, not a guess about our own diffs.
+      if (code > 0x7f) {
+        for (const b of utf8.encode(ch)) bytes.push(b);
+        index += ch.length;
+        continue;
+      }
+      bytes.push(code);
+      index += 1;
+      continue;
+    }
+    const next = inner[index + 1] as string | undefined;
+    const letter = next !== undefined ? GIT_C_ESCAPES[next] : undefined;
+    if (letter !== undefined) {
+      bytes.push(letter);
+      index += 2;
+      continue;
+    }
+    const octal = /^\\([0-7]{3})/.exec(inner.slice(index));
+    if (octal !== null) {
+      bytes.push(parseInt(octal[1] as string, 8));
+      index += 4;
+      continue;
+    }
+    throw new Error(
+      `${source}: undecodable git pathname escape in ${JSON.stringify(raw)} — refusing the unattributable component`,
+    );
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(bytes));
+  } catch {
+    throw new Error(
+      `${source}: git pathname ${JSON.stringify(raw)} is not valid UTF-8 — refusing the unattributable component`,
+    );
+  }
+}
+
+/**
+ * Resolve the b-side of a NEW file's `diff --git` header (review P2 uDtO).
+ * Git leaves spaces unquoted, so `a/GH_FOR_FA b/clean b/GH_FOR_FA b/clean`
+ * contains several ` b/` occurrences; the separator is the one where the
+ * decoded a-side and b-side name the SAME path (a new file has one name).
+ */
+function newFilePath(raw: string, source: string): string | undefined {
+  const candidates: number[] = [];
+  for (let i = raw.indexOf(' b/'); i !== -1; i = raw.indexOf(' b/', i + 1)) candidates.push(i);
+  for (let i = raw.indexOf(' "b/'); i !== -1; i = raw.indexOf(' "b/', i + 1)) candidates.push(i);
+  for (const index of candidates.sort((a, b) => a - b)) {
+    // A candidate inside a C-quoted a-side splits an escape sequence, so
+    // decoding it throws (review P2 vEcm: `foo" b/bar`). Speculative
+    // separators are allowed to fail; only the true pair must decode.
+    let aSide: string;
+    let bSide: string;
+    try {
+      aSide = decodeGitQuotedPath(raw.slice(0, index), source).replace(/^a\//, '');
+      bSide = decodeGitQuotedPath(raw.slice(index + 1), source).replace(/^b\//, '');
+    } catch {
+      continue;
+    }
+    if (aSide !== '' && aSide === bSide) return bSide;
+  }
+  return undefined;
+}
+
+export function addedLineComponents(patch: string, source: string): ScanComponentInput[] {
+  let path: string | undefined;
+  let headerRaw: string | undefined;
+  let inHeader = false;
+  const added = new Map<string, string[]>();
+  for (const rawLine of patch.split('\n')) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    if (line.startsWith('diff --git')) {
+      headerRaw = line.slice('diff --git '.length);
+      path = undefined;
+      inHeader = true;
+      continue;
+    }
+    if (line.startsWith('@@')) {
+      inHeader = false;
+      continue;
+    }
+    if (inHeader) {
+      // A header-only EMPTY new file has no ---/+++ hunk headers at all
+      // (review P2 tOU-, PR #1641): git emits `new file mode` + `index`
+      // only, so the b-side of the diff --git line is the sole path.
+      if (line.startsWith('new file mode')) {
+        const addedPath = headerRaw === undefined ? undefined : newFilePath(headerRaw, source);
+        if (addedPath === undefined) {
+          throw new Error(
+            `${source}: an added file has no parsable diff --git path — refusing the unattributable component`,
+          );
+        }
+        if (!added.has(addedPath)) added.set(addedPath, []);
+      }
+      if (line.startsWith('+++ ') || line.startsWith('--- ')) {
+        const candidate = decodeGitQuotedPath(line.slice(4).replace(/\t.*$/, ''), source);
+        path = candidate === '/dev/null' ? undefined : candidate.replace(/^[ab]\//, '');
+        // Register the ADDED side even with no '+' lines (review major
+        // sULl, PR #1641): an empty file whose NAME is credential-shaped
+        // is published by the push, and the name is the only text there
+        // is to scan. Registered on the +++ side only, so deletions stay
+        // unpublished.
+        if (line.startsWith('+++ ') && path !== undefined && !added.has(path)) {
+          added.set(path, []);
+        }
+      }
+      continue;
+    }
+    if (path === undefined || line.length === 0) {
+      if (line.startsWith('+') && path === undefined) {
+        throw new Error(
+          `${source}: a '+' line has no attributed path — the patch is not parseable as unified diff`,
+        );
+      }
+      continue;
+    }
+    if (line[0] !== '+') continue;
+    const lines = added.get(path) ?? [];
+    lines.push(line.slice(1));
+    added.set(path, lines);
+  }
+  return [...added.entries()].flatMap(([file, lines]) => [
+    {
+      component: file,
+      text: lines.join('\n'),
+      path: file,
+    },
+    // The PATH is published content too: a credential-shaped filename must
+    // be scanned even when the file has no added lines (review major
+    // sULl). A separate component keeps the content line numbers exact
+    // and names the filename in the hit evidence as `path <file>`.
+    { component: `path ${file}`, text: file, path: file },
+  ]);
+}
+
 /** A reusable scanner over the component set (the injected seam). */
 export interface DiffSecretScanner {
   (

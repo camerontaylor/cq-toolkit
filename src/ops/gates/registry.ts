@@ -20,10 +20,6 @@ import type { HackDetectorInput } from './hackDetector.js';
 import type { PolicyDiffInput, PolicyDiffOutcome } from './policyDiff.js';
 import { PolicyDiffInputObject } from './policyDiffInput.js';
 import type { RegressionGateInput } from './regressionGate.js';
-// The #1198 expectation-change observer (attempt-report evidence, never a
-// gate — no op entry by design; type-only wiring, like the helper notes
-// below): './expectationChanges.js'.
-export type { ExpectationChange } from './expectationChanges.js';
 // Shared protected-path taxonomy helper: './protectedPaths.js'.
 // gates.hackDetector helper, reached through './hackDetector.js': the Python
 // skip/xfail marker scanner './pythonSkipMarkers.js' (#774).

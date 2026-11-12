@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import {
+  addedLineComponents,
   checkScannerFor,
   composeScanners,
   decodePolicyUtf8,
@@ -607,5 +608,268 @@ describe('makeRepoDiffScanner reads the policy as STRICT UTF-8 (fail closed)', (
     } finally {
       cleanup();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// addedLineComponents (issue #1193) — the publication gate's patch parser
+// ---------------------------------------------------------------------------
+
+describe('addedLineComponents — one component per changed path of ADDED lines', () => {
+  const PATCH = [
+    'diff --git a/src/keep.ts b/src/keep.ts',
+    '--- a/src/keep.ts',
+    '+++ b/src/keep.ts',
+    '@@ -2,3 +2,3 @@',
+    ' context line (not published)',
+    '-const removed = "leaves the forge";',
+    '+const added = "enters the forge";',
+    'diff --git a/docs/new.md b/docs/new.md',
+    '--- /dev/null',
+    '+++ b/docs/new.md',
+    '@@ -0,0 +1,2 @@',
+    '+first line',
+    '+second line',
+  ].join('\n');
+
+  test('added lines per path, in diff order; removed and context lines are skipped', () => {
+    expect(addedLineComponents(PATCH, 'gate')).toEqual([
+      { component: 'src/keep.ts', text: 'const added = "enters the forge";', path: 'src/keep.ts' },
+      { component: 'path src/keep.ts', text: 'src/keep.ts', path: 'src/keep.ts' },
+      {
+        component: 'docs/new.md',
+        text: 'first line\nsecond line',
+        path: 'docs/new.md',
+      },
+      { component: 'path docs/new.md', text: 'docs/new.md', path: 'docs/new.md' },
+    ]);
+  });
+
+  test('a DELETED file (/dev/null on the + side) yields no component — deletions publish nothing', () => {
+    const patch = [
+      'diff --git a/src/gone.ts b/src/gone.ts',
+      '--- a/src/gone.ts',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-const secret = "was here";',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([]);
+  });
+
+  test('a path with spaces survives the git trailing TAB marker; CRLF terminators strip', () => {
+    const patch = [
+      'diff --git a/docs/my file.md b/docs/my file.md',
+      '--- a/docs/my file.md',
+      '+++ b/docs/my file.md\t',
+      '@@ -1 +1 @@',
+      '+added with crlf\r',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([
+      { component: 'docs/my file.md', text: 'added with crlf', path: 'docs/my file.md' },
+      { component: 'path docs/my file.md', text: 'docs/my file.md', path: 'docs/my file.md' },
+    ]);
+  });
+
+  test('an EMPTY added file is still a component: the path is published and scanned', () => {
+    // Git emits NO ---/+++ headers for a header-only empty new file.
+    const patch = [
+      'diff --git a/ghp_abcdefghijklmnopqrs b/ghp_abcdefghijklmnopqrs',
+      'new file mode 100644',
+      'index 0000000..e69de29',
+    ].join('\n');
+    const components = addedLineComponents(patch, 'gate');
+    expect(components).toEqual([
+      { component: 'ghp_abcdefghijklmnopqrs', text: '', path: 'ghp_abcdefghijklmnopqrs' },
+      {
+        component: 'path ghp_abcdefghijklmnopqrs',
+        text: 'ghp_abcdefghijklmnopqrs',
+        path: 'ghp_abcdefghijklmnopqrs',
+      },
+    ]);
+    const scans = scanComponents(components, [
+      { id: 'github-pat', description: 'd', regex: 'ghp_[A-Za-z0-9]{16,}' },
+    ]);
+    expect(scans[1]?.hits).toEqual([{ ruleId: 'github-pat', lines: [1] }]);
+  });
+
+  test('an empty added file with a SPACE in its name registers from the header (git does not quote spaces)', () => {
+    const patch = [
+      'diff --git a/my file.md b/my file.md',
+      'new file mode 100644',
+      'index 0000000..e69de29',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([
+      { component: 'my file.md', text: '', path: 'my file.md' },
+      { component: 'path my file.md', text: 'my file.md', path: 'my file.md' },
+    ]);
+  });
+
+  test('a NONEMPTY new file with a SPACE in its name is not refused (new file mode precedes ---/+++)', () => {
+    const patch = [
+      'diff --git a/new file.txt b/new file.txt',
+      'new file mode 100644',
+      'index 0000000..ce01362',
+      '--- /dev/null',
+      '+++ b/new file.txt',
+      '@@ -0,0 +1 @@',
+      '+hello',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([
+      { component: 'new file.txt', text: 'hello', path: 'new file.txt' },
+      { component: 'path new file.txt', text: 'new file.txt', path: 'new file.txt' },
+    ]);
+  });
+
+  test('a pathname containing b/ is not truncated — the separator is the matching a/b pair (review P2 uDtO)', () => {
+    const patch = [
+      'diff --git a/GH_FOR_FA b/clean b/GH_FOR_FA b/clean',
+      'new file mode 100644',
+      'index 0000000..e69de29',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([
+      { component: 'GH_FOR_FA b/clean', text: '', path: 'GH_FOR_FA b/clean' },
+      {
+        component: 'path GH_FOR_FA b/clean',
+        text: 'GH_FOR_FA b/clean',
+        path: 'GH_FOR_FA b/clean',
+      },
+    ]);
+  });
+
+  test('a C-quoted pathname with an internal b/ after a quote is not refused (review P2 vEcm)', () => {
+    // Real git header: the a-side slice before the first ` b/` ends inside
+    // an escape (\" b/bar), so decoding that speculative separator throws;
+    // the true split is the ` "b/` between the two quoted tokens.
+    const patch = [
+      'diff --git "a/foo\\" b/bar" "b/foo\\" b/bar"',
+      'new file mode 100644',
+      'index 0000000..e69de29',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate').map((entry) => entry.component)).toContain(
+      'path foo" b/bar',
+    );
+  });
+
+  test('an empty patch yields zero components (nothing to scan is clean)', () => {
+    expect(addedLineComponents('', 'gate')).toEqual([]);
+  });
+
+  test('FAULT-CLOSED: a body + line with no attributed path throws — unscannable never passes silently', () => {
+    const patch = ['@@ -1 +1 @@', '+orphan line'].join('\n');
+    expect(() => addedLineComponents(patch, 'gate')).toThrow(/no attributed path/);
+  });
+
+  test('a + line BEFORE any diff header throws the same way', () => {
+    expect(() => addedLineComponents('+early line', 'gate')).toThrow(/no attributed path/);
+  });
+});
+
+describe('addedLineComponents — git C-quoted pathnames (core.quotePath, review P2 PR #1628)', () => {
+  // A non-ASCII path as git renders it under the default core.quotePath:
+  // the WHOLE b/-prefixed path is wrapped in quotes and the é is \303\251.
+  const QUOTED_PATCH = [
+    'diff --git "a/config/s\\303\\251cret.txt" "b/config/s\\303\\251cret.txt"',
+    '--- "a/config/s\\303\\251cret.txt"',
+    '+++ "b/config/s\\303\\251cret.txt"',
+    '@@ -0,0 +1,1 @@',
+    '+const token = "sk-live-quoted";',
+  ].join('\n');
+
+  test('a quoted non-ASCII path DECODES, so a ^config/ path-scoped rule hits it', () => {
+    const components = addedLineComponents(QUOTED_PATCH, 'gate');
+    expect(components).toEqual([
+      {
+        component: 'config/sécret.txt',
+        text: 'const token = "sk-live-quoted";',
+        path: 'config/sécret.txt',
+      },
+      { component: 'path config/sécret.txt', text: 'config/sécret.txt', path: 'config/sécret.txt' },
+    ]);
+    // The end-to-end point of the decode: a rule scoped to ^config/ —
+    // which MISSES the raw quoted string — fires on the decoded path.
+    const rules = [{ id: 'config-token', description: 'd', regex: 'sk-live-', path: '^config/' }];
+    expect(scanComponents(components, rules)).toEqual([
+      {
+        component: 'config/sécret.txt',
+        hits: [{ ruleId: 'config-token', lines: [1] }],
+      },
+      {
+        component: 'path config/sécret.txt',
+        hits: [],
+      },
+    ]);
+  });
+
+  test('git letter escapes decode (\\t as \\09 in octal form and the C letters)', () => {
+    // git escapes tab as \011 octal in quoted paths, backslash as \\.
+    const patch = [
+      'diff --git "a/config/we\\151rd\\\\name.md" "b/config/we\\151rd\\\\name.md"',
+      '--- "a/config/we\\151rd\\\\name.md"',
+      '+++ "b/config/we\\151rd\\\\name.md"',
+      '@@ -0,0 +1,1 @@',
+      '+body',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([
+      { component: 'config/weird\\name.md', text: 'body', path: 'config/weird\\name.md' },
+      {
+        component: 'path config/weird\\name.md',
+        text: 'config/weird\\name.md',
+        path: 'config/weird\\name.md',
+      },
+    ]);
+  });
+
+  test('FAULT-CLOSED: an unknown escape sequence throws — the component is refused, never mangled', () => {
+    const patch = [
+      'diff --git a/config/x b/config/x',
+      '--- a/config/x',
+      '+++ "b/config/\\qbad.txt"',
+      '@@ -0,0 +1,1 @@',
+      '+body',
+    ].join('\n');
+    expect(() => addedLineComponents(patch, 'gate')).toThrow(/undecodable git pathname escape/);
+  });
+
+  test('FAULT-CLOSED: octal bytes that are not valid UTF-8 throw', () => {
+    const patch = [
+      'diff --git a/config/x "b/config/bad\\377\\376.txt"',
+      '--- a/config/x',
+      '+++ "b/config/bad\\377\\376.txt"',
+      '@@ -0,0 +1,1 @@',
+      '+body',
+    ].join('\n');
+    expect(() => addedLineComponents(patch, 'gate')).toThrow(/not valid UTF-8/);
+  });
+});
+
+describe('addedLineComponents — literal UTF-8 inside quoted paths (quotePath=false form, review P2 p52p)', () => {
+  test('a quoted path with a literal é and an escaped quote decodes — no false refusal', () => {
+    // git C-quotes for the `"` even with core.quotePath=false, leaving
+    // non-ASCII raw: "b/config/café\"note.txt"
+    const patch = [
+      'diff --git "a/config/café\\"note.txt" "b/config/café\\"note.txt"',
+      '--- "a/config/café\\"note.txt"',
+      '+++ "b/config/café\\"note.txt"',
+      '@@ -0,0 +1,1 @@',
+      '+const token = "sk-live-cafe";',
+    ].join('\n');
+    const components = addedLineComponents(patch, 'gate');
+    expect(components).toEqual([
+      {
+        component: 'config/café"note.txt',
+        text: 'const token = "sk-live-cafe";',
+        path: 'config/café"note.txt',
+      },
+      {
+        component: 'path config/café"note.txt',
+        text: 'config/café"note.txt',
+        path: 'config/café"note.txt',
+      },
+    ]);
+    // And a path-scoped rule fires on the decoded name.
+    const scans = scanComponents(components, [
+      { id: 'config-token', description: 'd', regex: 'sk-live-', path: '^config/' },
+    ]);
+    expect(scans[0]?.hits).toEqual([{ ruleId: 'config-token', lines: [1] }]);
   });
 });

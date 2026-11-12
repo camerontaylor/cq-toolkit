@@ -348,6 +348,42 @@ export class RecordingMergeEffects implements MergeEffects {
   async pushRef(): Promise<GhResult> {
     return { code: 0, stdout: '', stderr: '' };
   }
+
+  async diffPatch(): Promise<GhResult> {
+    return { code: 0, stdout: '', stderr: '' };
+  }
+
+  async commitParents(): Promise<{ ok: boolean; parents?: string[] }> {
+    return { ok: true, parents: [] };
+  }
+
+  async isAncestor(): Promise<GhResult> {
+    return { code: 0, stdout: '', stderr: '' };
+  }
+
+  async readCommitMessage(): Promise<GhResult> {
+    return { code: 0, stdout: 'resolve\n', stderr: '' };
+  }
+
+  async readCommitEncoding(): Promise<GhResult> {
+    return { code: 0, stdout: '', stderr: '' };
+  }
+
+  async readCommitIdentity(): Promise<GhResult> {
+    return {
+      code: 0,
+      stdout: 'Fixture <fixture@localhost>\nFixture <fixture@localhost>\n',
+      stderr: '',
+    };
+  }
+
+  async objectExists(): Promise<GhResult> {
+    return { code: 0, stdout: '', stderr: '' };
+  }
+
+  async fetchBaseBranch(): Promise<GhResult> {
+    return { code: 0, stdout: '', stderr: '' };
+  }
 }
 
 /** A ledger with PR `pr`'s live tuple observed once at `atMs`. */
