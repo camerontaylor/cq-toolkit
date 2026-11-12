@@ -530,22 +530,32 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
     // survive. Keep its process-group identity for the executable's final sweep.
     if (!processSignalCleanupStarted()) activeChildren.delete(child);
     // `flush` re-delivers the final unterminated line to the driver's
-    // listeners, and a listener THROW must not leave `close` pending — the
-    // settle runs in `finally`, so the promise always settles (contract at
+    // listeners. A listener THROW must neither skip the other stream's flush
+    // nor leave `close` pending nor escape this handler as an uncaught
+    // exception: both flushes are attempted, the settle always runs, and a
+    // listener failure is reported as a process warning (contract at
     // `ManagedChild.close`).
-    try {
-      stdout.flush();
-      stderr.flush();
-    } finally {
-      settleClose({
-        code,
-        signal,
-        ...(spawnError !== undefined ? { spawnError } : {}),
-        stdout: stdout.text,
-        stderr: stderr.text,
-        droppedBytes: stdout.droppedBytes + stderr.droppedBytes,
-        ...(stdout.oversizedLine || stderr.oversizedLine ? { oversizedLine: true } : {}),
-      });
+    let flushError: unknown;
+    for (const stream of [stdout, stderr]) {
+      try {
+        stream.flush();
+      } catch (error) {
+        flushError ??= error;
+      }
+    }
+    settleClose({
+      code,
+      signal,
+      ...(spawnError !== undefined ? { spawnError } : {}),
+      stdout: stdout.text,
+      stderr: stderr.text,
+      droppedBytes: stdout.droppedBytes + stderr.droppedBytes,
+      ...(stdout.oversizedLine || stderr.oversizedLine ? { oversizedLine: true } : {}),
+    });
+    if (flushError !== undefined) {
+      process.emitWarning(
+        `spawnManaged: a stdout/stderr listener threw during the final flush: ${String(flushError)}`,
+      );
     }
   });
 

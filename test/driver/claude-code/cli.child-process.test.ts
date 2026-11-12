@@ -99,6 +99,33 @@ describe('claude-code driver, CLI transport specifics (fake agent CLI)', () => {
     });
   }, 20_000);
 
+  test('a throwing stdout listener neither skips the stderr flush nor strands close', async () => {
+    await withScratch(async (scratchDir) => {
+      const child = spawnManaged({
+        command: process.execPath,
+        args: [
+          '-e',
+          `process.stdout.write('final-out'); process.stderr.write('final-err');`,
+        ],
+        cwd: scratchDir,
+        maxRetainedBytes: 64 * 1024,
+      });
+      const seenErr: string[] = [];
+      // The fragment has no newline, so it is delivered ONLY by the final
+      // flush inside the close handler — the throw lands there.
+      child.onStdoutLine((line) => {
+        if (line === 'final-out') throw new Error('stdout listener boom');
+      });
+      child.onStderrLine((line) => seenErr.push(line));
+      const close = await child.close;
+      // The promise still settles, both streams retain their bytes, and the
+      // OTHER stream's flush ran despite the throw.
+      expect(close.stdout).toBe('final-out');
+      expect(close.stderr).toBe('final-err');
+      expect(seenErr).toEqual(['final-err']);
+    });
+  }, 20_000);
+
   test('oversized lines fail loudly while retention stays bounded', async () => {
     await withScratch(async (scratchDir) => {
       const child = spawnManaged({
