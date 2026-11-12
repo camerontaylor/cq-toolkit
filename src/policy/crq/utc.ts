@@ -54,18 +54,38 @@ const MS_PER_DAY = 86_400_000;
  * return null, never local time.
  */
 export function parseUtc(value: unknown): UtcInstant | null {
-  if (typeof value !== 'string' || value.length === 0) return null;
+  const micros = parseUtcUnchecked(value);
+  if (micros === null) return null;
+  const { year } = civilFromDays(Number(floorDiv(micros, MICROS_PER_DAY)));
+  // Python datetime.astimezone() raises OverflowError outside years 1..9999,
+  // which parse_utc catches and reports as None.
+  if (year < 1 || year > 9999) return null;
+  return new UtcInstant(micros);
+}
+
+/**
+ * Parse-only companion to {@link parseUtc}: returns the UTC microsecond count
+ * for a valid ISO-like string even when `astimezone(UTC)` would overflow the
+ * datetime range. `parseUtc` deliberately collapses that overflow to null;
+ * callers that must distinguish overflow from malformed input use this.
+ */
+export function parseUtcUnchecked(value: unknown): bigint | null {
   try {
-    const micros = parseIsoLike(value.replaceAll('Z', '+00:00'));
-    if (micros === null) return null;
-    const { year } = civilFromDays(Number(floorDiv(micros, MICROS_PER_DAY)));
-    // Python datetime.astimezone() raises OverflowError outside years 1..9999,
-    // which parse_utc catches and reports as None.
-    if (year < 1 || year > 9999) return null;
-    return new UtcInstant(micros);
+    return parseUtcDetailed(value);
   } catch {
     return null;
   }
+}
+
+/**
+ * Parse-only companion that preserves Python's component-validation messages.
+ * Malformed syntax returns null; a structurally valid value with an invalid
+ * calendar/time component or offset raises {@link UtcParseError} carrying the
+ * message `datetime.fromisoformat` would raise.
+ */
+export function parseUtcDetailed(value: unknown): bigint | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  return parseIsoLike(value.replaceAll('Z', '+00:00'));
 }
 
 /**
@@ -155,7 +175,7 @@ function parseDate(text: string): { days: number } | null {
     const year = Number(match[1]);
     const month = Number(match[2]);
     const day = Number(match[3]);
-    if (!validDate(year, month, day)) return null;
+    assertValidDate(year, month, day);
     return { days: daysFromCivil(year, month, day) };
   }
   match = /^(\d{4})(\d{2})(\d{2})$/.exec(text);
@@ -163,7 +183,7 @@ function parseDate(text: string): { days: number } | null {
     const year = Number(match[1]);
     const month = Number(match[2]);
     const day = Number(match[3]);
-    if (!validDate(year, month, day)) return null;
+    assertValidDate(year, month, day);
     return { days: daysFromCivil(year, month, day) };
   }
   match = /^(\d{4})-W(\d{2})(?:-(\d))?$/.exec(text);
@@ -238,12 +258,15 @@ function parseClock(text: string): Omit<ParsedTime, 'offsetMicros'> | null {
   const minute = Number(match[2] ?? '0');
   const second = Number(match[3] ?? '0');
   const microsecond = parseFraction(match[4]);
-  if (minute > 59 || second > 59) return null;
   if (hour === 24) {
-    if (minute !== 0 || second !== 0 || microsecond !== 0) return null;
+    if (minute !== 0 || second !== 0 || microsecond !== 0) {
+      throw new UtcParseError('minute, second, and microsecond must be 0 when hour is 24');
+    }
     return { hour: 0, minute: 0, second: 0, microsecond: 0, dayOffset: 1 };
   }
-  if (hour > 23) return null;
+  if (hour > 23) throw new UtcParseError(`hour must be in 0..23, not ${hour}`);
+  if (minute > 59) throw new UtcParseError(`minute must be in 0..59, not ${minute}`);
+  if (second > 59) throw new UtcParseError(`second must be in 0..59, not ${second}`);
   return { hour, minute, second, microsecond, dayOffset: 0 };
 }
 
@@ -256,15 +279,33 @@ function parseOffset(text: string): bigint | null {
   const minutes = BigInt(match[3] ?? '0');
   const seconds = BigInt(match[4] ?? '0');
   const micros = BigInt(parseFraction(match[5]));
-  const total =
-    hours * 3_600n * MICROS_PER_SECOND +
-    minutes * 60n * MICROS_PER_SECOND +
-    seconds * MICROS_PER_SECOND +
-    micros;
+  const wholeSeconds = hours * 3_600n + minutes * 60n + seconds;
+  // CPython >= 3.14.7 (gh-152079, commit 6f9c76d8d869) and 3.15+ return UTC only
+  // when both the whole-second offset and its microseconds are zero;
+  // `+00:00:00.5` is a real 0.5-second offset. Pre-3.14.7 dropped the fraction.
+  const total = wholeSeconds * MICROS_PER_SECOND + micros;
   // Python's timezone() requires strictly between -24h and +24h. It normalises
   // overflowing minutes/seconds (for example +10:60 -> +11:00).
-  if (total >= 24n * 3_600n * MICROS_PER_SECOND) return null;
+  if (total >= 24n * 3_600n * MICROS_PER_SECOND) {
+    throw new UtcParseError(
+      'offset must be a timedelta strictly between -timedelta(hours=24) and ' +
+        `timedelta(hours=24), not ${pythonTimedeltaRepr(sign * total)}`,
+    );
+  }
   return sign * total;
+}
+
+function pythonTimedeltaRepr(micros: bigint): string {
+  const day = 86_400n * MICROS_PER_SECOND;
+  const days = floorDiv(micros, day);
+  const remainder = micros - days * day;
+  const seconds = remainder / MICROS_PER_SECOND;
+  const fraction = remainder % MICROS_PER_SECOND;
+  const parts: string[] = [];
+  if (days !== 0n) parts.push(`days=${days}`);
+  if (seconds !== 0n) parts.push(`seconds=${seconds}`);
+  if (fraction !== 0n) parts.push(`microseconds=${fraction}`);
+  return parts.length === 0 ? 'datetime.timedelta(0)' : `datetime.timedelta(${parts.join(', ')})`;
 }
 
 function parseFraction(digits: string | undefined): number {
@@ -275,6 +316,21 @@ function parseFraction(digits: string | undefined): number {
 function validDate(year: number, month: number, day: number): boolean {
   if (year < 1 || year > 9999 || month < 1 || month > 12 || day < 1) return false;
   return day <= daysInMonth(year, month);
+}
+
+function assertValidDate(year: number, month: number, day: number): void {
+  if (year < 1 || year > 9999) {
+    throw new UtcParseError(`year must be in 1..9999, not ${year}`);
+  }
+  if (month < 1 || month > 12) {
+    throw new UtcParseError(`month must be in 1..12, not ${month}`);
+  }
+  const lastDay = daysInMonth(year, month);
+  if (day < 1 || day > lastDay) {
+    throw new UtcParseError(
+      `day ${day} must be in range 1..${lastDay} for month ${month} in year ${year}`,
+    );
+  }
 }
 
 export function daysInMonth(year: number, month: number): number {

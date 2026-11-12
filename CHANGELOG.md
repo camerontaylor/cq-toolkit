@@ -9,6 +9,18 @@ Links default to the
 
 ## Unreleased
 
+- Slot-based selfhost rollout waits for old-writer drain before the first sweep.
+  See the [rollout sequence](docs/review-address-slot-rollout.md).
+
+- Breaking source API: `PrWorktreeOpts.registry` and `ReviewLoopOpts.registry`
+  now accept the per-PR `SlotWorktreeRegistry` facade. Use
+  `slotWorktreeRegistry(commonDir)` instead of a shared registry map. The old
+  `fileWorktreeRegistry` and shared-map types are removed. Legacy registry files
+  are read only as checkout hints and are preserved.
+- Bulk review returns `needs-human` for a PR with an unresolved legacy checkout
+  hint; run direct `review.address` for that PR before retrying the bulk run.
+  See [checkout recovery](docs/review-address-checkout-recovery.md).
+
 Changes since the `v1.0.1` source milestone. The next release is `0.2.0`,
 the first npm publication. It waits on the remaining prepublication
 hardening, implementation of the accepted ADRs, review debt and the G2 adversarial evidence; the release cut adds

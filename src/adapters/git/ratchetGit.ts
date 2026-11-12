@@ -119,6 +119,9 @@ function assertRev(rev: string, label: string): void {
 /** A `.git` path segment, including the forms some filesystems fold onto it (`.git.`, `.git `). */
 const DOT_GIT_SEGMENT = /^\.git[. ]*$/i;
 
+/** A `node_modules` path segment, folded the same way (`Node_Modules`, `node_modules.`, ...). */
+const NODE_MODULES_SEGMENT = /^node_modules[. ]*$/i;
+
 /**
  * Validate a repository-relative POSIX path: non-empty, not absolute, no
  * empty/`.`/`..` segment, no `.git` segment, no backslash (a separator on
@@ -539,7 +542,7 @@ export async function extractTreeAttributeFree(
   const skipped: SkippedEntry[] = [];
   for (const entry of entries) {
     assertRepoRelPath(entry.path, 'tree path');
-    if (entry.path.split('/').includes('node_modules')) {
+    if (entry.path.split('/').some((segment) => NODE_MODULES_SEGMENT.test(segment))) {
       throw new Error(`ratchet git: refusing head-controlled node_modules path '${entry.path}'`);
     }
     if (entry.type === 'blob' && REGULAR_BLOB_MODES.has(entry.mode)) blobs.push(entry);

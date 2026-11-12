@@ -173,6 +173,167 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(self.run_recovery()['disposition'], 'unresolved')
         self.prepare.assert_not_called()
 
+    def two_line_source(self):
+        (self.repo / 'a.py').write_text('original\nsecond line\n')
+        self.run_git(self.repo, 'add', 'a.py')
+        self.run_git(self.repo, 'commit', '-qm', 'two lines')
+        self.run_git(self.repo, 'update-ref', 'refs/remotes/origin/main',
+                     self.run_git(self.repo, 'rev-parse', 'HEAD'))
+        self.judge.return_value.update(current_lines=[[1, 2]], quoted_text='original\nsecond line')
+
+    def retain_old_unresolved(self):
+        # Model the artifact produced by the old single-line verifier.
+        self.two_line_source()
+        self.judge.return_value['quoted_text'] = 'incorrect'
+        self.assertEqual(self.run_recovery()['disposition'], 'unresolved')
+        artifact = self.root / 'state/repair/crq-job/recovery.json'
+        saved = json.loads(artifact.read_text())
+        saved['report']['quoted_text'] = 'original\nsecond line'
+        atomic(artifact, saved)
+
+    def test_exact_multiline_span_including_original_anchor(self):
+        self.two_line_source()
+        self.assertEqual(self.run_recovery()['disposition'], 'retry')
+        self.judge.assert_called_once()
+        self.prepare.assert_called_once()
+
+    def test_cached_unresolved_replays_after_unrelated_tip_advance(self):
+        self.retain_old_unresolved()
+        artifact = self.root / 'state/repair/crq-job/recovery.json'
+        old_saved = json.loads(artifact.read_text())
+        old_binding = old_saved['binding']
+        result_path = self.root / 'state/repair/crq-job/result.json'
+        original = result_path.read_bytes()
+        (self.repo / 'unrelated').write_text('new\n')
+        self.run_git(self.repo, 'add', 'unrelated')
+        self.run_git(self.repo, 'commit', '-qm', 'unrelated')
+        tip = self.run_git(self.repo, 'rev-parse', 'HEAD')
+        self.run_git(self.repo, 'update-ref', 'refs/remotes/origin/main', tip)
+        result = self.run_recovery()
+        self.assertEqual(result['disposition'], 'retry')
+        self.assertEqual(result['binding']['source_sha'], tip)
+        self.assertEqual(result['judgment_binding'], old_binding)
+        self.assertEqual(result['report'], old_saved['report'])
+        self.assertNotIn('reason', result)
+        self.assertEqual(result_path.read_bytes(), original)
+        self.assertEqual(self.run_recovery(), result)
+        self.judge.assert_called_once()
+        self.prepare.assert_called_once()
+
+    def test_failed_replay_preparation_preserves_refusal_artifact(self):
+        self.retain_old_unresolved()
+        artifact = self.root / 'state/repair/crq-job/recovery.json'
+        before = artifact.read_bytes()
+        self.prepare.side_effect = RuntimeError('preparation failed')
+        with self.assertRaisesRegex(RuntimeError, 'preparation failed'):
+            self.run_recovery()
+        self.assertEqual(artifact.read_bytes(), before)
+        self.assertEqual(json.loads(before)['reason'], 'current anchor could not be verified')
+        self.judge.assert_called_once()
+        self.prepare.assert_called_once()
+
+    def test_invalid_multiline_spans_never_prepare(self):
+        self.two_line_source()
+        for selected, quote, path in [([[2, 2]], 'second line', 'a.py'),
+                                      ([[1, 3]], 'original\nsecond line', 'a.py'),
+                                      ([[True, 2]], 'original\nsecond line', 'a.py'),
+                                      ([[1, 2], [3, 4]], 'original\nsecond line', 'a.py'),
+                                      ([[2, 1]], 'original\nsecond line', 'a.py'),
+                                      ([[0, 2]], 'original\nsecond line', 'a.py'),
+                                      ([1, 2], 'original\nsecond line', 'a.py'),
+                                      ('1-2', 'original\nsecond line', 'a.py'),
+                                      ([[1, 2]], 'original', 'a.py'),
+                                      ([[1, 2]], 'original\nsecond line', 'other.py')]:
+            with self.subTest(selected=selected, quote=quote, path=path):
+                artifact = self.root / 'state/repair/crq-job/recovery.json'
+                if artifact.exists():
+                    artifact.unlink()
+                self.judge.return_value.update(current_lines=selected, quoted_text=quote, current_path=path)
+                self.assertEqual(self.run_recovery()['disposition'], 'unresolved')
+        self.prepare.assert_not_called()
+
+    def test_cached_unresolved_refuses_unavailable_or_invalid_context(self):
+        self.retain_old_unresolved()
+        evidence = self.root / 'state/repair/crq-job/recovery-evidence.json'
+        original = evidence.read_text()
+        evidence.unlink()
+        with self.assertRaisesRegex(ValueError, 'retained recovery requires inspection'):
+            self.run_recovery()
+        evidence.write_text('{invalid json')
+        with self.assertRaisesRegex(ValueError, 'retained recovery requires inspection'):
+            self.run_recovery()
+        evidence.write_text(original)
+        read_text = Path.read_text
+
+        def unreadable(path, *args, **kwargs):
+            if path == evidence:
+                raise PermissionError('unreadable')
+            return read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'read_text', unreadable):
+            with self.assertRaisesRegex(ValueError, 'retained recovery requires inspection'):
+                self.run_recovery()
+        self.judge.assert_called_once()
+        self.prepare.assert_not_called()
+
+    def test_cached_unresolved_refuses_non_utf8_context_without_side_effects(self):
+        self.retain_old_unresolved()
+        directory = self.root / 'state/repair/crq-job'
+        artifact = directory / 'recovery.json'
+        before = artifact.read_bytes()
+        (directory / 'recovery-evidence.json').write_bytes(b'\xff')
+        with self.assertRaisesRegex(ValueError, 'retained recovery requires inspection'):
+            self.run_recovery()
+        self.assertEqual(artifact.read_bytes(), before)
+        self.judge.assert_called_once()
+        self.prepare.assert_not_called()
+
+    def test_cached_unresolved_rejects_changed_evidence_and_ownership(self):
+        self.retain_old_unresolved()
+        (self.wt / 'a.py').write_text('changed patch\n')
+        with self.assertRaisesRegex(ValueError, 'evidence or source changed'):
+            self.run_recovery()
+        (self.wt / 'a.py').write_text('unfinished\n')
+        result_path = self.root / 'state/repair/crq-job/result.json'
+        result = json.loads(result_path.read_text())
+        result['worktree'] = str(self.wt.parent / 'other')
+        atomic(result_path, result)
+        with self.assertRaisesRegex(ValueError, 'owned repair worktree'):
+            self.run_recovery()
+        self.judge.assert_called_once()
+        self.prepare.assert_not_called()
+
+    def test_cached_unresolved_rejects_changed_source(self):
+        self.retain_old_unresolved()
+        (self.repo / 'a.py').write_text('original\nchanged\n')
+        self.run_git(self.repo, 'add', 'a.py')
+        self.run_git(self.repo, 'commit', '-qm', 'changed')
+        self.run_git(self.repo, 'update-ref', 'refs/remotes/origin/main',
+                     self.run_git(self.repo, 'rev-parse', 'HEAD'))
+        with self.assertRaisesRegex(ValueError, 'evidence or source changed'):
+            self.run_recovery()
+        self.judge.assert_called_once()
+        self.prepare.assert_not_called()
+
+    def test_cached_unresolved_rejects_contract_change_beyond_excerpt(self):
+        contract = self.repo / 'docs/current-contract-and-backlog.md'
+        contract.parent.mkdir()
+        contract.write_text('x' * 24000 + 'old\n')
+        self.run_git(self.repo, 'add', str(contract.relative_to(self.repo)))
+        self.run_git(self.repo, 'commit', '-qm', 'contract')
+        self.run_git(self.repo, 'update-ref', 'refs/remotes/origin/main',
+                     self.run_git(self.repo, 'rev-parse', 'HEAD'))
+        self.retain_old_unresolved()
+        contract.write_text('x' * 24000 + 'new\n')
+        self.run_git(self.repo, 'add', str(contract.relative_to(self.repo)))
+        self.run_git(self.repo, 'commit', '-qm', 'contract suffix')
+        self.run_git(self.repo, 'update-ref', 'refs/remotes/origin/main',
+                     self.run_git(self.repo, 'rev-parse', 'HEAD'))
+        with self.assertRaisesRegex(ValueError, 'evidence or source changed'):
+            self.run_recovery()
+        self.judge.assert_called_once()
+        self.prepare.assert_not_called()
+
     def test_lost_judge_response_never_repeats_dispatch(self):
         self.judge.side_effect = RuntimeError('lost response')
         with self.assertRaisesRegex(RuntimeError, 'lost response'):

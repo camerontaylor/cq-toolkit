@@ -4,9 +4,24 @@
 
 import { describe, expect, test } from 'vitest';
 import { checkDiffMonotonicity } from '../../../src/ops/ratchet/monotonicGuard.js';
-import { METRIC, TARGET, realGitDiffCases } from './monotonicGuard.helpers.js';
+import { METRIC, TARGET, body, realGitDiffCases } from './monotonicGuard.helpers.js';
 
 describe('real git diff fixtures (literal git output from one temp repo)', () => {
+  test('escaped context key with changed colon is rejected in a real staged diff', async () => {
+    const before = body('higher-is-better', 80).replace(
+      '"value": 80,',
+      '"value": 80,\n  "val\\u0075e"\n  : 90,',
+    );
+    const after = before.replace('"value": 80,', '"value": 81,').replace(': 90,', ': 50,');
+    expect((JSON.parse(before) as { value: number }).value).toBe(90);
+    expect((JSON.parse(after) as { value: number }).value).toBe(50);
+    const diff = (await realGitDiffCases({ escaped: { before, after } })).escaped ?? '';
+    expect(diff).toContain('   "val\\u0075e"');
+    expect(diff).toContain('-  : 90,');
+    expect(diff).toContain('+  : 50,');
+    expect(checkDiffMonotonicity(diff)).toMatchObject({ ok: false });
+  });
+
   test(
     'all five real baseline cases stay live in one staged diff',
     { timeout: 20_000 },

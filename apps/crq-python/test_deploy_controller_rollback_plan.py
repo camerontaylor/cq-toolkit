@@ -44,6 +44,16 @@ class RollbackPlanTests(ControllerFixture):
         with self.fake_switch():
             host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
 
+    def test_active_runner_refuses_before_drain_or_switch(self):
+        self.at_target()
+        with mock.patch.object(host, "inactive", side_effect=ValueError("active tick")), \
+             mock.patch.object(dc, "drain_check") as drain, \
+             mock.patch.object(host, "switch") as switch:
+            with self.assertRaisesRegex(dc.Refused, "stopped before checking drain"):
+                dc.rollback_plan(self.effects, host, self.prior, self.overlay_path)
+        drain.assert_not_called()
+        switch.assert_not_called()
+
     def test_old_deploy_journal_refuses_after_a_second_completed_deployment(self):
         # Construct C before exercising the actual A -> B -> C controller path.
         self.command("restore", "--", host.CONFIG)

@@ -6,6 +6,7 @@ import type { WorkerResult } from '../../../src/driver/types.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { PrOpenInput } from '../../../src/ops/pr/open.js';
 import { makeTestRepo, repoEffects, seed, type TestRepo } from './repo.js';
+import { stubScanner } from './fakes.js';
 import {
   addressReport,
   bindCycleRepo,
@@ -163,6 +164,10 @@ describe('dev.cycle', () => {
       }),
       open: openFake(opens),
       gh: ghFake().gh,
+      // The findings section composes under the publication scanner
+      // (production always wires one); the envelope assertion below needs
+      // the composed path, not the missing-scanner refusal.
+      publicationScanner: stubScanner(),
       git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
     });
     const result: OpResult<unknown> & {

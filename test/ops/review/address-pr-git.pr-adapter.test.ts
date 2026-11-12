@@ -43,7 +43,6 @@ vi.mock('../../../src/ops/dev/disposition.js', async (original) => {
 const modes = [
   'local-only',
   'publish',
-  'publish-reuse',
   'publish-reuse-alias',
   'publish-reuse-bulk',
   'publish-reuse-modified-ledger',
@@ -83,3 +82,11 @@ test.each(modes)(
   'real PR adapter without cq ignore preserves admission and publication hygiene: %s',
   (mode) => runPrAdapterCase(mode, ledgerRace, scanner),
 );
+
+test('consecutive same-head PR address runs authenticate real engine bookkeeping and leave reusable slots (mutation: check caller root or skip receipt import)', () =>
+  runPrAdapterCase('publish-reuse', ledgerRace, scanner));
+
+test('address recreates an externally removed completed checkout (mutation: eager binding capture)', () =>
+  runPrAdapterCase('publish-reuse-removed', ledgerRace, scanner));
+test('address reports a pure dirty refusal as needs-human and retries cleanly (mutation: skip refusal classification)', () =>
+  runPrAdapterCase('publish-reuse-dirty', ledgerRace, scanner));

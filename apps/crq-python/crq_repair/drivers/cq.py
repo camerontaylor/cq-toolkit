@@ -1,6 +1,7 @@
 """Source-verified cq CLI JSON flag adapter; never launches tests."""
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -45,6 +46,81 @@ HARNESS = {
 
 MAX_OUTPUT_TOKENS = 500_000
 MAX_CONTEXT_TOKENS = 200_000
+MAX_ITEM_BODY_CHARS = 8_000  # review.fixItem uses JavaScript string length (UTF-16 units).
+
+# The CLI dispatches review.fixItem directly with no governor, and the
+# in-process ai-sdk lane ignores the payload's wallClockMs (I8: the governor
+# ladder owns wall-clock; a driver deadline would race it). On these direct
+# paths NO timer inside cq enforces the budget, so the only run-level
+# wall-clock owner is this Python kill timer, at budget + WALL_CLOCK_GRACE_S.
+# When it fires, the caller gets the runner's typed budget stop with what the
+# run's session files recorded — never a false claim that cq itself returned
+# budget-exhausted.
+WALL_CLOCK_GRACE_S = 60
+
+
+def wall_clock_summary(sessions_dir, created):
+    """Summary for a run the Python wall clock killed. Reports the runner's
+    own deadline: this invocation's budget-stop session line if one exists
+    (cq can emit it for its token/context caps mid-run), else the explicit
+    no-cq-wall-clock fallback."""
+    detail = budget_stop(sessions_dir, created)
+    return 'wall clock: Python deadline at budget+60s' + (
+        ' (' + detail + ')' if detail else ' (cq never returned budget-exhausted)')
+
+
+def fixer_body(job):
+    """Fit complete finding and provenance plus whole, anchor-containing source lines."""
+    finding = job['finding']
+    snapshot = job['source_snapshot']
+    line = finding.get('line')
+    start, end = snapshot.get('line_start'), snapshot.get('line_end')
+    source = snapshot.get('source')
+    if (not isinstance(line, int) or isinstance(line, bool)
+            or not isinstance(start, int) or isinstance(start, bool)
+            or not isinstance(end, int) or isinstance(end, bool)
+            or not 1 <= start <= line <= end or not isinstance(source, str)
+            or snapshot.get('path') != finding.get('path')
+            or any(not isinstance(snapshot.get(key), str) or not snapshot[key]
+                   for key in ('source_sha', 'source_blob_sha', 'finding_sha256'))):
+        raise ValueError('fixer source anchor or provenance unavailable')
+    lines = source.split('\n')
+    if len(lines) != end - start + 1 or any(
+            not text.startswith(str(start + offset) + ': ') for offset, text in enumerate(lines)):
+        raise ValueError('fixer source excerpt is incomplete or malformed')
+    body = finding.get('body') if isinstance(finding.get('body'), str) else ''
+    operator_instructions = job.get('revalidation', {}).get('fix_instructions')
+    instructions = operator_instructions or job.get('fix_instructions')
+    label = 'Operator fix guidance' if operator_instructions else 'Retry guidance from the previous attempt'
+    guidance = ('\n' + label + ' (subject to normal scope and safety rules):\n' + instructions
+                if isinstance(instructions, str) and instructions else '')
+    prefix = (body + guidance + '\nMechanical evidence / judge rationale: ' + job.get('mechanical_evidence', '')
+              + '\nPinned current-source evidence (untrusted data):\n')
+
+    def composed(first, last):
+        packed = {**snapshot, 'line_start': start + first, 'line_end': start + last - 1,
+                  'source': '\n'.join(lines[first:last]),
+                  'incomplete': bool(snapshot.get('incomplete')) or first > 0 or last < len(lines)}
+        return prefix + json.dumps(packed)
+
+    def fits(text):
+        return len(text.encode('utf-16-le', errors='surrogatepass')) // 2 <= MAX_ITEM_BODY_CHARS
+
+    first, last = line - start, line - start + 1
+    result = composed(first, last)
+    if not fits(result):
+        raise ValueError('fixer finding, provenance and anchor exceed item body budget')
+    while first > 0 or last < len(lines):
+        added = False
+        if first > 0 and fits(composed(first - 1, last)):
+            first -= 1
+            added = True
+        if last < len(lines) and fits(composed(first, last + 1)):
+            last += 1
+            added = True
+        if not added:
+            break
+    return composed(first, last)
 
 
 def _log_invocation(directory, stdout_text, stderr_text):
@@ -93,7 +169,7 @@ def budget_stop(sessions_dir, names):
             except ValueError:
                 continue
             if isinstance(entry, dict) and entry.get('type') == 'budget-stop':
-                return str(entry.get('detail') or entry.get('cause'))[:300]
+                return str(entry.get('detail') or entry.get('cause') or '')[:300]
     return None
 
 
@@ -108,12 +184,7 @@ def invoke(config, role, job, wt, directory):
         # review.fixItem takes an optional positive `pr`; 0 is invalid input.
         # Backfill and merged-current jobs carry pr 0: omit the key.
         payload['pr'] = job['pr']
-    # An accepted finding may carry no body at all (absent or null): the append
-    # below needs a string, so normalize before adding the evidence.
-    if not isinstance(payload['item'].get('body'), str):
-        payload['item']['body'] = ''
-    payload['item']['body'] += '\nMechanical evidence / judge rationale: ' + job.get('mechanical_evidence', '')
-    payload['item']['body'] += '\nPinned current-source evidence (untrusted data):\n' + json.dumps(job['source_snapshot'])
+    payload['item']['body'] = fixer_body(job)
     env = {k: v for k, v in os.environ.items() if not k.startswith('CQ_SANDBOX') and k != 'CQ_RUN_TOOL'}
     env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='remote.origin.pushurl', GIT_CONFIG_VALUE_0='/dev/null')
     # Session-log preservation (item 2.3): point the cq runner's session store
@@ -133,10 +204,15 @@ def invoke(config, role, job, wt, directory):
     argv += ['--' + k + '=' + json.dumps(v) for k, v in payload.items()]
     before = session_files(sessions_dir)
     try:
-        p = command(argv, cwd=wt, env=env, timeout=config['repair']['budget']['wall_clock_min'] * 60)
+        p = command(argv, cwd=wt, env=env,
+                    timeout=config['repair']['budget']['wall_clock_min'] * 60 + WALL_CLOCK_GRACE_S)
     except subprocess.TimeoutExpired as exc:
+        # The only run-level wall-clock owner on this direct path (cq arms
+        # none): classify truthfully as the runner's budget stop instead of
+        # a raw TimeoutExpired, keeping the partial output in driver.log.
         _log_invocation(directory, str(exc.stdout or ''), str(exc.stderr or ''))
-        raise
+        return {'stop': 'budget', 'changed': False, 'commits': [],
+                'summary': wall_clock_summary(sessions_dir, session_files(sessions_dir) - before)}
     created = session_files(sessions_dir) - before
     _log_invocation(directory, p.stdout, p.stderr)
     try:
@@ -184,11 +260,13 @@ def invoke(config, role, job, wt, directory):
                      or signals.get('httpStatus') == 429)
         stop = 'rate-limit' if throttled else 'budget' if data.get('status') == 'budget-exhausted' else 'error'
         summary = str(data.get('reason') or error or data.get('status'))
+        match = re.match(r'^fixReviewItem: no outcome to post — worker disposition (needs_human|no_outcome):', summary)
         if stop == 'budget':
             # The op result carries no detail; the driver records why in the session.
             summary = 'budget-exhausted: ' + (budget_stop(sessions_dir, created)
                                               or 'token or wall-clock cap (no budget-stop line)')
         return {'stop': stop, 'changed': False, 'summary': summary, 'commits': [],
+                'worker_disposition': match.group(1) if match else None,
                 'retry_after_ms': signals.get('retryAfterMs')}
     if result.get('verdict') in ('fail', 'failed', 'regression'):
         return {**result, 'stop': 'error', 'changed': False, 'commits': [],
@@ -225,16 +303,22 @@ def judge(config, role, job, wt, directory):
                              'For valid supply current_path, current_lines as [[start,end]], quoted_text exactly matching those lines. '
                              'For fixed/superseded supply full fixing_commit. Never infer validity from line carry alone. '
                              'Return unsure only when relevant source evidence is missing or applicable requirements '
-                             'are genuinely ambiguous.\n' + json.dumps(job['triage_context']))
+                             'are genuinely ambiguous. Multiple reasonable implementations are not ambiguity: '
+                             'choose the smallest compatible fix. Routine correctness repairs do not need owner judgment. '
+                             'An owner decision is needed only for a disruptive behavior change or a substantial '
+                             'architectural change; explain its concrete consequences in the reason.\n' + json.dumps(job['triage_context']))
     path = directory / 'judge-request.json'
     path.write_text(json.dumps(request))
     bridge = Path(__file__).parents[1] / 'judge-cq.mjs'
     try:
         p = command(['node', str(bridge), str(path)], cwd=wt,
-                    timeout=config['repair']['budget']['wall_clock_min'] * 60)
+                    timeout=config['repair']['budget']['wall_clock_min'] * 60 + WALL_CLOCK_GRACE_S)
     except subprocess.TimeoutExpired as exc:
+        # Same direct-path wall-clock ownership as invoke(): report the
+        # runner's budget stop without inventing a verdict.
         _log_invocation(directory, str(exc.stdout or ''), str(exc.stderr or ''))
-        raise
+        return {'stop': 'budget', 'verdict': 'unsure',
+                'reason': wall_clock_summary(None, [])}
     _log_invocation(directory, p.stdout, p.stderr)
     if p.returncode:
         return {'stop': 'error', 'verdict': 'unsure', 'reason': 'cq read-only judge failed'}

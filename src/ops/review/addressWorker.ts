@@ -4,7 +4,7 @@ import {
   checkpointAddressTerminalWorker,
   addressTerminalCandidate,
   deferAddressTerminalAttempt,
-} from './internal/addressOwnership.js';
+} from './internal/addressRunLifecycle.js';
 import { randomUUID } from 'node:crypto';
 import { GIT_HARDEN } from '../../shared/gitHarden.js';
 import {
@@ -22,7 +22,7 @@ import { toOutputSchema } from '../../driver/common/structured.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import { correlationInvocation } from '../../driver/correlationInvocation.js';
 import { currentJobContext } from '../../kernel/governor.js';
-import { makeGitMutex } from '../../shared/gitMutex.js';
+import { checkoutWriterContext } from '../../shared/checkoutWriterContext.js';
 import type { GhFn } from '../../adapters/forge-github/gh.js';
 import type { EffectiveCqPolicy } from '../analyze/cqConfigDefaults.js';
 import {
@@ -343,18 +343,6 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         const path = relative(resolve(root, pkg.path), resolve(root, file));
         return path !== '..' && !path.startsWith('../') && !isAbsolute(path);
       })?.name ?? policy.packages[0]!.name;
-  // Resolve identity only inside an awaited mutation. Unused or early-refused
-  // workers must not leave rejected setup promises racing checkout cleanup.
-  let mutex: Promise<ReturnType<typeof makeGitMutex>> | undefined;
-  const checkoutMutex = () =>
-    (mutex ??= realpath(root).then(async (canonicalRoot) => {
-      const result = await deps.git(['-C', canonicalRoot, 'rev-parse', '--absolute-git-dir']);
-      if (result.code !== 0 || !result.stdout.trim())
-        throw new Error('checkout index identity unavailable');
-      return makeGitMutex({
-        lockPath: resolve(await realpath(result.stdout.trim()), 'cq-review-address-mutation'),
-      });
-    }));
   const active = new Set<string>();
   const verifiedHeads = new Set<string>();
   let initialization: Promise<void> | undefined;
@@ -404,11 +392,11 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
   const withMutation = <T>(action: () => Promise<T>, admit?: () => void): Promise<T> => {
     const pending = mutations.then(async () => {
       admit?.();
-      return (await checkoutMutex()).withLock(async () => {
-        // A different process may have held the lock until our budget expired.
-        admit?.();
-        return action();
-      });
+      const context = checkoutWriterContext();
+      if (!context) throw new Error('address worker requires authenticated checkout lifetime');
+      await context.assertIdentity();
+      admit?.();
+      return action();
     });
     mutations = pending.then(
       () => undefined,
@@ -443,12 +431,21 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       throw new AddressRefusal('upload refused: diagnostic provenance unavailable');
   };
   const safeFile = async (cwd: string, path: string) => {
+    // Bracket/brace characters in a real file name (a Next.js route such as
+    // `pages/[id].tsx`) stay literal: every Git pathspec this path reaches
+    // runs under the hardened --literal-pathspecs prefix, and the harness
+    // allowlist compiler escapes them literally (literalChar). `*` and `?`
+    // stay refused: compilePathPatterns interprets them as wildcards
+    // (segmentToSource maps `*` to `[^/]*` and `?` to `[^/]`), and invoke()
+    // builds the edit allowlist from the finding path itself, so a wildcard
+    // here would authorize edits to files beyond this one finding.
+    if (/[*?]/.test(path))
+      throw new Error('finding must not name a file with edit-allowlist wildcards');
     if (
       !path ||
       path.startsWith('-') ||
       isAbsolute(path) ||
-      path.split(/[\\/]/).some((part) => part === '..') ||
-      /[*?\[\]{}]/.test(path)
+      path.split(/[\\/]/).some((part) => part === '..')
     )
       throw new Error('finding must name one literal repository-relative file');
     const full = resolve(cwd, path);

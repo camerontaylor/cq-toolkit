@@ -1,3 +1,4 @@
+import { coordinationRoot } from './addressMany.helpers.js';
 // Split provenance: test/ops/review/addressMany.test.ts was split into this
 // file plus addressMany.helpers.ts, addressMany.registry.test.ts,
 // addressMany.dispatch.test.ts, addressMany.guards.test.ts,
@@ -11,7 +12,7 @@ import { gh, head, input, metadata, report } from './addressMany.helpers.js';
 test('M7-many nominal evidence', async () => {
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh,
     address,
@@ -40,7 +41,7 @@ test('M7-many missing evidence', async () => {
       : { status: 'ok' as const, value: report() },
   );
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh,
     address,
@@ -65,7 +66,7 @@ test('M7-many failure evidence', async () => {
     throw new Error('leg two lost');
   });
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh,
     address,
@@ -93,7 +94,7 @@ test('M7-many exhaustion evidence', async () => {
     };
   });
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh,
     address,
@@ -125,7 +126,7 @@ test('M7-many failed-result evidence', async () => {
       : { status: 'ok' as const, value: report() },
   );
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh,
     address,
@@ -164,7 +165,7 @@ test('M7-many cancellation evidence', async () => {
   });
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh: changingGh,
     address,
@@ -189,7 +190,7 @@ test('M7-many malformed evidence degrades to unknown without losing settlement',
   (badUsage.usage as unknown as { input: number }).input = -5;
   const address = vi.fn(async () => ({ status: 'ok' as const, value: badUsage }));
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh,
     address,
@@ -230,7 +231,7 @@ test('M7-many post-dispatch exit retains the envelope through a thrown settlemen
         },
   );
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh,
     address,
@@ -255,7 +256,7 @@ test('M7-many clamp saturation at the safe integer bound', async () => {
     },
   }));
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh,
     address,
@@ -267,7 +268,7 @@ test('M7-many report-less refusal carries a top-level usage summary', async () =
   // A report-less exit (here: remote mismatch before dispatch) still carries
   // its I1 top-level usageSummary envelope, never silently dropping spend.
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh: async () => ({ code: 1, stderr: 'nope', stdout: '' }),
     address: vi.fn(),

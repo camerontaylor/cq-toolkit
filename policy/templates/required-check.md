@@ -123,6 +123,19 @@ jobs:
       - name: Python stdlib suite
         working-directory: apps/crq-python
         run: python3 -m unittest discover -p 'test_*.py'
+      - name: Verify Python vector bytes
+        run: python3 apps/crq-python/vector_emit.py --check
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - name: Set up Node {{NODE_VERSION}}
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: {{NODE_VERSION}}
+          cache: pnpm
+      - name: Install dependencies
+        run: {{INSTALL_CMD}}
+      - name: Compare TypeScript with Python vectors
+        run: pnpm exec vitest run --project pure test/policy/crq/vectors.test.ts
   static:
     runs-on: {{RUNNER}}
     # Every PR, default-branch push, nightly and manual full run.

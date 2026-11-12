@@ -6,7 +6,7 @@ import { fixture, git, input, reportOf, scripted } from './fix-run-shared.js';
 test('pushFailed publishes only the failed-attempt branch with a CI-skip commit subject', async () => {
   const f = await fixture();
   try {
-    const result = await makeFixRun({ drivers: scripted('fail-b') })({
+    const result = await makeFixRun({ drivers: scripted('fail-b-safe-change') })({
       ...input(f),
       pushFailed: true,
     });

@@ -174,7 +174,7 @@ import { makeManifest, topoOrder, type ManifestJob } from './manifest.js';
 import { OpResultArtifactSchema } from './schema.js';
 import { assertJsonLossless } from '../shared/jsonLossless.js';
 import type { Usage, WorkCorrelation } from '../driver/types.js';
-import { inboundParentWorkId } from '../driver/correlation-env.js';
+import { inboundParentWorkIdFromSnapshot } from '../driver/correlation-env.js';
 import type {
   JobFinishedJournalEvent,
   JobOutcome,
@@ -1102,13 +1102,15 @@ async function runPlanUnderLease(
     // in a wave must not cross-stain each other's children).
     const correlationByJob = new Map<string, WorkCorrelation>();
     // Prefer a recorded finish's parent on resume; legacy journals and runs
-    // that crashed before any finish fall back to the current launcher's
-    // CQ_* identity or Paseo agent. This is a finish-based pin, not a
-    // run-start anchor. Never mutate process.env — see inboundParentWorkId.
+    // that crashed before any finish fall back to the run's ENTRY Cq_*
+    // snapshot or the live foreign Paseo agent. This is a finish-based pin,
+    // not a run-start anchor for the recorded tier; the CQ_* fallback is
+    // frozen at entry, so ambient drift after entry cannot move it. Never
+    // mutate process.env — see inboundParentWorkIdFromSnapshot.
     const recordedParent = [...replay.values()].find(
       (finish) => finish.parentWorkId !== undefined,
     )?.parentWorkId;
-    const parentWorkId = recordedParent ?? inboundParentWorkId(process.env);
+    const parentWorkId = recordedParent ?? inboundParentWorkIdFromSnapshot(cqEnv, process.env);
 
     // Under a governed SIGNAL stop the never-dispatched rows are cancelled,
     // not failed. This is a PREDICATE, not a run-start snapshot: the trip

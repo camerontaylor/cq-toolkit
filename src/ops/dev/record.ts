@@ -533,7 +533,7 @@ const DevRecordSchema: z.ZodType<DevRecord> = z.union([
  * class) may ever be selected over or resolved away.
  */
 const NO_FRESH_TAIL_PATTERN =
-  /^reviewer completed '.+?' with an AFFIRMATIVE no-fresh\/skipped notice \(".+"\) — a fresh detailed review never ran$/u;
+  /^(?:skipped:no-fresh: )?reviewer completed '.+?' with an AFFIRMATIVE no-fresh\/skipped notice \(".+"\) — a fresh detailed review never ran$/u;
 
 /**
  * True when the cycle is an affirmative no-fresh BLOCKED attempt: the vendor

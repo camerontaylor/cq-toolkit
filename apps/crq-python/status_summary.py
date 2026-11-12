@@ -111,12 +111,14 @@ def merged_current(queue, receipt_root=None):
                 category = "unsupported"
             else:
                 raise ValueError("terminal state lacks proof")
-            counts[category] += 1
-            targets.add(capture["target"])
+            receipt_exclusions = exclusions.copy()
             for path in capture["paths"]:
                 disposition = path.get("disposition", "unknown")
                 if disposition not in ("included", "renamed"):
-                    exclusions[disposition] = exclusions.get(disposition, 0) + 1
+                    receipt_exclusions[disposition] = receipt_exclusions.get(disposition, 0) + 1
+            counts[category] += 1
+            targets.add(capture["target"])
+            exclusions = receipt_exclusions
         except (KeyError, TypeError, ValueError, AttributeError, OSError):
             counts["unverified"] += 1
     discovery = queue.get("merged_reconcile") or {}
@@ -191,6 +193,10 @@ def summarize(status, queue, heartbeat, config, events, now):
     finished = {}
     for index, event in enumerate(events):
         at = timestamp(event.get("at"))
+        # A completed record with an unparsable `at` must fail visibly instead of
+        # silently counting as zero outcomes; a missing or empty `at` stays accepted.
+        if event.get("event") == "review_finished" and event.get("at") and at is None:
+            raise ValueError("invalid review_finished timestamp")
         if event.get("event") == "review_finished" and at is not None and now - 86400 <= at <= now:
             finished[event.get("run") or ("anonymous", index)] = event
     for event in finished.values():

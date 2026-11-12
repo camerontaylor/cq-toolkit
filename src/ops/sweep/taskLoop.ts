@@ -27,6 +27,7 @@ import {
   type FixerDeadline,
 } from './internal/fixerBudget.js';
 import { finishAttempt, type FinishAttemptStop } from '../fix/attemptRecord.js';
+import { validTokens } from '../../shared/knownUsage.js';
 import type { AttemptFinishedJournalEvent } from '../../kernel/types.js';
 import type { SweepUnitBindings, SweepUnitReport, UnitProbe } from './unit.js';
 import type { WorkUnit } from './planSweep.js';
@@ -123,6 +124,42 @@ export function promptRound(
             ...(validation.regression ? { regression: true } : {}),
           },
         }),
+  };
+}
+
+/**
+ * Read the usage a REJECTING driver attached to its fault (issue #1195) so a
+ * thrown attempt still records the spend its run already settled. Every field
+ * must satisfy the success path's non-negative safe-integer rule
+ * (`validTokens`, issue #1189's rule in dev.cycle's rejection metering): a
+ * negative, fractional, unsafe or missing field voids the whole attachment —
+ * it contributes nothing and the thrown attempt row records usage unknown,
+ * exactly like the success path's `normalizeUsageObservation` semantics. A
+ * corrupt report is never trusted in part, so malformed usage can neither
+ * shrink nor enlarge the budget evidence; valid usage lands on the thrown
+ * attempt row (tokens, usage channels, requests) through the finally
+ * boundary, and on the report's attempt record.
+ */
+function usageOfRejection(err: unknown): Usage | undefined {
+  if (typeof err !== 'object' || err === null || !('usage' in err)) return undefined;
+  const usage: unknown = (err as { usage: unknown }).usage;
+  if (typeof usage !== 'object' || usage === null) return undefined;
+  const fields = usage as Record<string, unknown>;
+  const { input, output, cacheRead, cacheWrite, reasoning } = fields;
+  if (
+    !validTokens(input) ||
+    !validTokens(output) ||
+    !validTokens(cacheRead) ||
+    !validTokens(cacheWrite) ||
+    (reasoning !== undefined && !validTokens(reasoning))
+  )
+    return undefined;
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    ...(reasoning !== undefined ? { reasoning } : {}),
   };
 }
 
@@ -370,11 +407,21 @@ async function runTaskLoopInner(
       const recordFailedAttempt = async (
         gate: FailedAttemptGate,
         reason: string,
-      ): Promise<FailedAttempt> => {
+      ): Promise<FailedAttempt | undefined> => {
         if (parent === undefined) throw new Error('failed attempt has no pre-attempt HEAD');
         const kind = bindings.segments?.kind ?? unit.fixer;
         const slug = bindings.segments?.slug ?? unit.package;
         await git(['add', '-A', '--', '.']);
+        const staged = await git([
+          'diff',
+          '--cached',
+          ...SWEEP_DIFF_FLAGS,
+          '--name-only',
+          '-z',
+          parent,
+          '--',
+        ]);
+        if (staged === '') return undefined;
         const failedAttempt = await commitFailedAttempt(git, {
           runPrefix: bindings.runPrefix,
           kind,
@@ -427,7 +474,12 @@ async function runTaskLoopInner(
         };
         failedModel = resolved.modelSpec;
         if (decision.tier === 'rescue' && priorRound?.failedAttempt !== undefined) {
-          priorFailedFeedback = await failedAttemptFeedback(git, priorRound.failedAttempt);
+          try {
+            priorFailedFeedback = await failedAttemptFeedback(git, priorRound.failedAttempt);
+          } catch (error) {
+            if (!(error instanceof FailedAttemptFeedbackUnavailable)) throw error;
+            // Optional context stays local when it cannot be scanned safely.
+          }
         }
         const prompt = `${bindings.prompt(unit, worktree)}\nTier: ${decision.tier}; attempt: ${decision.attempt}; reason: ${decision.reason}\nPrevious attempt: ${JSON.stringify(promptRound(priorRound, accepted.failureSet))}${priorFailedFeedback === undefined ? '' : `\nPrior failed-attempt patch (engine-owned feedback; do not repeat rejected changes):\n${priorFailedFeedback.patch}`}\nTask: ${JSON.stringify(task)}\nRelated argv: ${JSON.stringify([related.command, ...related.args])}\nDo not stage or commit. Return outcome (broken-test, code-bug, todo), summary and confidence (0 to 1) as structured output.`;
         const invoke = async (
@@ -576,6 +628,17 @@ async function runTaskLoopInner(
               // Only a driver-call rejection is a driver-sourced cause; loop
               // throws must not be misattributed to the driver.
               driverThrew = true;
+              // A rejecting driver may attach the usage its run already
+              // settled (#1195): validated above (#1189's rule), it lands on
+              // the attempt record and the thrown attempt-finished row via
+              // the finally boundary below — tokens, usage channels and
+              // requests: one metered request, however the driver then
+              // failed. A corrupt or absent attachment changes nothing.
+              const rejectedUsage = usageOfRejection(driverError);
+              if (rejectedUsage !== undefined) {
+                usage = rejectedUsage;
+                if (attempt !== undefined) attempt.usage = rejectedUsage;
+              }
               throw driverError;
             }
             try {
@@ -848,7 +911,9 @@ async function runTaskLoopInner(
           if (bindings.proposeOnly) {
             row.outcome = 'escalated-to-human';
             row.reason = pathGate.message ?? 'propose-only';
-            row.failedAttempt = await recordFailedAttempt('path-policy', row.reason);
+            const failedAttempt = await recordFailedAttempt('path-policy', row.reason);
+            if (failedAttempt === undefined) delete row.failedAttempt;
+            else row.failedAttempt = failedAttempt;
             (row.rounds ??= []).push({
               tier,
               attempt: decision.attempt,
@@ -989,7 +1054,9 @@ async function runTaskLoopInner(
             break taskLoop;
           }
           const gate = failedGateOf(row.validation, row.reason);
-          row.failedAttempt = await recordFailedAttempt(gate, row.reason);
+          const failedAttempt = await recordFailedAttempt(gate, row.reason);
+          if (failedAttempt === undefined) delete row.failedAttempt;
+          else row.failedAttempt = failedAttempt;
           (row.rounds ??= []).push({
             tier,
             attempt: decision.attempt,
@@ -1197,6 +1264,8 @@ async function failedAttemptPaths(
   return stagedPathsOf(capture);
 }
 
+class FailedAttemptFeedbackUnavailable extends Error {}
+
 async function failedAttemptFeedback(
   git: (args: string[]) => Promise<string>,
   attempt: FailedAttempt,
@@ -1218,7 +1287,9 @@ async function failedAttemptFeedback(
     '--',
   ]);
   if (Buffer.byteLength(patch, 'utf8') > FAILED_ATTEMPT_SCAN_TOTAL_CAP_BYTES)
-    throw new Error('prior failed-attempt patch exceeds the feedback cap');
+    throw new FailedAttemptFeedbackUnavailable(
+      'prior failed-attempt patch exceeds the feedback cap',
+    );
   return { patch, contents };
 }
 
@@ -1253,17 +1324,23 @@ async function failedAttemptContents(
         throw new Error(`cannot determine failed-attempt size for ${path}`);
       const size = Number(sizeText);
       if (!Number.isSafeInteger(size) || size > FAILED_ATTEMPT_SCAN_FILE_CAP_BYTES)
-        throw new Error(`failed-attempt file exceeds the scan cap: ${path}`);
+        throw new FailedAttemptFeedbackUnavailable(
+          `failed-attempt file exceeds the scan cap: ${path}`,
+        );
       totalBytes += size;
       if (totalBytes > FAILED_ATTEMPT_SCAN_TOTAL_CAP_BYTES)
-        throw new Error('failed-attempt contents exceed the total scan cap');
+        throw new FailedAttemptFeedbackUnavailable(
+          'failed-attempt contents exceed the total scan cap',
+        );
       const text = await git(['show', `${revision}:${path}`]);
       if (
         Buffer.byteLength(text, 'utf8') > FAILED_ATTEMPT_SCAN_FILE_CAP_BYTES ||
         text.includes('\0') ||
         text.includes('\uFFFD')
       )
-        throw new Error(`failed-attempt file is too large or not safely scannable text: ${path}`);
+        throw new FailedAttemptFeedbackUnavailable(
+          `failed-attempt file is too large or not safely scannable text: ${path}`,
+        );
       contents.push({ text, path });
     }
   }

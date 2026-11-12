@@ -420,6 +420,90 @@ describe('T13 attempt-journal', () => {
     } finally {
       await rm(cancelWriter.root, { recursive: true, force: true });
     }
+
+    // #1195: a driver that rejects WITH the usage its run already settled
+    // meters the thrown attempt row — tokens, usage channels and one request
+    // — through the same finally boundary as a completed run. The stop
+    // classification is untouched (still infrastructure/unclassified).
+    const spendWriter = await headeredWriter();
+    const spendInvocations: OpInvocation[] = [];
+    try {
+      const spendDriver: Driver = {
+        run: async () => {
+          throw Object.assign(new Error('provider transport reset mid-run'), {
+            usage: { input: 7, output: 3, cacheRead: 1, cacheWrite: 2, reasoning: 4 },
+          });
+        },
+      } as unknown as Driver;
+      const bindings = loopBindings(spendInvocations, {
+        observationWriter: spendWriter.writer,
+      }) as unknown as Record<string, unknown>;
+      bindings.driver = spendDriver;
+      const result = await runTaskLoop(
+        bindings as unknown as Parameters<typeof runTaskLoop>[0],
+        UNIT,
+        { path: '/tmp/unused', branch: 'run/x' } as never,
+        PROBE,
+        'run/x',
+        EFFECTS,
+      );
+      expect(result.status).toBe('ok');
+      const events = attemptEvents(spendWriter.writer);
+      expect(events).toHaveLength(1);
+      const event = events[0];
+      if (event === undefined) throw new Error('no spend event');
+      expect(event.payload.class).toBe('infrastructure');
+      expect(event.payload.stopReason).toContain('provider transport reset mid-run');
+      // 7 + 3 + 1 + 2 + 4 — the rejection's settled usage, exactly.
+      expect(event.payload.tokens).toBe(17);
+      expect(event.payload.usageChannels).toEqual({
+        input: 7,
+        output: 3,
+        cacheRead: 1,
+        cacheWrite: 2,
+        reasoning: 4,
+      });
+      expect(event.payload.requests).toBe(1);
+    } finally {
+      await rm(spendWriter.root, { recursive: true, force: true });
+    }
+
+    // #1195/#1189: a CORRUPT rejection usage (negative count) contributes
+    // nothing — the row records usage unknown (nulls) instead of a lying
+    // meter, and finishAttempt's strict schema never sees a negative value.
+    const corruptWriter = await headeredWriter();
+    const corruptInvocations: OpInvocation[] = [];
+    try {
+      const corruptDriver: Driver = {
+        run: async () => {
+          throw Object.assign(new Error('driver failed with a lying meter'), {
+            usage: { input: -5, output: 3, cacheRead: 1, cacheWrite: 1 },
+          });
+        },
+      } as unknown as Driver;
+      const bindings = loopBindings(corruptInvocations, {
+        observationWriter: corruptWriter.writer,
+      }) as unknown as Record<string, unknown>;
+      bindings.driver = corruptDriver;
+      const result = await runTaskLoop(
+        bindings as unknown as Parameters<typeof runTaskLoop>[0],
+        UNIT,
+        { path: '/tmp/unused', branch: 'run/x' } as never,
+        PROBE,
+        'run/x',
+        EFFECTS,
+      );
+      expect(result.status).toBe('ok');
+      const events = attemptEvents(corruptWriter.writer);
+      expect(events).toHaveLength(1);
+      const event = events[0];
+      if (event === undefined) throw new Error('no corrupt-usage event');
+      expect(event.payload.tokens).toBeNull();
+      expect(event.payload.usageChannels).toEqual({});
+      expect(event.payload.requests).toBeNull();
+    } finally {
+      await rm(corruptWriter.root, { recursive: true, force: true });
+    }
   });
 
   test('T13 budget: token cap after a complete result names the cap', async () => {

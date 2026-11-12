@@ -2,16 +2,17 @@ import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { expect, test, vi } from 'vitest';
 import { isolateAddressMany, makeReviewAddressMany } from '../../../src/ops/review/addressMany.js';
-import { fileWorktreeRegistry } from '../../../src/adapters/git/prWorktree.js';
+import { discoverWorktreeSlots } from '../../../src/adapters/git/slotWorktreeRegistry.js';
 
-import { NOW, checkoutSnapshot, fixture, identityRepo } from './addressManyWorktree.helpers.js';
+import { checkoutSnapshot, fixture, identityRepo } from './addressManyWorktree.helpers.js';
 
 test('a dirty stale PR refuses while its sibling resolves without changing caller or foreign worktrees', async () => {
   const f = await fixture();
   try {
     const stale = await f.resolve(f.prs[0]);
     await writeFile(join(stale.path, 'README.md'), 'unpublished PR 7 work\n');
-    const entriesBefore = await fileWorktreeRegistry(f.registryPath).load();
+    const common = f.repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim();
+    const entriesBefore = await discoverWorktreeSlots(common);
     // The PR advances after its first checkout; refreshing must preserve dirty work.
     f.repo.git('push', '-q', 'origin', `${f.prs[1].headRefOid}:refs/pull/7/head`);
     const foreign = join(f.root, 'foreign');
@@ -36,12 +37,12 @@ test('a dirty stale PR refuses while its sibling resolves without changing calle
     expect(f.repo.git('-C', sibling.value.path, 'rev-parse', 'HEAD').trim()).toBe(
       f.prs[1].headRefOid,
     );
-    const entries = await fileWorktreeRegistry(f.registryPath).load();
-    expect(entries['7']).toEqual(entriesBefore['7']);
-    expect(entries['9']).toEqual({
-      path: sibling.value.path,
-      branch: sibling.value.branch,
-      createdAt: NOW + 9,
+    const entries = await discoverWorktreeSlots(common);
+    expect(entries.get(7)).toEqual({ ...entriesBefore.get(7), incomplete: true });
+    expect(entries.get(9)).toMatchObject({
+      state: 'bound',
+      checkoutPath: sibling.value.path,
+      incomplete: false,
     });
     expect(f.repo.git('-C', stale.path, 'rev-parse', 'HEAD').trim()).toBe(f.prs[0].headRefOid);
     expect(await readFile(join(stale.path, 'README.md'), 'utf8')).toBe('unpublished PR 7 work\n');

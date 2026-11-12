@@ -78,12 +78,156 @@ class RepairDrainTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def test_concurrent_items_are_bounded_and_environment_isolated(self):
+        self.config['repair']['max_concurrent_items'] = 10
+        stats = self.root / 'workers.json'
+        atomic(stats, {'active': 0, 'peak': 0, 'finished': []})
+        def worker(config, item, jobs):
+            with service.correlation({'run': item, 'job': item}, False):
+                with service.cooldown_write():
+                    data = json.loads(stats.read_text())
+                    data['active'] += 1
+                    data['peak'] = max(data['peak'], data['active'])
+                    atomic(stats, data)
+                time.sleep(0.1)
+                with service.cooldown_write():
+                    data = json.loads(stats.read_text())
+                    data['active'] -= 1
+                    data['finished'].append([item, os.environ['CQ_RUN_ID']])
+                    atomic(stats, data)
+        names = [str(n) for n in range(14)]
+        with mock.patch.object(service, 'drain_item', side_effect=worker), mock.patch.object(service, 'blocked', return_value=False):
+            service.drain_items(self.config, {n: [] for n in names}, names)
+        data = json.loads(stats.read_text())
+        self.assertGreater(data['peak'], 1)
+        self.assertLessEqual(data['peak'], 10)
+        self.assertEqual(data['active'], 0)
+        self.assertEqual(sorted(data['finished']), sorted([[n, n] for n in names]))
+
+    def test_concurrent_pause_stops_admission_and_drains_paid_worker(self):
+        self.config['repair']['max_concurrent_items'] = 2
+        def worker(config, item, jobs):
+            if item == 'pause':
+                deadline = time.monotonic() + 2
+                while not (self.root / 'paid-started').exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                service.rate_limit_pause({}, item)
+                return 'rate-limit'
+            (self.root / 'paid-started').touch()
+            time.sleep(0.1)
+            (self.root / item).touch()
+        names = ['pause', 'paid', 'never']
+        with mock.patch.object(service, 'drain_item', side_effect=worker), mock.patch.object(service, 'blocked', return_value=False):
+            service.drain_items(self.config, {n: [] for n in names}, names)
+        self.assertTrue((self.root / 'paid').exists())
+        self.assertFalse((self.root / 'never').exists())
+        self.assertIsNotNone(service.paused())
+
+    def test_fork_failure_reaps_admitted_worker_before_returning(self):
+        self.config['repair']['max_concurrent_items'] = 2
+        fork = os.fork
+        calls = []
+        def launch():
+            calls.append(True)
+            if len(calls) == 2:
+                raise OSError('fixture fork failure')
+            return fork()
+        def worker(config, item, jobs):
+            time.sleep(0.1)
+            (self.root / 'finished').touch()
+        with mock.patch.object(service.os, 'fork', side_effect=launch), mock.patch.object(service, 'drain_item', side_effect=worker), mock.patch.object(service, 'blocked', return_value=False):
+            with self.assertRaisesRegex(OSError, 'fixture fork failure'):
+                service.drain_items(self.config, {'a': [], 'b': []}, ['a', 'b'])
+        self.assertTrue((self.root / 'finished').exists())
+
+    def test_worker_crash_stops_further_admission_and_reaps_other_worker(self):
+        self.config['repair']['max_concurrent_items'] = 2
+        def worker(config, item, jobs):
+            if item == 'crash':
+                deadline = time.monotonic() + 2
+                while not (self.root / 'paid-started').exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                os._exit(9)
+            (self.root / 'paid-started').touch()
+            time.sleep(0.1)
+            (self.root / item).touch()
+        names = ['crash', 'paid', 'never']
+        with mock.patch.object(service, 'drain_item', side_effect=worker), mock.patch.object(service, 'blocked', return_value=False):
+            service.drain_items(self.config, {n: [] for n in names}, names)
+        self.assertTrue((self.root / 'paid').exists())
+        self.assertFalse((self.root / 'never').exists())
+
+    def test_interrupt_drains_admitted_children_without_new_admission(self):
+        self.config['repair']['max_concurrent_items'] = 2
+        reap = service.reap_item
+        calls = []
+        def interrupted(active):
+            calls.append(True)
+            if len(calls) == 1:
+                raise KeyboardInterrupt()
+            return reap(active)
+        def worker(config, item, jobs):
+            time.sleep(0.1)
+            (self.root / item).touch()
+        names = ['a', 'b', 'never']
+        with mock.patch.object(service, 'reap_item', side_effect=interrupted), mock.patch.object(service, 'drain_item', side_effect=worker), mock.patch.object(service, 'blocked', return_value=False):
+            with self.assertRaises(KeyboardInterrupt):
+                service.drain_items(self.config, {n: [] for n in names}, names)
+        self.assertTrue((self.root / 'a').exists())
+        self.assertTrue((self.root / 'b').exists())
+        self.assertFalse((self.root / 'never').exists())
+
+    def test_fallback_observes_another_items_new_provider_cooldown(self):
+        self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
+        calls = []
+        def invoke(config, role, job, wt, directory, judge):
+            calls.append(role['model'])
+            # A different worker exhausts the fallback while this call is live.
+            service.remember_provider_limit('deepseek', {'retry_after_ms': 60000})
+            return {'stop': 'rate-limit', 'retry_after_ms': 60000}
+        with mock.patch.object(service, 'provider_ready', return_value=True), mock.patch.object(service, '_dispatch', side_effect=invoke):
+            report = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root / 'attempt')
+        self.assertEqual(calls, [ROLES['fixer']['model']])
+        self.assertEqual(report['stop'], 'rate-limit')
+
+    def test_reap_aggregates_success_and_crash_before_replacement(self):
+        active = {100: 'successful', 101: 'crashed'}
+        with mock.patch.object(service.os, 'waitpid', side_effect=[(100, 0), (101, 9)]):
+            self.assertTrue(service.reap_item(active))
+        self.assertEqual(active, {})
+
+    def test_admission_checks_exited_workers_even_below_capacity(self):
+        self.config['repair']['max_concurrent_items'] = 10
+        with mock.patch.object(service.os, 'fork', return_value=100) as fork, mock.patch.object(service.os, 'waitpid', return_value=(100, 9)), mock.patch.object(service, 'blocked', return_value=False):
+            with mock.patch.object(service, 'drain_item') as work:
+                service.drain_items(self.config, {'a': [], 'b': []}, ['a', 'b'])
+        work.assert_not_called()
+        self.assertEqual(fork.call_count, 1)
+
+    def test_concurrency_config_refuses_invalid_limits(self):
+        for limit in (True, 0, 11, 2.5, '10', None):
+            self.config['repair']['max_concurrent_items'] = limit
+            with self.assertRaisesRegex(ValueError, 'max_concurrent_items'):
+                service.drain_items(self.config, {}, [])
+
+    def test_concurrent_provider_updates_do_not_lose_other_provider(self):
+        pids = []
+        for provider in ('zai', 'deepseek'):
+            pid = os.fork()
+            if pid == 0:
+                service.remember_provider_limit(provider, {'retry_after_ms': 60000})
+                os._exit(0)
+            pids.append(pid)
+        for pid in pids:
+            self.assertEqual(os.waitpid(pid, 0)[1], 0)
+        self.assertEqual(set(service.provider_cooldowns()), {'zai', 'deepseek'})
+
     def test_harvest_writeback_maps_nonfixed_outcomes(self):
-        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: 'now')
+        c = SimpleNamespace(STATE=self.root / 'state', CONFIG=self.config, iso=lambda: 'now')
         job = {'job': 'job', 'canonical_finding_id': 'finding'}
         with mock.patch('backfill_runtime.settings', return_value={'durable_artifact_root': str(self.root / 'artifacts')}), mock.patch('finding_delivery.Inbox') as inbox:
             for verdict, judge, expected in [('STALE', None, 'needs-retriage'),
-                    ('FAILED', None, 'needs-human'), ('NOT-FIXED', {'verdict': 'invalid'}, 'dismissed'),
+                    ('FAILED', None, 'needs-retriage'), ('NOT-FIXED', {'verdict': 'invalid'}, 'needs-retriage'),
                     ('FIXED', None, 'fixed')]:
                 repair_tick.mark_finding_outcome(c, job, {'verdict': verdict, 'judge': judge, 'reason': 'evidence'},
                                                 self.tip if verdict == 'FIXED' else None)
@@ -91,6 +235,87 @@ class RepairDrainTest(unittest.TestCase):
             inbox.reset_mock()
             repair_tick.mark_finding_outcome(c, job, {'verdict': 'FIXED'})
             inbox.assert_not_called()
+
+    def test_legacy_fixed_evidence_journal_replay_and_staleness(self):
+        job_id = 'crq-run1-F2'
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        publication = {'head': self.pin, 'commits': [self.pin], 'branch': 'fix',
+                       'target': self.pin, 'open_pr': False}
+        record.update(state='published', jobs=[job_id], publication=copy.deepcopy(publication),
+                      fix_pr={'number': 99}, verdicts=[{'job': job_id, 'verdict': 'FIXED', 'reason': 'fixed'}])
+        journal = self.root / 'state/repair' / job_id / 'publication.json'
+        atomic(journal, publication)
+        info = {'number': 99, 'state': 'MERGED', 'headRefOid': self.tip, 'mergeCommit': {'oid': self.tip}}
+        c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', iso=lambda: 'now',
+                            git=self.git, pr_info=mock.Mock(return_value=info),
+                            ensure_commit=mock.Mock(return_value=True),
+                            is_ancestor=lambda a, b: subprocess.run(['git', '-C', str(self.clone),
+                                'merge-base', '--is-ancestor', a, b]).returncode == 0,
+                            save_queue=mock.Mock())
+        job = json.loads(bounded.job_path(self.root, job_id).read_text())
+        paths = ['src/kept.ts', 'src/moved.ts']
+        sources = {p: {'published': repair_tick.repair_source_entry(c, self.pin, p),
+                       'actual': repair_tick.repair_source_entry(c, self.tip, p),
+                       'current': repair_tick.repair_source_entry(c, self.tip, p)} for p in paths}
+        evidence = json.loads(json.dumps({'job': job_id, 'item': item['id'], 'run': 'run1',
+            'finding_sha256': bounded.identity(job['finding']), 'pr': 99, 'published_head': self.pin,
+            'actual_head': self.tip, 'merge_commit': self.tip, 'source_sha': self.tip, 'sources': sources,
+            'verdict': 'fixed', 'reviewer': 'reviewer', 'reason': 'verified corrected source'}))
+        for key in ('job', 'item', 'run', 'finding_sha256', 'pr', 'published_head', 'actual_head',
+                    'merge_commit', 'source_sha', 'sources', 'verdict', 'reviewer', 'reason'):
+            bad = copy.deepcopy(evidence)
+            bad[key] = None
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, bad)
+        with self.assertRaisesRegex(ValueError, 'source changed'):
+            repair_tick.merge_head_evidence(c, record, self.tip)
+        c.ensure_commit.return_value = False
+        with self.assertRaisesRegex(ValueError, 'head unavailable'):
+            repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, evidence)
+        c.ensure_commit.return_value = True
+        repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, evidence)
+        old_publication = copy.deepcopy(record['publication'])
+        replacement = {**evidence, 'reason': 'reviewed replacement'}
+        c.save_queue.side_effect = OSError('crash before queue save')
+        with self.assertRaisesRegex(OSError, 'crash'):
+            repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, replacement)
+        c.save_queue.side_effect = None
+        record['publication'] = copy.deepcopy(old_publication)  # restart from old persisted queue
+        saved = json.loads(journal.read_text())
+        stale = {**replacement, 'source_sha': self.pin}
+        atomic(journal, {**saved, 'fixed_revalidation': stale})
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
+             mock.patch.object(repair_tick, 'publish_source_resolution') as publish:
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            mark.assert_not_called()
+            publish.assert_not_called()
+            self.assertIn('binding changed', record['source_publication_error'])
+        atomic(journal, saved)
+        evidence = replacement
+        changed_info = {**info, 'headRefOid': self.pin}
+        c.pr_info.return_value = changed_info
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
+             mock.patch.object(repair_tick, 'publish_source_resolution') as publish:
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            mark.assert_not_called()
+            publish.assert_not_called()
+            self.assertNotIn('fix_merged', record)
+        c.pr_info.return_value = info
+        record['publication']['source_resolutions'] = ['unexpected']
+        with self.assertRaisesRegex(ValueError, 'resolutions contradict'):
+            repair_tick.publication_journal(c, record)
+        record['publication'] = copy.deepcopy(old_publication)  # restart from old persisted queue
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
+             mock.patch.object(repair_tick, 'publish_source_resolution', side_effect=[RuntimeError('offline'), None]) as publish:
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            self.assertNotIn('fix_merged', record)
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            self.assertEqual(publish.call_count, 2)
+            self.assertEqual(record['fix_merged'], 'now')
+            self.assertEqual(mark.call_count, 2)
+        self.assertEqual(json.loads(journal.read_text())['fixed_revalidation'], evidence)
 
     def test_merge_reconciliation_marks_threadless_ledger_only_after_merge(self):
         job_id = 'crq-run1-F1'
@@ -509,6 +734,25 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(len(second), 1)
         self.assertIn('+second staged partial', (second[0].parent / 'staged.patch').read_text())
 
+    def test_explicit_fixer_owner_decision_is_preserved(self):
+        job = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')[1]
+        wt = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
+        report = {'stop': 'error', 'worker_disposition': 'needs_human',
+                  'summary': 'A disruptive architecture choice is required'}
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', return_value=report):
+            result = service.process(self.config, job, wt)
+        self.assertEqual(result['failure_class'], 'owner-decision')
+        self.assertEqual(result['verdict'], 'FAILED')
+        self.assertNotIn('dispatch_pending', result)
+
+    def test_stops_are_classified_without_inference_from_protected_path(self):
+        job = {'repair_base': self.tip, 'finding': {'path': 'policy/protected-paths.json'}}
+        for stop in ('rate-limit', 'configuration'):
+            self.assertEqual(service.failure_class_for_stop(self.config, job, {'stop': stop}), 'transient')
+        for stop in ('error', 'budget'):
+            self.assertEqual(service.failure_class_for_stop(self.config, job, {'stop': stop}), 'exhausted')
+
     def test_failed_retention_never_resets_the_worktree(self):
         job = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')[1]
         wt = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
@@ -586,6 +830,69 @@ class RepairDrainTest(unittest.TestCase):
         self.assertTrue(wt.exists())
         repair_tick.harvest(c, self.queue, item)
         self.assertFalse(wt.exists())
+
+    def test_unchanged_contract_verifies_and_preserves_source_evidence(self):
+        (self.clone / 'src/kept.ts').write_text('\n  one\n\n')
+        self.git('commit', '-qam', 'leading blank lines')
+        self.pin = self.git('rev-parse', 'HEAD')
+        self.git('push', '-q', 'origin', self.pin + ':refs/heads/main')
+        self.git('fetch', '-q', 'origin')
+        self.queue['items'][0]['repair_runs']['run1']['base'] = self.pin
+        job_id = 'crq-run1-F1'
+        self.job(job_id, 'pr1-merged', 'run1', 'src/kept.ts')
+        job = bounded.drain_job(self.root, self.config, self.queue, job_id)[1]
+        wt = self.worktree('crq-repair-pr1-merged-' + job_id)
+        report = {'stop': 'ok', 'changed': False, 'disposition': 'unchanged_with_reason',
+                  'summary': 'No defect in pinned code', 'evidence': [{'path': 'src/kept.ts', 'line': 2}]}
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', return_value=report) as dispatch:
+            result = service.process(self.config, job, wt)
+        self.assertEqual(result['verdict'], 'NOT-FIXED')
+        self.assertEqual(result['unchanged_evidence'][0]['target'], self.pin)
+        self.assertEqual(result['unchanged_evidence'][0]['quoted_text'], '  one')
+        dispatch.assert_called_once()
+
+    def test_unchanged_critical_keeps_required_judge_and_unresolved_defect(self):
+        job_id = 'crq-run1-F1'
+        self.job(job_id, 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')
+        job = bounded.drain_job(self.root, self.config, self.queue, job_id)[1]
+        wt = self.worktree('crq-repair-pr1-merged-' + job_id)
+        report = {'stop': 'ok', 'changed': False, 'disposition': 'unchanged_with_reason',
+                  'summary': 'No defect', 'evidence': [{'path': 'src/kept.ts', 'line': 1}]}
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', side_effect=[report,
+                 {'stop': 'ok', 'verdict': 'valid', 'reason': 'still a defect'}, report]) as dispatch:
+            result = service.process(self.config, job, wt)
+        self.assertEqual(result['verdict'], 'FAILED')
+        self.assertEqual(dispatch.call_count, 3)
+        self.assertTrue(dispatch.call_args_list[1].kwargs['judge'])
+
+    def test_evidence_short_judge_rationale_reaches_a2(self):
+        job_id = 'crq-run1-F1'
+        self.job(job_id, 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')
+        job = bounded.drain_job(self.root, self.config, self.queue, job_id)[1]
+        wt = self.worktree('crq-repair-pr1-merged-' + job_id)
+        report = {'stop': 'ok', 'changed': False, 'disposition': 'unchanged_with_reason',
+                  'summary': 'No defect', 'evidence': [{'path': 'src/kept.ts', 'line': 1}]}
+        reason = 'missing source evidence for the consumer'
+        observed = []
+        def dispatch(*args, **kwargs):
+            observed.append(args[2]['mechanical_evidence'])
+            return {'stop': 'ok', 'verdict': 'unsure', 'reason': reason} if kwargs.get('judge') else report
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', side_effect=dispatch):
+            service.process(self.config, job, wt)
+        self.assertEqual(observed, ['', '', reason])
+
+    def test_unchanged_evidence_projects_to_dismissed(self):
+        c = SimpleNamespace(CONFIG=self.config, iso=lambda: 'now')
+        evidence = [{'path': 'src/kept.ts', 'line': 1, 'target': self.pin, 'quoted_text': 'one'}]
+        with mock.patch.object(repair_tick, 'finding_inbox') as inbox:
+            repair_tick.mark_finding_outcome(c, {'job': 'j', 'canonical_finding_id': 'f'},
+                {'verdict': 'NOT-FIXED', 'reason': 'No defect', 'unchanged_evidence': evidence})
+        call = inbox.return_value.repair_outcome.call_args
+        self.assertEqual(call.args[2], 'dismissed')
+        self.assertEqual(call.kwargs['source_evidence'], evidence)
 
     def test_process_captures_terminal_tree_for_later_harvest_cleanup(self):
         item = self.queue['items'][0]
@@ -781,6 +1088,82 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual((status, reason), ('stale', 'reviewed PR head is already on the default branch'))
         self.assertEqual(bounded.drain_job(self.root, self.config, self.queue, 'crq-run3-F1')[0], 'skip')
         self.assertEqual(bounded.drain_job(self.root, self.config, {'items': []}, 'crq-run1-F1')[0], 'skip')
+
+    def test_only_canonical_minors_are_drainable(self):
+        path = bounded.job_path(self.root, 'crq-run1-F1')
+        job = json.loads(path.read_text())
+        atomic(self.root / 'state/backfill/findings/triage' / ('d' * 64 + '.json'),
+               {'status': 'delivered', 'receipt': {'repair_task': job['job']}})
+        for severity, canonical, expected in (
+                ('minor', None, 'skip'), ('minor', '', 'skip'),
+                ('minor', '  ', 'skip'), ('minor', 123, 'skip'),
+                ('minor', 'canonical-1', 'skip'), ('minor', 'd' * 64, 'run'), ('info', 'd' * 64, 'skip')):
+            with self.subTest(severity=severity, canonical=canonical):
+                job['finding']['severity'] = severity
+                job['canonical_finding_id'] = canonical
+                atomic(path, job)
+                self.assertEqual(bounded.drain_job(
+                    self.root, self.config, self.queue, job['job'])[0], expected)
+        job['finding']['severity'] = 'minor'
+        job['canonical_finding_id'] = 'd' * 64
+        job['finding']['path'] = 'src/moved.ts'
+        atomic(path, job)
+        self.assertEqual(bounded.drain_job(
+            self.root, self.config, self.queue, job['job'])[0], 'stale')
+
+    def test_drain_prioritizes_major_items_over_older_canonical_minors(self):
+        job_id = 'crq-backfill-minor'
+        item_id = 'backfill-finding-minor'
+        self.queue['items'].append(self.item(item_id, 'backfill-minor', [job_id], False))
+        self.job(job_id, item_id, 'backfill-minor', 'src/kept.ts', severity='minor')
+        path = bounded.job_path(self.root, job_id)
+        job = json.loads(path.read_text())
+        job['canonical_finding_id'] = 'd' * 64
+        atomic(self.root / 'state/backfill/findings/triage' / ('d' * 64 + '.json'),
+               {'status': 'delivered', 'receipt': {'repair_task': job_id}})
+        atomic(path, job)
+        atomic(self.root / 'state/queue.json', self.queue)
+        with mock.patch.object(service, 'drain_order', return_value=[job_id, 'crq-run1-F1']), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'process_item') as process_item:
+            service.drain(self.config)
+        self.assertEqual([call.args[1][0]['job'] for call in process_item.call_args_list],
+                         ['crq-run1-F1', job_id])
+        jobs = [job, {'job': 'crq-run1-F1', 'run': 'run1', 'finding': {'severity': 'major'}},
+                {'job': 'crq-run2-F1', 'run': 'run2', 'finding': {'severity': 'critical'}}]
+        self.assertEqual([j['job'] for j in sorted(jobs, key=service.finding_order)],
+                         ['crq-run1-F1', 'crq-run2-F1', job_id])
+        same_class = [{'job': 'crq-z-F2', 'run': 'z', 'finding': {'severity': 'major'}},
+                      {'job': 'crq-a-F2', 'run': 'a', 'finding': {'severity': 'critical'}},
+                      {'job': 'crq-a-F1', 'run': 'a', 'finding': {'severity': 'major'}}]
+        self.assertEqual([j['job'] for j in sorted(same_class, key=service.finding_order)],
+                         ['crq-a-F1', 'crq-a-F2', 'crq-z-F2'])
+
+    def test_priority_uses_eligible_jobs_and_preserves_item_order(self):
+        specs = [('minor-a', 'minor'), ('major-a', 'major'),
+                 ('minor-b', 'minor'), ('major-b', 'critical')]
+        for name, severity in specs:
+            job_id, item_id = 'crq-' + name, 'item-' + name
+            self.queue['items'].append(self.item(item_id, name, [job_id], False))
+            self.job(job_id, item_id, name, 'src/kept.ts', severity=severity)
+            if severity == 'minor':
+                path = bounded.job_path(self.root, job_id)
+                job = json.loads(path.read_text())
+                fid = ('a' if name == 'minor-a' else 'b') * 64
+                job['canonical_finding_id'] = fid
+                atomic(path, job)
+                atomic(self.root / 'state/backfill/findings/triage' / (fid + '.json'),
+                       {'status': 'delivered', 'receipt': {'repair_task': job_id}})
+        # This older major belongs to the minor item but is not queued.
+        self.job('crq-ineligible', 'item-minor-a', 'minor-a', 'src/kept.ts')
+        atomic(self.root / 'state/queue.json', self.queue)
+        order = ['crq-ineligible', 'crq-minor-a', 'crq-major-a', 'crq-minor-b', 'crq-major-b']
+        with mock.patch.object(service, 'drain_order', return_value=order), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'process_item') as process_item:
+            service.drain(self.config)
+        self.assertEqual([call.args[1][0]['job'] for call in process_item.call_args_list],
+                         ['crq-major-a', 'crq-major-b', 'crq-minor-a', 'crq-minor-b'])
 
     def test_started_job_resumes_even_if_now_superseded(self):
         atomic(self.root / 'state/repair/crq-run1-F2/progress.json', {'attempts': []})
@@ -1068,7 +1451,9 @@ class RepairDrainTest(unittest.TestCase):
         self.config.update(repo='example/repo')
         self.config['repair']['cq_bin'] = '/unused/cli.js'
         job = {'job': 'crq-run1-F1', 'finding': {'path': 'src/kept.ts', 'line': 1, 'body': 'x'},
-               'source_snapshot': {}}
+               'source_snapshot': {'source_sha': 'a' * 40, 'source_blob_sha': 'b' * 40,
+                                   'finding_sha256': 'c' * 64, 'path': 'src/kept.ts',
+                                   'line_start': 1, 'line_end': 1, 'source': '1: x', 'incomplete': False}}
         with mock.patch.object(service.cq, 'command',
                                return_value=SimpleNamespace(returncode=1, stdout=out, stderr='')):
             report = service.cq.invoke(self.config, ROLES['fixer'], job, self.root, self.root)
@@ -1249,6 +1634,7 @@ class RepairDrainTest(unittest.TestCase):
     def test_committed_config_enables_cq_with_provider_fallback(self):
         repair = json.loads((ROOT / 'config.json').read_text())['repair']
         self.assertIs(repair['enabled'], True)
+        self.assertEqual(repair['max_concurrent_items'], 1)
         self.assertIsInstance(repair['spend_authorization'], str)
         self.assertIn('2026-11-08', repair['spend_authorization'])
         self.assertEqual(repair['fallback_models'], ['opencode-go/deepseek-v4.1-flash', 'deepseek/deepseek-flash'])
@@ -1288,7 +1674,7 @@ class CanonicalFixedProjectionTest(unittest.TestCase):
         confirmed = self.inbox.triage(self.fid, self.f.repo, self.published,
                                       'confirmed', 'fixture', 'valid source', self.at)
         self.queue = {'items': []}
-        transport = finding_delivery.repair_transport(self.root, self.queue, lambda _: None, lambda *_: True)
+        transport = finding_delivery.repair_transport(self.root, self.queue, lambda _: None, lambda *_: True, scan_finding=lambda *_: True)
         receipt = self.inbox.deliver(self.fid, transport, self.at)
         self.job_id = receipt['repair_task']
         self.record = next(iter(self.queue['items'][0]['repair_runs'].values()))

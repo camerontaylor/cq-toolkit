@@ -1,10 +1,13 @@
 // C3a: the CLI reads the CQ_* environment once, before dispatch. Errors list
 // together and exit 2; warnings print once on stderr; --json keeps stdout one
 // JSON artifact.
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { readCqEnv } from '../../src/config/env.js';
 import { resolveSandboxConfig } from '../../src/sandbox/config.js';
-import { capture, opsRoot } from './i1-helpers.js';
+import { capture, makeTmpDir, opsRoot } from './i1-helpers.js';
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -59,6 +62,55 @@ describe('cq config --json exit codes', () => {
     const clean = await capture(['config', '--json', '--strict']);
     expect(clean.code).toBe(0);
     expect(() => asJson(clean.out)).not.toThrow();
+  });
+});
+
+describe('cq config entry snapshot', () => {
+  const showTs = fileURLToPath(new URL('../../src/ops/config/show.ts', import.meta.url));
+
+  /** A fixture `config` family that mutates the ambient env before the real op loads. */
+  async function writeConfigFixture(): Promise<string> {
+    const tmp = await makeTmpDir('cq-config-entry-');
+    await writeFile(join(tmp, 'package.json'), '{"type":"module"}\n');
+    await mkdir(join(tmp, 'config'), { recursive: true });
+    await writeFile(
+      join(tmp, 'config', 'registry.js'),
+      [
+        'const { makeConfigShow } = await import(' + JSON.stringify(showTs) + ');',
+        'const schema = {',
+        '  parse: (value) => value,',
+        '  safeParseAsync: async (value) => ({ success: true, data: value }),',
+        '  parseAsync: async (value) => value,',
+        '};',
+        'export const registry = [',
+        '  {',
+        "    name: 'config',",
+        '    inputSchema: schema,',
+        '    importer: async (wiring) => {',
+        "      process.env.CQ_SANDBOX = 'required'; // ambient drift AFTER entry",
+        '      return makeConfigShow(wiring?.cqEnv);',
+        '    },',
+        '  },',
+        '];',
+        '',
+      ].join('\n'),
+    );
+    return tmp;
+  }
+
+  test('reports the entry value when the ambient env changes before the op loads', async () => {
+    vi.stubEnv('CQ_SANDBOX', 'off');
+    const run = await capture(['config', '--json'], { opsRoot: await writeConfigFixture() });
+    expect(run.code).toBe(0);
+    const report = JSON.parse(run.out) as {
+      value: { keys: Array<{ name: string; value: unknown; source: string }> };
+    };
+    expect(report.value.keys.find((key) => key.name === 'CQ_SANDBOX')).toMatchObject({
+      value: 'off',
+      source: 'env',
+    });
+    // Control: the fixture really did mutate the ambient environment after entry.
+    expect(process.env['CQ_SANDBOX']).toBe('required');
   });
 });
 

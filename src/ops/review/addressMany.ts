@@ -1,7 +1,11 @@
+import {
+  isAddressCheckoutIncomplete,
+  withAddressManyCheckout,
+} from './internal/addressCheckoutOwnership.js';
 import { checkoutWriterContext } from '../../shared/checkoutWriterContext.js';
 import { checkoutWriterCommand } from '../../shared/checkoutWriterCommand.js';
 import { z } from 'zod';
-import { mkdtemp, symlink, access, readFile, mkdir, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, symlink, access, readFile, mkdir, rm, realpath, lstat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { makeQueueOps } from './queue.js';
@@ -78,7 +82,7 @@ class IsolationRefusal extends Error {}
 export async function isolateAddressMany(
   repoRoot: string,
   number: number,
-  options: { cloneRoot: string; target?: string },
+  options: { cloneRoot: string; target?: string; onPartial?: (path: string) => void },
 ): Promise<string> {
   const git = checkoutWriterContext() ? checkoutWriterCommand : promisify(execFile);
   // Inspect key names only: helpers, HTTP headers and signing values may contain credentials.
@@ -123,6 +127,7 @@ export async function isolateAddressMany(
   await mkdir(options.cloneRoot, { recursive: true });
   const parent = await mkdtemp(resolve(options.cloneRoot, `pr-${number}-`));
   const root = resolve(parent, 'repo');
+  options.onPartial?.(root);
   try {
     const origin = await git('git', ['-C', repoRoot, 'remote', 'get-url', 'origin']);
     await git('git', ['clone', '--no-hardlinks', '--', repoRoot, root]);
@@ -185,6 +190,7 @@ export function makeReviewAddressMany(
     address?: (input: ReviewAddressInput) => Promise<ReviewAddressResult>;
     /** Driver factory for the default address; carries the alias sink wiring. */
     drivers?: DriverFactory;
+    managedSubmit?: import('../dev/managedReview.js').ManagedReviewSubmit;
   } = {},
 ) {
   return async (input: ReviewAddressManyInput): Promise<ReviewAddressManyResult> => {
@@ -225,6 +231,7 @@ function makeReviewAddressManyCore(
     address?: (input: ReviewAddressInput) => Promise<ReviewAddressResult>;
     /** Driver factory for the default address; carries the alias sink wiring. */
     drivers?: DriverFactory;
+    managedSubmit?: import('../dev/managedReview.js').ManagedReviewSubmit;
   } = {},
   record: (id: string, observation: UsageObservation) => void = () => {},
 ) {
@@ -364,6 +371,7 @@ function makeReviewAddressManyCore(
         address = makeReviewAddress({
           config,
           coordinationRoot,
+          ...(deps.managedSubmit ? { managedSubmit: deps.managedSubmit } : {}),
           ...(deps.drivers === undefined ? {} : { drivers: deps.drivers }),
         });
       }
@@ -372,6 +380,10 @@ function makeReviewAddressManyCore(
       const pending = [...selection.candidates];
       const faults: string[] = [];
       const preservedClones: Array<{ number: number; path: string }> = [];
+      const forgetPreservedClone = (path: string) => {
+        const index = preservedClones.findIndex((entry) => entry.path === path);
+        if (index >= 0) preservedClones.splice(index, 1);
+      };
       const requestedEnrollment = (number: number): AddressManyEnrollment =>
         input.enrollments?.some((r) => r.number === number)
           ? { state: 'unavailable', reason: 'Requested but leg not dispatched' }
@@ -401,215 +413,310 @@ function makeReviewAddressManyCore(
             continue;
           }
           budget = admission.state;
-          let result: ReviewAddressResult | undefined;
-          let dispatched = false;
-          let enrollment: AddressManyEnrollment = requestedEnrollment(candidate.number);
-          let isolatedRoot: string | undefined;
+          let enteredCheckout = false;
           try {
-            const request = input.enrollments?.find(
-              (row) => row.number === candidate.number,
-            )?.request;
-            if (request) {
-              try {
-                if (request.action && request.action !== 'enqueue')
-                  throw new Error('Enrollment requires enqueue action');
-                if (
-                  request.binding.kind !== 'deferred-author' ||
-                  request.binding.repo.toLowerCase() !== input.repo.toLowerCase() ||
-                  request.binding.head !== candidate.headOid
-                )
-                  throw new Error('Enrollment binding does not match admitted PR head');
-                const queued = await (deps.enqueue ?? makeQueueOps().enqueue)(request);
-                enrollment =
-                  queued.status === 'ok' &&
-                  queued.value.state !== 'unsupported' &&
-                  queued.value.enqueued === true
-                    ? { state: 'enrolled' }
-                    : { state: 'unavailable', reason: JSON.stringify(queued) };
-              } catch (error) {
-                enrollment = { state: 'unavailable', reason: String(error) };
-              }
-            }
-            const root = deps.isolate
-              ? await deps.isolate(input.repoRoot, candidate.number, {
-                  cloneRoot,
-                  target: baseRefName,
-                })
-              : await isolateAddressMany(input.repoRoot, candidate.number, {
-                  cloneRoot,
-                  target: baseRefName,
-                });
-            isolatedRoot = root;
-            preservedClones.push({ number: candidate.number, path: root });
-            if (!deps.isolate) {
-              const checked = await makeGhRunner({
-                cwd: root,
-                unsetEnv: ['GH_REPO'],
-                timeoutMs: 30_000,
-              })(['repo', 'view', '--json', 'nameWithOwner']);
-              if (
-                checked.code !== 0 ||
-                RepositoryMetadata.parse(
-                  JSON.parse(checked.stdout) as unknown,
-                ).nameWithOwner.toLowerCase() !== input.repo.toLowerCase()
-              )
-                throw new Error('Isolated repository does not match requested repo');
-            }
-            const current = await facts(candidate.number);
-            const revalidated = selectAddressMany(
-              { repo: input.repo, complete: true, pulls: [current] },
-              { repo: input.repo, owner: input.owner },
-            );
-            if (
-              !revalidated.ok ||
-              !revalidated.candidates.length ||
-              current.headOid !== candidate.headOid ||
-              current.headRepository !== candidate.headRepository ||
-              current.headRefName !== candidate.headRefName ||
-              current.baseRefName !== baseRefName
-            ) {
-              result = {
-                status: 'needs-human',
-                reason: 'PR eligibility, head or base changed before dispatch',
-              };
-            } else {
-              dispatched = true;
-              result = await address({
-                repoRoot: root,
-                source: `pr:${candidate.number}`,
-                target: baseRefName,
-                ...(input.dependencyRoots?.[String(candidate.number)] === undefined
-                  ? {}
-                  : {
-                      dependencyRoot: resolve(
-                        input.repoRoot,
-                        input.dependencyRoots[String(candidate.number)]!,
+            await withAddressManyCheckout(
+              { commonDir: coordinationRoot, pr: candidate.number },
+              async (lifetime) => {
+                enteredCheckout = true;
+                let result: ReviewAddressResult | undefined;
+                let dispatched = false;
+                let enrollment: AddressManyEnrollment = requestedEnrollment(candidate.number);
+                let isolatedRoot: string | undefined;
+                try {
+                  const root = deps.isolate
+                    ? await deps.isolate(input.repoRoot, candidate.number, {
+                        cloneRoot,
+                        target: baseRefName,
+                      })
+                    : await isolateAddressMany(input.repoRoot, candidate.number, {
+                        cloneRoot,
+                        target: baseRefName,
+                        onPartial: (path) => {
+                          isolatedRoot = path;
+                          preservedClones.push({ number: candidate.number, path });
+                        },
+                      });
+                  isolatedRoot = root;
+                  if (!preservedClones.some((entry) => entry.path === root))
+                    preservedClones.push({ number: candidate.number, path: root });
+                  if (!deps.isolate) {
+                    const checked = await makeGhRunner({
+                      cwd: root,
+                      unsetEnv: ['GH_REPO'],
+                      timeoutMs: 30_000,
+                    })(['repo', 'view', '--json', 'nameWithOwner']);
+                    if (
+                      checked.code !== 0 ||
+                      RepositoryMetadata.parse(
+                        JSON.parse(checked.stdout) as unknown,
+                      ).nameWithOwner.toLowerCase() !== input.repo.toLowerCase()
+                    )
+                      throw new Error('Isolated repository does not match requested repo');
+                  }
+                  const current = await facts(candidate.number);
+                  const revalidated = selectAddressMany(
+                    { repo: input.repo, complete: true, pulls: [current] },
+                    { repo: input.repo, owner: input.owner },
+                  );
+                  if (
+                    !revalidated.ok ||
+                    !revalidated.candidates.length ||
+                    current.headOid !== candidate.headOid ||
+                    current.headRepository !== candidate.headRepository ||
+                    current.headRefName !== candidate.headRefName ||
+                    current.baseRefName !== baseRefName
+                  ) {
+                    result = {
+                      status: 'needs-human',
+                      reason: 'PR eligibility, head or base changed before dispatch',
+                    };
+                  } else {
+                    const request = input.enrollments?.find(
+                      (row) => row.number === candidate.number,
+                    )?.request;
+                    if (request) {
+                      try {
+                        if (request.action && request.action !== 'enqueue')
+                          throw new Error('Enrollment requires enqueue action');
+                        if (
+                          request.binding.kind !== 'deferred-author' ||
+                          request.binding.repo.toLowerCase() !== input.repo.toLowerCase() ||
+                          request.binding.head !== candidate.headOid
+                        )
+                          throw new Error('Enrollment binding does not match admitted PR head');
+                        const queued = await (deps.enqueue ?? makeQueueOps().enqueue)(request);
+                        enrollment =
+                          queued.status === 'ok' &&
+                          queued.value.state !== 'unsupported' &&
+                          queued.value.enqueued === true
+                            ? { state: 'enrolled' }
+                            : { state: 'unavailable', reason: JSON.stringify(queued) };
+                      } catch (error) {
+                        enrollment = { state: 'unavailable', reason: String(error) };
+                      }
+                    }
+                    dispatched = true;
+                    result = await address({
+                      repoRoot: root,
+                      source: `pr:${candidate.number}`,
+                      target: baseRefName,
+                      ...(input.dependencyRoots?.[String(candidate.number)] === undefined
+                        ? {}
+                        : {
+                            dependencyRoot: resolve(
+                              input.repoRoot,
+                              input.dependencyRoots[String(candidate.number)]!,
+                            ),
+                          }),
+                      expectedHead: candidate.headOid,
+                      maxTokens: input.tokensPerPr,
+                      ...(input.rounds === undefined ? {} : { rounds: input.rounds }),
+                      ...(input.wallMs === undefined ? {} : { wallMs: input.wallMs }),
+                      ...(input.push === undefined ? {} : { push: input.push }),
+                      journalDir: resolve(
+                        coordinationRoot,
+                        'cq-address-many-reports',
+                        basename(dirname(root)),
+                        String(candidate.number),
                       ),
-                    }),
-                expectedHead: candidate.headOid,
-                maxTokens: input.tokensPerPr,
-                ...(input.rounds === undefined ? {} : { rounds: input.rounds }),
-                ...(input.wallMs === undefined ? {} : { wallMs: input.wallMs }),
-                ...(input.push === undefined ? {} : { push: input.push }),
-                journalDir: resolve(
-                  coordinationRoot,
-                  'cq-address-many-reports',
-                  basename(dirname(root)),
-                  String(candidate.number),
-                ),
-              });
-            }
-            outcomes.push({
-              number: candidate.number,
-              headOid: candidate.headOid,
-              result,
-              enrollment,
-            });
-          } catch (error) {
-            if (error instanceof IsolationRefusal)
-              result = { status: 'needs-human', reason: error.message };
-            outcomes.push({
-              number: candidate.number,
-              headOid: candidate.headOid,
-              ...(result ? { result } : { exception: String(error) }),
-              enrollment,
-            });
-          }
-          const report = result?.status === 'ok' ? result.value : result?.report;
-          const usage = report?.usage;
-          // A measurement only counts as KNOWN when it survives normalization;
-          // a malformed one (negative or non-integer tokens) is unmeasurable
-          // telemetry, so the leg settles through the SAME unknown-usage path
-          // as a dispatched leg without a measurement. The held reservation
-          // settles as unresolved and is retained in outstanding at its full
-          // allocation (never released, never refunded), the sticky
-          // unknown-usage stop is set, and the raw value can never leak into
-          // the ledger as a token total.
-          const observation = usage
-            ? normalizeUsageObservation({
-                usage,
-                ...(report?.costUSD === undefined ? {} : { costUSD: report.costUSD }),
-              })
-            : undefined;
-          const known = observation?.usage !== undefined && usage !== undefined;
-          // Exit spend is recorded EXACTLY ONCE per admitted leg, at its
-          // settlement point: the normalized observation when the settled
-          // report carried a valid measurement, an explicit unknown observation
-          // otherwise. A leg that settled without dispatching is also unknown:
-          // it is not an invocation, so counting it as measured zero would
-          // inflate knownCount. Not-admitted legs are never recorded, so a
-          // refusal cannot invent spend. A telemetry failure degrades to
-          // unknown and never replaces the leg's settlement.
-          try {
-            record(identity.id, observation ?? {});
-          } catch {
-            try {
-              record(identity.id, {});
-            } catch {
-              // The dispatch was already recorded; retain the first observation.
-            }
-          }
-          // A thrown settlement (ledger arithmetic leaving the safe range) is
-          // folded into the same unknown-usage settlement path: the held
-          // reservation settles as unresolved and is retained in outstanding
-          // at its full allocation, the sticky stop is set, and
-          // the fault is named — the leg can never skip settlement, and the
-          // aggregate can never spuriously flip on a held allocation.
-          // A thrown settlement and a refused known settlement are handled
-          // DIFFERENTLY, deliberately: a refusal (individually safe
-          // measurement whose honest total exceeds MAX_SAFE_INTEGER) leaves
-          // the reservation `reserved` with stop: null, which holds only
-          // while the ledger is not already stopped — the refused path
-          // returns state unchanged, so a ledger already carrying a sticky
-          // stop keeps it (state.stop ?? 'unknown-usage') — while a thrown
-          // total becomes `unresolved` with the sticky unknown-usage stop. Do NOT
-          // fold these paths; that would change behavior outside this lane.
-          let settled: ReturnType<typeof settleAddressMany>;
-          try {
-            settled = known
-              ? settleAddressMany(budget, {
-                  ...identity,
-                  usage: {
-                    kind: 'known',
-                    tokens:
-                      usage.input +
-                      usage.output +
-                      usage.cacheRead +
-                      usage.cacheWrite +
-                      (usage.reasoning ?? 0),
-                  },
-                })
-              : dispatched
-                ? settleAddressMany(budget, { ...identity, usage: { kind: 'unknown' } })
-                : // A leg refused before dispatch provably spent nothing through
-                  // the provider, so its BUDGET settlement is measured zero (the
-                  // ledger stays clean, needs-human stays needs-human); its
-                  // ledger OBSERVATION above stays explicit unknown because a
-                  // non-dispatch is not an invocation.
-                  settleAddressMany(budget, { ...identity, usage: { kind: 'known', tokens: 0 } });
-          } catch (error) {
-            settled = settleAddressMany(budget, { ...identity, usage: { kind: 'unknown' } });
-            faults.push(
-              `PR #${candidate.number} settlement threw and was settled as unknown: ${String(error)}`,
+                    });
+                  }
+                  outcomes.push({
+                    number: candidate.number,
+                    headOid: candidate.headOid,
+                    result,
+                    enrollment,
+                  });
+                } catch (error) {
+                  if (error instanceof IsolationRefusal)
+                    result = { status: 'needs-human', reason: error.message };
+                  outcomes.push({
+                    number: candidate.number,
+                    headOid: candidate.headOid,
+                    ...(result ? { result } : { exception: String(error) }),
+                    enrollment,
+                  });
+                }
+                const report = result?.status === 'ok' ? result.value : result?.report;
+                const usage = report?.usage;
+                // A measurement only counts as KNOWN when it survives normalization;
+                // a malformed one (negative or non-integer tokens) is unmeasurable
+                // telemetry, so the leg settles through the SAME unknown-usage path
+                // as a dispatched leg without a measurement. The held reservation
+                // settles as unresolved and is retained in outstanding at its full
+                // allocation (never released, never refunded), the sticky
+                // unknown-usage stop is set, and the raw value can never leak into
+                // the ledger as a token total.
+                const observation = usage
+                  ? normalizeUsageObservation({
+                      usage,
+                      ...(report?.costUSD === undefined ? {} : { costUSD: report.costUSD }),
+                    })
+                  : undefined;
+                const known = observation?.usage !== undefined && usage !== undefined;
+                // Exit spend is recorded EXACTLY ONCE per admitted leg, at its
+                // settlement point: the normalized observation when the settled
+                // report carried a valid measurement, an explicit unknown observation
+                // otherwise. A leg that settled without dispatching is also unknown:
+                // it is not an invocation, so counting it as measured zero would
+                // inflate knownCount. Not-admitted legs are never recorded, so a
+                // refusal cannot invent spend. A telemetry failure degrades to
+                // unknown and never replaces the leg's settlement.
+                try {
+                  record(identity.id, observation ?? {});
+                } catch {
+                  try {
+                    record(identity.id, {});
+                  } catch {
+                    // The dispatch was already recorded; retain the first observation.
+                  }
+                }
+                // A thrown settlement (ledger arithmetic leaving the safe range) is
+                // folded into the same unknown-usage settlement path: the held
+                // reservation settles as unresolved and is retained in outstanding
+                // at its full allocation, the sticky stop is set, and
+                // the fault is named — the leg can never skip settlement, and the
+                // aggregate can never spuriously flip on a held allocation.
+                // A thrown settlement and a refused known settlement are handled
+                // DIFFERENTLY, deliberately: a refusal (individually safe
+                // measurement whose honest total exceeds MAX_SAFE_INTEGER) leaves
+                // the reservation `reserved` with stop: null, which holds only
+                // while the ledger is not already stopped — the refused path
+                // returns state unchanged, so a ledger already carrying a sticky
+                // stop keeps it (state.stop ?? 'unknown-usage') — while a thrown
+                // total becomes `unresolved` with the sticky unknown-usage stop. Do NOT
+                // fold these paths; that would change behavior outside this lane.
+                let settled: ReturnType<typeof settleAddressMany>;
+                try {
+                  settled = known
+                    ? settleAddressMany(budget, {
+                        ...identity,
+                        usage: {
+                          kind: 'known',
+                          tokens:
+                            usage.input +
+                            usage.output +
+                            usage.cacheRead +
+                            usage.cacheWrite +
+                            (usage.reasoning ?? 0),
+                        },
+                      })
+                    : dispatched
+                      ? settleAddressMany(budget, { ...identity, usage: { kind: 'unknown' } })
+                      : // A leg refused before dispatch provably spent nothing through
+                        // the provider, so its BUDGET settlement is measured zero (the
+                        // ledger stays clean, needs-human stays needs-human); its
+                        // ledger OBSERVATION above stays explicit unknown because a
+                        // non-dispatch is not an invocation.
+                        settleAddressMany(budget, {
+                          ...identity,
+                          usage: { kind: 'known', tokens: 0 },
+                        });
+                } catch (error) {
+                  settled = settleAddressMany(budget, { ...identity, usage: { kind: 'unknown' } });
+                  faults.push(
+                    `PR #${candidate.number} settlement threw and was settled as unknown: ${String(error)}`,
+                  );
+                }
+                budget = settled.state;
+                if (settled.kind === 'refused')
+                  faults.push(
+                    `PR #${candidate.number} settlement refused: ${JSON.stringify(settled)}`,
+                  );
+                if (
+                  isolatedRoot &&
+                  !deps.isolate &&
+                  (!dispatched || (result?.status === 'ok' && result.value.fixes.length === 0))
+                ) {
+                  try {
+                    try {
+                      await lstat(isolatedRoot);
+                    } catch (error) {
+                      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                      forgetPreservedClone(isolatedRoot);
+                      return;
+                    }
+                    if (!(await lifetime.canRemove()))
+                      throw new Error(`incomplete clone retained: ${isolatedRoot}`);
+                    const metadata = await lifetime.metadata();
+                    const target =
+                      metadata?.state === 'bound' ? metadata.checkoutPath : isolatedRoot;
+                    for (const root of new Set([isolatedRoot, target])) {
+                      const clean = await checkoutWriterCommand('git', [
+                        '-C',
+                        root,
+                        'status',
+                        '--porcelain=v1',
+                        '-z',
+                        '--ignored',
+                        '--untracked-files=all',
+                      ]);
+                      for (const entry of clean.stdout.split('\0').filter(Boolean)) {
+                        if (
+                          root === isolatedRoot &&
+                          entry.slice(3).replace(/\/$/, '') === 'node_modules' &&
+                          (await lstat(resolve(root, 'node_modules'))).isSymbolicLink() &&
+                          (await realpath(resolve(root, 'node_modules'))) ===
+                            (await realpath(resolve(input.repoRoot, 'node_modules')))
+                        )
+                          continue;
+                        throw new Error(`dirty clone retained: ${root}`);
+                      }
+                    }
+                    if (dispatched) {
+                      const ahead = await checkoutWriterCommand('git', [
+                        '-C',
+                        target,
+                        'rev-list',
+                        '--count',
+                        `refs/cq-review/pr-${candidate.number}..HEAD`,
+                      ]);
+                      if (ahead.stdout.trim() !== '0')
+                        throw new Error(`unpublished clone work retained: ${target}`);
+                    }
+                    const refs = await checkoutWriterCommand('git', [
+                      '-C',
+                      isolatedRoot,
+                      'for-each-ref',
+                      '--format=%(refname)',
+                      'refs/heads',
+                    ]);
+                    if (refs.stdout.split('\n').some((ref) => ref.includes('/failed/')))
+                      throw new Error(`dirty or failed-attempt clone retained: ${isolatedRoot}`);
+                    await lifetime.beforeRemove();
+                    const canonicalRoot = await realpath(isolatedRoot);
+                    await rm(dirname(canonicalRoot), { recursive: true, force: true });
+                    await lifetime.removed(canonicalRoot);
+                    forgetPreservedClone(isolatedRoot);
+                  } catch (error) {
+                    lifetime.retainIncomplete();
+                    faults.push(`PR #${candidate.number} cleanup failed: ${String(error)}`);
+                  }
+                }
+              },
             );
-          }
-          budget = settled.state;
-          if (settled.kind === 'refused')
-            faults.push(`PR #${candidate.number} settlement refused: ${JSON.stringify(settled)}`);
-          if (
-            isolatedRoot &&
-            !deps.isolate &&
-            (!dispatched || (result?.status === 'ok' && result.value.fixes.length === 0))
-          ) {
-            try {
-              await rm(dirname(isolatedRoot), { recursive: true, force: true });
-              preservedClones.splice(
-                preservedClones.findIndex((entry) => entry.path === isolatedRoot),
-                1,
-              );
-            } catch (error) {
-              faults.push(`PR #${candidate.number} cleanup failed: ${String(error)}`);
+          } catch (error) {
+            if (!enteredCheckout) {
+              // A refused slot never dispatched a provider. Release its reserved
+              // allocation so an unrelated PR can use the same sweep budget.
+              budget = settleAddressMany(budget, {
+                ...identity,
+                usage: { kind: 'known', tokens: 0 },
+              }).state;
             }
+            const legacyRefusal = isAddressCheckoutIncomplete(error);
+            if (!legacyRefusal)
+              faults.push(`PR #${candidate.number} slot lifetime refused: ${String(error)}`);
+            if (!outcomes.some((row) => row.number === candidate.number))
+              outcomes.push({
+                number: candidate.number,
+                headOid: candidate.headOid,
+                ...(legacyRefusal && error instanceof Error
+                  ? { result: { status: 'needs-human' as const, reason: error.message } }
+                  : { exception: String(error) }),
+                enrollment: requestedEnrollment(candidate.number),
+              });
           }
         }
       };

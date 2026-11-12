@@ -456,6 +456,12 @@ export function makeRegistry(
      * data — never plan JSON.
      */
     driverFactory?: DriverFactoryConfig;
+    /**
+     * The deployment's run snapshot; the per-dispatch `wiring.cqEnv` still
+     * wins when present, and absent both the factory reads ambient.
+     * Runtime-only deployment data — never plan JSON.
+     */
+    cqEnv?: DriverFactoryConfig['cqEnv'];
   } = {},
 ): OpRegistryEntry[] {
   const observation = observationOf(options);
@@ -464,7 +470,7 @@ export function makeRegistry(
       ? entry
       : {
           ...entry,
-          importer: makeSweepUnitImporter(observation, options.driverFactory),
+          importer: makeSweepUnitImporter(observation, options.driverFactory, options.cqEnv),
         },
   );
 }
@@ -490,16 +496,23 @@ function observationOf(options: {
  * makeRegistry rebuilds the entry with the writer/config without duplicating
  * the dynamic module load or touching any other entry.
  */
-function makeSweepUnitImporter(observation: SweepObservation, driverFactory?: DriverFactoryConfig) {
+function makeSweepUnitImporter(
+  observation: SweepObservation,
+  driverFactory?: DriverFactoryConfig,
+  cqEnv?: DriverFactoryConfig['cqEnv'],
+) {
   return async (wiring?: {
     onDeprecatedAlias?: (message: string) => void;
+    cqEnv?: DriverFactoryConfig['cqEnv'];
   }): Promise<Op<unknown, unknown>> => {
     const m = await import('./unit.js');
     return (async (input: SweepUnitDispatchInput) => {
       try {
         const bindings = m.bindingsFromDispatch(
           input,
-          createDriverFactory(factoryConfigOf(driverFactory, wiring?.onDeprecatedAlias)),
+          createDriverFactory(
+            factoryConfigOf(driverFactory, wiring?.onDeprecatedAlias, wiring?.cqEnv ?? cqEnv),
+          ),
         );
         // ADR-0008 T30: the injected observation writer rides the RESOLVED
         // RUNTIME BINDINGS — never the serialized dispatch input (no
@@ -540,17 +553,23 @@ function makeSweepUnitImporter(observation: SweepObservation, driverFactory?: Dr
 
 /**
  * Compose the factory config at the registry boundary: the deployment's own
- * config (bindings/lanes) with the dispatch-time alias-notice sink laid over
- * it. The wiring sink is the host's per-dispatch narration contract, so it
- * wins over a deployment-level `onDeprecatedAlias`; absent wiring keeps the
- * deployment's sink (or the library default when there is no config at all).
+ * config (bindings/lanes) with the dispatch-time alias-notice sink and run
+ * snapshot laid over it. The wiring sink is the host's per-dispatch
+ * narration contract, so it wins over a deployment-level
+ * `onDeprecatedAlias`; absent wiring keeps the deployment's sink (or the
+ * library default when there is no config at all). The snapshot follows the
+ * same layering for the session-logs read: the per-dispatch `wiring.cqEnv`
+ * wins, then the deployment's `cqEnv`, then the ambient read. Both layers
+ * preserve the deployment's other options unchanged.
  */
 function factoryConfigOf(
   driverFactory: DriverFactoryConfig | undefined,
   onDeprecatedAlias: ((message: string) => void) | undefined,
+  cqEnv?: DriverFactoryConfig['cqEnv'],
 ): DriverFactoryConfig {
-  if (onDeprecatedAlias === undefined) return driverFactory ?? {};
-  return { ...driverFactory, onDeprecatedAlias };
+  const sink = onDeprecatedAlias === undefined ? {} : { onDeprecatedAlias };
+  if (cqEnv === undefined) return { ...driverFactory, ...sink };
+  return { ...driverFactory, ...sink, cqEnv };
 }
 
 // Shared task and stage-path helpers: './tasks.js', './stagePaths.js', './taskLoop.js'.
