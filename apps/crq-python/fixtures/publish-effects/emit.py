@@ -252,9 +252,11 @@ def repair_digest_family() -> Dict[str, Any]:
         finally:
             tmp.cleanup()
 
-    verdict = lambda job, v, rung="A0", judge=None: (
+    verdict = lambda job, v, rung="A0", judge="__absent__": (
         {"job": job, "verdict": v, "attempts": [{"rung": rung}],
-         **({"judge": {"verdict": judge}} if judge is not None else {})}
+         **({} if judge == "__absent__" else
+            ({"judge": judge} if isinstance(judge, dict)
+             else {"judge": {"verdict": judge}}))}
     )
     queued = lambda jobs: {"state": "queued", "jobs": jobs}
     items = lambda *runs: [{"id": "i", "kind": "open", "state": "pending", "repair_runs": {
@@ -269,6 +271,91 @@ def repair_digest_family() -> Dict[str, Any]:
             {"verdicts": [verdict("j4", "UNKNOWN", "A0")]},
         ), "last_tick": "x"},
         files={},
+    ))
+    cases.append(case(
+        "unknown-rung-keyerror",
+        queue={"items": items({"verdicts": [verdict("j", "FIXED", "A9")]})},
+        files={},
+    ))
+    cases.append(case(
+        "falsy-judges-collapse-to-empty",
+        queue={"items": items(
+            {"verdicts": [{"job": "j1", "verdict": "STALE", "judge": 0}]},
+            {"verdicts": [{"job": "j2", "verdict": "STALE", "judge": ""}]},
+            {"verdicts": [{"job": "j3", "verdict": "STALE", "judge": []}]},
+            {"verdicts": [{"job": "j4", "verdict": "STALE", "judge": False}]},
+        ), "last_tick": "x"},
+        files={},
+    ))
+    cases.append(case(
+        "judge-dict-unknown-verdict-ignored",
+        queue={"items": items({"verdicts": [
+            {"job": "j", "verdict": "STALE", "judge": {"verdict": 5}}]})},
+        files={},
+    ))
+    cases.append(case(
+        "verdicts-null-refuses",
+        queue={"items": items({"verdicts": None})},
+        files={},
+    ))
+    cases.append(case(
+        "verdicts-dict-iterates-keys",
+        queue={"items": items({"verdicts": {"a": {"job": 1, "verdict": "STALE"}}})},
+        files={},
+    ))
+    cases.append(case(
+        "repair-runs-null-attributeerror",
+        queue={"items": [{"id": "i", "kind": "open", "state": "pending",
+                         "repair_runs": None}]},
+        files={},
+    ))
+    cases.append(case(
+        "missing-job-keyerror",
+        queue={"items": items({"verdicts": [{"verdict": "STALE"}]})},
+        files={},
+    ))
+    cases.append(case(
+        "missing-verdict-keyerror",
+        queue={"items": items({"verdicts": [{"job": "j"}]})},
+        files={},
+    ))
+    cases.append(case(
+        "unhashable-job-typeerror",
+        queue={"items": items({"verdicts": [{"job": {"a": 1}, "verdict": "STALE"}]})},
+        files={},
+    ))
+    cases.append(case(
+        "unhashable-job-list-typeerror",
+        queue={"items": items({"verdicts": [{"job": ["x"], "verdict": "STALE"}]})},
+        files={},
+    ))
+    cases.append(case(
+        "hashable-nonstring-jobs-consume",
+        queue={"items": items(
+            {"verdicts": [{"job": 5, "verdict": "STALE"},
+                          {"job": True, "verdict": "STALE"}]},
+        ), "last_tick": "x"},
+        files={},
+    ))
+    cases.append(case(
+        "queued-jobs-nonstring-grammar-typeerror",
+        queue={"items": items(queued([7]))},
+        files={},
+    ))
+    cases.append(case(
+        "queued-jobs-noniterable-typeerror",
+        queue={"items": items(queued(5))},
+        files={},
+    ))
+    cases.append(case(
+        "queued-jobs-dict-iterates-keys",
+        queue={"items": items(queued({"crq-ghi-F1": 1}))},
+        files={},
+    ))
+    cases.append(case(
+        "orphan-progress-still-orphaned",
+        queue={"items": []},
+        files={"state/repair/crq-nores-F1/progress.json": "{}"},
     ))
     cases.append(case(
         "drainable-pending-running-deferred",
@@ -425,6 +512,25 @@ def triage_family() -> Dict[str, Any]:
         "broken.json": "broken",
         "empty.json": "{}",
     }))
+    cases.append(case("mapped-path-falsy-dict-falls-back", {
+        "a.json": triage_row(mapped_path={}),
+    }))
+    cases.append(case("mapped-path-falsy-list-falls-back", {
+        "a.json": triage_row(mapped_path=[]),
+    }))
+    cases.append(case("mapped-path-null-falls-back", {
+        "a.json": triage_row(mapped_path=None),
+    }))
+    cases.append(case("failure-class-object-stays-data", {
+        "a.json": triage_row(failure_class={"k": 1}),
+    }))
+    cases.append(case("failure-class-list-stays-data", {
+        "a.json": triage_row(failure_class=[1, 2]),
+    }))
+    cases.append(case("no-path-anywhere-is-null", {
+        "a.json": {"status": "needs-human", "target": "tip", "canonical_id": "c",
+                   "finding": {"id": "i", "title": "T", "severity": "minor"}},
+    }))
     return _family("triage", cases, "backfill_report.finding_triage(strict=False, limit=32) over real rows")
 
 
@@ -463,31 +569,44 @@ def publish_full_family() -> Dict[str, Any]:
             (xdg / "crq").mkdir(parents=True)
             if previous is not None:
                 (xdg / "crq/summary.json").write_text(previous)
-            if systemd_output is not None:
-                systemd_output = systemd_output.replace("%MONO%", "")
+
+            input_record: Dict[str, Any] = {
+                "queue": queue, "config": config, "schedule": schedule,
+                "previous": previous,
+            }
 
             def run() -> Dict[str, Any]:
                 env = {"XDG_STATE_HOME": str(xdg)}
+                gh_calls: List[str] = []
+
+                def recording_command(argv: List[str], timeout: int) -> str:
+                    if argv[:1] == ["systemctl"]:
+                        raise RuntimeError("systemctl unavailable")
+                    if argv[:1] == ["gh"]:
+                        gh_calls.append(argv[2])
+                        if gh is None:
+                            raise OSError("no gh")
+                        return gh(argv[2])
+                    raise AssertionError(f"unmocked probe: {argv}")
+
                 with unittest.mock.patch.dict(os.environ, env):
-                    if systemd_output is None:
-                        probe = unittest.mock.patch.object(
-                            status_summary, "command",
-                            side_effect=_gh_or_fail(gh),
-                        )
-                    else:
-                        probe = unittest.mock.patch.object(
-                            status_summary, "command",
-                            side_effect=_gh_or_fail(gh),
-                        )
-                    with probe:
-                        return status_summary.publish(
+                    with unittest.mock.patch.object(status_summary, "command",
+                                                    side_effect=recording_command):
+                        published = status_summary.publish(
                             root, queue, config, schedule, home=root, now=FIXED_NOW
                         )
+                input_record["events"] = events
+                input_record["triage_rows"] = triage_rows or {}
+                input_record["inbox"] = inbox or {}
+                input_record["result_files"] = result_files or {}
+                input_record["gh_calls"] = gh_calls
+                input_record["clocks"] = {"now": FIXED_NOW}
+                input_record["systemd_probe"] = {"error": "systemctl unavailable"}
+                return published
 
             result = _call(
                 "status_summary.publish",
-                {"queue": queue, "config": config, "schedule": schedule,
-                 "previous": previous, "systemd": "patched-empty" if systemd_output is None else systemd_output},
+                input_record,
                 run,
                 bytes_key="bytes",
             )
@@ -495,18 +614,6 @@ def publish_full_family() -> Dict[str, Any]:
             return result
         finally:
             tmp.cleanup()
-
-    def _gh_or_fail(gh: Optional[Callable[[str], str]]):
-        def command(argv: List[str], timeout: int) -> str:
-            if argv[:1] == ["systemctl"]:
-                raise RuntimeError("systemctl unavailable")
-            if argv[:1] == ["gh"]:
-                if gh is None:
-                    raise OSError("no gh")
-                return gh(argv[2])
-            raise AssertionError(f"unmocked probe: {argv}")
-
-        return command
 
     base_queue = {
         "last_tick": "2026-11-09T11:55:00Z",

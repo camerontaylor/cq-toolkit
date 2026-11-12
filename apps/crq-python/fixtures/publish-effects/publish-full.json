@@ -48,7 +48,47 @@
           "status": "unknown"
         },
         "previous": null,
-        "systemd": "patched-empty"
+        "events": "",
+        "triage_rows": {
+          "a.json": {
+            "status": "needs-human",
+            "target": "tip",
+            "canonical_id": "c",
+            "finding": {
+              "id": "i",
+              "title": "Needs",
+              "severity": "minor",
+              "path": "a.py"
+            },
+            "failure_class": "owner-decision"
+          },
+          "b.json": {
+            "status": "delivered",
+            "target": "tip",
+            "canonical_id": "d",
+            "finding": {
+              "id": "j",
+              "title": "Fine",
+              "severity": "major",
+              "path": "a.py"
+            },
+            "context_error": {
+              "code": 5
+            }
+          }
+        },
+        "inbox": {},
+        "result_files": {},
+        "gh_calls": [
+          "repos/owner/repo/pulls/7",
+          "repos/owner/repo/pulls/9"
+        ],
+        "clocks": {
+          "now": 1794225600.0
+        },
+        "systemd_probe": {
+          "error": "systemctl unavailable"
+        }
       },
       "expect": {
         "ok": true,
@@ -325,7 +365,46 @@
           "status": "active"
         },
         "previous": "{\"pending_items\": [{\"repo\": \"owner/repo\", \"pr\": 7, \"title\": \"cached title\"}, {\"repo\": \"owner/repo\", \"pr\": 9, \"title\": null}]}",
-        "systemd": "patched-empty"
+        "events": "",
+        "triage_rows": {
+          "a.json": {
+            "status": "needs-human",
+            "target": "tip",
+            "canonical_id": "c",
+            "finding": {
+              "id": "i",
+              "title": "Needs",
+              "severity": "minor",
+              "path": "a.py"
+            },
+            "failure_class": "owner-decision"
+          },
+          "b.json": {
+            "status": "delivered",
+            "target": "tip",
+            "canonical_id": "d",
+            "finding": {
+              "id": "j",
+              "title": "Fine",
+              "severity": "major",
+              "path": "a.py"
+            },
+            "context_error": {
+              "code": 5
+            }
+          }
+        },
+        "inbox": {},
+        "result_files": {},
+        "gh_calls": [
+          "repos/owner/repo/pulls/9"
+        ],
+        "clocks": {
+          "now": 1794225600.0
+        },
+        "systemd_probe": {
+          "error": "systemctl unavailable"
+        }
       },
       "expect": {
         "ok": true,
@@ -601,7 +680,47 @@
           "status": "active"
         },
         "previous": "{broken",
-        "systemd": "patched-empty"
+        "events": "",
+        "triage_rows": {
+          "a.json": {
+            "status": "needs-human",
+            "target": "tip",
+            "canonical_id": "c",
+            "finding": {
+              "id": "i",
+              "title": "Needs",
+              "severity": "minor",
+              "path": "a.py"
+            },
+            "failure_class": "owner-decision"
+          },
+          "b.json": {
+            "status": "delivered",
+            "target": "tip",
+            "canonical_id": "d",
+            "finding": {
+              "id": "j",
+              "title": "Fine",
+              "severity": "major",
+              "path": "a.py"
+            },
+            "context_error": {
+              "code": 5
+            }
+          }
+        },
+        "inbox": {},
+        "result_files": {},
+        "gh_calls": [
+          "repos/owner/repo/pulls/7",
+          "repos/owner/repo/pulls/9"
+        ],
+        "clocks": {
+          "now": 1794225600.0
+        },
+        "systemd_probe": {
+          "error": "systemctl unavailable"
+        }
       },
       "expect": {
         "ok": true,
@@ -877,7 +996,47 @@
           "status": "active"
         },
         "previous": "{\"pending_items\": [{\"repo\": \"owner/repo\", \"pr\": 7, \"title\": \"first\"}, {\"title\": \"missing both\"}]}",
-        "systemd": "patched-empty"
+        "events": "",
+        "triage_rows": {
+          "a.json": {
+            "status": "needs-human",
+            "target": "tip",
+            "canonical_id": "c",
+            "finding": {
+              "id": "i",
+              "title": "Needs",
+              "severity": "minor",
+              "path": "a.py"
+            },
+            "failure_class": "owner-decision"
+          },
+          "b.json": {
+            "status": "delivered",
+            "target": "tip",
+            "canonical_id": "d",
+            "finding": {
+              "id": "j",
+              "title": "Fine",
+              "severity": "major",
+              "path": "a.py"
+            },
+            "context_error": {
+              "code": 5
+            }
+          }
+        },
+        "inbox": {},
+        "result_files": {},
+        "gh_calls": [
+          "repos/owner/repo/pulls/7",
+          "repos/owner/repo/pulls/9"
+        ],
+        "clocks": {
+          "now": 1794225600.0
+        },
+        "systemd_probe": {
+          "error": "systemctl unavailable"
+        }
       },
       "expect": {
         "ok": true,
@@ -1122,7 +1281,17 @@
         },
         "schedule": {},
         "previous": null,
-        "systemd": "patched-empty"
+        "events": "",
+        "triage_rows": {},
+        "inbox": {},
+        "result_files": {},
+        "gh_calls": [],
+        "clocks": {
+          "now": 1794225600.0
+        },
+        "systemd_probe": {
+          "error": "systemctl unavailable"
+        }
       },
       "expect": {
         "ok": true,
@@ -1286,8 +1455,7 @@
           "schedule_id": "tick"
         },
         "schedule": {},
-        "previous": null,
-        "systemd": "patched-empty"
+        "previous": null
       },
       "expect": {
         "ok": false,

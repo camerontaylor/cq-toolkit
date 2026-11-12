@@ -1404,6 +1404,404 @@
         },
         "bytes": "{\"counts\":{\"needs-human\":35},\"needs_human\":[{\"id\":\"0\",\"canonical_id\":\"0\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"1\",\"canonical_id\":\"1\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"2\",\"canonical_id\":\"2\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"3\",\"canonical_id\":\"3\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"4\",\"canonical_id\":\"4\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"5\",\"canonical_id\":\"5\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"6\",\"canonical_id\":\"6\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"7\",\"canonical_id\":\"7\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"8\",\"canonical_id\":\"8\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"9\",\"canonical_id\":\"9\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"10\",\"canonical_id\":\"10\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"11\",\"canonical_id\":\"11\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"12\",\"canonical_id\":\"12\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"13\",\"canonical_id\":\"13\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"14\",\"canonical_id\":\"14\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"15\",\"canonical_id\":\"15\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"16\",\"canonical_id\":\"16\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"17\",\"canonical_id\":\"17\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"18\",\"canonical_id\":\"18\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"19\",\"canonical_id\":\"19\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"20\",\"canonical_id\":\"20\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"21\",\"canonical_id\":\"21\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"22\",\"canonical_id\":\"22\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"23\",\"canonical_id\":\"23\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"24\",\"canonical_id\":\"24\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"25\",\"canonical_id\":\"25\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"26\",\"canonical_id\":\"26\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"27\",\"canonical_id\":\"27\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"28\",\"canonical_id\":\"28\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"29\",\"canonical_id\":\"29\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"30\",\"canonical_id\":\"30\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null},{\"id\":\"31\",\"canonical_id\":\"31\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null}],\"owner_decisions\":[],\"operator_attention\":[],\"owner_decisions_count\":0,\"operator_attention_count\":35,\"unknown_failure_class\":[{\"id\":\"0\",\"canonical_id\":\"0\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"1\",\"canonical_id\":\"1\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"2\",\"canonical_id\":\"2\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"3\",\"canonical_id\":\"3\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"4\",\"canonical_id\":\"4\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"5\",\"canonical_id\":\"5\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"6\",\"canonical_id\":\"6\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"7\",\"canonical_id\":\"7\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"8\",\"canonical_id\":\"8\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"9\",\"canonical_id\":\"9\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"10\",\"canonical_id\":\"10\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"11\",\"canonical_id\":\"11\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"12\",\"canonical_id\":\"12\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"13\",\"canonical_id\":\"13\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"14\",\"canonical_id\":\"14\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"15\",\"canonical_id\":\"15\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"16\",\"canonical_id\":\"16\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"17\",\"canonical_id\":\"17\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"18\",\"canonical_id\":\"18\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"19\",\"canonical_id\":\"19\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"20\",\"canonical_id\":\"20\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"21\",\"canonical_id\":\"21\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"22\",\"canonical_id\":\"22\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"23\",\"canonical_id\":\"23\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"24\",\"canonical_id\":\"24\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"25\",\"canonical_id\":\"25\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"26\",\"canonical_id\":\"26\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"27\",\"canonical_id\":\"27\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"28\",\"canonical_id\":\"28\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"29\",\"canonical_id\":\"29\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"30\",\"canonical_id\":\"30\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null},{\"id\":\"31\",\"canonical_id\":\"31\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null}],\"unknown_failure_class_count\":35,\"unknown_failure_class_note\":\"rows with an absent or unrecognized failure_class (including non-string legacy values); treated as operator attention, not owner decisions (D7); unknown_failure_class_count is a subset of operator_attention_count\",\"counts_complete\":false,\"error_count\":2,\"errors\":[{\"file\":\"broken.json\",\"error\":\"JSONDecodeError\"},{\"file\":\"empty.json\",\"error\":\"KeyError\"}],\"errors_omitted\":0,\"needs_human_count\":35,\"needs_human_omitted\":3,\"unknown_failure_class_omitted\":3}"
       }
+    },
+    {
+      "name": "mapped-path-falsy-dict-falls-back",
+      "source": "backfill_report.finding_triage",
+      "input": {
+        "rows": {
+          "a.json": {
+            "status": "needs-human",
+            "target": "tip",
+            "canonical_id": "c",
+            "finding": {
+              "id": "i",
+              "title": "Needs",
+              "severity": "minor",
+              "path": "a.py"
+            },
+            "mapped_path": {}
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "counts": {
+            "needs-human": 1
+          },
+          "needs_human": [
+            {
+              "id": "i",
+              "canonical_id": "c",
+              "path": "a.py",
+              "title": "Needs",
+              "severity": "minor",
+              "target": "tip",
+              "event_id": null
+            }
+          ],
+          "owner_decisions": [],
+          "operator_attention": [],
+          "owner_decisions_count": 0,
+          "operator_attention_count": 1,
+          "unknown_failure_class": [
+            {
+              "id": "i",
+              "canonical_id": "c",
+              "path": "a.py",
+              "title": "Needs",
+              "severity": "minor",
+              "target": "tip",
+              "event_id": null,
+              "failure_class": null
+            }
+          ],
+          "unknown_failure_class_count": 1,
+          "unknown_failure_class_note": "rows with an absent or unrecognized failure_class (including non-string legacy values); treated as operator attention, not owner decisions (D7); unknown_failure_class_count is a subset of operator_attention_count",
+          "counts_complete": true,
+          "error_count": 0,
+          "errors": [],
+          "errors_omitted": 0,
+          "needs_human_count": 1,
+          "needs_human_omitted": 0,
+          "unknown_failure_class_omitted": 0
+        },
+        "bytes": "{\"counts\":{\"needs-human\":1},\"needs_human\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null}],\"owner_decisions\":[],\"operator_attention\":[],\"owner_decisions_count\":0,\"operator_attention_count\":1,\"unknown_failure_class\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null}],\"unknown_failure_class_count\":1,\"unknown_failure_class_note\":\"rows with an absent or unrecognized failure_class (including non-string legacy values); treated as operator attention, not owner decisions (D7); unknown_failure_class_count is a subset of operator_attention_count\",\"counts_complete\":true,\"error_count\":0,\"errors\":[],\"errors_omitted\":0,\"needs_human_count\":1,\"needs_human_omitted\":0,\"unknown_failure_class_omitted\":0}"
+      }
+    },
+    {
+      "name": "mapped-path-falsy-list-falls-back",
+      "source": "backfill_report.finding_triage",
+      "input": {
+        "rows": {
+          "a.json": {
+            "status": "needs-human",
+            "target": "tip",
+            "canonical_id": "c",
+            "finding": {
+              "id": "i",
+              "title": "Needs",
+              "severity": "minor",
+              "path": "a.py"
+            },
+            "mapped_path": []
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "counts": {
+            "needs-human": 1
+          },
+          "needs_human": [
+            {
+              "id": "i",
+              "canonical_id": "c",
+              "path": "a.py",
+              "title": "Needs",
+              "severity": "minor",
+              "target": "tip",
+              "event_id": null
+            }
+          ],
+          "owner_decisions": [],
+          "operator_attention": [],
+          "owner_decisions_count": 0,
+          "operator_attention_count": 1,
+          "unknown_failure_class": [
+            {
+              "id": "i",
+              "canonical_id": "c",
+              "path": "a.py",
+              "title": "Needs",
+              "severity": "minor",
+              "target": "tip",
+              "event_id": null,
+              "failure_class": null
+            }
+          ],
+          "unknown_failure_class_count": 1,
+          "unknown_failure_class_note": "rows with an absent or unrecognized failure_class (including non-string legacy values); treated as operator attention, not owner decisions (D7); unknown_failure_class_count is a subset of operator_attention_count",
+          "counts_complete": true,
+          "error_count": 0,
+          "errors": [],
+          "errors_omitted": 0,
+          "needs_human_count": 1,
+          "needs_human_omitted": 0,
+          "unknown_failure_class_omitted": 0
+        },
+        "bytes": "{\"counts\":{\"needs-human\":1},\"needs_human\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null}],\"owner_decisions\":[],\"operator_attention\":[],\"owner_decisions_count\":0,\"operator_attention_count\":1,\"unknown_failure_class\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null}],\"unknown_failure_class_count\":1,\"unknown_failure_class_note\":\"rows with an absent or unrecognized failure_class (including non-string legacy values); treated as operator attention, not owner decisions (D7); unknown_failure_class_count is a subset of operator_attention_count\",\"counts_complete\":true,\"error_count\":0,\"errors\":[],\"errors_omitted\":0,\"needs_human_count\":1,\"needs_human_omitted\":0,\"unknown_failure_class_omitted\":0}"
+      }
+    },
+    {
+      "name": "mapped-path-null-falls-back",
+      "source": "backfill_report.finding_triage",
+      "input": {
+        "rows": {
+          "a.json": {
+            "status": "needs-human",
+            "target": "tip",
+            "canonical_id": "c",
+            "finding": {
+              "id": "i",
+              "title": "Needs",
+              "severity": "minor",
+              "path": "a.py"
+            },
+            "mapped_path": null
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "counts": {
+            "needs-human": 1
+          },
+          "needs_human": [
+            {
+              "id": "i",
+              "canonical_id": "c",
+              "path": "a.py",
+              "title": "Needs",
+              "severity": "minor",
+              "target": "tip",
+              "event_id": null
+            }
+          ],
+          "owner_decisions": [],
+          "operator_attention": [],
+          "owner_decisions_count": 0,
+          "operator_attention_count": 1,
+          "unknown_failure_class": [
+            {
+              "id": "i",
+              "canonical_id": "c",
+              "path": "a.py",
+              "title": "Needs",
+              "severity": "minor",
+              "target": "tip",
+              "event_id": null,
+              "failure_class": null
+            }
+          ],
+          "unknown_failure_class_count": 1,
+          "unknown_failure_class_note": "rows with an absent or unrecognized failure_class (including non-string legacy values); treated as operator attention, not owner decisions (D7); unknown_failure_class_count is a subset of operator_attention_count",
+          "counts_complete": true,
+          "error_count": 0,
+          "errors": [],
+          "errors_omitted": 0,
+          "needs_human_count": 1,
+          "needs_human_omitted": 0,
+          "unknown_failure_class_omitted": 0
+        },
+        "bytes": "{\"counts\":{\"needs-human\":1},\"needs_human\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null}],\"owner_decisions\":[],\"operator_attention\":[],\"owner_decisions_count\":0,\"operator_attention_count\":1,\"unknown_failure_class\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null}],\"unknown_failure_class_count\":1,\"unknown_failure_class_note\":\"rows with an absent or unrecognized failure_class (including non-string legacy values); treated as operator attention, not owner decisions (D7); unknown_failure_class_count is a subset of operator_attention_count\",\"counts_complete\":true,\"error_count\":0,\"errors\":[],\"errors_omitted\":0,\"needs_human_count\":1,\"needs_human_omitted\":0,\"unknown_failure_class_omitted\":0}"
+      }
+    },
+    {
+      "name": "failure-class-object-stays-data",
+      "source": "backfill_report.finding_triage",
+      "input": {
+        "rows": {
+          "a.json": {
+            "status": "needs-human",
+            "target": "tip",
+            "canonical_id": "c",
+            "finding": {
+              "id": "i",
+              "title": "Needs",
+              "severity": "minor",
+              "path": "a.py"
+            },
+            "failure_class": {
+              "k": 1
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "counts": {
+            "needs-human": 1
+          },
+          "needs_human": [
+            {
+              "id": "i",
+              "canonical_id": "c",
+              "path": "a.py",
+              "title": "Needs",
+              "severity": "minor",
+              "target": "tip",
+              "event_id": null
+            }
+          ],
+          "owner_decisions": [],
+          "operator_attention": [],
+          "owner_decisions_count": 0,
+          "operator_attention_count": 1,
+          "unknown_failure_class": [
+            {
+              "id": "i",
+              "canonical_id": "c",
+              "path": "a.py",
+              "title": "Needs",
+              "severity": "minor",
+              "target": "tip",
+              "event_id": null,
+              "failure_class": {
+                "k": 1
+              }
+            }
+          ],
+          "unknown_failure_class_count": 1,
+          "unknown_failure_class_note": "rows with an absent or unrecognized failure_class (including non-string legacy values); treated as operator attention, not owner decisions (D7); unknown_failure_class_count is a subset of operator_attention_count",
+          "counts_complete": true,
+          "error_count": 0,
+          "errors": [],
+          "errors_omitted": 0,
+          "needs_human_count": 1,
+          "needs_human_omitted": 0,
+          "unknown_failure_class_omitted": 0
+        },
+        "bytes": "{\"counts\":{\"needs-human\":1},\"needs_human\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null}],\"owner_decisions\":[],\"operator_attention\":[],\"owner_decisions_count\":0,\"operator_attention_count\":1,\"unknown_failure_class\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":{\"k\":1}}],\"unknown_failure_class_count\":1,\"unknown_failure_class_note\":\"rows with an absent or unrecognized failure_class (including non-string legacy values); treated as operator attention, not owner decisions (D7); unknown_failure_class_count is a subset of operator_attention_count\",\"counts_complete\":true,\"error_count\":0,\"errors\":[],\"errors_omitted\":0,\"needs_human_count\":1,\"needs_human_omitted\":0,\"unknown_failure_class_omitted\":0}"
+      }
+    },
+    {
+      "name": "failure-class-list-stays-data",
+      "source": "backfill_report.finding_triage",
+      "input": {
+        "rows": {
+          "a.json": {
+            "status": "needs-human",
+            "target": "tip",
+            "canonical_id": "c",
+            "finding": {
+              "id": "i",
+              "title": "Needs",
+              "severity": "minor",
+              "path": "a.py"
+            },
+            "failure_class": [
+              1,
+              2
+            ]
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "counts": {
+            "needs-human": 1
+          },
+          "needs_human": [
+            {
+              "id": "i",
+              "canonical_id": "c",
+              "path": "a.py",
+              "title": "Needs",
+              "severity": "minor",
+              "target": "tip",
+              "event_id": null
+            }
+          ],
+          "owner_decisions": [],
+          "operator_attention": [],
+          "owner_decisions_count": 0,
+          "operator_attention_count": 1,
+          "unknown_failure_class": [
+            {
+              "id": "i",
+              "canonical_id": "c",
+              "path": "a.py",
+              "title": "Needs",
+              "severity": "minor",
+              "target": "tip",
+              "event_id": null,
+              "failure_class": [
+                1,
+                2
+              ]
+            }
+          ],
+          "unknown_failure_class_count": 1,
+          "unknown_failure_class_note": "rows with an absent or unrecognized failure_class (including non-string legacy values); treated as operator attention, not owner decisions (D7); unknown_failure_class_count is a subset of operator_attention_count",
+          "counts_complete": true,
+          "error_count": 0,
+          "errors": [],
+          "errors_omitted": 0,
+          "needs_human_count": 1,
+          "needs_human_omitted": 0,
+          "unknown_failure_class_omitted": 0
+        },
+        "bytes": "{\"counts\":{\"needs-human\":1},\"needs_human\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null}],\"owner_decisions\":[],\"operator_attention\":[],\"owner_decisions_count\":0,\"operator_attention_count\":1,\"unknown_failure_class\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":\"a.py\",\"title\":\"Needs\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":[1,2]}],\"unknown_failure_class_count\":1,\"unknown_failure_class_note\":\"rows with an absent or unrecognized failure_class (including non-string legacy values); treated as operator attention, not owner decisions (D7); unknown_failure_class_count is a subset of operator_attention_count\",\"counts_complete\":true,\"error_count\":0,\"errors\":[],\"errors_omitted\":0,\"needs_human_count\":1,\"needs_human_omitted\":0,\"unknown_failure_class_omitted\":0}"
+      }
+    },
+    {
+      "name": "no-path-anywhere-is-null",
+      "source": "backfill_report.finding_triage",
+      "input": {
+        "rows": {
+          "a.json": {
+            "status": "needs-human",
+            "target": "tip",
+            "canonical_id": "c",
+            "finding": {
+              "id": "i",
+              "title": "T",
+              "severity": "minor"
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "counts": {
+            "needs-human": 1
+          },
+          "needs_human": [
+            {
+              "id": "i",
+              "canonical_id": "c",
+              "path": null,
+              "title": "T",
+              "severity": "minor",
+              "target": "tip",
+              "event_id": null
+            }
+          ],
+          "owner_decisions": [],
+          "operator_attention": [],
+          "owner_decisions_count": 0,
+          "operator_attention_count": 1,
+          "unknown_failure_class": [
+            {
+              "id": "i",
+              "canonical_id": "c",
+              "path": null,
+              "title": "T",
+              "severity": "minor",
+              "target": "tip",
+              "event_id": null,
+              "failure_class": null
+            }
+          ],
+          "unknown_failure_class_count": 1,
+          "unknown_failure_class_note": "rows with an absent or unrecognized failure_class (including non-string legacy values); treated as operator attention, not owner decisions (D7); unknown_failure_class_count is a subset of operator_attention_count",
+          "counts_complete": true,
+          "error_count": 0,
+          "errors": [],
+          "errors_omitted": 0,
+          "needs_human_count": 1,
+          "needs_human_omitted": 0,
+          "unknown_failure_class_omitted": 0
+        },
+        "bytes": "{\"counts\":{\"needs-human\":1},\"needs_human\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":null,\"title\":\"T\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null}],\"owner_decisions\":[],\"operator_attention\":[],\"owner_decisions_count\":0,\"operator_attention_count\":1,\"unknown_failure_class\":[{\"id\":\"i\",\"canonical_id\":\"c\",\"path\":null,\"title\":\"T\",\"severity\":\"minor\",\"target\":\"tip\",\"event_id\":null,\"failure_class\":null}],\"unknown_failure_class_count\":1,\"unknown_failure_class_note\":\"rows with an absent or unrecognized failure_class (including non-string legacy values); treated as operator attention, not owner decisions (D7); unknown_failure_class_count is a subset of operator_attention_count\",\"counts_complete\":true,\"error_count\":0,\"errors\":[],\"errors_omitted\":0,\"needs_human_count\":1,\"needs_human_omitted\":0,\"unknown_failure_class_omitted\":0}"
+      }
     }
   ]
 }

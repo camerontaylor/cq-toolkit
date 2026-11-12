@@ -39,6 +39,7 @@ export type PublishEffectsPythonError =
   | 'IndexError'
   | 'JSONDecodeError'
   | 'KeyError'
+  | 'OSError'
   | 'OverflowError'
   | 'TypeError'
   | 'ValueError';
@@ -65,7 +66,10 @@ export interface TriageRowFile {
 export interface RepairInboxEntry {
   /** Inbox file stem, e.g. `crq-abc-F1`. */
   readonly stem: string;
-  /** The `*.json` job document bytes; unreadable bytes refuse like Python. */
+  /**
+   * The `*.json` job document bytes; null when the file is absent. An
+   * unreadable file must raise instead, like Python's failed `read_text()`.
+   */
   readonly jobBytes: Uint8Array | null;
   /** `path.stat().st_mtime` seconds. */
   readonly mtime: number;
@@ -79,9 +83,11 @@ export interface RepairInboxState {
    */
   readonly entries: readonly RepairInboxEntry[];
   /**
-   * `state/repair/<stem>/result.json` bytes, or null when the file is absent
-   * or unreadable; Python reads it only when it exists and refuses corrupt
-   * bytes (`json.JSONDecodeError` propagates).
+   * `state/repair/<stem>/result.json` bytes, or null when the file is absent.
+   * Python reads it only when it exists and refuses corrupt bytes
+   * (`json.JSONDecodeError` propagates); an unreadable existing file must
+   * raise from this callback instead of returning null, so the digest can
+   * propagate the read failure exactly like Python's `read_text()`.
    */
   readResult(stem: string): Uint8Array | null;
   /** `state/repair/<stem>/result.json` existence, Python `.exists()`. */
@@ -168,27 +174,33 @@ export function repairDigest(
       if (pyTruthy(recordGet(record, 'fix_pr'))) {
         fixPrs.push(plainOf2(recordGet(record, 'fix_pr')));
       }
-      const verdicts = recordGet(record, 'verdicts');
-      if (verdicts === undefined) continue;
+      const verdictsValue = recordGet(record, 'verdicts');
+      // Python `record.get('verdicts', [])`: only an absent key defaults; an
+      // explicit None reaches the for-loop and refuses as not iterable.
+      const verdicts = verdictsValue === undefined ? [] : verdictsValue;
       if (!Array.isArray(verdicts)) {
+        // Python iterates the object: None refuses as not iterable, while a
+        // dict yields its keys and a str its characters. Every such str
+        // element then fails `value['job']` with the string-subscript error.
         throw new PublishEffectsError(
-          subscriptMessage(verdicts, 'value'),
-          typeof verdicts === 'string' ? 'TypeError' : 'TypeError',
+          verdicts === null
+            ? "'NoneType' object is not iterable"
+            : "string indices must be integers, not 'str'",
+          'TypeError',
         );
       }
-      for (const value of verdicts) {
-        if (!isMapping(value)) {
-          throw new PublishEffectsError(subscriptMessage(value, 'value'), 'TypeError');
+      for (const verdictValue of verdicts) {
+        if (!isMapping(verdictValue)) {
+          // Python iterates dicts/strings element-wise, so each element hits
+          // the same subscript path as a scalar.
+          throw new PublishEffectsError(subscriptMessage(verdictValue, 'value'), 'TypeError');
         }
-        const job = value.get('job');
-        if (typeof job !== 'string') {
-          // Python uses the value as a set element; any hashable works, so
-          // only its identity matters here.
-          consumed.add(jobKey(job));
-        } else {
-          consumed.add(job);
-        }
-        const verdict = value.get('verdict');
+        const value = verdictValue;
+        // Python subscripts both keys; a missing one refuses.
+        const job = subscriptRequired(value, 'job');
+        const verdict = subscriptRequired(value, 'verdict');
+        // Python `consumed.add(job)`: the value must be hashable.
+        consumed.add(consumedKey(job));
         if (verdict === 'FIXED') {
           const attempts = value.get('attempts');
           if (attempts === undefined) {
@@ -204,25 +216,28 @@ export function repairDigest(
           if (!isMapping(last)) {
             throw new PublishEffectsError(subscriptMessage(last, 'value'), 'TypeError');
           }
-          const rung = last.get('rung');
-          if (rung === undefined) {
-            throw new PublishEffectsError("'rung'", 'KeyError');
-          }
+          const rung = subscriptRequired(last, 'rung');
           if (typeof rung !== 'string') {
             throw new PublishEffectsError(
               'can only concatenate str (not "' + pythonTypeName(rung) + '") to str',
               'TypeError',
             );
           }
+          // Python `counts['fixed@' + rung] += 1`: an unknown rung refuses;
+          // no new key is ever created.
           const key = 'fixed@' + rung;
-          if (!(key in counts)) counts[key] = 0;
+          if (!(key in counts)) {
+            throw new PublishEffectsError(`'${key}'`, 'KeyError');
+          }
           counts[key] = (counts[key] ?? 0) + 1;
         } else {
           const bucket = VERDICT_FAILURE_KEYS.get(verdict as string) ?? 'failed';
           counts[bucket] = (counts[bucket] ?? 0) + 1;
         }
+        // Python `(value.get('judge') or {})`: every falsy judge collapses to
+        // an empty mapping and is ignored.
         const judge = value.get('judge');
-        if (judge !== undefined && judge !== null) {
+        if (pyTruthy(judge)) {
           if (!isMapping(judge)) {
             throw new PublishEffectsError(
               `'${pythonTypeName(judge)}' object has no attribute 'get'`,
@@ -247,9 +262,38 @@ export function repairDigest(
       if (recordGet(record, 'state') !== 'queued') continue;
       const jobs = recordGet(record, 'jobs');
       if (jobs === undefined) continue;
-      if (!Array.isArray(jobs)) continue;
-      for (const job of jobs) {
-        if (typeof job === 'string' && JOB_ID.test(job)) drainable.add(job);
+      if (
+        !Array.isArray(jobs) &&
+        typeof jobs !== 'string' &&
+        !(jobs instanceof TriageMapping) &&
+        jobs !== null
+      ) {
+        // Python iterates `record.get('jobs', [])`: an int/float/None element
+        // source refuses as not iterable.
+        throw new PublishEffectsError(
+          jobs === null
+            ? "'NoneType' object is not iterable"
+            : `'${pythonTypeName(jobs)}' object is not iterable`,
+          'TypeError',
+        );
+      }
+      const jobElements: readonly unknown[] = Array.isArray(jobs)
+        ? jobs
+        : typeof jobs === 'string'
+          ? [...jobs]
+          : jobs instanceof TriageMapping
+            ? [...jobs.entriesOfSource().map(([key]) => key)]
+            : [];
+      for (const job of jobElements) {
+        // Python `JOB_ID.fullmatch(job)` requires a string; anything else is
+        // `TypeError: expected string or bytes-like object, got 'int'`.
+        if (typeof job !== 'string') {
+          throw new PublishEffectsError(
+            `expected string or bytes-like object, got '${pythonTypeName(job)}'`,
+            'TypeError',
+          );
+        }
+        if (JOB_ID.test(job)) drainable.add(job);
       }
     }
   }
@@ -261,15 +305,23 @@ export function repairDigest(
   for (const entry of inbox.entries) {
     if (consumed.has(entry.stem)) continue;
     if (!drainable.has(entry.stem)) {
-      // Python tests only `result.json` existence for an undrainable stem; a
-      // stem with neither result nor progress is orphaned.
-      if (!inbox.hasResult(entry.stem) && !inbox.hasProgress(entry.stem)) {
+      // Python tests only `result.json` existence for an undrainable stem;
+      // progress is not consulted, so a progress-only stem is orphaned too.
+      if (!inbox.hasResult(entry.stem)) {
         orphaned += 1;
       }
       continue;
     }
-    // Python `json.loads(path.read_text())`: a corrupt inbox job refuses.
-    if (entry.jobBytes !== null) parsePlainJson(entry.jobBytes);
+    // Python `json.loads(path.read_text())`: a missing job file is impossible
+    // for a glob yield, and an unreadable one must have raised in the seam
+    // before reaching here, so null bytes refuse as the glob/parse gap.
+    if (entry.jobBytes === null) {
+      throw new PublishEffectsError(
+        `[Errno 2] No such file or directory: 'state/repair/inbox/${entry.stem}.json'`,
+        'OSError',
+      );
+    }
+    parsePlainJson(entry.jobBytes);
     const resultBytes = inbox.readResult(entry.stem);
     if (resultBytes !== null) {
       const data = parseResult(resultBytes);
@@ -342,8 +394,10 @@ export function findingTriage(rows: readonly TriageRowFile[]): Record<string, un
         id: finding.get('id') as string,
         canonical_id: document.get('canonical_id') as string,
         path: pyTruthy(document.get('mapped_path'))
-          ? document.get('mapped_path')
-          : finding.get('path'),
+          ? plainOf(document.get('mapped_path') as JsonValue)
+          : finding.has('path')
+            ? plainOf(finding.get('path') as JsonValue)
+            : null,
         title: finding.get('title') as string,
         severity: finding.get('severity') as string,
         target: Object.prototype.hasOwnProperty.call(document.plain, 'target_current')
@@ -378,8 +432,10 @@ export function findingTriage(rows: readonly TriageRowFile[]): Record<string, un
           unknownFailureCount += 1;
           if (unknownFailure.length < LIMIT) {
             // Python's `row.get("failure_class")` is None for an absent key;
-            // a JSON null, never a missing key.
-            unknownFailure.push({ ...plainDetail, failure_class: failureClass ?? null });
+            // a JSON null, never a missing key. Non-string values (including
+            // objects and lists) stay data and must serialise, so views are
+            // unwrapped to plain JSON here.
+            unknownFailure.push({ ...plainDetail, failure_class: unwrap(failureClass ?? null) });
           }
           operatorCount += 1;
         }
@@ -778,6 +834,13 @@ function plainOf(value: JsonValue): unknown {
   return value;
 }
 
+/** Unwrap a runtime value (mapping views, arrays of views) to plain JSON. */
+function unwrap(value: unknown): unknown {
+  if (value instanceof TriageMapping) return value.toPlain();
+  if (Array.isArray(value)) return value.map(unwrap);
+  return value;
+}
+
 function pyValue(value: JsonValue): unknown {
   return plainOf(value);
 }
@@ -849,10 +912,16 @@ function asMapping(
 }
 
 function jsonValueOf(value: unknown): JsonValue {
+  if (value instanceof JsonNumber) return value;
   if (value === null || typeof value === 'boolean' || typeof value === 'string') return value;
-  if (typeof value === 'number') return JsonNumber.float(value);
+  if (
+    typeof value === 'number' &&
+    (Number.isInteger(value) || Object.getOwnPropertySymbols(value).length === 0)
+  ) {
+    return Number.isInteger(value) ? JsonNumber.int(BigInt(value)) : JsonNumber.float(value);
+  }
   if (Array.isArray(value)) return value.map(jsonValueOf);
-  if (isRecord(value)) {
+  if (isRecord(value) && !(value instanceof JsonNumber) && value.constructor === Object) {
     return new JsonObject(
       Object.entries(value).map(([key, entry]) => [key, jsonValueOf(entry)] as const),
     );
@@ -876,7 +945,9 @@ function queueItems(queue: unknown): TriageMapping[] {
 function repairRuns(item: TriageMapping): Map<string | number | boolean | null, TriageMapping> {
   const runs = item.get('repair_runs');
   const out = new Map<string | number | boolean | null, TriageMapping>();
-  if (runs === undefined || runs === null) return out;
+  // Python `item.get('repair_runs', {})`: only an absent key defaults. An
+  // explicit None reaches `.items()` and refuses with AttributeError.
+  if (runs === undefined) return out;
   if (!isMapping(runs)) {
     throw new PublishEffectsError(
       `'${pythonTypeName(runs)}' object has no attribute 'items'`,
@@ -919,12 +990,54 @@ function jobKey(job: unknown): string {
   return typeof job === 'string' ? job : JSON.stringify(job) + ':' + typeof job;
 }
 
+/**
+ * `row[key]` where the key must exist: Python subscripts, so absence refuses
+ * with `KeyError` while an explicit null is a value like any other.
+ */
+function subscriptRequired(row: TriageMapping, key: string): unknown {
+  if (!row.has(key)) throw new PublishEffectsError(`'${key}'`, 'KeyError');
+  return row.get(key);
+}
+
+/**
+ * Python hashability for a `consumed` set element: NoneType/bool/int/float/str
+ * are hashable, list/dict are not. Floats and ints hash equal, so `True`
+ * collapses with `1` exactly as in the oracle.
+ */
+function consumedKey(job: unknown): string {
+  if (job === null) return jobKey(job);
+  if (job instanceof JsonNumber)
+    return jobKey(job.kind === 'int' ? Number(job.integer) : (job.float as number));
+  if (typeof job === 'boolean' || typeof job === 'number' || typeof job === 'string') {
+    return jobKey(job);
+  }
+  if (job instanceof TriageMapping) {
+    throw new PublishEffectsError(
+      `cannot use 'dict' as a set element (unhashable type: 'dict')`,
+      'TypeError',
+    );
+  }
+  if (Array.isArray(job)) {
+    throw new PublishEffectsError(
+      `cannot use 'list' as a set element (unhashable type: 'list')`,
+      'TypeError',
+    );
+  }
+  // Any other structural value behaves like a dict for hashability.
+  throw new PublishEffectsError(
+    `cannot use 'dict' as a set element (unhashable type: 'dict')`,
+    'TypeError',
+  );
+}
+
 function pyTruthy(value: unknown): boolean {
   if (value === undefined || value === null) return false;
   if (typeof value === 'boolean') return value;
   if (typeof value === 'number') return value !== 0;
   if (typeof value === 'string') return value.length > 0;
   if (Array.isArray(value)) return value.length > 0;
+  // A mapping view's truthiness follows its source entries, not the wrapper.
+  if (value instanceof TriageMapping) return value.entriesOfSource().length > 0;
   if (value instanceof JsonObject) return value.entries.length > 0;
   if (typeof value === 'object' && value !== null && 'kind' in (value as object)) {
     // A lossless JsonNumber: truthiness follows the Python numeric value.
@@ -944,6 +1057,9 @@ function pyTruthy(value: unknown): boolean {
 function pythonTypeName(value: unknown): string {
   if (value === null || value === undefined) return 'NoneType';
   if (typeof value === 'boolean') return 'bool';
+  if (value instanceof JsonNumber) {
+    return value.kind === 'int' ? 'int' : 'float';
+  }
   if (typeof value === 'number') return Number.isInteger(value) ? 'int' : 'float';
   if (typeof value === 'string') return 'str';
   if (Array.isArray(value)) return 'list';

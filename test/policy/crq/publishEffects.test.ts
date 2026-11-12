@@ -18,10 +18,11 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 import {
-  JsonObject,
   JsonNumber,
+  JsonObject,
   JsonValue,
   parseJsonValue,
+  toPlainJsonRetainingNumbers,
 } from '../../../src/policy/crq/jsonValue.js';
 import { pythonJsonText, type PythonJsonOptions } from '../../../src/policy/crq/pythonJson.js';
 import {
@@ -172,6 +173,26 @@ function digestVectors(): DigestVector[] {
   });
 }
 
+/** Job-file contents the emitter writes beyond the default `{}` inbox. */
+const INBOX_CONTENTS: Readonly<Record<string, string>> = {
+  'corrupt-inbox-job-refuses': 'broken',
+};
+
+/** Result/progress files the emitter writes, by case. */
+const CASE_FILES: Readonly<Record<string, readonly (readonly [string, string])[]>> = {
+  'drainable-pending-running-deferred': [
+    ['state/repair/crq-abc-F1/result.json', '{"retry_after": 30}'],
+    ['state/repair/crq-run-F1/progress.json', '{}'],
+    ['state/repair/crq-retry-F1/result.json', '{"retry_after": "later"}'],
+  ],
+  'retry-after-falsy-is-skipped': [
+    ['state/repair/crq-retry0-F1/result.json', '{"retry_after": 0}'],
+  ],
+  'undrainable-consumed-orphaned': [['state/repair/crq-consumed-F1/result.json', '{}']],
+  'corrupt-result-refuses': [['state/repair/crq-abc-F1/result.json', 'broken']],
+  'orphan-progress-still-orphaned': [['state/repair/crq-nores-F1/progress.json', '{}']],
+};
+
 const INBOX_MTIMES: Readonly<Record<string, number>> = {
   'crq-abc-F1': 1_794_000_000,
   'crq-def-F1': 1_794_000_600,
@@ -191,24 +212,10 @@ const INBOX_MTIMES: Readonly<Record<string, number>> = {
  * The exact state-tree layout `emit.py` builds for each named case; the
  * TypeScript seam receives the same reads through injected callbacks.
  */
-function inboxStateFor(name: string, vector: FamilyCase): RepairInboxState {
+function inboxStateFor(name: string): RepairInboxState {
   const files = new Map<string, string>();
-  const layout = vector.input.get('queue') as JsonObject;
-  void layout;
-  const layouts: Record<string, Map<string, string>> = {
-    'drainable-pending-running-deferred': new Map([
-      ['state/repair/crq-abc-F1/result.json', '{"retry_after": 30}'],
-      ['state/repair/crq-run-F1/progress.json', '{}'],
-      ['state/repair/crq-retry-F1/result.json', '{"retry_after": "later"}'],
-    ]),
-    'retry-after-falsy-is-skipped': new Map([
-      ['state/repair/crq-retry0-F1/result.json', '{"retry_after": 0}'],
-    ]),
-    'undrainable-consumed-orphaned': new Map([['state/repair/crq-consumed-F1/result.json', '{}']]),
-    'corrupt-result-refuses': new Map([['state/repair/crq-abc-F1/result.json', 'broken']]),
-  };
-  for (const [relative, text] of layouts[name] ?? []) files.set(relative, text);
-  const corruptInbox = name === 'corrupt-inbox-job-refuses' ? 'broken' : null;
+  for (const [relative, text] of CASE_FILES[name] ?? []) files.set(relative, text);
+  const corruptInbox = INBOX_CONTENTS[name] ?? null;
   const symlinkCase = name === 'symlinked-job-is-still-inbox';
   const entries: RepairInboxEntry[] = Object.entries(INBOX_MTIMES)
     // The emitter creates the symlink stem only in the symlink case.
@@ -249,8 +256,8 @@ describe('repair digest oracle', () => {
       let outcome: unknown;
       try {
         outcome = repairDigest(
-          vector.input.get('queue'),
-          inboxStateFor(vector.name, vector),
+          toPlainJsonRetainingNumbers(vector.input.get('queue') as JsonValue),
+          inboxStateFor(vector.name),
           1_794_225_600,
         );
       } catch (error) {
@@ -271,6 +278,71 @@ describe('repair digest oracle', () => {
     const state: RepairInboxState = {
       entries: [{ stem: 'crq-a-F1', jobBytes: new TextEncoder().encode('{}'), mtime: 1000 }],
       readResult: () => new TextEncoder().encode('broken'),
+      hasResult: () => true,
+      hasProgress: () => false,
+    };
+    const queue = {
+      items: [
+        {
+          id: 'i',
+          kind: 'open',
+          state: 'pending',
+          repair_runs: { r: { state: 'queued', jobs: ['crq-a-F1'] } },
+        },
+      ],
+    };
+    expect(() => repairDigest(queue, state, 2000)).toThrow(PublishEffectsError);
+  });
+
+  test('an unreadable job file must raise from the seam, never count as pending', () => {
+    // Python `path.read_text()` propagates the read failure (PermissionError
+    // on a 0600-shadowed file) and the digest publishes nothing. The seam
+    // contract: null bytes mean absent; an unreadable existing file raises
+    // from the entry read itself, so the digest cannot mistake it for data.
+    const state: RepairInboxState = {
+      entries: [{ stem: 'crq-a-F1', jobBytes: null, mtime: 1000 }],
+      readResult: () => null,
+      hasResult: () => false,
+      hasProgress: () => false,
+    };
+    const queue = {
+      items: [
+        {
+          id: 'i',
+          kind: 'open',
+          state: 'pending',
+          repair_runs: { r: { state: 'queued', jobs: ['crq-a-F1'] } },
+        },
+      ],
+    };
+    try {
+      repairDigest(queue, state, 2000);
+      throw new Error('expected refusal');
+    } catch (error) {
+      expect(error).toBeInstanceOf(PublishEffectsError);
+      const refusal = error as PublishEffectsError;
+      // An absent job file for a globbed stem is the closest the seam can
+      // get to Python's failed read; the refusal class matches, and the
+      // message names the exact path the producer would have read.
+      expect(refusal.pythonError).toBe('OSError');
+      expect(refusal.message).toContain('state/repair/inbox/crq-a-F1.json');
+    }
+  });
+
+  test('an unreadable result file raises from readResult with the read error', () => {
+    // Python: `result.json` exists, `read_text()` fails -> PermissionError
+    // propagates out of `repair_tick.digest` (probed: REFUSED PermissionError
+    // '[Errno 13] Permission denied'). The TS adapter binds the seam so the
+    // callback throws the producer-shaped error; the digest must not swallow
+    // it into absent-file semantics.
+    const state: RepairInboxState = {
+      entries: [{ stem: 'crq-a-F1', jobBytes: new TextEncoder().encode('{}'), mtime: 1000 }],
+      readResult: () => {
+        throw new PublishEffectsError(
+          "[Errno 13] Permission denied: 'state/repair/crq-a-F1/result.json'",
+          'OSError',
+        );
+      },
       hasResult: () => true,
       hasProgress: () => false,
     };
