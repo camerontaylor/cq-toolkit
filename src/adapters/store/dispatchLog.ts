@@ -8,14 +8,35 @@ import { appendFile, open, readFile } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { lock } from 'proper-lockfile';
 import { DISPATCH_RECORD_VERSION } from '../../ops/review/replyAndResolve.js';
-import type { DispatchLog, DispatchRecord } from '../../ops/review/replyAndResolve.js';
+import type {
+  DispatchLog,
+  DispatchRecord,
+  ReviewAction,
+} from '../../ops/review/replyAndResolve.js';
 
-/** The action kinds a dispatch record may carry (the ReviewAction union). */
-const RECORD_KINDS: ReadonlySet<string> = new Set([
-  'review_reply',
-  'issue_comment',
-  'resolve_thread',
-]);
+/**
+ * The action kinds a dispatch record may carry, as an exhaustive record over
+ * the ops-owned `ReviewAction['kind']` union: a fourth action kind breaks
+ * the static gate here until it is listed, so the reader cannot silently
+ * drift behind the vocabulary. The runtime set below derives from this
+ * record (a type union has no runtime keys), so there is exactly one
+ * hand-maintained list. Failure mode on genuine drift is a loud load
+ * refusal naming the kind, never a silent re-dispatch.
+ */
+const RECORD_KIND_COVERAGE: Record<ReviewAction['kind'], true> = {
+  review_reply: true,
+  issue_comment: true,
+  resolve_thread: true,
+};
+const RECORD_KINDS: ReadonlySet<ReviewAction['kind']> = new Set<ReviewAction['kind']>(
+  (Object.keys(RECORD_KIND_COVERAGE) as Array<ReviewAction['kind']>).filter(
+    (kind) => kind.length > 0,
+  ),
+);
+/** Type-guard: a string is a known record kind (narrows for the shape gate). */
+function isRecordKind(value: string): value is ReviewAction['kind'] {
+  return RECORD_KINDS.has(value as ReviewAction['kind']);
+}
 
 /**
  * Describe the first shape fault in a candidate record, or null when the
@@ -30,7 +51,7 @@ function recordShapeFault(value: Record<string, unknown>): string | null {
     return `actionId must be a non-empty string (the dedupe key) — got ${JSON.stringify(actionId)}`;
   }
   const kind: unknown = value.kind;
-  if (typeof kind !== 'string' || !RECORD_KINDS.has(kind)) {
+  if (typeof kind !== 'string' || !isRecordKind(kind)) {
     return `kind must be "review_reply", "issue_comment" or "resolve_thread" — got ${JSON.stringify(kind)}`;
   }
   const resultRef: unknown = value.resultRef;
