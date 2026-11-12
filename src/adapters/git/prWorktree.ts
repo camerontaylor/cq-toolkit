@@ -769,6 +769,14 @@ async function removeLockedPrWorktree(
   }
   const canonicalPath = await realpath(requestedPath);
   await bindCheckout(opts, canonicalPath, false, phase);
+  // Read (and canonicalize) the registry entry BEFORE removal: an entry
+  // spelled through a terminal symlink still names THIS tree, but git leaves
+  // the out-of-tree symlink dangling, so comparing afterwards would miss it.
+  // The UPDATE still happens only after git actually removed the tree.
+  const metadata = await opts.registry.read(opts.pr);
+  const entryPath = metadata?.state === 'bound' ? metadata.checkoutPath : undefined;
+  const entryMatches =
+    entryPath !== undefined && (await canonicalize(entryPath)) === canonicalPath;
   phase.checkoutMutation = true;
   checkoutWriterContext()!.markCheckoutMutation();
   const removeArgs = ['-C', repoRoot, 'worktree', 'remove', requestedPath];
@@ -782,12 +790,9 @@ async function removeLockedPrWorktree(
     );
   }
   await checkoutWriterContext()!.removed(canonicalPath);
-  // The prune compares the entry against the SAME canonical location just
-  // removed (an entry spelled through an alias still names this tree); an
-  // entry pointing anywhere else describes a different tree and survives.
-  const metadata = await opts.registry.read(opts.pr);
-  const entryPath = metadata?.state === 'bound' ? metadata.checkoutPath : undefined;
-  if (entryPath !== undefined && (await canonicalize(entryPath)) === canonicalPath) {
+  // Only an entry that named THE removed tree is pruned; an entry pointing
+  // anywhere else describes a different tree and survives.
+  if (entryMatches) {
     await opts.registry.update(opts.pr, { version: 1, state: 'unbound', incomplete: true });
   }
 }
