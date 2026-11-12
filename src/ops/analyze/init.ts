@@ -179,18 +179,26 @@ export function makeAnalyzeInit(): Op<AnalyzeInitInput, AnalyzeInitReport> {
       try {
         // A killed migration can leave its private staging directory behind.
         // Keep recent directories (another migration may still be using one).
-        for (const entry of readdirSync(dirname(configPath), { withFileTypes: true })) {
-          if (!entry.isDirectory() || !/^\.cq-config-migrate-[A-Za-z0-9]{6}$/.test(entry.name))
-            continue;
-          const scratch = join(dirname(configPath), entry.name);
-          try {
-            if (Date.now() - lstatSync(scratch).mtimeMs > 24 * 60 * 60 * 1000) {
-              rmSync(scratch, { recursive: true, force: true });
+        // The scan itself is best-effort too: a parent that permits traversal
+        // and writing but not listing throws EACCES from readdirSync, and that
+        // must not block the migration it precedes.
+        try {
+          for (const entry of readdirSync(dirname(configPath), { withFileTypes: true })) {
+            if (!entry.isDirectory() || !/^\.cq-config-migrate-[A-Za-z0-9]{6}$/.test(entry.name))
+              continue;
+            const scratch = join(dirname(configPath), entry.name);
+            try {
+              if (Date.now() - lstatSync(scratch).mtimeMs > 24 * 60 * 60 * 1000) {
+                rmSync(scratch, { recursive: true, force: true });
+              }
+            } catch {
+              // Cleanup is best-effort: concurrent removal or permissions must
+              // not prevent migration of the actual configuration.
             }
-          } catch {
-            // Cleanup is best-effort: concurrent removal or permissions must
-            // not prevent migration of the actual configuration.
           }
+        } catch {
+          // Unreadable parent: skip stale-directory cleanup and proceed with
+          // the migration (mkdtempSync below still validates writability).
         }
         const migrated = migrateCqConfig(readFileSync(configPath, 'utf8'));
         if (!migrated.ok)
