@@ -109,7 +109,9 @@ concrete defect, not merely an unknown record location.
    checked against the retained record or the physical state. The implemented
    `recover_unit` (`deploy-controller.py:1313`) now calls that guard with
    `exclude=<its own record>`, so a legitimate recovery does not block itself
-   while any other unfinished transaction still does.
+   while any other unfinished transaction still does. A checkout
+   `deploy_pending`, `rollback_pending` or `recovery_required` record has no
+   machine-verifiable resolution in `recover_unit`; keep it as an open gap.
 4. **Record identity is weak (still open).** Records do not retain the record
    root, the controller version or a host identity. The controller lock is
    `state/controller.lock` inside the checkout (`deploy-controller.py:85`,
