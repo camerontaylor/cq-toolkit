@@ -194,7 +194,11 @@ describe('the fix-run wall-clock ladder (opts.limits → the governor)', () => {
       // same-file successor started only after its predecessor entered and
       // settled; the disjoint worker needed neither; the waiter's wall-clock
       // ladder was not consumed by the wait; every row still ended ok.
-      expect([...new Set(started)].sort()).toEqual(['fix-1', 'fix-2', 'fix-3']);
+      // Multiplicity IS deterministic even when order is not: the SORTED
+      // ARRAY (a multiset) pins each job key EXACTLY ONCE — a duplicate
+      // body launch (double-dispatch/double-spend class) fails here, which
+      // a Set-membership check would silently pass.
+      expect(started.slice().sort()).toEqual(['fix-1', 'fix-2', 'fix-3']);
       expect(started.indexOf('fix-2')).toBeGreaterThan(started.indexOf('fix-1'));
       expect(started.indexOf('fix-3')).toBeLessThan(started.indexOf('fix-1'));
       expect(aborted).toEqual([]);
