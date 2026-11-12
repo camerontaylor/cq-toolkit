@@ -882,25 +882,15 @@ const STARTED_AT_ENV = 'CQ_SELFHOST_NOW_MS';
 
 /**
  * The run's start instant: the pinned epoch-ms when the deployment set one,
- * else ONE `deps.nowMs()` read. A malformed pin THROWS: a bad clock must
- * fail loud, never silently fall back to a different peak window than the
- * handshake validated.
+ * else ONE `deps.nowMs()` read. A malformed pin never reaches this function:
+ * the entry snapshot's registry epoch-ms parser already failed the process
+ * loud at the entry, so there is no ambient fallback here to disagree with
+ * the snapshot the handshake validated.
  */
-function runStartInstant(deps: SelfReviewLoopDeps, cqEnv?: CqEnv): number {
-  if (cqEnv !== undefined) {
-    // Already parsed (and validated at the entry) by the registry's epoch-ms parser.
-    const pinned = cqEnv.values[STARTED_AT_ENV];
-    return typeof pinned === 'number' ? pinned : deps.nowMs();
-  }
-  const raw = processEnv()[STARTED_AT_ENV];
-  if (raw === undefined || raw === '') return deps.nowMs();
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(
-      `selfhost-review-loop: ${STARTED_AT_ENV} must be a non-negative safe integer epoch-ms — got ${JSON.stringify(raw)}`,
-    );
-  }
-  return value;
+function runStartInstant(deps: SelfReviewLoopDeps, cqEnv: CqEnv): number {
+  // Already parsed (and validated at the entry) by the registry's epoch-ms parser.
+  const pinned = cqEnv.values[STARTED_AT_ENV];
+  return typeof pinned === 'number' ? pinned : deps.nowMs();
 }
 
 /**

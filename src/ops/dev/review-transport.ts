@@ -30,7 +30,7 @@ import type { Op, OpResult } from '../../kernel/types.js';
 import { DevTransportInputSchema, type DevTransportInput } from './registry.js';
 import { assertCqEnvName } from '../../config/entry.js';
 import type { CqEnv } from '../../config/env.js';
-import { processEnv } from '../../config/process-env.js';
+import { currentCqEnv } from '../../config/run-env.js';
 
 const DecisionSchema = z
   .object({
@@ -172,7 +172,7 @@ export function resolveAuthorEnv(env: AuthorEnv): {
 export function makeAuthorAdmission(
   transport: AuthorTransport,
   capture?: (base: string, tree: string) => Promise<{ head: string; snapshot: object }>,
-  env: AuthorEnv = processEnv(),
+  env: AuthorEnv = currentCqEnv(),
 ): Op<DevTransportInput, AuthorDecision> {
   return async (input) => {
     let i: DevTransportInput;
@@ -246,11 +246,12 @@ export function makeAuthorAdmission(
  * from the merged PR's registry adapter — a missing alias is a
  * needs-human configuration gap, an invalid alias a configuration fault).
  * The alias resolves from the dispatch wiring's snapshot (or the explicit
- * record); the ambient environment is the default only.
+ * record); the default is the enclosing run's snapshot (`currentCqEnv()` —
+ * one fresh validated read when called outside a run).
  */
 export function envAuthorAdmission(
   input: DevTransportInput,
-  env: AuthorEnv = processEnv(),
+  env: AuthorEnv = currentCqEnv(),
 ): Promise<OpResult<AuthorDecision> | { status: 'needs-human'; reason: string }> {
   if (isCqEnv(env)) {
     assertCqEnvName(env, 'dev.review', 'CQ_AUTHOR_SSH_ALIAS');

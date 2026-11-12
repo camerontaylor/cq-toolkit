@@ -197,7 +197,6 @@ The rule `cq/no-process-env-accessor` bans importing or calling `processEnv()` (
 - `src/driver/acp/binaries.ts`
 - `src/driver/claude-code/routing.ts`
 - `src/driver/sessions-dir.ts`
-- `src/ops/dev/review-transport.ts`
 - `src/ops/fix/runFix.ts`
 - `src/ops/review/internal/addressEvidence.ts`
 - `src/sandbox/launcher.ts`
@@ -211,3 +210,9 @@ a live ambient re-read — so an ambient policy-knob change after entry cannot
 move a mid-run gate (issue #1185). An explicit `env` argument remains the
 deliberate foreign-environment injection path and still overrides the
 snapshot; launcher PATH and child env are untouched.
+`src/ops/dev/review-transport.ts`'s `makeAuthorAdmission`/`envAuthorAdmission`
+`env` default is now `currentCqEnv()` — the dispatch wiring's snapshot inside
+a run, one fresh validated read per standalone call — while an explicitly
+injected raw record stays a first-class seam keeping its historical
+`''`-only blank rule (the snapshot path treats a whitespace-only value as
+unset via the registry).

@@ -9,8 +9,10 @@
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { readCqEnv } from '../../../src/config/env.js';
+import { readCqEnv, type CqEnv } from '../../../src/config/env.js';
+import { currentCqEnv } from '../../../src/config/run-env.js';
 import { openObservationWriter, type ObservationWriter } from '../../../src/kernel/observation.js';
+import type { OpRegistryEntry } from '../../../src/kernel/types.js';
 import { makeFixRun, type FixRunDeps } from '../../../src/ops/fix/runFix.js';
 import {
   fixedUnitReport,
@@ -91,5 +93,46 @@ describe('fix composition provenance identity snapshot (issue #1185)', () => {
     vi.stubEnv('PASEO_AGENT_ID', '');
     const { writer } = await runComposition({ cqEnv }, f);
     expect(headerOf(writer).payload.correlation.parentWorkId).toBeNull();
+  });
+
+  test('a nested sweep op resolves the ENTRY snapshot, never an ambient re-read', async () => {
+    const f = await fixtureIn(roots);
+    const cqEnv = readCqEnv({ CQ_WORK_ID: ENTRY_PARENT });
+    vi.stubEnv('CQ_WORK_ID', AMBIENT_PARENT);
+    vi.stubEnv('CQ_PARENT_WORK_ID', '');
+    vi.stubEnv('PASEO_AGENT_ID', '');
+    // Wrap the stub sweep.unit so the op records the snapshot it actually
+    // sees when the composition's nested runPlan dispatches it. A direct
+    // library call with no enclosing run scope proves the option threading:
+    // a bare nested runPlan would fresh-read the ambient here.
+    const seen: { input?: unknown } = {};
+    const base = stubSweepRegistries(fixedUnitReport(), seen);
+    let nestedSnapshotWorkId: unknown;
+    const view = (name: string): OpRegistryEntry<never, never> | undefined => {
+      const entry = base(name);
+      if (name !== 'sweep.unit' || entry === undefined) return entry;
+      return {
+        ...entry,
+        importer: async (wiring?: { cqEnv?: CqEnv }) => {
+          const op = await entry.importer(wiring);
+          return async (raw: never) => {
+            nestedSnapshotWorkId = currentCqEnv().values['CQ_WORK_ID'];
+            return op(raw);
+          };
+        },
+      } as unknown as OpRegistryEntry<never, never>;
+    };
+    const writer = await openObservationWriter({
+      workId: randomUUID(),
+      compositionRunId: `probe-${randomUUID()}`,
+    });
+    await makeFixRun({
+      cqEnv,
+      drivers: fixingDrivers(),
+      registry: { get: view },
+      observationWriter: writer,
+    })(input(f));
+    expect(nestedSnapshotWorkId).toBe(ENTRY_PARENT);
+    expect(nestedSnapshotWorkId).not.toBe(AMBIENT_PARENT);
   });
 });
