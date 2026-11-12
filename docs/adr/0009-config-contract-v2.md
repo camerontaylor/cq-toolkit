@@ -208,6 +208,5 @@ The rule `cq/no-process-env-accessor` bans importing or calling `processEnv()` (
 - `src/sandbox/config.ts`
 - `src/sandbox/index.ts`
 - `src/sandbox/launcher.ts`
-- `src/selfhost/config.ts`
 - `src/selfhost/observe-prs.ts`
 - `src/selfhost/self-review-loop.ts`
