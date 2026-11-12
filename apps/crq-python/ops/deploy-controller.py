@@ -1932,14 +1932,40 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
 # --------------------------------------------------------------------- main
 
 
-def _error_artifact(kind: str, subcommand: str, message: str, exit_code: int) -> dict:
+def _error_artifact(kind: str, subcommand: str | None, message: str,
+                    exit_code: int) -> dict:
     """The one JSON artifact for an error with no result (doctrine I1)."""
     return {"error": {"kind": kind, "subcommand": subcommand,
                       "message": message, "exitCode": exit_code}}
 
 
+class _JsonArgumentParser(argparse.ArgumentParser):
+    """argparse parser that can answer argument failures with the I1 artifact.
+
+    Machine mode (--json) is shared with the subparsers argparse derives from
+    this class, so every usage error -- on this parser or a subparser --
+    writes one error object to stdout with exit code 2 and keeps stderr
+    empty. Without --json, argparse's stderr usage text and exit code are
+    unchanged.
+    """
+
+    json_mode = False
+    subcommand: str | None = None
+
+    def error(self, message: str):
+        if not self.json_mode:
+            super().error(message)
+            return
+        print(json.dumps(_error_artifact("usage", self.subcommand, message, 2),
+                         indent=2, sort_keys=True))
+        raise SystemExit(2)
+
+
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    if argv is None:
+        argv = sys.argv[1:]
+    parser = _JsonArgumentParser(description=__doc__)
+    parser.json_mode = "--json" in argv
     parser.add_argument("--root", required=True, type=Path,
                         help="deployment checkout root (full monorepo)")
     parser.add_argument("--overlay", required=True, type=Path,
@@ -1951,6 +1977,10 @@ def main(argv=None) -> int:
     parser.add_argument("--expect-helper-sha256", metavar="HEX64",
                         help="owner-pinned sha256 of the helper; a mismatch refuses "
                              "before import, lock and preflight")
+    parser.add_argument("--json", action="store_true",
+                        help="machine mode: argument failures emit the JSON error "
+                             "artifact on stdout (exit 2) instead of argparse's "
+                             "usage text on stderr")
     sub = parser.add_subparsers(dest="operation", required=True)
     switch = sub.add_parser("switch", help="preflight, drain, switch, verify, journal")
     switch.add_argument("--unit", choices=sorted(UNIT_RUNTIMES))
@@ -1973,7 +2003,13 @@ def main(argv=None) -> int:
                              "polls --first-tick-timeout-seconds instead)")
     health.add_argument("--first-tick-timeout-seconds", type=int, default=1500,
                         help="first completed-tick wait (default: 20-minute cadence plus 5-minute slack)")
+    # Argument failures raised by a subparser (e.g. a missing required option)
+    # must honor --json too, and name the operation in the artifact.
+    for name, child in sub.choices.items():
+        child.json_mode = parser.json_mode
+        child.subcommand = name
     args = parser.parse_args(argv)
+    parser.subcommand = args.operation
     if args.operation == "health" and (args.first_tick_timeout_seconds < 0 or args.interval_seconds < 0):
         parser.error("health wait intervals must be nonnegative")
 
