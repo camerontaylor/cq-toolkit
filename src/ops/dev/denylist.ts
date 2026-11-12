@@ -443,70 +443,33 @@ function decodeGitQuotedPath(raw: string, source: string): string {
   }
 }
 
-function splitHeaderPaths(raw: string, source: string): [string, string] | undefined {
-  const tokens: string[] = [];
-  let index = 0;
-  while (index < raw.length) {
-    if (raw[index] === ' ') {
-      index += 1;
-      continue;
-    }
-    const start = index;
-    if (raw[index] === '"') {
-      index += 1;
-      while (index < raw.length) {
-        if (raw[index] === '\\') {
-          index += 2;
-          continue;
-        }
-        if (raw[index] === '"') {
-          index += 1;
-          break;
-        }
-        index += 1;
-      }
-    } else {
-      while (index < raw.length && raw[index] !== ' ') index += 1;
-    }
-    tokens.push(raw.slice(start, index));
+/**
+ * Resolve the b-side of a NEW file's `diff --git` header (review P2 uDtO).
+ * Git leaves spaces unquoted, so `a/GH_FOR_FA b/clean b/GH_FOR_FA b/clean`
+ * contains several ` b/` occurrences; the separator is the one where the
+ * decoded a-side and b-side name the SAME path (a new file has one name).
+ */
+function newFilePath(raw: string, source: string): string | undefined {
+  const candidates: number[] = [];
+  for (let i = raw.indexOf(' b/'); i !== -1; i = raw.indexOf(' b/', i + 1)) candidates.push(i);
+  for (let i = raw.indexOf(' "b/'); i !== -1; i = raw.indexOf(' "b/', i + 1)) candidates.push(i);
+  for (const index of candidates.sort((a, b) => a - b)) {
+    const aSide = decodeGitQuotedPath(raw.slice(0, index), source).replace(/^a\//, '');
+    const bSide = decodeGitQuotedPath(raw.slice(index + 1), source).replace(/^b\//, '');
+    if (aSide !== '' && aSide === bSide) return bSide;
   }
-  // Git only C-quotes special characters, NOT spaces: `diff --git a/my
-  // file.md b/my file.md` is legal for an empty new file. The a- and
-  // b-sides are identical there, so split at the last ` b/` (or ` "b/`)
-  // delimiter; otherwise leave the b-side unknown and let ---/+++ attribute it.
-  if (tokens.length !== 2) {
-    const delimiter = raw.lastIndexOf(' b/');
-    if (delimiter > 0) {
-      return [
-        decodeGitQuotedPath(raw.slice(0, delimiter), source),
-        decodeGitQuotedPath(raw.slice(delimiter + 1), source),
-      ];
-    }
-    const quoted = raw.lastIndexOf(' "b/');
-    if (quoted > 0) {
-      return [
-        decodeGitQuotedPath(raw.slice(0, quoted), source),
-        decodeGitQuotedPath(raw.slice(quoted + 1), source),
-      ];
-    }
-    return undefined;
-  }
-  return [
-    decodeGitQuotedPath(tokens[0] as string, source),
-    decodeGitQuotedPath(tokens[1] as string, source),
-  ];
+  return undefined;
 }
 
 export function addedLineComponents(patch: string, source: string): ScanComponentInput[] {
   let path: string | undefined;
-  let addedPath: string | undefined;
+  let headerRaw: string | undefined;
   let inHeader = false;
   const added = new Map<string, string[]>();
   for (const rawLine of patch.split('\n')) {
     const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
     if (line.startsWith('diff --git')) {
-      const split = splitHeaderPaths(line.slice('diff --git '.length), source);
-      addedPath = split?.[1].replace(/^b\//, '');
+      headerRaw = line.slice('diff --git '.length);
       path = undefined;
       inHeader = true;
       continue;
@@ -520,6 +483,7 @@ export function addedLineComponents(patch: string, source: string): ScanComponen
       // (review P2 tOU-, PR #1641): git emits `new file mode` + `index`
       // only, so the b-side of the diff --git line is the sole path.
       if (line.startsWith('new file mode')) {
+        const addedPath = headerRaw === undefined ? undefined : newFilePath(headerRaw, source);
         if (addedPath === undefined) {
           throw new Error(
             `${source}: an added file has no parsable diff --git path — refusing the unattributable component`,

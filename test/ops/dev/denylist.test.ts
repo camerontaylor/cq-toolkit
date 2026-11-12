@@ -720,6 +720,22 @@ describe('addedLineComponents — one component per changed path of ADDED lines'
     ]);
   });
 
+  test('a pathname containing b/ is not truncated — the separator is the matching a/b pair (review P2 uDtO)', () => {
+    const patch = [
+      'diff --git a/GH_FOR_FA b/clean b/GH_FOR_FA b/clean',
+      'new file mode 100644',
+      'index 0000000..e69de29',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([
+      { component: 'GH_FOR_FA b/clean', text: '', path: 'GH_FOR_FA b/clean' },
+      {
+        component: 'path GH_FOR_FA b/clean',
+        text: 'GH_FOR_FA b/clean',
+        path: 'GH_FOR_FA b/clean',
+      },
+    ]);
+  });
+
   test('an empty patch yields zero components (nothing to scan is clean)', () => {
     expect(addedLineComponents('', 'gate')).toEqual([]);
   });
