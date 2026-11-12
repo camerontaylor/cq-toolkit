@@ -74,6 +74,18 @@ regexTarget = "line"
 targetRules = ["generic-api-key"]
 regexes = ['''Settle reasoning tokens, paginate\+slurp''']
 
+# A deliberate test fixture in PR #1641 (review P2 vEcv): the real-git
+# regression must configure an identity whose hostname the repository
+# denylist would normally refuse. The fixture now assembles the address
+# from parts; this entry covers the one commit that still carries the
+# literal. Narrow by commit AND exact line text, nothing else.
+[[allowlists]]
+description = "Fake identity fixture in the publication-gate regression (PR #1641)"
+regexTarget = "line"
+commits = ["d0e085f62acde12bfae33e806baf2a53cad1e129"]
+targetRules = ["webfront-names"]
+regexes = ['''bot@internal\.webfront\.app''']
+
 [[allowlists]]
 description = "Tooling directories, this file, and the legacy pattern corpus (intentionally dirty samples)"
 paths = [

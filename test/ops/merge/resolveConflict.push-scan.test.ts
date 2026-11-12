@@ -125,7 +125,11 @@ describe('the publication gate (issue #1193): scan BEFORE any push, fail closed'
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') {
       expect(result.reason).toContain('project-token-rule');
-      expect(result.reason).toContain('src/leak.ts');
+      // Attribution is kind+index only: a component name can BE the
+      // secret when a path rule fires, and this reason reaches reports
+      // (review P2 vaJ4, PR #1641).
+      expect(result.reason).toMatch(/content #\d+/);
+      expect(result.reason).not.toContain('src/leak.ts');
       expect(result.reason).toContain('NOT pushed');
       expect(result.reason).not.toContain('ghp_HIDDEN_SECRET_VALUE');
     }

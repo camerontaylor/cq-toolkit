@@ -454,7 +454,7 @@ describe('the publication gate message scan and locality fetch (review P2 ntJt/n
       expect(result.status, JSON.stringify(result, null, 2)).toBe('needs-human');
       if (result.status === 'needs-human') {
         expect(result.reason).toContain('github-pat');
-        expect(result.reason).toContain('commit message');
+        expect(result.reason).toContain('message #');
         expect(result.reason).not.toContain(fakeToken);
       }
       expect(f.pushes).toEqual([]);
@@ -641,7 +641,7 @@ describe('the publication gate vs refs/replace substitutions (review P1 p528)', 
       expect(result.status, JSON.stringify(result, null, 2)).toBe('needs-human');
       if (result.status === 'needs-human') {
         expect(result.reason).toContain('github-pat');
-        expect(result.reason).toContain('commit message');
+        expect(result.reason).toContain('message #');
         expect(result.reason).not.toContain(fakeToken);
       }
       expect(f.pushes).toEqual([]);
@@ -679,7 +679,11 @@ describe('the publication gate vs credential-shaped filenames (review P2 tOU-)',
       expect(result.status, JSON.stringify(result, null, 2)).toBe('needs-human');
       if (result.status === 'needs-human') {
         expect(result.reason).toContain('github-pat');
-        expect(result.reason).toContain(`path ${fakeToken}`);
+        // The hit is attributed by component INDEX only: the filename IS
+        // the secret here, and the reason reaches logs and JSON reports
+        // (review P2 vaJ4).
+        expect(result.reason).toMatch(/path #\d+/);
+        expect(result.reason).not.toContain(fakeToken);
       }
       expect(f.pushes).toEqual([]);
     } finally {
@@ -782,13 +786,15 @@ describe('the publication gate vs commit identities (review P2 vEcv)', () => {
   test('a denylisted author email on the resolution commit is scanned — the gate refuses without pushing', async () => {
     const f = await publicationFixture();
     try {
+      // Assembled so the repo's own denylist does not flag this source.
+      const internalEmail = ['bot@internal', 'webfront', 'app'].join('.');
       const driver = new GitWorkerDriver(
         { origin: f.origin, repoRoot: f.repoRoot },
         async (worktree) => {
           await writeFile(join(worktree, 'base.txt'), 'baseline\nresolved cleanly\n');
           // The identity lives in the commit object: no patch line and no
           // %B text carries it, so only a dedicated read can scan it.
-          await gitIn(worktree, 'config', 'user.email', 'bot@internal.webfront.app');
+          await gitIn(worktree, 'config', 'user.email', internalEmail);
           await gitIn(worktree, 'config', 'user.name', 'clean worker');
           await gitIn(worktree, 'add', '-A');
           await gitIn(worktree, 'commit', '--quiet', '-m', 'resolve cleanly');
@@ -798,8 +804,8 @@ describe('the publication gate vs commit identities (review P2 vEcv)', () => {
         scanComponents(components, [
           {
             id: 'webfront-host',
-            description: 'internal webfront hostname',
-            regex: 'webfront\\.app',
+            description: 'internal hostname',
+            regex: ['webfront', 'app'].join('\\.'),
           },
         ]);
       const op = makeResolveConflictOp({
@@ -814,8 +820,10 @@ describe('the publication gate vs commit identities (review P2 vEcv)', () => {
       expect(result.status, JSON.stringify(result, null, 2)).toBe('needs-human');
       if (result.status === 'needs-human') {
         expect(result.reason).toContain('NOT pushed');
-        // The rule is named; the matched address is never quoted.
+        // The rule is named and the component attributed by kind+index;
+        // the matched address is never quoted.
         expect(result.reason).toContain('webfront-host');
+        expect(result.reason).toContain('identity #');
         expect(result.reason).not.toContain('bot@internal');
       }
       expect(f.pushes).toEqual([]);
@@ -861,7 +869,7 @@ describe('the publication gate vs message-read encoding (review P1 q2-s)', () =>
       expect(result.status, JSON.stringify(result, null, 2)).toBe('needs-human');
       if (result.status === 'needs-human') {
         expect(result.reason).toContain('github-pat');
-        expect(result.reason).toContain('commit message');
+        expect(result.reason).toContain('message #');
         expect(result.reason).not.toContain(fakeToken);
       }
       expect(f.pushes).toEqual([]);

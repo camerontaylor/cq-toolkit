@@ -1122,10 +1122,32 @@ export function makeResolveConflictOp(
             const ruleIds = [
               ...new Set(hits.flatMap((component) => component.hits.map((hit) => hit.ruleId))),
             ].join(', ');
-            const files = hits.map((component) => component.component).join(', ');
+            // OPAQUE identifiers only (review P2 vaJ4, PR #1641): the
+            // component NAME can itself be the secret when a path rule
+            // fires on a credential-shaped filename, and this reason lands
+            // in JSON reports and human output. The operator re-runs the
+            // scan locally to inspect; the diagnostic never quotes it.
+            const labels = hits
+              .map((component) => {
+                const index = scanInputs.findIndex(
+                  (candidate) => candidate.component === component.component,
+                );
+                const position = index === -1 ? '?' : String(index);
+                if (component.component.startsWith('commit message ')) {
+                  return `message #${position}`;
+                }
+                if (component.component.startsWith('commit identity ')) {
+                  return `identity #${position}`;
+                }
+                // Patch components are named by their PATH, which can be the
+                // secret itself; the kind plus index is all we may print.
+                if (component.component.startsWith('path ')) return `path #${position}`;
+                return `content #${position}`;
+              })
+              .join(', ');
             return {
               status: 'needs-human',
-              reason: `the resolved change for pr ${input.pr} carries denylist hits (rules: ${ruleIds}; files: ${files}) — the branch was NOT pushed; scrub or review the findings before publishing${sessionSuffix(result)}`,
+              reason: `the resolved change for pr ${input.pr} carries denylist hits (rules: ${ruleIds}; components: ${labels}) — the branch was NOT pushed; scrub or review the findings before publishing${sessionSuffix(result)}`,
             };
           }
           // Gate rung 7: the publication — the OP pushes the resolution
