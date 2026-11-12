@@ -36,14 +36,14 @@ CONFIG_KEYS = {
     'promotion.alert_agent_id', 'promotion.signer.spool.dir',
     'promotion.signer.spool.ssh_alias', 'promotion.signer.spool.ssh_key',
     'repair.enabled', 'repair.cq_bin',
-    'repair.paseo_host', 'repair.blackout.enabled',
+    'repair.paseo_host', 'repair.blackout.enabled', 'repair.max_concurrent_items',
 }
 # Allowlisted but optional: absent means the committed value applies.
 OPTIONAL_KEYS = {'repos', 'notify.hosts', 'alerts.alert_agent_id',
                  'promotion.record_url_template', 'promotion.alert_agent_id',
                  'promotion.signer.spool.dir', 'promotion.signer.spool.ssh_alias',
                  'promotion.signer.spool.ssh_key',
-                 'repair.blackout.enabled'}
+                 'repair.blackout.enabled', 'repair.max_concurrent_items'}
 HOST_KEYS = {'schema_version', 'deploy_root', 'record_dir', 'config', 'fleet_reader'}
 PATH_KEYS = {'clone', 'worktree_root', 'timeout_bin', 'repair.cq_bin',
              'promotion.signer.spool.dir', 'promotion.signer.spool.ssh_key'}
@@ -110,6 +110,9 @@ def validate(overlay):
             # Host switch for the GLM peak blackout; window and times stay committed.
             if type(value) is not bool:
                 raise ValueError('repair.blackout.enabled must be JSON true or false')
+        elif name == 'repair.max_concurrent_items':
+            if type(value) is not int or not 1 <= value <= 10:
+                raise ValueError('repair.max_concurrent_items must be an integer from 1 to 10')
         elif name == 'repair.enabled':
             # Host kill switch. Spend authorization and roles stay committed policy.
             if type(value) is not bool:
