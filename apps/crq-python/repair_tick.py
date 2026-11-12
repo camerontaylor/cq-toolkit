@@ -20,7 +20,9 @@ def scan_fix_instructions(c, instructions, source_sha, scan_path):
     if (not isinstance(instructions, str) or not instructions.strip()
             or len(instructions) > 2000 or '\x00' in instructions):
         raise ValueError('fix instructions must contain 1..2000 characters without NUL')
-    lines = instructions.split('\n')
+    # The scan representation uses the scanner's own splitlines() boundaries, so
+    # text after a lone \r or \x85 still gets a '+' prefix and is inspected.
+    lines = instructions.splitlines()
     patch = ('diff --git a/crq-fix-instructions.txt b/crq-fix-instructions.txt\n'
              '--- /dev/null\n+++ b/crq-fix-instructions.txt\n'
              '@@ -0,0 +1,' + str(len(lines)) + ' @@\n'

@@ -65,7 +65,7 @@ def _full_source_patch(path, text):
 
 def _instructions_patch(text):
     """The production fix-instructions scan patch, kept byte-identical."""
-    lines = text.split("\n")
+    lines = text.splitlines()
     return (
         "diff --git a/crq-fix-instructions.txt b/crq-fix-instructions.txt\n"
         "--- /dev/null\n+++ b/crq-fix-instructions.txt\n"
