@@ -21,6 +21,16 @@ describe('sweep.unit registry entry (jSKJF)', () => {
     }
   });
 
+  test('non-.snap files under __snapshots__/ stay protected when protectTests is false (#1188)', () => {
+    // Vitest `toMatchFileSnapshot` outputs carry arbitrary extensions; the
+    // directory is the snapshot signal in either protectTests mode.
+    const refused = classifyStagePaths(['src/__snapshots__/out.txt'], undefined, false, false);
+    expect(refused.kind).toBe('protected');
+    expect(refused.paths).toContain('src/__snapshots__/out.txt');
+    expect(classifyStagePaths(['src/foo.ts'], undefined, false, false).kind).toBe('clean');
+    expect(classifyStagePaths(['src/__snapshots__/out.txt']).kind).toBe('protected');
+  });
+
   test('propose-only routes every non-empty staged set to human review', () => {
     expect(classifyStagePaths(['src/production.ts'], undefined, true).kind).toBe('propose-only');
     expect(classifyStagePaths([], undefined, true).kind).toBe('clean');

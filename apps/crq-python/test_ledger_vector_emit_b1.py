@@ -134,6 +134,25 @@ class LedgerVectorTest(unittest.TestCase):
             self.assertEqual(value["id"], ledger.digest(
                 {key: item for key, item in value.items() if key != "id"}), case["name"])
 
+    def test_scope_exceedance_vectors_reach_the_named_validation(self):
+        cases = {case["name"]: case for case in _family("validate")["cases"]}
+        requested = cases["reviewed-exceeds-requested"]
+        input_scope = cases["reviewed-exceeds-input"]
+        for case in (requested, input_scope):
+            self.assertEqual(case["expect"], {
+                "ok": False,
+                "error": "IntegrityError",
+                "message": "mapped review scope exceeds requested/input scope",
+            })
+            payload = case["input"]["value"]["payload"]
+            self.assertEqual(ledger.digest(payload["requested_scope"]), payload["scope_digest"])
+        rp = requested["input"]["value"]["payload"]
+        ip = input_scope["input"]["value"]["payload"]
+        self.assertNotEqual(rp["reviewed_scope"], rp["requested_scope"])
+        self.assertEqual(rp["input_scope"], rp["requested_scope"])
+        self.assertNotEqual(ip["reviewed_scope"], ip["input_scope"])
+        self.assertEqual(ip["reviewed_scope"], ip["requested_scope"])
+
     def test_sequence_members_are_individually_valid(self):
         # Sequence refusals must come from cross-record rules, not an accidental
         # invalid member that would fail earlier for the wrong reason.

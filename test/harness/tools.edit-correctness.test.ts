@@ -3,7 +3,7 @@
 // tools.helpers.ts). This file keeps the F1 edit-correctness cases; the
 // concurrent-edit and admission-ordering cases live in
 // tools.edit-concurrency.test.ts.
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { buildTools } from '../../src/harness/tools.js';
@@ -250,6 +250,52 @@ describe('F1 edit correctness', () => {
       // NO poisoned queue: a later read on the SAME path runs normally.
       const fine = await read.execute({ path: 'guard.txt' });
       expect(fine.ok, fine.ok ? '' : fine.denial.reason).toBe(true);
+    });
+  });
+
+  // #1194 follow-up: the edit allowlist invoke() builds from a finding path
+  // compiles through compilePathPatterns, whose literalChar escapes brackets
+  // — so a bracketed route name authorizes exactly that file — while `*` and
+  // `?` are wildcards, which is why safeFile must refuse them.
+  test('a bracketed edit pattern authorizes only the literal file', async () => {
+    await withScratch(async (scratchDir) => {
+      await mkdir(join(scratchDir, 'pages'), { recursive: true });
+      await mkdir(join(scratchDir, 'src'), { recursive: true });
+      for (const name of ['[id].tsx', 'i.tsx', 'd.tsx'])
+        await writeFile(join(scratchDir, 'pages', name), 'seed\n', 'utf8');
+      await writeFile(join(scratchDir, 'src/ab.ts'), 'seed\n', 'utf8');
+      const toolsWithPatterns = (pattern: string) =>
+        buildTools(
+          {
+            ...defaultHarnessConfig,
+            tools: {
+              ...defaultHarnessConfig.tools,
+              edit: { ...defaultHarnessConfig.tools.edit, pathPatterns: [pattern] },
+            },
+          },
+          scratchDir,
+        );
+      const editFile = async (pattern: string, file: string, dir: string) => {
+        const tools = toolsWithPatterns(pattern);
+        const read = tools.find((c) => c.name === 'read');
+        const edit = tools.find((c) => c.name === 'edit');
+        if (read === undefined || edit === undefined) throw new Error('missing tools');
+        // edit refuses FS_NOT_READ without a prior read on the same instance.
+        const seen = await read.execute({ path: `${dir}/${file}` });
+        if (!seen.ok) return seen.denial.reason;
+        const result = await edit.execute({
+          file_path: `${dir}/${file}`,
+          old_string: 'seed',
+          new_string: 'edited',
+        });
+        return result.ok ? 'ok' : result.denial.reason;
+      };
+      expect(await editFile('pages/[id].tsx', '[id].tsx', 'pages')).toBe('ok');
+      expect(await editFile('pages/[id].tsx', 'i.tsx', 'pages')).toContain('path not allowed');
+      expect(await editFile('pages/[id].tsx', 'd.tsx', 'pages')).toContain('path not allowed');
+      // And why `?` stays refused in safeFile: the same compiler widens it
+      // to any one-character sibling, beyond the single finding file.
+      expect(await editFile('src/a?.ts', 'ab.ts', 'src')).toBe('ok');
     });
   });
 });

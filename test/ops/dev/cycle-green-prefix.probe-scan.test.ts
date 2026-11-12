@@ -12,6 +12,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { join } from 'node:path';
 import { bindCycleHarness } from './cycle-green-prefix.helpers.js';
+import { stubScanner } from './fakes.js';
 import { makeTestRepo, type TestRepo } from './repo.js';
 
 let repo: TestRepo;
@@ -119,6 +120,67 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
       expect(r.result.error).toContain('the probe phase threw — candidate cq.json unreadable');
     expectAuthorUntouched(r);
     expect(repo.git('branch', '--list', r.pub).trim()).toBe('');
+  });
+
+  test('without a publication scanner bound to the probe root, the author scanner is never reused: nothing published', async () => {
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      // The harness still wires a stub author scanner; the probe factory
+      // binds nothing, so the default probe leg must refuse before the push.
+      defaultProbePublication: { probeScannerFor: () => undefined },
+    });
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed') {
+      expect(r.result.error).toContain('no PR payload denylist scanner');
+      expect(r.result.error).toContain(r.probeDir);
+      expect(r.result.error).toContain('nothing published');
+    }
+    expect(r.pushes.filter((args) => args.includes('push'))).toEqual([]);
+    expect(r.opens).toEqual([]);
+    expectAuthorUntouched(r);
+    expect(repo.git('branch', '--list', r.pub).trim()).toBe('');
+  });
+
+  test('the probe publication scanner is built from the PROBE root; a throw there releases the worktree and branch', async () => {
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      defaultProbePublication: {
+        probeScannerFor: () => {
+          throw new Error('candidate cq.json unreadable');
+        },
+      },
+    });
+    expect(r.publicationProbeRoots).toEqual([r.probeDir]);
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed')
+      expect(r.result.error).toContain('the probe phase threw — candidate cq.json unreadable');
+    expectAuthorUntouched(r);
+    expect(repo.git('branch', '--list', r.pub).trim()).toBe('');
+  });
+
+  test('a probe publication scanner that records its root receives the tmp path', async () => {
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      defaultProbePublication: {
+        probeScannerFor: () => stubScanner(),
+      },
+    });
+    // The factory ran against the probe checkout, not the author's: the
+    // default leg bound and ran past the scanner gate (the harness fakes the
+    // push, so the real pushed-head rule stops it after binding).
+    expect(r.publicationProbeRoots).toEqual([r.probeDir]);
+    expect(r.publicationProbeRoots[0]).not.toBe(repo.root);
+    expect(r.result.status).toBe('needs-human');
+    if (r.result.status === 'needs-human') {
+      expect(r.result.reason).toContain('dev.cycle (pr.open)');
+      expect(r.result.reason).toContain('never pushed');
+    }
+    expect(r.pushes.filter((args) => args.includes('push'))).not.toEqual([]);
+    expect(r.opens).toEqual([]);
+    expectAuthorUntouched(r);
   });
 
   test('a thrown probe check releases the worktree and branch with attribution', async () => {

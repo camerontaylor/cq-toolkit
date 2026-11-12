@@ -3,7 +3,7 @@
 // contract (#203, #502), the fixed prepared definitions, the legacy Anthropic
 // JSON-tool fallback, final-step/repair tool denials, and the
 // token-cap/priced-miss verdicts on structured runs.
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -396,8 +396,13 @@ describe('ai-sdk driver specifics (mock model)', () => {
       },
     });
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-repair-tool-'));
+    // The session binding file lives OUTSIDE the model-editable workspace
+    // (Annex A, issue #1197): sessions stay at the scratch root, the bound
+    // workspace is the child holding the model-visible fixture.
+    const workspace = join(scratchDir, 'workspace');
+    await mkdir(workspace);
     try {
-      await writeFile(join(scratchDir, 'evidence.txt'), 'must not be read by the repair');
+      await writeFile(join(workspace, 'evidence.txt'), 'must not be read by the repair');
       const driver = new AiSdkDriver({
         providers: { mock: () => mock },
         sessionsDir: join(scratchDir, 'sessions'),
@@ -407,7 +412,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       });
       const result = await driver.run(
         invocation({
-          workspace: { path: scratchDir },
+          workspace: { path: workspace },
           toolPolicy: { allow: ['read'], mode: 'allowlist' },
           outputSchema: toOutputSchema('test/repair-tool/v1', z.object({ answer: z.string() })),
         }),
@@ -436,6 +441,11 @@ describe('ai-sdk driver specifics (mock model)', () => {
       },
     });
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-repair-alias-'));
+    // The session binding file lives OUTSIDE the model-editable workspace
+    // (Annex A, issue #1197): sessions stay at the scratch root, the bound
+    // workspace is the child. Cleanup (rm scratchDir) is unchanged.
+    const workspace = join(scratchDir, 'workspace');
+    await mkdir(workspace);
     try {
       const driver = new AiSdkDriver({
         providers: { mock: () => mock },
@@ -443,7 +453,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       });
       const result = await driver.run(
         invocation({
-          workspace: { path: scratchDir },
+          workspace: { path: workspace },
           toolPolicy: { allow: ['read', 'bash'], mode: 'allowlist' },
           outputSchema: toOutputSchema(
             'test/repair-alias/v1',

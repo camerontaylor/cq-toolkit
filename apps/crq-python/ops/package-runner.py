@@ -736,21 +736,22 @@ def main():
                                     lockfile=args.lockfile,
                                     smoke=not args.no_smoke, node=args.node,
                                     keep=args.keep)
-            if args.json:
-                print(json.dumps(report, sort_keys=True, indent=2))
-            else:
-                print('verified ' + report['archive_sha256'] + ' ' + report['archive'])
+            print(json.dumps(report, sort_keys=True, indent=2))
+            if not args.json:
+                print('verified ' + report['archive_sha256'] + ' ' + report['archive'],
+                      file=sys.stderr)
                 if report['observed'] is not None:
                     print('fs-ext ' + report['observed']['fsExt'] + ' Node '
                           + report['observed']['node'] + ' ABI '
-                          + report['observed']['modules'] + ' flock ok')
+                          + report['observed']['modules'] + ' flock ok', file=sys.stderr)
                 if report['runner'] is not None:
                     print('runner exit ' + str(report['runner']['exit_code']) + ' status '
                           + report['runner']['status'] + ' detail '
-                          + report['runner']['detail'])
+                          + report['runner']['detail'], file=sys.stderr)
                 if args.keep:
-                    print('extracted tree ' + report['root'])
-    except (ArtifactError, OSError, ValueError) as exc:
+                    print('extracted tree ' + report['root'], file=sys.stderr)
+    except (ArtifactError, OSError, ValueError, subprocess.TimeoutExpired,
+            tarfile.TarError) as exc:
         if machine:
             _machine_error('thrown', 'package-runner', str(exc), 1)
         parser.exit(1, 'package-runner: ' + str(exc) + '\n')

@@ -35,6 +35,46 @@ import type { DevDispositionInput } from './disposition.js';
 import type { DevIdentity } from './record.js';
 import type { DevReadyInput } from './ready.js';
 import type { DevCycleInput, DevReviewInput } from './review.js';
+import type { DevEffects } from './effects.js';
+import { currentCqEnv } from '../../config/run-env.js';
+import { QueueConfigurationError } from '../review/internal/queueClient.js';
+
+/**
+ * S2b-i: read the queue SSH alias lazily (at submit, never at registry
+ * resolution, keeping entry construction inert). Missing configuration is a
+ * construction-time QueueConfigurationError only when the managed path
+ * actually submits. An explicit dispatch snapshot takes precedence; otherwise
+ * resolve the enclosing run snapshot (or ambient fallback) at that time.
+ */
+function reviewAlias(cqEnv = currentCqEnv()): string {
+  const alias = cqEnv.values['CQ_QUEUE_SSH_ALIAS'];
+  if (typeof alias !== 'string' || alias === '')
+    throw new QueueConfigurationError('Configure CQ_QUEUE_SSH_ALIAS for review-v1');
+  return alias;
+}
+
+/**
+ * S2b-i: resolve the forge `owner/repo` for the managed queue route via the
+ * bound dev effects. The server re-derives every hashed fact and refuses a
+ * mismatch (plan D2), so this is a routing hint, never authority. A forge
+ * read failure is a refusal (the submission cannot be routed), surfaced by
+ * the managed leg — never a silent fallback.
+ */
+async function resolveForgeRepo(dev: DevEffects): Promise<string> {
+  const result = await dev.runCommand(
+    'gh',
+    ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'],
+    {
+      timeoutMs: 30_000,
+    },
+  );
+  if (result.exitCode !== 0 || result.timedOut)
+    throw new Error('cannot verify deferred forge identity');
+  const repo = result.stdout.trim();
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))
+    throw new Error(`forge returned an unparseable repository identity '${repo}'`);
+  return repo;
+}
 
 /** The reviewer choice: the shipped CLI reviewer, or a configured `agent:` role. */
 const REVIEWER_PATTERN = new RegExp(
@@ -87,50 +127,11 @@ export const DevCycleInputSchema: z.ZodType<DevCycleInput> = z
   .strict();
 
 /**
- * The author-admission branch of the `dev.review` union (the worker
- * transport's wire shape from the merged worker-transport PR — the crq-side
- * invocation `cq dev.review --action=enroll --head=…` keeps working
- * byte-for-byte). P5 adds `tree` as the alternative to `head`: exactly one.
+ * The `dev.review` op's input: the CodeRabbit review cycle (no action, or
+ * `action: 'cycle'`). S2b-ii retired the author-admission branch and its
+ * `enroll | status | fallback` actions; unknown actions still refuse.
  */
-export const DevTransportInputSchema = z
-  .object({
-    action: z.enum(['enroll', 'status', 'fallback']),
-    requestId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/),
-    base: z.string().regex(/^[0-9a-f]{40}$/),
-    head: z
-      .string()
-      .regex(/^[0-9a-f]{40}$/)
-      .optional(),
-    tree: z
-      .string()
-      .regex(/^[0-9a-f]{40}$/)
-      .optional(),
-    target: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/),
-    cycle: z.number().int().min(1).max(2),
-  })
-  .strict()
-  .refine(
-    (i) => [i.requestId, i.base, i.head ?? i.tree ?? '', i.target].every((v) => v.trim() === v),
-    'binding must not contain whitespace or controls',
-  )
-  .refine((i) => Boolean(i.head) !== Boolean(i.tree), 'provide exactly one of head or tree')
-  .refine((i) => i.base !== i.head, 'base and head must differ')
-  // Published as JSON Schema too: a refinement alone is invisible to schema consumers.
-  .meta({ oneOf: [{ required: ['head'] }, { required: ['tree'] }] });
-
-export type DevTransportInput = z.infer<typeof DevTransportInputSchema>;
-
-/**
- * The ONE `dev.review` op's input: the CodeRabbit review cycle (no action,
- * or `action: 'cycle'`) or the author-admission transport
- * (`enroll | status | fallback`). Both branches are strict objects, so the
- * union is unambiguous — an unknown key or an unknown action spelling fails
- * every branch and the schema refuses.
- */
-export const DevReviewInputSchema: z.ZodType<DevReviewInput> = z.union([
-  DevCycleInputSchema,
-  DevTransportInputSchema,
-]);
+export const DevReviewInputSchema: z.ZodType<DevReviewInput> = DevCycleInputSchema;
 
 // Defaults are applied by the OPS (`target ?? DEFAULT_DEV_TARGET`), not the
 // schemas — the drift pins mirror the hand-written optional input types, so
@@ -224,15 +225,16 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'dev.review',
     inputSchema: DevReviewInputSchema,
-    // ONE ENTRY, TWO BRANCHES (the composition ruling): an admission action
-    // binds only the ambient SSH alias (#332's adapter, unchanged — the
-    // transport input carries no repoRoot); the cycle branch binds the
-    // subprocess effects and the two-layer secret scanner from the
-    // dispatched repoRoot.
-    importer: () =>
+    // ONE ENTRY, ONE BRANCH: S2b-ii retired the author-admission branch, so
+    // the frozen DevCycleInputSchema below is the whole input. The cycle binds
+    // the subprocess effects and the two-layer secret scanner from the
+    // dispatched repoRoot. S2b-i: the cycle's `coderabbit` path rides the
+    // managed queue route (review-v1 on the queue identity); the binding is
+    // inert at construction (closures only — no spawn, no env read), so
+    // resolving the entry still touches nothing.
+    importer: (wiring) =>
       Promise.all([
         import('./review.js'),
-        import('./review-transport.js'),
         import('./effects.js'),
         import('./denylist.js'),
         import('../../driver/factory.js'),
@@ -241,10 +243,12 @@ export const registry: OpRegistryEntry[] = [
         import('../review/agentReviewer.js'),
         import('./agentReview.js'),
         import('node:fs/promises'),
+        import('../../shared/readCqConfigText.js'),
+        import('./managedReview.js'),
+        import('../review/internal/queueClient.js'),
       ]).then(
         ([
           m,
-          admission,
           effects,
           denylist,
           driverFactory,
@@ -253,50 +257,100 @@ export const registry: OpRegistryEntry[] = [
           agentReviewer,
           agentReview,
           fs,
+          sharedRead,
+          managed,
+          queueClient,
         ]) =>
-          (async (input: DevReviewInput) => {
-            if (m.isAdmissionInput(input)) return admission.envAuthorAdmission(input);
-            const { repoRoot } = input as DevCycleInput;
-            const dev = effects.makeSubprocessDevEffects(repoRoot);
-            // Portable default: gitleaks' built-in rules apply everywhere.
-            // A repo-specific scanner is added only when cq.json configures
-            // its optional patterns file; missing toolkit policy is never a
-            // prerequisite for an adopter review.
-            const readFile = (path: string) => fs.readFile(path, 'utf8');
-            const configText = await readFile(`${repoRoot}/cq.json`).catch(() => null);
-            const packageName = await agentReview.readPackageName(readFile, repoRoot);
-            const scanSecrets = denylist.makePortableReviewScanner(
-              repoRoot,
-              dev,
-              configText,
-              packageName,
+          (async (raw: unknown) => {
+            // The per-dispatch bindings run BEFORE input validation (#1185 +
+            // S2b-i): even a schema-bypassing dispatch binds its driver
+            // factory and its managed-route submission (the driver-cqenv
+            // probes dispatch a schema-invalid dummy and still expect both
+            // lines to have run). Every construction here is inert:
+            // closure-only effects, and the queue alias is read only when
+            // the managed path actually submits.
+            const { repoRoot: rawRoot } = raw as DevCycleInput;
+            const dev = effects.makeSubprocessDevEffects(rawRoot);
+            const drivers = driverFactory.createDriverFactory({
+              // The dispatch wiring's snapshot wins when supplied (a direct
+              // importer call with explicit wiring outside a run); inside a
+              // run the wiring IS the run snapshot, so this is identical to
+              // the run-context fallback. Absent = the library default. The
+              // narration sink rides the same way (the CLI's `--json` mode
+              // keeps stderr empty through it).
+              ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+              ...(wiring?.onDeprecatedAlias !== undefined
+                ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+                : {}),
+            });
+            const managedSubmit = managed.makeManagedReviewSubmit(
+              () => queueClient.sshQueueTransport(reviewAlias(wiring?.cqEnv), 'review-v1'),
+              () => resolveForgeRepo(dev),
             );
-            let patternsFile: string | undefined;
-            let configuredReviewers: readonly string[] | undefined;
-            if (configText !== null) {
-              const parsed = cqConfig.parseCqConfig(configText, repoRoot);
-              if (parsed.ok) {
-                const policy = cqDefaults.resolveCqConfigDefaults(parsed.config, {
+            // The guarded body runs INSIDE the family boundary: a
+            // schema-bypassing input keeps the `failed` taxonomy of
+            // guardDevOp (never a rejected promise, never a read fault
+            // masquerading as one), and the cq.json read fault below refuses
+            // only a schema-valid dispatch.
+            return effects.guardDevOp(
+              'dev.review',
+              DevReviewInputSchema,
+              async (valid: DevReviewInput) => {
+                const { repoRoot } = valid;
+                // `dev` is the per-dispatch effects bound BEFORE validation;
+                // for a schema-valid dispatch it binds this same repoRoot.
+                // Portable default: gitleaks' built-in rules apply everywhere.
+                // A repo-specific scanner is added only when cq.json configures
+                // its optional patterns file; missing toolkit policy is never a
+                // prerequisite for an adopter review.
+                const readFile = (path: string) => fs.readFile(path, 'utf8');
+                // Only an ABSENT cq.json means "no config"; any other read fault
+                // refuses the review under needs-human instead of silently
+                // binding the default scanner and reviewer policy.
+                const configRead = await sharedRead.readCqConfigText(repoRoot, readFile);
+                if (configRead.outcome === 'fault')
+                  return {
+                    status: 'needs-human',
+                    reason: `dev.review: ${sharedRead.cqConfigFaultText(configRead.error)}`,
+                  };
+                const configText = configRead.outcome === 'text' ? configRead.text : null;
+                const packageName = await agentReview.readPackageName(readFile, repoRoot);
+                const scanSecrets = denylist.makePortableReviewScanner(
+                  repoRoot,
+                  dev,
+                  configText,
                   packageName,
-                }).review;
-                patternsFile = policy.denylistPatternsFile;
-                configuredReviewers = policy.reviewers;
-              }
-            }
-            const drivers = driverFactory.createDriverFactory();
-            return m.makeDevReview({
-              effects: dev,
-              scanSecrets,
-              ...(patternsFile === undefined ? {} : { patternsFile }),
-              ...(configuredReviewers === undefined ? {} : { configuredReviewers }),
-              runAgentReviewer: agentReview.makeAgentReviewRunner({
-                repoRoot,
-                readFile,
-                drivers,
-                scanSecrets,
-                run: agentReviewer.runAgentReviewer,
-              }),
-            })(input);
+                );
+                let patternsFile: string | undefined;
+                let configuredReviewers: readonly string[] | undefined;
+                if (configText !== null) {
+                  const parsed = cqConfig.parseCqConfig(configText, repoRoot);
+                  if (parsed.ok) {
+                    const policy = cqDefaults.resolveCqConfigDefaults(parsed.config, {
+                      packageName,
+                    }).review;
+                    patternsFile = policy.denylistPatternsFile;
+                    configuredReviewers = policy.reviewers;
+                  }
+                }
+                return m.makeDevReview({
+                  effects: dev,
+                  scanSecrets,
+                  ...(patternsFile === undefined ? {} : { patternsFile }),
+                  ...(configuredReviewers === undefined ? {} : { configuredReviewers }),
+                  runAgentReviewer: agentReview.makeAgentReviewRunner({
+                    repoRoot,
+                    readFile,
+                    drivers,
+                    scanSecrets,
+                    run: agentReviewer.runAgentReviewer,
+                  }),
+                  // S2b-i managed route: review-v1 on the existing queue SSH
+                  // identity (plan D1), bound per dispatch before validation.
+                  managedSubmit,
+                })(valid);
+              },
+            )(raw);
           }) as Op<unknown, unknown>,
       ),
   },
@@ -334,15 +388,18 @@ export const registry: OpRegistryEntry[] = [
     // Every construction is inert (closure-only; processes spawn only when
     // an effect is CALLED), so resolving the entry never touches env, the
     // network, or the filesystem.
-    importer: () =>
+    importer: (wiring) =>
       Promise.all([
         import('./cycle.js'),
+        import('../../driver/factory.js'),
+        import('./managedReview.js'),
         import('./effects.js'),
         import('../../adapters/forge-github/ghEffects.js'),
         import('../dev/denylist.js'),
+        import('../pr/registry.js'),
         import('node:fs/promises'),
       ]).then(
-        ([m, effects, ghEffects, denylist, fs]) =>
+        ([m, driverFactory, managed, effects, ghEffects, denylist, prRegistry, fs]) =>
           (async (input: DevCycleCompositionInput) => {
             const dev = effects.makeSubprocessDevEffects(input.repoRoot);
             // The secret scanner a check leg binds: the SAME two-layer
@@ -354,6 +411,17 @@ export const registry: OpRegistryEntry[] = [
             const scannerFor = async (root: string, rootEffects: typeof dev) =>
               denylist.checkScannerFor(root, rootEffects, readFile);
             const scanSecrets = await scannerFor(input.repoRoot, dev);
+            // The publication scanner the default pr.open legs bind (the
+            // pr.open importer's mandatory gate): built for one checkout
+            // ROOT, so the #536 probe worktree binds its own from its own
+            // configuration. An unreadable author cq.json refuses the op
+            // outright (the pr.open fail-closed shape); an unbindable probe
+            // root fails the probe publication (never another tree's rules).
+            const publicationLoaded = await prRegistry.loadPublicationScanner(
+              input.repoRoot,
+              'dev.cycle',
+            );
+            if ('status' in publicationLoaded) return publicationLoaded;
             // #536: the red-final-gate fallback's probe worktree binds its own
             // effects (same construction as `dev`). Its dependency install is
             // wired ONLY for a pnpm-locked repository: an offline, frozen
@@ -364,11 +432,32 @@ export const registry: OpRegistryEntry[] = [
               .then(() => true)
               .catch(() => false);
             return m.makeDevCycle({
+              managedSubmit: managed.makeConfiguredManagedReviewSubmit(wiring?.cqEnv),
               effects: dev,
               gh: ghEffects.makeSubprocessPrEffects(input.repoRoot),
+              // The dispatch wiring's snapshot, when explicitly supplied: the
+              // default factory the review/address legs resolve roles through
+              // reads it instead of the ambient environment. Absent, no
+              // drivers key is bound and the cycle's library default
+              // (deps.drivers ?? createDriverFactory()) stands.
+              ...(wiring?.cqEnv !== undefined
+                ? {
+                    drivers: driverFactory.createDriverFactory({
+                      cqEnv: wiring.cqEnv,
+                      ...(wiring.onDeprecatedAlias !== undefined
+                        ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+                        : {}),
+                    }),
+                  }
+                : {}),
               ...(scanSecrets === undefined ? {} : { scanSecrets }),
+              publicationScanner: publicationLoaded.scanner,
               effectsFor: (root: string) => effects.makeSubprocessDevEffects(root),
               scanSecretsFor: scannerFor,
+              publicationScannerFor: async (root: string, _rootEffects: typeof dev) => {
+                const probeLoaded = await prRegistry.loadPublicationScanner(root, 'dev.cycle');
+                return 'status' in probeLoaded ? undefined : probeLoaded.scanner;
+              },
               ...(pnpmLocked
                 ? {
                     installDeps: async (root: string, signal: AbortSignal) => {
