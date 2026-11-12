@@ -58,7 +58,15 @@ export const registry: OpRegistryEntry[] = [
           : {}),
         ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
       });
-      return async (raw) => makeFixRun({ drivers })(raw as FixRunInput);
+      return async (raw) =>
+        makeFixRun({
+          drivers,
+          // The dispatch wiring's snapshot wins when supplied (a direct
+          // importer call with explicit wiring outside a run); inside a run
+          // the wiring IS the run snapshot. Absent, the composition resolves
+          // the enclosing run snapshot at entry.
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        })(raw as FixRunInput);
     },
   },
 ];
