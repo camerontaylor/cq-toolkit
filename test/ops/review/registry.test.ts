@@ -50,6 +50,7 @@ interface LooseResult {
 const ENTRY_NAMES = [
   'review.addressMany',
   'review.submit',
+  'review.history',
   'review.status',
   'review.wait',
   'review.result',
@@ -132,6 +133,7 @@ const minimalInputs: Record<string, () => Record<string, unknown>> = {
     tokensPerPr: 1,
   }),
   'review.submit': () => ({ repo: 'owner/repo', target: 'main' }),
+  'review.history': () => ({ repo: 'owner/repo', target: 'main' }),
   'review.status': () => ({ requestId: 'request-1' }),
   'review.wait': () => ({ requestId: 'request-1' }),
   'review.result': () => ({ requestId: 'request-1' }),

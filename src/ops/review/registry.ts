@@ -58,6 +58,7 @@
 // referenced-module rule.)
 import { z } from 'zod';
 import {
+  HistoryInputSchema,
   ReferenceSchema,
   StatusInputSchema,
   SubmitInputSchema,
@@ -709,6 +710,11 @@ export const registry: OpRegistryEntry[] = [
     name: 'review.cancel',
     inputSchema: ReferenceSchema,
     importer: async () => (await import('./cancel.js')).makeCancel() as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.history',
+    inputSchema: HistoryInputSchema,
+    importer: async () => (await import('./history.js')).makeHistory() as Op<unknown, unknown>,
   },
   // ./queue.js owns queue-v1; ./internal/queueEvidence.js is isolated from findings v1.
   {

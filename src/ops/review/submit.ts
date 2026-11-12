@@ -4,7 +4,13 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { git, headMessage, reviewOp, evidenceRoot } from './internal/localReview.js';
+import {
+  git,
+  headMessage,
+  reviewOp,
+  evidenceRoot,
+  withoutHistoryCue,
+} from './internal/localReview.js';
 import { WireSchema, SnapshotSchema } from './internal/reviewOperation.js';
 import { captureSnapshot, SnapshotConfigError } from '../dev/internal/snapshot.js';
 import { observeReview } from './wait.js';
@@ -49,6 +55,15 @@ async function resolveTarget(cwd: string, target: string) {
 async function resolveCommit(cwd: string, ref: string) {
   return git(cwd, 'rev-parse', '--verify', '--end-of-options', ref + '^{commit}');
 }
+/** Attached branch is an observation; a detached head simply omits it. */
+async function observedBranch(cwd: string): Promise<string | undefined> {
+  try {
+    const branch = await git(cwd, 'symbolic-ref', '--short', '-q', 'HEAD');
+    return branch || undefined;
+  } catch {
+    return undefined;
+  }
+}
 type TargetFreshness = { local: string; upstream: string; ahead: number; behind: number };
 async function targetFreshness(cwd: string, target: string): Promise<TargetFreshness | undefined> {
   const localRef = target.startsWith('refs/') ? target : 'refs/heads/' + target;
@@ -91,6 +106,7 @@ export const makeSubmit = (transport?: QueueTransport, beforeDispatch?: () => Pr
             wire: unknown;
             snapshotPolicy?: string;
             targetFreshness?: TargetFreshness;
+            history_digest?: string;
           }
         | undefined;
       try {
@@ -123,7 +139,11 @@ export const makeSubmit = (transport?: QueueTransport, beforeDispatch?: () => Pr
           (i.base !== undefined &&
             (await resolveCommit(i.cwd, i.base)) !== wire.inputs.base_commit) ||
           (i.repeat !== undefined && (wire.repeat ?? false) !== i.repeat) ||
-          (i.supersedes !== undefined && wire.supersedes !== i.supersedes)
+          (i.supersedes !== undefined && wire.supersedes !== i.supersedes) ||
+          (i.task !== undefined && wire.task !== i.task) ||
+          (i.branch !== undefined && wire.branch !== i.branch) ||
+          (i.predecessor !== undefined && wire.predecessor !== i.predecessor) ||
+          (i.observed !== undefined && !isDeepStrictEqual(wire.observed, i.observed))
         )
           throw new Error('requestId is already bound to different inputs');
       } else {
@@ -145,6 +165,7 @@ export const makeSubmit = (transport?: QueueTransport, beforeDispatch?: () => Pr
           head_tree: await git(i.cwd, 'rev-parse', head + '^{tree}'),
           projection: i.projection,
         };
+        const branch = i.branch ?? (await observedBranch(i.cwd));
         if (inputs.base_tree === inputs.head_tree)
           return {
             v: 1,
@@ -163,6 +184,10 @@ export const makeSubmit = (transport?: QueueTransport, beforeDispatch?: () => Pr
           inputs,
           ...(i.repeat === undefined ? {} : { repeat: i.repeat }),
           ...(i.supersedes === undefined ? {} : { supersedes: i.supersedes }),
+          ...(i.task === undefined ? {} : { task: i.task }),
+          ...(branch === undefined ? {} : { branch }),
+          ...(i.predecessor === undefined ? {} : { predecessor: i.predecessor }),
+          ...(i.observed === undefined ? {} : { observed: i.observed }),
         });
         const record = {
           key: requestId,
@@ -236,6 +261,9 @@ export const makeSubmit = (transport?: QueueTransport, beforeDispatch?: () => Pr
             ...record,
             response,
             ...('identity' in response ? { identity: response.identity } : {}),
+            ...('history' in response && response.history
+              ? { history_digest: response.history.digest }
+              : {}),
           }),
           { mode: 0o600 },
         );
@@ -244,9 +272,16 @@ export const makeSubmit = (transport?: QueueTransport, beforeDispatch?: () => Pr
           i.waitMs === undefined || !['queued', 'running'].includes(response.state)
             ? response
             : await observeReview(client, requestId, i.waitMs, undefined, response);
+        const history =
+          'history' in response && response.history
+            ? saved?.history_digest === response.history.digest
+              ? withoutHistoryCue(response.history)
+              : response.history
+            : undefined;
         return {
           ...response,
           ...result,
+          ...(history === undefined ? {} : { history }),
           action: response.action,
           request_id: requestId,
           exclusions,
