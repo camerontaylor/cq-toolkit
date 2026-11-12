@@ -511,6 +511,7 @@
   "test/ops/ratchet/verifyRatchet.guard-range.test.ts": "process",
   "test/ops/ratchet/verifyRatchet.measurement-artifact.test.ts": "process",
   "test/ops/ratchet/verifyRatchet.subject-baseline.test.ts": "process",
+  "test/ops/ratchet/verifyRatchet.subject-pin.test.ts": "pure",
   "test/ops/ratchet/verifyRatchet.trust-definitions.test.ts": "process",
   "test/ops/review/address-local.cancellation.test.ts": "process",
   "test/ops/review/address-local.full-cycle.test.ts": "process",
