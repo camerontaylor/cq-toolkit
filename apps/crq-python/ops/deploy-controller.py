@@ -1775,9 +1775,10 @@ def switch_unit(effects, adapter, unit, runtime):
 
 
 def prior_tag_for(effects: Effects, sha: str) -> str | None:
-    """The annotated crq-runner/ tag that peels to ``sha`` in this checkout,
-    or None when no such tag exists. Read-only; used to record the prior
-    target's own approval tag in the deploy journal."""
+    """The annotated crq-runner/ tag matching ``TAG_RE`` that peels to
+    ``sha`` in this checkout, or None when no such tag exists. Read-only;
+    used to record the prior target's own approval tag in the deploy
+    journal."""
     listing = effects.git("tag", "--list", "crq-runner/*",
                           "--format=%(refname:short) %(objecttype)")
     candidates = []
@@ -1786,6 +1787,8 @@ def prior_tag_for(effects: Effects, sha: str) -> str | None:
         if len(parts) != 2 or parts[1] != "tag":
             continue  # lightweight tags are not owner-approval artifacts
         tag = parts[0]
+        if not TAG_RE.fullmatch(tag):
+            continue  # off-shape names are not recordable prior_tag values
         if effects.git("rev-parse", "refs/tags/" + tag + "^{commit}") == sha:
             candidates.append(tag)
     if len(candidates) == 1:
