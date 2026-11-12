@@ -8,7 +8,17 @@
  */
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -115,6 +125,24 @@ describe('artifact store', () => {
       store.verify({ ...reference, location: join(root, 'outside', reference.sha256) }),
     ).rejects.toThrow('artifact outside configured durable store');
   });
+  test.skipIf(process.platform === 'win32')(
+    'resolves a new durable root beneath an existing symlink ancestor',
+    async () => {
+      const root = await tempRoot();
+      const target = join(root, 'target');
+      await mkdir(target);
+      const link = join(root, 'link');
+      await symlink(target, link, 'dir');
+
+      const store = fileArtifactStore(join(link, 'new-store', 'nested'));
+      const reference = await store.put(Buffer.from('new store artifact\n'));
+      const canonicalRoot = await realpath(target);
+      expect(reference.location).toBe(
+        join(canonicalRoot, 'new-store', 'nested', 'sha256', reference.sha256),
+      );
+      await expect(store.verify(reference)).resolves.toBeUndefined();
+    },
+  );
 });
 
 describe('finding inbox', () => {

@@ -77,15 +77,34 @@ function artifactReference(value: JsonValue): ArtifactReference {
   return { sha256, location };
 }
 
-/** `Path.resolve()` without strict mode: resolve the existing parent, then append. */
-async function resolveExisting(path: string): Promise<string> {
-  try {
-    return await realpath(path);
-  } catch {
+/** `Path.resolve(strict=False)`: resolve the longest existing prefix, then append. */
+function resolveNonStrict(path: string): string {
+  let current = resolve(path);
+  const missing: string[] = [];
+  for (;;) {
     try {
-      return join(await realpath(dirname(path)), basename(path));
+      return join(realpathSync(current), ...missing.reverse());
     } catch {
-      return resolve(path);
+      const parent = dirname(current);
+      if (parent === current) return resolve(path);
+      missing.push(basename(current));
+      current = parent;
+    }
+  }
+}
+
+/** Asynchronous form of the same non-strict resolution for reference paths. */
+async function resolveExisting(path: string): Promise<string> {
+  let current = resolve(path);
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      return join(await realpath(current), ...missing.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return resolve(path);
+      missing.push(basename(current));
+      current = parent;
     }
   }
 }
@@ -98,15 +117,9 @@ async function resolveExisting(path: string): Promise<string> {
  * be the configured path, then re-hashes the retained file.
  */
 export function fileArtifactStore(durableRoot: string): ArtifactStore {
-  // Python resolves the durable root in the constructor; failing to resolve a
-  // not-yet-created root falls back to the absolute path it will occupy.
-  const root = (() => {
-    try {
-      return realpathSync(durableRoot);
-    } catch {
-      return resolve(durableRoot);
-    }
-  })();
+  // Python resolves the durable root in the constructor, including a missing
+  // final component beneath an existing symlinked ancestor.
+  const root = resolveNonStrict(durableRoot);
   const store = join(root, 'sha256');
 
   async function verify(reference: ArtifactReference): Promise<void> {
