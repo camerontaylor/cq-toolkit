@@ -82,6 +82,22 @@ class RepairHarvestVectorsTest(unittest.TestCase):
         self.assertEqual(len(case["events_added"]), 1)
         self.assertEqual(case["row_replayed"], case["row_after"])
 
+    def test_invalid_artifact_persists_queue_before_the_terminal_outcome(self) -> None:
+        document = emitter.build()
+        cases = {case["name"]: case for case in document["harvest_cases"]}
+        invalid = cases["invalid-fixed-without-commits"]
+        # repair_tick.harvest rejects a malformed artifact as a deterministic
+        # terminal failure: it persists queue identity first, then records the
+        # FAILED outcome the TS port models as needs-retriage/exhausted.
+        self.assertTrue(invalid["queue_saved"])
+        self.assertEqual(len(invalid["events_added"]), 1)
+        payload = invalid["events_added"][0]["payload"]
+        self.assertEqual(payload["action"], "needs-retriage")
+        self.assertEqual(payload["evidence"]["failure_class"], "exhausted")
+        self.assertTrue(payload["evidence"]["reason"].startswith("invalid repair result: "))
+        self.assertFalse(any(case["queue_saved"] for name, case in cases.items()
+                             if name != "invalid-fixed-without-commits"))
+
     def test_no_temp_paths_leak(self) -> None:
         text = emitter.render(emitter.build())
         self.assertNotIn("/tmp/", text)

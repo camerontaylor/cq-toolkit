@@ -9,6 +9,12 @@
  * source: the caller hands over the merged bridge's `RepairArtifactRead`,
  * which already carries the exact run's binding and harvest observation.
  *
+ * Boundary: a malformed artifact never reaches this seam. `harvestRepairArtifact`
+ * refuses it before a read exists, while Python's `harvest` persists queue
+ * identity (`save_queue`) and only then records its terminal FAILED outcome.
+ * That ordering belongs to the future caller/queue adapter, so this slice does
+ * not invent the ledger half without the queue half.
+ *
  * No real state root, lock file, outbox or model is bound here; the future
  * adapter supplies `RepairHarvestEffects`. No queue, ledger, status, schema or
  * kernel shape changes.

@@ -141,12 +141,18 @@ def _harvest_case(name, outcome, *, row=None, seeds=(), replay=False,
         row_value["previous_event_id"] = latest
         _write(row_path, row_value)
 
+        queue_path = root / "queue.json"
+
+        def save_queue(value):
+            queue_path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+
         c = SimpleNamespace(
             STATE=state,
             CONFIG={"repair": {"max_finding_retries": max_retries}},
             iso=lambda: AT,
             WT_ROOT=root / "worktrees",
             CLONE=root / "clone",
+            save_queue=save_queue,
         )
         item = {
             "id": ITEM,
@@ -191,6 +197,9 @@ def _harvest_case(name, outcome, *, row=None, seeds=(), replay=False,
             "retained_before": prior,
             "events_added": events_after,
             "row_replayed": None if row_replayed is None else json.loads(row_replayed),
+            # A deterministic artifact defect persists queue identity before
+            # the ledger write (repair_tick.harvest invalid-result path).
+            "queue_saved": queue_path.exists(),
             "outcome": outcome,
         }
 

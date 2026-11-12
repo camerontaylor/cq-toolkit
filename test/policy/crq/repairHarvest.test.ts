@@ -134,8 +134,15 @@ describe('repair harvest oracle parity', () => {
 
     test(`harvest case: ${name}`, () => {
       if (SKIP.has(name)) {
-        // Python rejects the artifact before an outcome exists.
+        // Python rejects the malformed artifact inside `harvest`, persists
+        // queue identity, then records a terminal FAILED whose reason is the
+        // Python exception prose. The TS seam consumes read-validated
+        // artifacts, so parity here covers the D7 action/class only; the
+        // reason bytes belong to the caller/queue slice.
         expect(events).toHaveLength(1);
+        const payload = asObject(asObject(events[0]).get('payload'));
+        expect(string(payload.get('action'))).toBe('needs-retriage');
+        expect(string(asObject(payload.get('evidence')).get('failure_class'))).toBe('exhausted');
         return;
       }
       const plan = planRepairHarvest({
