@@ -705,6 +705,7 @@ def drain_items(config, groups, order):
         for item in order:
             while len(active) >= limit:
                 stopped = reap_item(active) or stopped
+            stopped = reap_completed(active)[0] or stopped
             if stopped or blocked(config['repair']) or dispatch_paused(config):
                 break
             if limit == 1:
@@ -738,16 +739,26 @@ def drain_items(config, groups, order):
                 continue  # keep ownership until every admitted child has exited
 
 
+def reap_completed(active):
+    """Collect every currently completed owned child before new admission."""
+    failed, reaped = False, False
+    for pid, item in list(active.items()):
+        found, status = os.waitpid(pid, os.WNOHANG)
+        if found:
+            del active[pid]
+            reaped = True
+            if status:
+                print('repair item ' + item + ': worker exit status ' + str(status), flush=True)
+                failed = True
+    return failed, reaped
+
+
 def reap_item(active):
-    """Poll only our own children; never reap or terminate unrelated work."""
+    """Wait for owned children only; aggregate failures from the whole poll."""
     while True:
-        for pid, item in list(active.items()):
-            found, status = os.waitpid(pid, os.WNOHANG)
-            if found:
-                del active[pid]
-                if status:
-                    print('repair item ' + item + ': worker exit status ' + str(status), flush=True)
-                return status != 0
+        failed, reaped = reap_completed(active)
+        if reaped:
+            return failed
         time.sleep(0.1)
 
 

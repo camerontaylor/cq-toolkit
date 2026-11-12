@@ -139,7 +139,11 @@ class RepairDrainTest(unittest.TestCase):
         self.config['repair']['max_concurrent_items'] = 2
         def worker(config, item, jobs):
             if item == 'crash':
+                deadline = time.monotonic() + 2
+                while not (self.root / 'paid-started').exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
                 os._exit(9)
+            (self.root / 'paid-started').touch()
             time.sleep(0.1)
             (self.root / item).touch()
         names = ['crash', 'paid', 'never']
@@ -180,6 +184,19 @@ class RepairDrainTest(unittest.TestCase):
             report = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root / 'attempt')
         self.assertEqual(calls, [ROLES['fixer']['model']])
         self.assertEqual(report['stop'], 'rate-limit')
+
+    def test_reap_aggregates_success_and_crash_before_replacement(self):
+        active = {100: 'successful', 101: 'crashed'}
+        with mock.patch.object(service.os, 'waitpid', side_effect=[(100, 0), (101, 9)]):
+            self.assertTrue(service.reap_item(active))
+        self.assertEqual(active, {})
+
+    def test_admission_checks_exited_workers_even_below_capacity(self):
+        self.config['repair']['max_concurrent_items'] = 10
+        with mock.patch.object(service.os, 'fork', return_value=100), mock.patch.object(service.os, 'waitpid', return_value=(100, 9)), mock.patch.object(service, 'blocked', return_value=False):
+            with mock.patch.object(service, 'drain_item') as work:
+                service.drain_items(self.config, {'a': [], 'b': []}, ['a', 'b'])
+        work.assert_not_called()
 
     def test_concurrency_config_refuses_invalid_limits(self):
         for limit in (True, 0, 11, 2.5, '10', None):
