@@ -145,6 +145,26 @@ class CommandTests(PortFixture):
             port.show("crq-tick.service", ["ActiveState"])
         self.assertIn("user bus is unavailable", str(caught.exception))
 
+    def test_show_accepts_activator_units(self):
+        port = self.port(lambda command: {
+            "rc": 0, "stdout": "ActiveState=active\n",
+            "stderr": "", "timeout": False})
+        for unit in ("crq-tick.timer", "crq-tick.path", "crq-tick.socket"):
+            self.assertEqual(port.show(unit, ["ActiveState"]),
+                             {"ActiveState": "active"})
+        self.assertEqual([call[0][4] for call in self.calls],
+                         ["crq-tick.timer", "crq-tick.path",
+                          "crq-tick.socket"])
+
+    def test_show_refuses_unsupported_unit_types(self):
+        port = self.port()
+        for unit in ("crq-tick.mount", "crq-tick.swap", "crq-tick.slice",
+                     "crq-tick"):
+            with self.assertRaises(live.LiveBindingRefused) as raised:
+                port.show(unit, ["ActiveState"])
+            self.assertEqual(str(raised.exception), "invalid unit name")
+        self.assertEqual(self.calls, [])
+
     def test_jobs_returns_list_jobs_lines(self):
         port = self.port(lambda command: {
             "rc": 0, "stdout": "17 crq-tick.service start running\n",
