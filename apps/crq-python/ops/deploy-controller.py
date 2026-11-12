@@ -15,8 +15,9 @@ renderer, switcher or scheduler. The controller's additions:
     ``alive``/``ambiguous`` items block the controller and require the owner
     to drain them through the documented author-recovery path;
   * preservation invariants verified before and after the helper runs:
-    queue.json, receipts/claims, author quota history and the heartbeat are
-    byte-identical (never restored, rewritten or migrated by the controller);
+    queue.json (items, starts, author_requests, author quota history) and
+    the runner's completion heartbeat are byte-identical (never restored,
+    rewritten or migrated by the controller);
   * operator-approved activation: the controller renders/installs nothing and
     starts nothing; the runbook's owner steps start units;
   * two advancing completed-tick health observations AFTER owner activation,
@@ -95,8 +96,11 @@ RUN_ID_RE = re.compile(
 
 # Queue surfaces the controller must observe and preserve (never rewrite).
 # The queue file is the single ledger: items, starts, author_requests and
-# author_observations all persist inside queue.json; the heartbeat mirrors the
-# completed-tick timestamp for the watchdog. Keys are state-relative names.
+# author_observations all persist inside queue.json; the completion heartbeat
+# mirrors the completed-tick timestamp for the watchdog. queue.json resolves
+# under the state directory; the heartbeat is hashed at the runner's actual
+# WATCHDOG_HOME path (Effects.completion_heartbeat_path) — the same file
+# read_completion_heartbeat reads, never a state-directory copy nothing writes.
 PRESERVED = {
     "queue.json": "queue, reservations, author quota history",
     "heartbeat.json": "completed-tick heartbeat",
@@ -171,18 +175,27 @@ class Effects:
     def exists(self, rel: str) -> bool:
         return (self.state_dir() / rel).exists()
 
+    def completion_heartbeat_path(self) -> Path:
+        """The runner's completion heartbeat's exact path:
+        WATCHDOG_HOME/heartbeat.json ($XDG_STATE_HOME/crq or
+        ~/.local/state/crq) — where crq.py write_heartbeat atomically
+        replaces the completed-tick marker. On the seam so injected Effects
+        keep control of the location; preservation digests hash this same
+        file read_completion_heartbeat reads."""
+        home = Path(os.environ.get("XDG_STATE_HOME",
+                                   str(Path.home() / ".local/state"))) / "crq"
+        return home / "heartbeat.json"
+
     def read_completion_heartbeat(self):
         """The runner's completion heartbeat (crq.py write_heartbeat), read
-        from its actual WATCHDOG_HOME — $XDG_STATE_HOME/crq or
-        ~/.local/state/crq — never from the checkout's queue/state saves.
+        from its actual WATCHDOG_HOME — completion_heartbeat_path, never the
+        checkout's queue/state saves.
 
         Returns None only when no heartbeat exists yet; one that is present
         but unreadable or not a JSON object refuses assessment.
         """
-        home = Path(os.environ.get("XDG_STATE_HOME",
-                                   str(Path.home() / ".local/state"))) / "crq"
         try:
-            raw = (home / "heartbeat.json").read_text()
+            raw = self.completion_heartbeat_path().read_text()
         except FileNotFoundError:
             return None
         except OSError as exc:
@@ -289,9 +302,7 @@ def captured_state(effects: Effects) -> dict:
         state["prior_config_sha256"] = _sha256(effects.config_path)
     except OSError:
         state["prior_config_sha256"] = None
-    for rel in PRESERVED:
-        state["preserved/" + rel] = (_sha256(effects.state_dir() / rel)
-                                     if effects.exists(rel) else None)
+    state.update(preserved_digests(effects))
     state["checkout_status"] = effects.git("status", "--porcelain",
                                            "--untracked-files=all")
     state["units"] = effects.unit_digests()
@@ -315,9 +326,7 @@ def no_change_observation(effects: Effects, before: dict) -> dict:
                 "checkout_status": effects.git("status", "--porcelain",
                                                "--untracked-files=all"),
                 "units": effects.unit_digests()}
-    for rel in PRESERVED:
-        observed["preserved/" + rel] = (_sha256(effects.state_dir() / rel)
-                                        if effects.exists(rel) else None)
+    observed.update(preserved_digests(effects))
     expected = {"head": before.get("prior_head"),
                 "config_sha256": before.get("prior_config_sha256"),
                 "checkout_status": before.get("checkout_status"),
@@ -350,6 +359,25 @@ def helper_precheck(helper_module, root: Path, overlay: dict, target: str,
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def preserved_digests(effects: Effects) -> dict:
+    """sha256 of every PRESERVED surface, keyed "preserved/<name>", None when
+    that surface does not exist yet. queue.json is read state-relative; the
+    completion heartbeat is read from effects.completion_heartbeat_path() —
+    the exact file read_completion_heartbeat reads and crq.py replaces — so
+    the digests cover what the runner actually writes. A surface that exists
+    but cannot be read raises, never quietly digests as None.
+    """
+    digests: dict = {}
+    for rel in PRESERVED:
+        path = (effects.completion_heartbeat_path()
+                if rel == "heartbeat.json" else effects.state_dir() / rel)
+        try:
+            digests["preserved/" + rel] = _sha256(path)
+        except FileNotFoundError:
+            digests["preserved/" + rel] = None
+    return digests
 
 
 def read_queue(effects: Effects) -> dict:
@@ -518,9 +546,9 @@ def preservation_check(effects: Effects, before: dict) -> dict:
     the helper invocation. Any difference is a refused deployment (fail
     stopped, reason recorded)."""
     diffs = []
+    after = preserved_digests(effects)
     for rel in PRESERVED:
-        after = _sha256(effects.state_dir() / rel) if effects.exists(rel) else None
-        if after != before.get("preserved/" + rel):
+        if after["preserved/" + rel] != before.get("preserved/" + rel):
             diffs.append(rel)
     if diffs:
         raise Refused("preserved surfaces changed during deployment: "

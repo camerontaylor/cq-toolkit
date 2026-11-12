@@ -239,10 +239,13 @@ Ordering and guarantees:
    interruption during validation therefore leaves no intent to replace or
    clear; one after the write is replaced by its recorded outcome.
 4. **Preservation** — `state/queue.json` (items, starts, author_requests,
-   author_observations) and `state/heartbeat.json` must be byte-identical
-   across the switch; any difference after helper entry requires owner recovery
-   with the affected file names. State is never restored, migrated or rewritten
-   by the controller.
+   author_observations) and the runner's completion heartbeat
+   (`WATCHDOG_HOME/heartbeat.json`, resolved as `$XDG_STATE_HOME/crq` or
+   `~/.local/state/crq` — the same file the health check reads, never a
+   state-directory copy) must be byte-identical across the switch; any
+   difference after helper entry requires owner recovery with the affected
+   file names. State is never restored, migrated or rewritten by the
+   controller.
 5. **Rollback compatibility** — recorded before and after: automatic
    rollback is permitted only when the queue carries **no explicit
    `schema_version` marker at all** (presence is recorded as the boolean
