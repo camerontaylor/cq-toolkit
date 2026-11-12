@@ -99,6 +99,9 @@ export const PROTECTED_STAGE_PATTERNS: readonly RegExp[] = Object.freeze([
   ...PROTECTED_TEST_FILE_PATTERNS,
   ...PROTECTED_CONFIG_PATH_PATTERNS,
   /\.snap$/i,
+  // Vitest `toMatchFileSnapshot` outputs live under `__snapshots__/` with
+  // arbitrary extensions: snapshot evidence in either protectTests mode.
+  /(?:^|\/)__snapshots__\//i,
 ]);
 
 /** True when a repo-relative path is worker-controlled test evidence. */
@@ -111,16 +114,23 @@ export function isProtectedTestPath(path: string): boolean {
 /** True when a repo-relative path is protected runner/repository configuration. */
 export function isProtectedConfigPath(path: string): boolean {
   return (
-    PROTECTED_CONFIG_PATH_PATTERNS.some((pattern) => pattern.test(path)) || /\.snap$/i.test(path)
+    PROTECTED_CONFIG_PATH_PATTERNS.some((pattern) => pattern.test(path)) ||
+    /\.snap$/i.test(path) ||
+    // Snapshot outputs (`__snapshots__/out.txt`) stay protected when
+    // protectTests is false; the `__snapshots__` test root only covers the
+    // protectTests-true route. Deliberately NOT in
+    // PROTECTED_CONFIG_PATH_PATTERNS: snapshots are worker evidence (W1.8),
+    // not D11 policy definitions.
+    /(?:^|\/)__snapshots__\//i.test(path)
   );
 }
 
 /**
  * True when a repo-relative path is a D11 protected policy path (ADR-0004
  * D-G.1): exactly the configuration patterns above. Deliberately WITHOUT the
- * test-root, test-file and `.snap` patterns — tests and snapshots are worker
- * evidence (W1.8), not D11 enforcement definitions, so a human-authored test
- * change is not a D11 event.
+ * test-root, test-file, `.snap` and `__snapshots__/` patterns — tests and
+ * snapshots are worker evidence (W1.8), not D11 enforcement definitions, so a
+ * human-authored test change is not a D11 event.
  */
 export function isProtectedPolicyPath(path: string): boolean {
   return PROTECTED_CONFIG_PATH_PATTERNS.some((pattern) => pattern.test(path));

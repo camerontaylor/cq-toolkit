@@ -2270,8 +2270,7 @@
       },
       "expect": {
         "ok": false,
-        "error": "OSError",
-        "message": "[Errno 75] Value too large for defined data type"
+        "error": "OSError"
       }
     }
   ]

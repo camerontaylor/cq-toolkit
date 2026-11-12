@@ -79,6 +79,14 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def _text(value):
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value)
+
+
 def run(argv, timeout=60):
     """Run one observable command and record its exact result."""
     started = time.time()
@@ -89,8 +97,8 @@ def run(argv, timeout=60):
                   "seconds": round(time.time() - started, 3)}
     except subprocess.TimeoutExpired as exc:
         record = {"argv": argv, "rc": None, "timeout": True,
-                  "stdout": (exc.stdout or "")[-4000:],
-                  "stderr": (exc.stderr or "")[-4000:],
+                  "stdout": _text(exc.stdout)[-4000:],
+                  "stderr": _text(exc.stderr)[-4000:],
                   "seconds": round(time.time() - started, 3)}
     ACTIONS.append(record)
     return record
