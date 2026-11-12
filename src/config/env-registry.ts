@@ -167,7 +167,7 @@ export const CQ_ENV_ENTRIES: readonly CqEnvEntry[] = [
     text,
     'neutral',
     false,
-    'Snapshot scanner command for the review transport and review.submit (an explicit scanner input wins).',
+    'Snapshot scanner command for unpublished review.submit and managed dev.review/review.run commits; required on author hosts for unpublished work (an explicit scanner input wins). Published heads advertised by origin use reachable objects.',
   ),
   entry(
     'CQ_AUTHOR_SSH_ALIAS',

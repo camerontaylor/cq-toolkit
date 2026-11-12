@@ -345,6 +345,14 @@ export const SubmitInputSchema = z
     repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
     target: z.string().min(1),
     base: z.string().min(1).optional(),
+    /** Immutable object to submit instead of the checkout HEAD (synthetic snapshots). */
+    head: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .optional(),
+    projection: z
+      .enum(['full-diff', 'working-tree-full-v1', 'working-tree-uncommitted-v1'])
+      .default('full-diff'),
     requestId: z
       .string()
       .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/)

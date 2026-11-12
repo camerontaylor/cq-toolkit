@@ -35,7 +35,6 @@
 // cycle; `enroll | status | fallback` runs the author-admission transport
 // (review-transport.ts, unchanged from #332 — same wire shapes, same crq
 // invocation `cq dev.review --action=enroll …`).
-import { setTimeout as delay } from 'node:timers/promises';
 import type { Op, OpResult } from '../../kernel/types.js';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { AgentReviewReport, AgentReviewResult } from '../review/agentReviewer.js';
@@ -49,15 +48,9 @@ import { LegacyReviewCoverageSchema } from '../review/internal/reviewPartitions.
 import { legacyEvidenceText, type Finding } from '../review/findings.js';
 import { restoreDurableDisposition } from '../review/internal/durableDisposition.js';
 import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
-import {
-  CODERABBIT_REVIEWER,
-  coderabbitReviewArgv,
-  decideCompletion,
-  isTransientReviewerFailure,
-  parseReviewerStream,
-} from './coderabbit.js';
+import { CODERABBIT_REVIEWER } from './coderabbit.js';
 import type { ComponentScan, DiffSecretScanner, ScanComponentInput } from './denylist.js';
-import type { CommandResult, DevEffects } from './effects.js';
+import type { DevEffects } from './effects.js';
 import { faultText, guardDevOp } from './effects.js';
 import {
   DEFAULT_DEV_TARGET,
@@ -85,6 +78,11 @@ import {
   zList,
   type WorkState,
 } from './internal/workState.js';
+import {
+  runManagedReviewSpan,
+  type ManagedReviewSubmit,
+  type ManagedSpan,
+} from './managedReview.js';
 
 /** Per-component scan cap: a bigger file patch or untracked file is refused, never truncated. */
 export const SCAN_COMPONENT_CAP_BYTES = 4 * 1024 * 1024;
@@ -232,7 +230,7 @@ export interface DevReviewDeps {
   /** Composition-owned cancellation/deadline; cleanup and evidence writes remain enabled. */
   signal?: AbortSignal;
   remainingWallMs?: () => number;
-  /** Abortable backoff; injectable so rate-limit tests never sleep in real time. */
+  /** @deprecated Queue workers own backoff. Retained for SDK source compatibility. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** The composed pre-upload secret scanner (cycle action only). */
   scanSecrets: DiffSecretScanner;
@@ -255,6 +253,14 @@ export interface DevReviewDeps {
     /** Live view of the remaining cycle wall budget; the runner caps its engine budget at it. */
     remainingWallMs?: () => number;
   }) => Promise<AgentReviewResult>;
+  /**
+   * The managed CodeRabbit route (S2b-i): submit the pinned (base, head)
+   * to the queue via review-v1 instead of spawning the CLI. Injected so
+   * tests script it; production binds the SSH transport (see registry).
+   * Absent means the managed route is unavailable — reported, never a
+   * silent CLI fallback.
+   */
+  managedSubmit?: ManagedReviewSubmit;
   /**
    * The author-admission transport (admission actions). When omitted, the
    * admission actions report the configuration gap.
@@ -327,8 +333,8 @@ export function makeDevReview(
     deps.patternsFile,
     deps.signal,
     deps.remainingWallMs,
-    deps.sleep,
     deps.configuredReviewers,
+    deps.managedSubmit,
   );
   return async (input) => {
     if (isAdmissionInput(input)) {
@@ -364,10 +370,8 @@ function makeReviewCycle(
   patternsFile?: string,
   signal?: AbortSignal,
   remainingWallMs?: () => number,
-  sleep: NonNullable<DevReviewDeps['sleep']> = async (ms, signal) => {
-    await delay(ms, undefined, { signal });
-  },
   configuredReviewers?: readonly string[],
+  managedSubmit?: ManagedReviewSubmit,
 ): Op<DevCycleInput, DevReviewReport> {
   return guardDevOp('dev.review', DevCycleInputSchema, async (input) => {
     const contextDeadlineAt = Date.now() + DEFAULT_REVIEWER_TIMEOUT_MS;
@@ -580,7 +584,51 @@ function makeReviewCycle(
     // The run under the HOST lock; the completion is decided and the log
     // written inside the span, the record appended after it.
     const at = effects.nowIso();
-    const argv = coderabbitReviewArgv(state.base, scope);
+    // S2b-i: the managed CodeRabbit route replaces the direct CLI launch.
+    // The agent path below is unchanged; only `reviewer: 'coderabbit'` (the
+    // non-agent default) submits to the queue. An absent managedSubmit or an
+    // unsupported server is REPORTED, never a silent CLI fallback.
+    if (!isAgent) {
+      if (managedSubmit === undefined)
+        return needsHuman(
+          'the queue is the only managed CodeRabbit launch route — no managed submit leg is configured (configure CQ_QUEUE_SSH_ALIAS for a review-v1 runner); no direct CLI fallback',
+        );
+      const managed = await runManagedReviewSpan({
+        effects,
+        state,
+        target,
+        scope,
+        reviewer,
+        at,
+        cwd: input.repoRoot,
+        submit: managedSubmit,
+        ...(signal ? { signal } : {}),
+        remainingWallMs: contextRemaining,
+        refuseDrift,
+      });
+      if (!managed.ok) {
+        const blocked = needsHuman(`managed queue review — ${managed.reason}`);
+        // The #509 class rides the report envelope (stripped before the
+        // strict OpResult parse), never the reason text — mirroring the CLI
+        // path's transient envelope so run.ts marks the block retryable.
+        return managed.transient === true ? { ...blocked, report: { transient: true } } : blocked;
+      }
+      const recorded = await recordManagedTerminal(
+        state,
+        target,
+        scope,
+        reviewer,
+        managed.span,
+        effects,
+      );
+      // A receipt that completed after the caller's wall expired is a budget
+      // stop: the class rides the report envelope (stripped before the
+      // strict OpResult parse), mirroring the CLI path's envelope. The
+      // recorded cycle already carries the blocked budget reason.
+      return managed.budgetStopped === true && recorded.status === 'needs-human'
+        ? { ...recorded, report: { budgetStopped: true } }
+        : recorded;
+    }
     let span: {
       completion: DevReviewCompletion;
       logPath: string;
@@ -596,7 +644,7 @@ function makeReviewCycle(
       span = await effects.withHostLock(async () => {
         signal?.throwIfAborted();
         await refuseDrift('while waiting for the review lock');
-        if (isAgent) {
+        {
           const role = reviewer.slice('agent:'.length);
           if (!role) throw new Error('agent reviewer role is empty');
           const context = await collectBoundedReviewContext(
@@ -702,152 +750,6 @@ function makeReviewCycle(
               : {}),
           };
         }
-        const timeoutMs = Math.min(DEFAULT_REVIEWER_TIMEOUT_MS, remainingWallMs?.() ?? Infinity);
-        if (timeoutMs <= 0) throw new Error('review wall budget exhausted before dispatch');
-        // Both attempts and their wait share one per-reviewer timeout.
-        const reviewerDeadline = Date.now() + timeoutMs;
-        let raw = await runReviewer(effects, argv, timeoutMs, signal);
-        await refuseDrift(
-          'during the review run (content the scan never saw may have been uploaded)',
-        );
-        // A killed run is blocked, but whatever findings it emitted before
-        // the kill are still recorded: they stay open until dispositioned.
-        let parsed = parseReviewerStream(raw.stdout);
-        const attemptLog: string[] = [];
-        const priorFindings: Omit<DevFinding, 'id'>[] = [];
-        const wait = parsed.rateLimitWait;
-        if (wait !== undefined && raw.exitCode !== null && !raw.timedOut) {
-          const waitMs = wait.ms + 15_000;
-          const available = Math.min(
-            reviewerDeadline - Date.now(),
-            remainingWallMs?.() ?? Infinity,
-          );
-          if (!signal?.aborted && waitMs < available) {
-            attemptLog.push(
-              '# --- attempt 1 stdout (NDJSON) ---',
-              raw.stdout,
-              '# --- attempt 1 stderr ---',
-              raw.stderr,
-              `rate-limit wait: ${wait.text} + 15000ms margin; retry 1 after ${String(waitMs)}ms`,
-            );
-            // Keep evidence even if the wait is cancelled or the retry's guards refuse.
-            await effects.writeReviewLog(
-              state.branch,
-              `${Date.now()}`,
-              [
-                `base: ${state.base}`,
-                `head: ${state.head}`,
-                `dirtySha256: ${state.dirtySha256}`,
-                ...attemptLog,
-              ].join('\n'),
-            );
-            try {
-              await sleep(waitMs, signal);
-            } catch (error) {
-              if (!signal?.aborted) throw error;
-              attemptLog.push(`retry 1 cancelled: ${faultText(error)}`);
-            }
-            if (!signal?.aborted) {
-              await refuseDrift('during the rate-limit wait');
-              const retryScans = await scanSecrets(collected.components);
-              if (retryScans.some((scan) => scan.hits.length > 0))
-                throw new Error(
-                  'secret scan found denylist-class content before retry — review refused',
-                );
-              await refuseDrift('during the retry secret scan');
-              signal?.throwIfAborted();
-              const retryTimeoutMs = Math.min(
-                reviewerDeadline - Date.now(),
-                remainingWallMs?.() ?? Infinity,
-              );
-              if (retryTimeoutMs > 0) {
-                priorFindings.push(...parsed.findings);
-                raw = await runReviewer(effects, argv, retryTimeoutMs, signal);
-                await refuseDrift('during the review retry run');
-                parsed = parseReviewerStream(raw.stdout);
-                attemptLog.push('retry 1 dispatched');
-              } else attemptLog.push('retry 1 refused: remaining reviewer/wall budget exhausted');
-            }
-          } else
-            attemptLog.push(
-              `retry 1 refused: wait ${wait.text} + 15000ms margin exceeds remaining reviewer/wall budget or review cancelled`,
-            );
-        }
-        // Explicit refusals survive a later deadline kill. Use the stream
-        // verdict independently of the exit code so a killed process cannot
-        // erase an error, required action, or skipped/no-fresh completion.
-        const streamCompletion = decideCompletion(0, parsed);
-        const streamRefusal =
-          (parsed.sawError ||
-            parsed.sawActionRequired ||
-            parsed.sawComplete ||
-            parsed.unparsedLines > 0) &&
-          streamCompletion.kind === 'blocked'
-            ? streamCompletion
-            : undefined;
-        const ordinaryCompletion =
-          raw.exitCode === null ? undefined : decideCompletion(raw.exitCode, parsed);
-        // Use one wall sample for attribution and completion. Parent cancellation
-        // alone is blocked without budget eligibility; explicit refusals still win.
-        const wallRemainingMs = remainingWallMs?.() ?? Infinity;
-        const budgetStopped =
-          streamRefusal === undefined &&
-          wallRemainingMs <= 0 &&
-          (ordinaryCompletion?.kind === 'terminal' ||
-            (raw.exitCode === null && (raw.timedOut || raw.interruption?.kind === 'abort')));
-        const completion: DevReviewCompletion =
-          streamRefusal ??
-          (signal?.aborted || wallRemainingMs <= 0
-            ? {
-                kind: 'blocked',
-                reason: `review cancelled or wall budget exhausted — ${faultText(signal?.reason ?? 'deadline elapsed')}`,
-              }
-            : raw.exitCode === null
-              ? {
-                  kind: 'blocked',
-                  reason: raw.timedOut
-                    ? `the reviewer CLI timed out after ${String(timeoutMs)}ms and was stopped — no review completed`
-                    : `the reviewer CLI did not run — ${raw.stderr.trim().slice(0, 300)}`,
-                }
-              : decideCompletion(raw.exitCode, parsed));
-        const logPath = await effects.writeReviewLog(
-          state.branch,
-          `${Date.now()}`,
-          [
-            '# dev.review cycle log',
-            `reviewer: ${reviewer}`,
-            `argv: ${CODERABBIT_REVIEWER} ${argv.join(' ')}`,
-            `base: ${state.base}`,
-            `head: ${state.head}`,
-            `dirtySha256: ${state.dirtySha256}`,
-            `scope: ${scope}`,
-            `exitCode: ${raw.exitCode === null ? 'none (killed)' : String(raw.exitCode)}`,
-            `timedOut: ${String(raw.timedOut)}`,
-            `at: ${at}`,
-            '',
-            ...attemptLog,
-            '# --- stdout (NDJSON) ---',
-            raw.stdout,
-            '# --- stderr ---',
-            raw.stderr,
-            '',
-          ].join('\n'),
-        );
-        // #509: a dropped CLI connection (`con_err`) is the network class; a
-        // cancelled or out-of-wall run never is.
-        const transient =
-          completion.kind === 'blocked' &&
-          !signal?.aborted &&
-          (remainingWallMs?.() ?? Infinity) > 0 &&
-          isTransientReviewerFailure(parsed, raw);
-        return {
-          completion,
-          logPath,
-          findings: [...priorFindings, ...parsed.findings],
-          advisories: [],
-          ...(transient ? { transient: true } : {}),
-          ...(budgetStopped ? { budgetStopped: true as const } : {}),
-        };
       }, signal);
     } catch (err) {
       // A host-lock, drift, or log-write fault: nothing is recorded, and
@@ -956,6 +858,77 @@ function makeReviewCycle(
 }
 
 /**
+ * Persist a managed queue-review span as the cycle record. The quota is
+ * ALREADY spent on the queue (like the CLI path's comment), so a store
+ * fault still reports the verdict and the log path rather than burying the
+ * paid review. A blocked managed completion records the same way a blocked
+ * CLI cycle does — findings stay open until dispositioned.
+ */
+async function recordManagedTerminal(
+  state: WorkState,
+  target: string,
+  scope: 'full' | 'uncommitted',
+  reviewer: string,
+  span: ManagedSpan,
+  effects: DevEffects,
+): Promise<OpResult<DevReviewReport>> {
+  let record: DevCycleRecord;
+  try {
+    record = await effects.openLedger(state.branch).mutate((ledger) => {
+      const cycleCount = ledger.records.filter((entry) => entry.kind === 'cycle').length;
+      const cycleId = `c${String(cycleCount + 1).padStart(3, '0')}-${state.head.slice(0, 8)}`;
+      const entry: DevCycleRecord = {
+        ...span,
+        cycleId,
+        findings: span.findings.map((finding, index) => ({
+          ...finding,
+          id: `${cycleId}#f${String(index + 1)}`,
+        })),
+      };
+      return {
+        ledger: {
+          version: DEV_LEDGER_VERSION,
+          branch: ledger.branch,
+          records: [...ledger.records, entry],
+        },
+        value: entry,
+      };
+    });
+  } catch (err) {
+    const verdict =
+      span.completion.kind === 'terminal'
+        ? 'the cycle TERMINAL'
+        : `the cycle BLOCKED (${span.completion.reason})`;
+    return {
+      status: 'failed',
+      error: `dev.review: ${verdict} with ${String(span.findings.length)} finding(s), but the record could not be persisted — ${faultText(err)}; log: ${span.logPath}`,
+    };
+  }
+  if (record.completion.kind === 'blocked')
+    return needsHuman(
+      `review cycle ${record.cycleId} was BLOCKED (${record.completion.reason}) — the cycle is recorded with ${String(record.findings.length)} finding(s); log: ${record.logPath}`,
+    );
+  return {
+    status: 'ok',
+    value: {
+      cycleId: record.cycleId,
+      reviewer,
+      scope,
+      target,
+      base: record.base,
+      head: record.head,
+      dirtySha256: record.dirtySha256,
+      completion: record.completion,
+      findings: record.findings,
+      advisories: record.advisories ?? [],
+      logPath: record.logPath,
+      untracked: record.untracked,
+      at: record.at,
+    },
+  };
+}
+
+/**
  * The scan components for the scope: one per (leg, path) from git's own
  * NUL-separated path list — so no patch header is parsed for a path — plus
  * one per untracked file. `paths` counts every path the scope touches
@@ -1036,21 +1009,4 @@ async function collectScanComponents(
     components.push({ component: `untracked:${path}`, text: file.text, path });
   }
   return { ok: true, components, paths, excludedPaths };
-}
-
-/** Run one reviewer invocation; a spawn fault becomes a synthetic killed result. */
-async function runReviewer(
-  effects: DevEffects,
-  argv: readonly string[],
-  timeoutMs: number,
-  signal?: AbortSignal,
-): Promise<CommandResult> {
-  return effects
-    .runCommand(CODERABBIT_REVIEWER, argv, { timeoutMs, ...(signal ? { signal } : {}) })
-    .catch((err: unknown): CommandResult => ({
-      exitCode: null,
-      stdout: '',
-      stderr: `spawn fault: ${faultText(err)}`,
-      timedOut: false,
-    }));
 }
