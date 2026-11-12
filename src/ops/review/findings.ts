@@ -253,7 +253,9 @@ export interface FindingDispositionView {
 export function findingDispositionView(finding: Finding): FindingDispositionView {
   const retained = finding.evidence;
   const evidence =
-    retained === undefined || (typeof retained === 'string' && retained.trim() === '')
+    retained === undefined ||
+    (typeof retained === 'string' && retained.trim() === '') ||
+    (Array.isArray(retained) && retained.length === 0)
       ? null
       : Array.isArray(retained)
         ? retained
