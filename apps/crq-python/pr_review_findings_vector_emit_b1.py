@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -194,18 +195,67 @@ class EndpointGh:
                                    stderr=step["stderr"])
         target = next(a for a in argv[2:] if a.startswith("repos/"))
         if target.endswith("/reviews?per_page=100"):
-            return SimpleNamespace(returncode=0, stdout=self.reviews["stdout"]
-                                   if isinstance(self.reviews, dict) else self.reviews,
-                                   stderr="")
+            raw = self.reviews["stdout"] if isinstance(self.reviews, dict) else self.reviews
+            stdout = _apply_reviews_jq(argv, raw)
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
         if "/compare/" in target:
-            return SimpleNamespace(returncode=0, stdout=self.compare["stdout"],
-                                   stderr=self.compare["stderr"])
+            step = self.compare
+            if isinstance(step, dict):
+                if step.get("raise") == "timeout":
+                    raise subprocess.TimeoutExpired(list(argv), pr_review_findings.GH_TIMEOUT)
+                if step.get("raise") == "oserror":
+                    raise OSError(step["detail"])
+                return SimpleNamespace(returncode=step.get("returncode", 0),
+                                       stdout=step.get("stdout", ""),
+                                       stderr=step.get("stderr", ""))
+            return SimpleNamespace(returncode=0, stdout=step["stdout"]
+                                   if isinstance(step, dict) else step, stderr="")
         return SimpleNamespace(
             returncode=0,
             stdout=json.dumps({"state": self.state, "merged": self.merged,
                                "base": self.base, "head": self.head}),
             stderr="")
 
+
+
+def _apply_reviews_jq(argv: List[str], raw: str) -> str:
+    """Apply the oracle's review-list jq filter: rows whose `user.login`
+    equals the selector's login and whose body satisfies the marker
+    predicate (`startswith` or `contains` with the quoted literal). A
+    regression that drops either predicate from the caller changes the argv,
+    and the fake then returns unfiltered rows, which the recorded calls and
+    the delivery result expose."""
+    jq = ""
+    for index, arg in enumerate(argv):
+        if arg == "--jq" and index + 1 < len(argv):
+            jq = argv[index + 1]
+            break
+    login_match = re.search(r'select\(\.user\.login == "((?:[^"\\]|\\.)*)"', jq)
+    if login_match is None:
+        return raw
+    login = json.loads('"' + login_match.group(1) + '"')
+    literal_match = re.search(r'(startswith|contains)\("((?:[^"\\]|\\.)*)"\)', jq)
+    predicate = literal_match.group(1) if literal_match else ""
+    wanted = json.loads('"' + literal_match.group(2) + '"') if literal_match else ""
+    out_lines = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if (row.get("user") or {}).get("login") != login:
+            continue
+        body = row.get("body") or ""
+        if predicate == "startswith" and not body.startswith(wanted):
+            continue
+        if predicate == "contains" and wanted not in body:
+            continue
+        out_lines.append(json.dumps({"id": row.get("id"), "url": row.get("html_url")}))
+    return "".join(line + "\n" for line in out_lines)
 
 def timeout_step(argv: List[str]) -> Dict[str, Any]:
     detail = str(subprocess.TimeoutExpired(list(argv), pr_review_findings.GH_TIMEOUT))
@@ -234,7 +284,7 @@ def marker_cases() -> List[Dict[str, Any]]:
         ("space-run-id", "a b"),
         ("newline-run-id", "a\nb"),
         ("astral-run-id", "😀r"),
-        ("zwj-run-id", "a​b"),
+        ("zwj-run-id", "a‍b"),
     ]
     cases = []
     for name, run_id in values:
@@ -301,6 +351,8 @@ def load_findings_cases() -> List[Dict[str, Any]]:
         dict(FINDING, startLine=2.0, endLine=3.0)]))
     add("huge-start-line", write_events([
         dict(FINDING, startLine=10 ** 30, endLine=10 ** 30 + 1)]))
+    add("huge-start-only-defaults-end", write_events([
+        dict(FINDING, startLine=10 ** 30, endLine=None)]))
     add("unicode-title-comment", write_events([
         dict(FINDING, title="Très — 😀", comment="À propos **b** <!-- x --> @user")]))
     add("astral-title-comment", write_events([
@@ -345,7 +397,7 @@ def one_line_cases() -> List[Dict[str, Any]]:
         ("non-string-dict", {"a": 1}),
         ("non-string-bool", True),
         ("non-string-float", 1.5),
-        ("zwj-already-present", "a​b"),
+        ("zwj-already-present", "a‍b"),
         ("comment-then-mention", "<!-- x --> @team"),
     ]
     return [
@@ -513,6 +565,12 @@ def build_review_cases() -> List[Dict[str, Any]]:
     add("start-only-lines-suffix", meta_full,
         [dict(severity="minor", path=FILE_NAME, start=5, end=None,
               title="t", text="x")], hunks)
+    add("huge-start-anchored", meta_full,
+        [dict(severity="minor", path=FILE_NAME, start=10 ** 30, end=10 ** 30,
+              title="t", text="x")], hunks)
+    add("huge-range-clamps-outside", meta_full,
+        [dict(severity="minor", path=FILE_NAME, start=10 ** 30, end=10 ** 30 + 1,
+              title="t", text="x")], hunks)
     add("single-line-comment-note", meta_full,
         [dict(severity="minor", path=FILE_NAME, start=2, end=2, title="t", text="x")], hunks)
     add("marker-idempotent-shape", dict(meta_full, run_id="r" * 100),
@@ -539,6 +597,15 @@ def build_review_cases() -> List[Dict[str, Any]]:
     add("comment-clip-astral", meta_full,
         [dict(severity="none", path=FILE_NAME, start=1, end=1, title="",
               text="😀" * 4000)], hunks)
+    add("clip-severs-fence-closed", meta_full,
+        [dict(severity="none", path=None, start=None, end=None, title="",
+              text="```py\n@user\n" + "x" * 12000)], hunks)
+    add("clip-keeps-closed-fence", meta_full,
+        [dict(severity="none", path=None, start=None, end=None, title="",
+              text="```py\n@user\n```\n" + "x" * 12000)], hunks)
+    add("clip-tab-fence-not-opened", meta_full,
+        [dict(severity="none", path=None, start=None, end=None, title="",
+              text="prose\n\t```python\n@user\n" + "x" * 12000)], hunks)
     add("body-truncated-large", meta_full,
         [dict(severity="none", path=None, start=None, end=None, title="t", text="q" * 30000),
          dict(severity="none", path=None, start=None, end=None, title="t", text="q" * 30000)],
@@ -661,12 +728,20 @@ def deliver_cases() -> List[Dict[str, Any]]:
         gh=EndpointGh(script=[ok(json.dumps(["open"]))]))
     add("pr-state-unknown-state", REPO, 77, META, nd,
         gh=EndpointGh(state="mysterious"))
+    # The failing step must land on the COMPARE call, so the passing pr_state
+    # response is queued ahead of it (script steps feed the next call in
+    # order) and the compare answer itself is a step on the compare branch.
+    _prstate_ok = ok(json.dumps({"state": "open", "merged": False,
+                                 "base": BASE, "head": HEAD}))
     add("compare-exit-error", REPO, 77, META, nd,
-        gh=EndpointGh(script=[ok("", "no diff", 1)]))
+        gh=EndpointGh(script=[_prstate_ok],
+                      compare=ok("", "no diff", 1)))
     add("compare-unparsable", REPO, 77, META, nd,
-        gh=EndpointGh(script=[ok("[")]))
+        gh=EndpointGh(script=[_prstate_ok],
+                      compare=ok("[")))
     add("compare-files-not-list", REPO, 77, META, nd,
-        gh=EndpointGh(script=[ok(json.dumps({"files": []}))]))
+        gh=EndpointGh(script=[_prstate_ok],
+                      compare=ok(json.dumps({"files": []}))))
     add("compare-removed-file-skipped", REPO, 77, META, nd,
         gh=EndpointGh(compare=ok(json.dumps([
             {"filename": "gone.py", "status": "removed", "patch": PATCH},
@@ -695,6 +770,15 @@ def deliver_cases() -> List[Dict[str, Any]]:
     add("invalid-run-id-type", REPO, 77, dict(META, run_id=None), nd,
         gh=EndpointGh())
     add("invalid-repo", "ownér/repo", 77, META, nd, gh=EndpointGh())
+    add("invalid-repo-leading-slash", "/owner", 77, META, nd,
+        gh=EndpointGh())
+    add("invalid-repo-trailing-slash", "owner/", 77, META, nd,
+        gh=EndpointGh())
+    add("invalid-repo-empty-side", "owner//repo", 77, META, nd,
+        gh=EndpointGh())
+    add("invalid-repo-connector-punct", "own‿﹏/repo", 77, META, nd,
+        gh=EndpointGh())
+    add("invalid-repo-two-slashes", "a/b/c", 77, META, nd, gh=EndpointGh())
     add("invalid-pr-zero", REPO, 0, META, nd, gh=EndpointGh())
     add("invalid-pr-float", REPO, 7.5, META, nd, gh=EndpointGh())
     add("invalid-pr-bool", REPO, True, META, nd, gh=EndpointGh())
@@ -708,6 +792,12 @@ def deliver_cases() -> List[Dict[str, Any]]:
         gh=EndpointGh())
     add("unicode-payload-created", REPO, 77, META,
         [dict(FINDING, title="标题", comment="😀 <!-- x --> @user")],
+        gh=EndpointGh())
+    add("astral-letter-mention-blocked", REPO, 77, META,
+        [dict(FINDING, title="t", comment="𝔸@user stays literal")],
+        gh=EndpointGh())
+    add("connector-punct-mention-neutralised", REPO, 77, META,
+        [dict(FINDING, title="t", comment="a‿@user hello")],
         gh=EndpointGh())
     add("local-review-head-moved-before-post", REPO, 77,
         dict(META, local_review=True), nd,

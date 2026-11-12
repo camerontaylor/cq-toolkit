@@ -201,7 +201,27 @@ def _lines(finding: Dict[str, Any]) -> str:
 
 
 def _clip(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[:limit].rstrip() + "\n\n… (truncated; full text in the crq run artifacts)"
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rstrip()
+    # A clip can sever a code fence; close it so the trailer renders as
+    # prose (same policy in the TypeScript port).
+    fence = None
+    for line in cut.split("\n"):
+        # Same opener rule as neutralisation: FENCE_OPEN over the RAW line
+        # (spaces-only indent), so a tab-indented delimiter is not a fence.
+        opened = FENCE_OPEN.match(line)
+        if fence is None:
+            if opened:
+                fence = opened.group(1)
+            continue
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if indent <= 3 and stripped and set(stripped) == {fence[0]} and len(stripped) >= len(fence):
+            fence = None
+    if fence is not None:
+        cut += "\n" + fence[0] * 3
+    return cut + "\n\n… (truncated; full text in the crq run artifacts)"
 
 
 def build_review(meta: Dict[str, Any], findings: List[Dict[str, Any]],

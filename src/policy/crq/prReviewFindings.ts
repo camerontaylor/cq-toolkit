@@ -145,7 +145,7 @@ function isAsciiAlphanumeric(codePoint: number): boolean {
  * `\p{L}`, `\p{Nd}`, `\p{Nl}`, `\p{No}` and `\p{Pc}`. Repository names
  * additionally allow `.` and `-`, which are NOT `\w` characters.
  */
-const WORD_CHARACTER = /[\p{L}\p{Nd}\p{Nl}\p{No}\p{Pc}]/u;
+const WORD_CHARACTER = /[\p{L}\p{Nd}\p{Nl}\p{No}_]/u;
 
 /** Repository-name character: Python `\w` plus `.` and `-`. */
 function isWordCodePoint(codePoint: number): boolean {
@@ -158,11 +158,12 @@ function isRegexWordCodePoint(codePoint: number): boolean {
   return WORD_CHARACTER.test(String.fromCodePoint(codePoint));
 }
 
-/** Python `REPO.fullmatch`: `\w.-` on each side of exactly one slash. */
+/** Python `REPO.fullmatch`: nonempty `\w.-` sides around exactly one slash. */
 export function isRepo(value: string): boolean {
   const characters = [...value];
-  const slashes = characters.filter((character) => character === '/').length;
-  if (slashes !== 1) return false;
+  const slash = characters.indexOf('/');
+  if (slash <= 0 || slash === characters.length - 1) return false;
+  if (characters.filter((character) => character === '/').length !== 1) return false;
   return characters.every(
     (character) => character === '/' || isWordCodePoint(character.codePointAt(0) as number),
   );
@@ -244,8 +245,21 @@ function neutraliseProse(segment: string): string {
 
 function codePointBefore(text: string, index: number): number | null {
   if (index === 0) return null;
-  // A lone surrogate before @ is not a word character either way.
-  return text.codePointAt(index - 1) ?? null;
+  const previous = text.codePointAt(index - 1) ?? null;
+  // The code unit at `index - 1` may be the low half of a surrogate pair whose
+  // high half sits at `index - 2`; combine them so Python's `\w` sees the
+  // astral code point (e.g. the letter `\U0001d538`) rather than a lone low
+  // surrogate. Unpaired halves keep their own code points, like Python.
+  if (previous !== null && previous >= 0xdc00 && previous <= 0xdfff && index >= 2) {
+    // `codePointAt` decodes, so read the raw UTF-16 code unit with
+    // `charCodeAt`: the astral letter itself (0x1d538) is not in the high
+    // surrogate range, but its leading code unit (0xd835) is.
+    const high = text.charCodeAt(index - 2);
+    if (high >= 0xd800 && high <= 0xdbff) {
+      return 0x10000 + ((high - 0xd800) << 10) + (previous - 0xdc00);
+    }
+  }
+  return previous;
 }
 
 /**
@@ -771,18 +785,49 @@ function numberOrNone(value: JsonValue): number | null {
 }
 
 function linesSuffix(finding: Finding): string {
-  const start = numberOrNone(finding.start);
-  if (!start) return '';
-  const end = numberOrNone(finding.end);
-  if (!end) return `lines ${start}-${pythonStr(finding.end)}`;
-  if (start === end) return `line ${start}`;
-  return `lines ${start}-${end}`;
+  const start = finding.start;
+  if (!pythonTruthy(start)) return '';
+  const end = finding.end;
+  if (!pythonTruthy(end)) return `lines ${pythonStr(start)}-${pythonStr(end)}`;
+  // Python `start == end` over ints and floats; model ints compare exactly.
+  const equal =
+    start === end ||
+    (start instanceof JsonNumber &&
+      end instanceof JsonNumber &&
+      (start.kind === 'int' ? (start.integer as bigint) : start.float) ===
+        (end.kind === 'int' ? (end.integer as bigint) : end.float));
+  if (equal) return `line ${pythonStr(start)}`;
+  return `lines ${pythonStr(start)}-${pythonStr(end)}`;
 }
 
 function clip(text: string, limit: number): string {
   if (pythonLength(text) <= limit) return text;
   let cut = pythonSlice(text, 0, limit);
   cut = pythonRstrip(cut);
+  // A clip can sever a code fence; close it so the trailer renders as
+  // prose (same policy in the Python oracle).
+  let fence: string | null = null;
+  for (const line of cut.split('\n')) {
+    // Same opener rule as neutralisation: matchFenceOpen over the RAW line
+    // (spaces-only indent), so a tab-indented delimiter is not a fence.
+    const opened = matchFenceOpen(line);
+    if (fence === null) {
+      if (opened !== null) fence = opened;
+      continue;
+    }
+    const stripped = pythonStrip(line);
+    let indent = 0;
+    while (indent < line.length && line[indent] === ' ') indent += 1;
+    if (
+      indent <= 3 &&
+      stripped.length > 0 &&
+      [...stripped].every((character) => character === fence?.[0]) &&
+      stripped.length >= fence.length
+    ) {
+      fence = null;
+    }
+  }
+  if (fence !== null) cut += `\n${fence[0]?.repeat(3) ?? ''}`;
   return `${cut}\n\n… (truncated; full text in the crq run artifacts)`;
 }
 
@@ -1459,17 +1504,27 @@ export function loadFindings(text: string): Finding[] {
     };
     const startValue: JsonValue = finding.start ?? null;
     const endValue: JsonValue = finding.end ?? null;
-    const start = numberOrNone(startValue);
-    const end = numberOrNone(endValue);
-    if (start !== null && end === null) {
+    // Python `_line` yields arbitrary-size positive ints; truthiness is
+    // presence, not a 2^53-capped read.
+    const start = lineValue(
+      event.has('startLine') ? (event.get('startLine') as JsonValue) : undefined,
+    );
+    const end = lineValue(event.has('endLine') ? (event.get('endLine') as JsonValue) : undefined);
+    const startPresent = start !== null;
+    const endPresent = end !== null;
+    if (startPresent && !endPresent) {
       finding.end = startValue;
     }
-    if (end !== null && start === null) {
+    if (endPresent && !startPresent) {
       finding.start = endValue;
     }
-    if (start !== null && end !== null && start > end) {
-      finding.start = endValue;
-      finding.end = startValue;
+    if (startPresent && endPresent) {
+      const startInt = (start as JsonNumber).integer as bigint;
+      const endInt = (end as JsonNumber).integer as bigint;
+      if (startInt > endInt) {
+        finding.start = endValue;
+        finding.end = startValue;
+      }
     }
     const key = pythonJsonText(
       new JsonObject([

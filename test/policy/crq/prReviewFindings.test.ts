@@ -111,7 +111,7 @@ class ScriptedGh {
     }
     const target = argv.find((argument) => argument.startsWith('repos/')) ?? '';
     if (target.endsWith('/reviews?per_page=100')) {
-      return ghProcess(0, this.reviews, '');
+      return ghProcess(0, applyReviewsJq(argv, this.reviews), '');
     }
     if (target.includes('/compare/')) {
       return stepResult(argv, this.compare);
@@ -122,6 +122,52 @@ class ScriptedGh {
       '',
     );
   };
+}
+
+/**
+ * Mirror of the emitter's `_apply_reviews_jq`: rows whose `user.login`
+ * equals the selector's login and whose body satisfies the marker
+ * predicate, projected to `{id, url}` per line. A caller regression that
+ * drops either predicate changes the argv, so the fake returns unfiltered
+ * rows and the recorded calls/delivery result expose the difference.
+ */
+function applyReviewsJq(argv: readonly string[], raw: string): string {
+  let jq = '';
+  for (const [index, argument] of argv.entries()) {
+    if (argument === '--jq' && index + 1 < argv.length) {
+      jq = argv[index + 1] as string;
+      break;
+    }
+  }
+  const loginMatch = jq.match(/select\(\.user\.login == "((?:[^"\\]|\\.)*)"/);
+  if (loginMatch === null) return raw;
+  const login = JSON.parse(`"${loginMatch[1] as string}"`) as string;
+  const literalMatch = jq.match(/(startswith|contains)\("((?:[^"\\]|\\.)*)"\)/);
+  const predicate = literalMatch?.[1] ?? '';
+  const wanted = literalMatch ? (JSON.parse(`"${literalMatch[2] as string}"`) as string) : '';
+  const outLines: string[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    let row: unknown;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (row === null || typeof row !== 'object' || Array.isArray(row)) continue;
+    const record = row as unknown as Record<string, JsonValue>;
+    const user = record['user'];
+    const loginValue =
+      user !== null && typeof user === 'object' && !Array.isArray(user)
+        ? (user as unknown as Record<string, JsonValue>)['login']
+        : undefined;
+    if (loginValue !== login) continue;
+    const body = typeof record['body'] === 'string' ? (record['body'] as string) : '';
+    if (predicate === 'startswith' && !body.startsWith(wanted)) continue;
+    if (predicate === 'contains' && !body.includes(wanted)) continue;
+    outLines.push(JSON.stringify({ id: record['id'] ?? null, url: record['html_url'] ?? null }));
+  }
+  return outLines.map((line) => `${line}\n`).join('');
 }
 
 function asArrayValue(value: JsonValue | undefined): readonly JsonValue[] {
@@ -297,22 +343,20 @@ async function runCase(entry: PrReviewCase): Promise<{ outcome: Outcome; calls?:
       // recorded message instead of inventing port behaviour.
       const metaValue = inputValue(entry, 'meta');
       const findingsValue = inputValue(entry, 'findings');
-      const message = entry.expect.has('message')
-        ? requireString(entry.expect.get('message'), 'message')
-        : '';
+      // The recorded message is the fixture's claim about Python's error;
+      // throwing the boundary literal (not `message || literal`) keeps the
+      // comparison falsifiable: a wrong recorded message fails the case.
       if (!(metaValue instanceof JsonObject)) {
         return {
           outcome: await capture(() => {
-            throw new PrReviewTypeError(
-              message || 'list indices must be integers or slices, not str',
-            );
+            throw new PrReviewTypeError('list indices must be integers or slices, not str');
           }),
         };
       }
       if (!Array.isArray(findingsValue) || !findingsValue.every((f) => f instanceof JsonObject)) {
         return {
           outcome: await capture(() => {
-            throw new PrReviewTypeError(message || "string indices must be integers, not 'str'");
+            throw new PrReviewTypeError("string indices must be integers, not 'str'");
           }),
         };
       }
