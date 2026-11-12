@@ -135,10 +135,7 @@ class ScriptedGh {
  * drops either predicate changes the argv, so the fake returns unfiltered
  * rows and the recorded calls/delivery result expose the difference.
  */
-function applyReviewsJq(
-  argv: readonly string[],
-  raw: string,
-): GhResult | string {
+function applyReviewsJq(argv: readonly string[], raw: string): GhResult | string {
   let jq = '';
   for (const [index, argument] of argv.entries()) {
     if (argument === '--jq' && index + 1 < argv.length) {
@@ -150,7 +147,7 @@ function applyReviewsJq(
   const literalMatch = jq.match(/(startswith|contains)\("((?:[^"\\]|\\.)*)"\)/);
   if (loginMatch === null || literalMatch === null) {
     // Unmodelled selector: refuse rather than fake agreement.
-    return { returncode: 3, stdout: '', stderr: 'jq: unmodelled selector in fake' };
+    return { returncode: processCode(3), stdout: '', stderr: 'jq: unmodelled selector in fake' };
   }
   const login = JSON.parse(`"${loginMatch[1] as string}"`) as string;
   const predicate = literalMatch[1];
@@ -159,10 +156,18 @@ function applyReviewsJq(
   try {
     page = JSON.parse(raw);
   } catch {
-    return { returncode: 2, stdout: '', stderr: 'jq: error (at <stdin>:0): parse error' };
+    return {
+      returncode: processCode(2),
+      stdout: '',
+      stderr: 'jq: error (at <stdin>:0): parse error',
+    };
   }
   if (!Array.isArray(page)) {
-    return { returncode: 2, stdout: '', stderr: 'jq: error (at <stdin>:0): Cannot iterate over null' };
+    return {
+      returncode: processCode(2),
+      stdout: '',
+      stderr: 'jq: error (at <stdin>:0): Cannot iterate over null',
+    };
   }
   const outLines: string[] = [];
   for (const row of page) {
@@ -170,7 +175,7 @@ function applyReviewsJq(
       // Real jq exits 5 on the first non-object row after emitting earlier
       // matches; delivery aborts on the returncode either way.
       return {
-        returncode: 5,
+        returncode: processCode(5),
         stdout: outLines.map((line) => `${line}\n`).join(''),
         stderr: 'jq: error (at <stdin>:0): Cannot index string with string ("user")',
       };
