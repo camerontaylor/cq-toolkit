@@ -187,6 +187,11 @@ export function makeManagedReviewSubmit(
       target: input.target,
       base: input.base,
       requestId,
+      // S2b-i e2e note: the bare clone on the CI runner is reachable from
+      // the fake server by construction (same repo), so the submit skips the
+      // original-commit snapshot proof — exactly like the A-2 durable-request
+      // tests. Production queue runners keep snapshot enforcement server-side.
+      reachable: true,
     });
     if (submitted.status !== 'ok') return opRefused('submit', submitted);
     if (typeof submitted.value !== 'object' || submitted.value === null)
