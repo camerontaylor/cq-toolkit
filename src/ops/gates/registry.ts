@@ -20,7 +20,6 @@ import type { HackDetectorInput } from './hackDetector.js';
 import type { PolicyDiffInput, PolicyDiffOutcome } from './policyDiff.js';
 import { PolicyDiffInputObject } from './policyDiffInput.js';
 import type { RegressionGateInput } from './regressionGate.js';
-import { processEnv } from '../../config/process-env.js';
 // Shared protected-path taxonomy helper: './protectedPaths.js'.
 // gates.hackDetector helper, reached through './hackDetector.js': the Python
 // skip/xfail marker scanner './pythonSkipMarkers.js' (#774).
@@ -272,15 +271,18 @@ export const registry: OpRegistryEntry[] = [
     name: 'gates.policyDiff',
     inputSchema: PolicyDiffInputSchema,
     // The D11 policy check (W1.9). The posture is resolved ONCE per dispatch
-    // from the project env (the per-call opt-in is W3.6's CLI flag) and bound
-    // into the op; an invalid posture value is `failed`, never a fallback.
+    // from the host's entry/run CqEnv snapshot threaded through the wiring
+    // (the per-call opt-in is W3.6's CLI flag) and bound into the op; an
+    // invalid posture value is `failed`, never a fallback. A library caller
+    // that supplies no wiring falls back to the resolver's enclosing-run
+    // snapshot, never a direct process.env read.
     importer: (wiring) =>
       Promise.all([import('./policyDiff.js'), import('./policyConfig.js')]).then(([m, cfg]) => {
         const op: Op<PolicyDiffInput, PolicyDiffOutcome> = async (input) => {
           let config;
           try {
             config = cfg.resolveProtectedPathsConfig(
-              wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : { env: processEnv() },
+              wiring?.cqEnv === undefined ? {} : { cqEnv: wiring.cqEnv },
             );
           } catch (err) {
             return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
