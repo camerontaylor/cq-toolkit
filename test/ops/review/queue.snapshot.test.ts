@@ -125,11 +125,30 @@ describe('queue alias reads the CqEnv snapshot, not the ambient env', () => {
       error: 'invalid queue SSH alias',
     });
     expect(seen).toEqual([' fixture ']);
-    // Whitespace-only is blank, and blank means unset: needs-human, never a
-    // dispatch with a whitespace alias (the old `!alias` check agreed, since
-    // '   ' is falsy in JavaScript).
+    // Whitespace-only is blank, and blank means unset (contract C2): the
+    // snapshot resolves it to needs-human, never a dispatch with a whitespace
+    // alias. This intentionally DIFFERS from the old call-time guard: `!alias`
+    // on the raw ambient string treated '   ' as PRESENT (non-empty strings
+    // are truthy in JavaScript), so the old path reached sshQueueTransport and
+    // failed closed at the alias regex ({status:'failed'}). Both refuse; the
+    // new declared needs-human is the honest classification.
+    // Pin the OLD observable too, by replaying the old guard's logic against
+    // the same blank input: it builds the transport and the alias regex
+    // refuses, exactly the old failure shape this slice deliberately reclassifies.
+    const oldGuardTransport = (() => {
+      try {
+        return queueClient.sshQueueTransport('   ');
+      } catch (error) {
+        return error;
+      }
+    })();
+    expect(oldGuardTransport).toBeInstanceOf(Error);
+    expect((oldGuardTransport as Error).message).toBe('invalid queue SSH alias');
     const blank = makeQueueOps(undefined, readCqEnv({ CQ_QUEUE_SSH_ALIAS: '   ' }));
     await expect(blank.queueStatus(ref)).resolves.toMatchObject({ status: 'needs-human' });
-    expect(seen).toEqual([' fixture ']);
+    // ' fixture ' came from the padded op dispatch; '   ' is ONLY the old-guard
+    // replay above (a rejected construction, never a built transport or
+    // dispatch): the blank op itself built nothing and dispatched nothing.
+    expect(seen).toEqual([' fixture ', '   ']);
   });
 });
