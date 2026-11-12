@@ -225,11 +225,11 @@ export const registry: OpRegistryEntry[] = [
     name: 'dev.review',
     inputSchema: DevReviewInputSchema,
     // ONE ENTRY, TWO BRANCHES (the composition ruling): an admission action
-    // binds only the ambient SSH alias (#332's adapter, unchanged — the
-    // transport input carries no repoRoot); the cycle branch binds the
-    // subprocess effects and the two-layer secret scanner from the
+    // binds only the dispatch wiring's author snapshot (#332's adapter,
+    // unchanged — the transport input carries no repoRoot); the cycle branch
+    // binds the subprocess effects and the two-layer secret scanner from the
     // dispatched repoRoot.
-    importer: () =>
+    importer: (wiring) =>
       Promise.all([
         import('./review.js'),
         import('./review-transport.js'),
@@ -255,7 +255,11 @@ export const registry: OpRegistryEntry[] = [
           fs,
         ]) =>
           (async (input: DevReviewInput) => {
-            if (m.isAdmissionInput(input)) return admission.envAuthorAdmission(input);
+            if (m.isAdmissionInput(input))
+              return admission.envAuthorAdmission(
+                input,
+                ...(wiring?.cqEnv !== undefined ? [wiring.cqEnv] : []),
+              );
             const { repoRoot } = input as DevCycleInput;
             const dev = effects.makeSubprocessDevEffects(repoRoot);
             // Portable default: gitleaks' built-in rules apply everywhere.

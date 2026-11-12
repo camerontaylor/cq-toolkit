@@ -97,5 +97,5 @@ export {
   DevTransportInputSchema,
 } from './registry.js';
 export type { DevTransportInput } from './registry.js';
-export type { AuthorDecision, AuthorTransport } from './review-transport.js';
-export { makeAuthorAdmission, sshAuthorTransport } from './review-transport.js';
+export type { AuthorDecision, AuthorEnv, AuthorTransport } from './review-transport.js';
+export { makeAuthorAdmission, resolveAuthorEnv, sshAuthorTransport } from './review-transport.js';
