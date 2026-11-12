@@ -490,8 +490,17 @@ export function findingTriage(rows: readonly TriageRowFile[]): Record<string, un
 /** `collections.Counter` sorted by key: Python sorts str keys by code point. */
 function sortedCounts(counts: ReadonlyMap<string, number>): Record<string, number> {
   const keys = [...counts.keys()].sort(compareCodePoints);
+  // Own-property writes: a `__proto__` status is an ordinary Counter key in
+  // Python; an assignment would set the prototype and silently drop the key.
   const sorted: Record<string, number> = {};
-  for (const key of keys) sorted[key] = counts.get(key) as number;
+  for (const key of keys) {
+    Object.defineProperty(sorted, key, {
+      value: counts.get(key) as number,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
   return sorted;
 }
 
@@ -809,7 +818,14 @@ class TriageMapping {
   toPlain(): Record<string, unknown> {
     const out: Record<string, unknown> = {};
     for (const [key, entry] of this.source.entries) {
-      out[key] = entry instanceof JsonObject ? TriageMapping.of(entry).toPlain() : pyValue(entry);
+      // `__proto__` stays an own data property (see plainOf): an assignment
+      // would set the prototype, drop the key, and refuse serialisation.
+      Object.defineProperty(out, key, {
+        value: entry instanceof JsonObject ? TriageMapping.of(entry).toPlain() : pyValue(entry),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     }
     return out;
   }
@@ -826,8 +842,18 @@ class TriageMapping {
 
 function plainOf(value: JsonValue): unknown {
   if (value instanceof JsonObject) {
+    // `__proto__` is an ordinary own dict key in Python; a plain assignment
+    // would set the prototype (dropping the key and later refusing
+    // serialisation), so every projection writes own, enumerable properties.
     const out: Record<string, unknown> = {};
-    for (const [key, entry] of value.entries) out[key] = plainOf(entry);
+    for (const [key, entry] of value.entries) {
+      Object.defineProperty(out, key, {
+        value: plainOf(entry),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
     return out;
   }
   if (Array.isArray(value)) return value.map(plainOf);
@@ -847,14 +873,24 @@ function pyValue(value: JsonValue): unknown {
 
 /** Unwrap TriageMapping views from an output row so JSON can serialise it. */
 function unwrapValues(record: Record<string, unknown>): Record<string, unknown> {
+  // Own-property writes: `detail` keys come from attacker-controlled triage
+  // JSON, so a `__proto__` key must never become a prototype assignment.
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
-    if (value instanceof TriageMapping) out[key] = value.toPlain();
-    else if (Array.isArray(value)) {
-      out[key] = (value as unknown[]).map((item: unknown) =>
-        item instanceof TriageMapping ? item.toPlain() : item,
-      );
-    } else out[key] = value;
+    const resolved =
+      value instanceof TriageMapping
+        ? value.toPlain()
+        : Array.isArray(value)
+          ? (value as unknown[]).map((item: unknown) =>
+              item instanceof TriageMapping ? item.toPlain() : item,
+            )
+          : value;
+    Object.defineProperty(out, key, {
+      value: resolved,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
   }
   return out;
 }

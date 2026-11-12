@@ -399,6 +399,116 @@ describe('publish-full oracle replay through publishSummary', () => {
     ).toEqualTypeOf<Uint8Array>();
     expectTypeOf(publishSummary(core, emptyQueue, {}, {}, effects).text).toBeString();
   });
+
+  it('enriches a lossless JsonNumber pr: cache hit skips gh, cache miss fires gh', () => {
+    // P2-12: the title cache previously keyed by JS typeof, so a JsonNumber
+    // pr never matched a cached plain-int entry (forced gh on every item)
+    // and was refused gh on a miss. The producer's gate is Python's
+    // `type(pr) is int`, which a lossless int lexeme still satisfies.
+    // A previous summary seeds the cache the way the real route does.
+    const COMPACT_NO_NL = { ...COMPACT, trailingNewline: false };
+    const previous = `${pythonJsonText(
+      parseJsonValue(
+        '{"last_tick":"x","pending_items":[{"repo":"owner/repo","pr":7,"title":"Cached seven"}]}',
+      ) as JsonValue,
+      COMPACT_NO_NL,
+    )}\n`;
+    const items = [
+      { repo: 'owner/repo', pr: JsonNumber.int(7), title: null },
+      { repo: 'owner/repo', pr: 7, title: null },
+      { repo: 'owner/repo', pr: JsonNumber.int(9), title: null },
+      { repo: 'owner/repo', pr: JsonNumber.float(7, '7.0'), title: null },
+    ];
+    const core = {
+      last_tick: 'x',
+      pending_items: items,
+      starts_cap: 8,
+      generated_at: 'g',
+    };
+    const queue = { items: [], starts: [], last_tick: 'x' } as unknown as CrqRecord;
+    const calls: string[] = [];
+    const result = publishSummary(
+      core,
+      queue,
+      {},
+      {},
+      {
+        root: '/state',
+        xdgStateHome: '/xdg',
+        now: 0,
+        previousBytes: new TextEncoder().encode(previous),
+        inbox: {
+          entries: [],
+          readResult: () => null,
+          hasResult: () => false,
+          hasProgress: () => false,
+        },
+        triageRows: [],
+        systemd: { error: 'x' },
+        systemdClock: { realtime: 0, monotonic: 0 },
+        ghTitle: (repo, pr) => {
+          calls.push(`repos/${repo}/pulls/${pr}`);
+          return `Fresh ${pr}`;
+        },
+        readReceipt: () => null,
+      },
+    );
+    // JsonNumber 7 hits the cached plain-int 7 (value-equal tuple keys);
+    // plain 7 hits too; 9 misses and fires; the float-lexeme 7.0 is
+    // value-equal to 7 in Python (1 == 1.0 hashing) so it hits the cached
+    // title, but never reaches gh because the gate is `type(pr) is int`.
+    expect(calls).toEqual(['repos/owner/repo/pulls/9']);
+    const pending = result.value['pending_items'] as { title: unknown }[];
+    expect(pending.map((item) => item.title)).toEqual([
+      'Cached seven',
+      'Cached seven',
+      'Fresh 9',
+      'Cached seven',
+    ]);
+    // The published bytes keep the lossless route's exact lexemes: the
+    // float-lexeme pr serialises as `7.0`, not `7`.
+    expect(result.text).toContain('"pr":7.0');
+  });
+
+  it('keeps __proto__ triage keys as ordinary own keys', () => {
+    // P2-13: plain `out[key] =` on a `__proto__` key silently set the
+    // prototype (key lost = corrupted document) and the later serialiser
+    // refused the degraded object. The producer's dict keeps it as an own
+    // key; ours must too, through the lossless serialiser.
+    // status `__proto__` is falsy-but-own: it must land in `counts` verbatim
+    // (a __proto__-keyed assignment would silently drop it).
+    const row = new TextEncoder().encode(
+      '{"status":"__proto__","canonical_id":"c","target":"tip","finding":{"id":"i","title":"Needs","severity":"minor"}}',
+    );
+    const core = { last_tick: 'x', pending_items: [], starts_cap: 8, generated_at: 'g' };
+    const queue = { items: [], starts: [], last_tick: 'x' } as unknown as CrqRecord;
+    const result = publishSummary(
+      core,
+      queue,
+      {},
+      {},
+      {
+        root: '/state',
+        xdgStateHome: '/xdg',
+        now: 0,
+        previousBytes: null,
+        inbox: {
+          entries: [],
+          readResult: () => null,
+          hasResult: () => false,
+          hasProgress: () => false,
+        },
+        triageRows: [{ name: 'a.json', bytes: row }],
+        systemd: { error: 'x' },
+        systemdClock: { realtime: 0, monotonic: 0 },
+        ghTitle: () => null,
+        readReceipt: () => null,
+      },
+    );
+    expect(result.text).toContain('"counts":{"__proto__":1}');
+    // And the prototype was never touched.
+    expect(Object.getPrototypeOf({}) === Object.prototype).toBe(true);
+  });
 });
 
 /** `datetime.fromtimestamp(now, utc).strftime("%Y-%m-%dT%H:%M:%SZ")`. */

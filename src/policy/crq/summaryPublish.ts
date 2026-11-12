@@ -159,16 +159,12 @@ export function publishSummary(
         item['title'] = cached;
       }
     }
-    if (
-      !pyTruthy(item['title']) &&
-      pyTruthy(repo) &&
-      typeof pr === 'number' &&
-      Number.isInteger(pr) &&
-      pr > 0
-    ) {
-      // `type(pr) is int`: JSON integers only, never a float lexeme. The gh
-      // seam returns null for a failed process; the producer swallows those.
-      const stdout = effects.ghTitle(repo as string, pr);
+    const ghPr = ghIntegerPr(pr);
+    if (!pyTruthy(item['title']) && pyTruthy(repo) && ghPr !== null) {
+      // `type(pr) is int`: JSON integers only (a lossless JsonNumber int is
+      // still Python's int; a float lexeme never qualifies). The gh seam
+      // returns null for a failed process; the producer swallows those.
+      const stdout = effects.ghTitle(repo as string, ghPr);
       const title = stdout === null ? null : stdout.trim();
       item['title'] = title === '' ? null : title;
     }
@@ -352,11 +348,17 @@ function cacheBucketMap(
 function cacheKey2(pr: unknown): CacheKey {
   // Python's tuple key hashes `pr` by value: `True == 1` and `1 == 1.0` share
   // one slot and strings are their own key, so the port maps every hashable
-  // `pr` onto one primitive-string key space with those collapses.
+  // `pr` onto one primitive-string key space with those collapses. A
+  // lossless JsonNumber keeps its exact integer value (the real route reads
+  // queue subtrees with numbers retained), and hashes by that value so
+  // `JsonNumber.int(7)` and the parsed-from-previous `7` share one slot.
   if (pr === null || pr === undefined) return 'p:null';
   if (typeof pr === 'boolean') return `p:${pr ? 1 : 0}`;
   if (typeof pr === 'number') return `p:${String(pr)}`;
   if (typeof pr === 'string') return `s:${pr}`;
+  if (pr instanceof JsonNumber) {
+    return pr.kind === 'int' ? `p:${(pr.integer as bigint).toString()}` : `p:${String(pr.float)}`;
+  }
   // Unhashable pr voids the cache at build time (TypeError caught).
   throw new SummaryPublishError('unhashable type', 'TypeError');
 }
@@ -364,6 +366,17 @@ function cacheKey2(pr: unknown): CacheKey {
 function cacheLookupKey(repo: unknown, pr: unknown): void {
   cacheBucket(repo);
   cacheKey2(pr);
+}
+
+/** `type(pr) is int and pr > 0`: a plain JSON integer or a lossless int
+ * JsonNumber; floats, bools and everything else return null (no gh lookup). */
+function ghIntegerPr(pr: unknown): number | null {
+  if (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) return pr;
+  if (pr instanceof JsonNumber && pr.kind === 'int') {
+    const value = pr.integer as bigint;
+    if (value > 0n && value <= BigInt(Number.MAX_SAFE_INTEGER)) return Number(value);
+  }
+  return null;
 }
 
 function cacheLookup(
