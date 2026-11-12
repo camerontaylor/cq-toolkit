@@ -264,6 +264,8 @@ DENIED = [
     'git grep -O vim x', 'git grep -nO x', 'git grep -Ovim x', 'git grep --open-files-in-pager=vim x',
     'git grep --op=vim x', 'git grep --no-index x /etc', 'git grep --no-ind x', 'git grep --textconv x',
     'git grep --tex x', 'git grep --ext-grep x', 'git ls-files --output=x',
+    'git grep --help x', 'git grep --hel x', 'git grep --h x', 'git grep --heading pat',
+    'git ls-files --help', 'git ls-tree --help HEAD',
     # File-input options: patterns are read from the named file, and invalid
     # pattern lines reach git's error output verbatim.
     'git grep -f /etc/shadow x', 'git grep -nf /etc/shadow x', 'git grep --file /etc/shadow x',
