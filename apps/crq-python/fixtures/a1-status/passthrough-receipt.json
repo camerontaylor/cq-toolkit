@@ -161,8 +161,8 @@
                 "projection": "current-affected-files/full-file-addition-projection",
                 "reviewer": "coderabbit-review-agent-committed-v1",
                 "reviewer_version": "fixture",
-                "equivalence": "434f0cf2b1e65a31095300fe24e9fd4d44f699070fe69d835b8b1662f99188d5",
-                "extra": 1.0
+                "extra": 1.0,
+                "equivalence": "434f0cf2b1e65a31095300fe24e9fd4d44f699070fe69d835b8b1662f99188d5"
               },
               "receipt_id": "839794833971e60ce9abe41960d0d9975f6a041742bb6daa1d2f63d72218528e"
             }
@@ -227,8 +227,8 @@
                 "projection": "current-affected-files/full-file-addition-projection",
                 "reviewer": "coderabbit-review-agent-committed-v1",
                 "reviewer_version": "fixture",
-                "equivalence": "434f0cf2b1e65a31095300fe24e9fd4d44f699070fe69d835b8b1662f99188d5",
-                "extra": 9007199254740993
+                "extra": 9007199254740993,
+                "equivalence": "434f0cf2b1e65a31095300fe24e9fd4d44f699070fe69d835b8b1662f99188d5"
               },
               "receipt_id": "de47ecc6be9ff283f383852c0e6eeee5abf0386914edaa3f651c0a4cb7503c2a"
             }
