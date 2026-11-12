@@ -156,3 +156,39 @@ test('tracked symlink and file-to-directory changes use final tree without follo
   );
   expect(await indexBytes()).toEqual(before);
 });
+
+test('skip-worktree paths refuse capture rather than inventing deletions', async () => {
+  const head = repo.git('rev-parse', 'HEAD').trim();
+  repo.git('update-index', '--skip-worktree', 'src/a.ts');
+  await rm(join(repo.root, 'src/a.ts'));
+  const before = await indexBytes();
+  const directories = await privateDirectories();
+  await expect(captureWorkingTree(repo.root, head)).rejects.toThrow('skip-worktree');
+  expect(await indexBytes()).toEqual(before);
+  expect(repo.git('rev-parse', 'HEAD').trim()).toBe(head);
+  expect(await privateDirectories()).toEqual(directories);
+});
+
+test('unpublished HEAD with uncommitted content refuses locally with a supported alternative', async () => {
+  const head = repo.git('rev-parse', 'HEAD').trim();
+  await repo.write('src/a.ts', 'export const a = 2;\n');
+  const transport = vi.fn(async () => {
+    throw new Error('no queue writes');
+  });
+  const result = await makeManagedReviewSubmit(
+    () => transport,
+    async () => 'owner/repo',
+  )({
+    cwd: repo.root,
+    target: 'main',
+    base: head,
+    head,
+    workingTree: 'uncommitted',
+    scanner: '/bin/true',
+  });
+  expect(result).toMatchObject({
+    status: 'refused',
+    reason: expect.stringContaining('use full scope') as unknown,
+  });
+  expect(transport).not.toHaveBeenCalled();
+});

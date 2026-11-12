@@ -13,9 +13,10 @@
 //     with the same receipt.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, test } from 'vitest';
+import { makeSubmit } from '../../../src/ops/review/submit.js';
 import { captureWorkingTree } from '../../../src/ops/dev/internal/snapshot.js';
 import { makeManagedReviewSubmit } from '../../../src/ops/dev/managedReview.js';
 import {
@@ -39,7 +40,7 @@ const caps = {
   v: 1,
   command: 'review-v1',
   operations: ['capabilities', 'submit', 'status', 'result', 'cancel'],
-  features: ['original-commit-snapshot-v1', 'chunked-result-v1'],
+  features: ['original-commit-snapshot-v1', 'chunked-result-v1', 'repeat-generations-v1'],
   limits: {
     max_request_bytes: 6291456,
     max_snapshot_bytes: 5242880,
@@ -55,6 +56,7 @@ test.each(['committed', 'full', 'uncommitted'] as const)(
     const root = repo.root;
     if (scope === 'full') repo.git('commit', '--allow-empty', '-qm', 'outgoing-metadata-marker');
     const actualHead = repo.git('rev-parse', 'HEAD').trim();
+    if (scope === 'uncommitted') repo.git('push', '-q', 'origin', 'HEAD:refs/heads/feature/x');
     const working = scope === 'committed' ? undefined : scope;
     if (working) {
       await repo.write('src/staged.ts', 'export const staged = 1;\n');
@@ -282,7 +284,7 @@ test.each(['committed', 'full', 'uncommitted'] as const)(
       [
         '-c',
         `
-import copy, json, sys, tempfile
+import copy, json, sys, tempfile, subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -293,9 +295,21 @@ root = Path(payload['root'])
 q = {'items': [], 'starts': []}
 with tempfile.TemporaryDirectory() as directory:
     state = Path(directory)
+    if payload['working']:
+        # Distinct clone: full scope has only its published comparison base;
+        # uncommitted scope has the published actual HEAD. Neither has the synthetic commit.
+        runner_clone = state / 'clone'
+        origin = author_snapshot.git(root, 'remote', 'get-url', 'origin').decode().strip()
+        subprocess.run(['git', 'clone', '--bare', origin, str(runner_clone)], check=True, capture_output=True)
+        assert author_snapshot.git(runner_clone, 'cat-file', '-t', wire['inputs']['base_commit']).strip() == b'commit'
+        assert subprocess.run(['git', '-C', str(runner_clone), 'cat-file', '-e', wire['inputs']['head_commit']], capture_output=True).returncode != 0
+        if wire['inputs']['projection'] == 'working-tree-full-v1':
+            assert subprocess.run(['git', '-C', str(runner_clone), 'cat-file', '-e', payload['actualHead']], capture_output=True).returncode != 0
+    else:
+        runner_clone = root
     def git(*args, **kw):
         return author_snapshot.git(root, *args).decode().strip()
-    runner = SimpleNamespace(CLONE=root, STATE=state, WT_ROOT=state / 'worktrees', REPO='owner/repo', CONFIG={}, ALLOWLIST_PATHS=[], denylist_rules=lambda: [{'regex': '(?!)'}], secret_scan_diff=lambda *a, **kw: (True, {}),
+    runner = SimpleNamespace(CLONE=runner_clone, STATE=state, WT_ROOT=state / 'worktrees', REPO='owner/repo', CONFIG={}, ALLOWLIST_PATHS=[], denylist_rules=lambda: [{'regex': '(?!)'}], secret_scan_diff=lambda *a, **kw: (True, {}),
         load_queue=lambda: q, save_queue=lambda value: None,
         iso=lambda: '2026-11-08T00:00:00Z')
     policy = dict(repo='owner/repo', enabled=True, write=['test'], branches=['merge-queue'])
@@ -470,19 +484,48 @@ test('production defaults detect advertised heads, separate targets, and return 
     },
     async () => 'owner/repo',
   );
+  let retryReason = '';
   for (const target of ['main', 'merge-queue']) {
     const result = await submit({ cwd: repo.root, target, base, head });
+    if (result.status === 'refused') retryReason = result.reason;
     expect(result).toMatchObject({
       status: 'refused',
       reason: expect.stringContaining('--repeat --requestId=') as unknown,
     });
     expect(result).toMatchObject({
-      reason: expect.stringContaining('provider unavailable') as unknown,
+      reason: expect.stringContaining(`--head=${head} --reachable --repeat`) as unknown,
     });
   }
   expect(wires).toHaveLength(2);
   expect(wires[0]?.snapshot).toBeUndefined();
   expect(wires[0]?.request_id).not.toBe(wires[1]?.request_id);
+  // Execute the printed selectors after the checkout advances. Recovery still
+  // submits the failed reviewed commit and needs no snapshot scanner.
+  await repo.write('later.txt', 'later commit');
+  const later = repo.commitAll('advance after failure');
+  expect(later).not.toBe(head);
+  const flags = Object.fromEntries<string>(
+    [...retryReason.matchAll(/--(\w+)=(\S+)/g)].map((match) => [match[1]!, match[2]!] as const),
+  );
+  let retried: unknown;
+  const recovery = await makeSubmit(async (raw) => {
+    const wire = JSON.parse(raw) as { op: string };
+    if (wire.op === 'capabilities') return JSON.stringify(caps);
+    retried = wire;
+    return JSON.stringify({ v: 1, action: 'created', state: 'queued' });
+  })({
+    cwd: repo.root,
+    repo: flags['repo']!,
+    target: flags['target']!,
+    base: flags['base']!,
+    head: flags['head']!,
+    requestId: flags['requestId']!,
+    repeat: true,
+    reachable: retryReason.includes(' --reachable'),
+  });
+  expect(recovery.status).toBe('ok');
+  expect(retried).toMatchObject({ repeat: true, inputs: { head_commit: head } });
+  expect(retried).not.toHaveProperty('snapshot');
 });
 
 test('empty committed diff reports no changes without fetching an unknown result', async () => {
@@ -497,3 +540,118 @@ test('empty committed diff reports no changes without fetching an unknown result
     await submit({ cwd: repo.root, target: 'main', base: head, head, reachable: true }),
   ).toEqual({ status: 'refused', reason: 'the queue saw no committed changes to review' });
 });
+
+test('published uncommitted base missing at the runner reports fetch guidance without claiming coverage', async () => {
+  repo.git('push', '-q', 'origin', 'HEAD:refs/heads/feature/x');
+  const head = repo.git('rev-parse', 'HEAD').trim();
+  await repo.write('src/a.ts', 'export const a = 3;\n');
+  const result = await makeManagedReviewSubmit(
+    () => async (raw) => {
+      const wire = JSON.parse(raw) as { op: string };
+      if (wire.op === 'capabilities') return JSON.stringify(caps);
+      return JSON.stringify({
+        v: 1,
+        error: { code: 'refused', message: 'snapshot Git operation refused', retryable: false },
+      });
+    },
+    async () => 'owner/repo',
+  )({
+    cwd: repo.root,
+    target: 'merge-queue',
+    base: head,
+    head,
+    workingTree: 'uncommitted',
+    scanner: '/bin/true',
+  });
+  expect(result).toMatchObject({
+    status: 'refused',
+    reason: expect.stringContaining(`runner has fetched published HEAD ${head}`) as unknown,
+  });
+});
+
+test.each(['full', 'uncommitted'] as const)(
+  'synthetic %s recovery preserves head, projection and quoted scanner after checkout advances',
+  async (scope) => {
+    const actualHead = repo.git('rev-parse', 'HEAD').trim();
+    if (scope === 'uncommitted') repo.git('push', '-q', 'origin', 'HEAD:refs/heads/feature/x');
+    await repo.write('src/a.ts', 'export const a = 3;\n');
+    await mkdir(join(repo.root, '.cq'), { recursive: true });
+    const scanner = join(repo.root, '.cq', "scanner's fixture");
+    await writeFile(scanner, `#!${process.execPath}\nprocess.exit(0);\n`, { mode: 0o755 });
+    let original: unknown;
+    const result = await makeManagedReviewSubmit(
+      () => async (raw) => {
+        const wire = JSON.parse(raw) as { op: string };
+        if (wire.op === 'capabilities') return JSON.stringify(caps);
+        original = wire;
+        return JSON.stringify({
+          v: 1,
+          action: 'observed',
+          state: 'failed',
+          next_action: 'resubmit',
+          reason: 'offline failure',
+        });
+      },
+      async () => 'owner/repo',
+    )({
+      cwd: repo.root,
+      target: 'main',
+      base: scope === 'full' ? repo.git('rev-parse', 'origin/merge-queue').trim() : actualHead,
+      head: actualHead,
+      workingTree: scope,
+      scanner,
+    });
+    expect(result.status).toBe('refused');
+    if (result.status !== 'refused') throw new Error('expected recovery command');
+    expect(result.reason).toContain('cq review.submit ');
+    const command = result.reason.slice(result.reason.indexOf('cq review.submit '));
+    const tokens = JSON.parse(
+      execFileSync(
+        'python3',
+        ['-c', 'import json, shlex, sys; print(json.dumps(shlex.split(sys.stdin.read())))'],
+        { input: command, encoding: 'utf8' },
+      ),
+    ) as string[];
+    const flags = Object.fromEntries(
+      tokens
+        .filter((token) => token.startsWith('--') && token.includes('='))
+        .map((token) => {
+          const split = token.indexOf('=');
+          return [token.slice(2, split), token.slice(split + 1)];
+        }),
+    );
+    const projection = scope === 'full' ? 'working-tree-full-v1' : 'working-tree-uncommitted-v1';
+    expect(flags['projection']).toBe(projection);
+    expect(flags['scanner']).toBe(scanner);
+    expect(tokens).toContain('--repeat');
+    expect(tokens).not.toContain('--reachable');
+    expect(original).toMatchObject({ inputs: { head_commit: flags['head'], projection } });
+    expect(flags['head']).toMatch(/^[0-9a-f]{40}$/);
+    expect(flags['head']).not.toBe(actualHead);
+    repo.git('commit', '--allow-empty', '-qm', 'advance after failed snapshot');
+    expect(repo.git('rev-parse', 'HEAD').trim()).not.toBe(actualHead);
+    let retried: unknown;
+    const recovery = await makeSubmit(async (raw) => {
+      const wire = JSON.parse(raw) as { op: string };
+      if (wire.op === 'capabilities') return JSON.stringify(caps);
+      retried = wire;
+      return JSON.stringify({ v: 1, action: 'created', state: 'queued' });
+    })({
+      cwd: repo.root,
+      repo: flags['repo']!,
+      target: flags['target']!,
+      base: flags['base']!,
+      head: flags['head']!,
+      projection,
+      scanner: flags['scanner']!,
+      requestId: flags['requestId']!,
+      repeat: true,
+    });
+    expect(recovery.status).toBe('ok');
+    expect(retried).toMatchObject({
+      repeat: true,
+      inputs: { head_commit: flags['head'], projection },
+      snapshot: expect.any(Object) as unknown,
+    });
+  },
+);

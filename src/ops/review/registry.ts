@@ -675,15 +675,18 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'review.addressMany',
     inputSchema: ReviewAddressManyInputSchema,
-    importer: async (wiring) =>
-      (await import('./addressMany.js')).makeReviewAddressMany({
+    importer: async (wiring) => {
+      const managed = await import('../dev/managedReview.js');
+      return (await import('./addressMany.js')).makeReviewAddressMany({
+        managedSubmit: managed.makeConfiguredManagedReviewSubmit(),
         drivers: createDriverFactory({
           ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
             : {}),
           ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
         }),
-      }) as Op<unknown, unknown>,
+      }) as Op<unknown, unknown>;
+    },
   },
   {
     name: 'review.submit',
@@ -769,8 +772,9 @@ export const registry: OpRegistryEntry[] = [
     name: 'review.address',
     inputSchema: ReviewAddressInputSchema,
     importer: async (wiring) => {
-      const { makeReviewAddress } = await import('./address.js');
-      return makeReviewAddress({
+      const managed = await import('../dev/managedReview.js');
+      return (await import('./address.js')).makeReviewAddress({
+        managedSubmit: managed.makeConfiguredManagedReviewSubmit(),
         drivers: createDriverFactory({
           ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
@@ -790,48 +794,17 @@ export const registry: OpRegistryEntry[] = [
     // the forge repo itself from the input repoRoot; the server re-derives
     // every hashed fact and refuses a mismatch (plan D2).
     importer: (wiring) =>
-      Promise.all([
-        import('./run.js'),
-        import('../dev/managedReview.js'),
-        import('./internal/queueClient.js'),
-        import('../../adapters/forge-github/gh.js'),
-        import('../../config/run-env.js'),
-      ]).then(
-        ([m, managed, queueClient, gh, runEnv]) =>
-          ((input: ReviewRunInput) =>
-            m.makeReviewRun({
-              drivers: createDriverFactory({
-                ...(wiring?.onDeprecatedAlias !== undefined
-                  ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-                  : {}),
-                ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
-              }),
-              managedSubmit: managed.makeManagedReviewSubmit(
-                () => {
-                  const alias = runEnv.currentCqEnv().values['CQ_QUEUE_SSH_ALIAS'];
-                  if (typeof alias !== 'string' || alias === '')
-                    throw new queueClient.QueueConfigurationError(
-                      'Configure CQ_QUEUE_SSH_ALIAS for review-v1',
-                    );
-                  return queueClient.sshQueueTransport(alias, 'review-v1');
-                },
-                async () => {
-                  const run = gh.makeGhRunner({ cwd: input.repoRoot, timeoutMs: 30_000 });
-                  const result = await run([
-                    'repo',
-                    'view',
-                    '--json',
-                    'nameWithOwner',
-                    '--jq',
-                    '.nameWithOwner',
-                  ]);
-                  const repo = result.stdout.trim();
-                  if (result.code !== 0 || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))
-                    throw new Error('cannot verify deferred forge identity');
-                  return repo;
-                },
-              ),
-            })(input)) as Op<unknown, unknown>,
+      Promise.all([import('./run.js'), import('../dev/managedReview.js')]).then(
+        ([m, managed]) =>
+          m.makeReviewRun({
+            drivers: createDriverFactory({
+              ...(wiring?.onDeprecatedAlias !== undefined
+                ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+                : {}),
+              ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+            }),
+            managedSubmit: managed.makeConfiguredManagedReviewSubmit(),
+          }) as Op<unknown, unknown>,
       ),
   },
   {

@@ -406,13 +406,14 @@ export const registry: OpRegistryEntry[] = [
       Promise.all([
         import('./cycle.js'),
         import('../../driver/factory.js'),
+        import('./managedReview.js'),
         import('./effects.js'),
         import('../../adapters/forge-github/ghEffects.js'),
         import('../dev/denylist.js'),
         import('../pr/registry.js'),
         import('node:fs/promises'),
       ]).then(
-        ([m, driverFactory, effects, ghEffects, denylist, prRegistry, fs]) =>
+        ([m, driverFactory, managed, effects, ghEffects, denylist, prRegistry, fs]) =>
           (async (input: DevCycleCompositionInput) => {
             const dev = effects.makeSubprocessDevEffects(input.repoRoot);
             // The secret scanner a check leg binds: the SAME two-layer
@@ -445,6 +446,7 @@ export const registry: OpRegistryEntry[] = [
               .then(() => true)
               .catch(() => false);
             return m.makeDevCycle({
+              managedSubmit: managed.makeConfiguredManagedReviewSubmit(),
               effects: dev,
               gh: ghEffects.makeSubprocessPrEffects(input.repoRoot),
               // The dispatch wiring's snapshot, when explicitly supplied: the

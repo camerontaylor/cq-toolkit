@@ -208,6 +208,22 @@ export async function captureWorkingTree(repo: string, originalHead: string) {
   try {
     const realEnv = { ...env };
     delete realEnv['GIT_INDEX_FILE'];
+    const flags = (
+      await promisify(execFile)(
+        'git',
+        ['--no-replace-objects', '-c', 'core.fsmonitor=false', 'ls-files', '-v', '-z'],
+        {
+          cwd: repo,
+          env: realEnv,
+          timeout: 30_000,
+          maxBuffer: MAX_WIRE,
+        },
+      )
+    ).stdout;
+    if (flags.split('\0').some((entry) => /^[Ss] /.test(entry)))
+      throw new Error(
+        'sparse or skip-worktree checkout cannot be captured — materialize the full checkout first',
+      );
     const entries = (
       await promisify(execFile)(
         'git',

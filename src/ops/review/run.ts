@@ -365,7 +365,6 @@ export function makeReviewRun(
           configuredReviewers: policy.review.reviewers,
           ...(deadline.signal ? { signal: deadline.signal } : {}),
           remainingWallMs,
-          ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }),
           scanSecrets: scanner,
           ...(policy.review.denylistPatternsFile === undefined
             ? {}

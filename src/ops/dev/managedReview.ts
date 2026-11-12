@@ -22,12 +22,66 @@ import { makeSubmit } from '../review/submit.js';
 import { makeStatus } from '../review/status.js';
 import { makeResult } from '../review/result.js';
 
+/** Inert production binding; resolve forge identity in each actual checkout. */
+export function makeConfiguredManagedReviewSubmit(): ManagedReviewSubmit {
+  return async (input) => {
+    const [{ currentCqEnv }, queue, { makeGhRunner }] = await Promise.all([
+      import('../../config/run-env.js'),
+      import('../review/internal/queueClient.js'),
+      import('../../adapters/forge-github/gh.js'),
+    ]);
+    return makeManagedReviewSubmit(
+      () => {
+        const alias = currentCqEnv().values['CQ_QUEUE_SSH_ALIAS'];
+        if (typeof alias !== 'string' || alias === '')
+          throw new queue.QueueConfigurationError('Configure CQ_QUEUE_SSH_ALIAS for review-v1');
+        return queue.sshQueueTransport(alias, 'review-v1');
+      },
+      async () => {
+        const result = await makeGhRunner({ cwd: input.cwd, timeoutMs: 30_000 })([
+          'repo',
+          'view',
+          '--json',
+          'nameWithOwner',
+          '--jq',
+          '.nameWithOwner',
+        ]);
+        const repo = result.stdout.trim();
+        if (result.code !== 0 || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))
+          throw new Error('gh repo view could not resolve a valid owner/repository identity');
+        return repo;
+      },
+    )(input);
+  };
+}
+
+async function advertisedHead(cwd: string, head: string): Promise<boolean> {
+  try {
+    for (const line of (await git(cwd, 'ls-remote', '--heads', 'origin')).split('\n')) {
+      const oid = line.split(/\s+/)[0];
+      if (!oid || !/^[0-9a-f]{40}$/.test(oid)) continue;
+      try {
+        if ((await git(cwd, 'merge-base', head, oid)) === head) return true;
+      } catch {
+        /* Remote-only objects cannot prove local ancestry. */
+      }
+    }
+  } catch {
+    /* Offline is not proof of publication. */
+  }
+  return false;
+}
+
 /**
  * The S1d ops enrich the wire response with local fields (exclusions,
  * reviewedHead, message, receipt bindings), so this leg narrows the op
  * values at runtime instead of reusing the wire union.
  */
 type QueueValue = Record<string, unknown>;
+
+function shellArgument(value: string): string {
+  return /^[A-Za-z0-9_./:@+-]+$/.test(value) ? value : "'" + value.replaceAll("'", "'\\''") + "'";
+}
 
 function queueState(value: QueueValue): string | undefined {
   return typeof value['state'] === 'string' ? (value['state'] as string) : undefined;
@@ -246,25 +300,14 @@ export function makeManagedReviewSubmit(
     // Check the actual forge remote rather than trusting stale tracking refs.
     // The server still resolves and verifies every claimed object.
     let reachable = input.workingTree === undefined ? input.reachable : false;
-    if (reachable === undefined && input.scanner === undefined) {
-      try {
-        const advertised = await git(input.cwd, 'ls-remote', '--heads', 'origin');
-        for (const line of advertised.split('\n')) {
-          const oid = line.split(/\s+/)[0];
-          if (!oid || !/^[0-9a-f]{40}$/.test(oid)) continue;
-          try {
-            if ((await git(input.cwd, 'merge-base', input.head, oid)) === input.head) {
-              reachable = true;
-              break;
-            }
-          } catch {
-            /* A remote-only object cannot establish local ancestry. */
-          }
-        }
-      } catch {
-        /* Offline or unpublished work uses the scanned snapshot route. */
-      }
-    }
+    if (input.workingTree === 'uncommitted' && !(await advertisedHead(input.cwd, input.head)))
+      return {
+        status: 'refused',
+        reason:
+          'uncommitted scope requires HEAD published on origin and fetched by the runner — publish HEAD and wait for the runner fetch, or use full scope',
+      };
+    if (reachable === undefined && input.scanner === undefined)
+      reachable = await advertisedHead(input.cwd, input.head);
     const submitted = await makeSubmit(transport, async () => {
       input.signal?.throwIfAborted();
       if ((input.remainingWallMs?.() ?? Infinity) <= 0)
@@ -294,7 +337,19 @@ export function makeManagedReviewSubmit(
       ...(input.scanner !== undefined ? { scanner: input.scanner } : {}),
       ...(reachable !== undefined ? { reachable } : {}),
     });
-    if (submitted.status !== 'ok') return opRefused('submit', submitted);
+    if (submitted.status !== 'ok') {
+      const refusal = opRefused('submit', submitted);
+      if (
+        input.workingTree === 'uncommitted' &&
+        refusal.status === 'refused' &&
+        refusal.reason.includes('snapshot Git operation refused')
+      )
+        return {
+          ...refusal,
+          reason: `${refusal.reason} — confirm the runner has fetched published HEAD ${input.head}; wait for its next fetch or use full scope`,
+        };
+      return refusal;
+    }
     if (typeof submitted.value !== 'object' || submitted.value === null)
       return { status: 'refused', reason: 'queue admission returned no state' };
     const admission: QueueValue = submitted.value as QueueValue;
@@ -342,7 +397,7 @@ export function makeManagedReviewSubmit(
         reason: `the queued review ended '${finalState}'${(() => {
           const reason = queueReason(terminal.value);
           return reason === undefined ? '' : ` — ${reason}`;
-        })()} — retry explicitly with cq review.submit --repo=${repo} --target=${input.target} --base=${input.base}${input.workingTree === undefined ? '' : ` --head=${reviewedHead} --projection=${projection}`} --repeat --requestId=${randomUUID()}`,
+        })()} — retry explicitly with cq review.submit --repo=${shellArgument(repo)} --target=${shellArgument(input.target)} --base=${input.base} --head=${reviewedHead}${input.workingTree === undefined ? '' : ` --projection=${projection}`}${reachable === true ? ' --reachable' : ''}${input.scanner === undefined ? '' : ` --scanner=${shellArgument(input.scanner)}`} --repeat --requestId=${randomUUID()}`,
       };
     const fetched = await makeResult(transport)({ requestId, cwd: input.cwd });
     if (fetched.status !== 'ok') return opRefused('result', fetched);
@@ -601,6 +656,8 @@ export async function runManagedReviewSpan(options: {
   // so the cycle describes the tree the submission pinned. The budget class
   // rides OUT of band (never inside the persisted span): the caller attaches
   // the envelope to its report exactly like the CLI path's span does.
+  // This is receipt retention after paid work, not dispatch. Do not cancel
+  // lock acquisition: a late parent abort must not discard the settled result.
   let span: ManagedSpan | undefined;
   let budgetStopped = false;
   try {

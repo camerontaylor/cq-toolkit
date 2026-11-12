@@ -418,6 +418,7 @@ export interface DevCycleDeps {
     effects: DevEffects,
   ) => DiffSecretScanner | undefined | Promise<DiffSecretScanner | undefined>;
   drivers?: DriverFactory;
+  managedSubmit?: import('./managedReview.js').ManagedReviewSubmit;
   /** The git transport the push leg binds (tests script it). */
   git?: GhFn;
   /**
@@ -478,7 +479,13 @@ function makeDevCycleCore(
     const target = input.target ?? DEFAULT_DEV_TARGET;
     const check =
       deps.check ?? ((step: DevCheckInput) => makeDevCheck(deps.effects, deps.scanSecrets)(step));
-    const review = deps.review ?? ((step: ReviewRunInput) => makeReviewRun({ drivers })(step));
+    const review =
+      deps.review ??
+      ((step: ReviewRunInput) =>
+        makeReviewRun({
+          drivers,
+          ...(deps.managedSubmit ? { managedSubmit: deps.managedSubmit } : {}),
+        })(step));
     // The default address leg is CONSTRUCTED with the cycle's (metered)
     // driver factory: the whole cycle honours one wiring — test transports
     // injected here must not be replaced by real provider factories inside
@@ -494,7 +501,12 @@ function makeDevCycleCore(
     // alone, Driver is `run` alone, lane/modelSpec ride the spread — so
     // the legs share the wiring, never driver state.
     const address =
-      deps.address ?? ((step: ReviewAddressInput) => makeReviewAddress({ drivers })(step));
+      deps.address ??
+      ((step: ReviewAddressInput) =>
+        makeReviewAddress({
+          drivers,
+          ...(deps.managedSubmit ? { managedSubmit: deps.managedSubmit } : {}),
+        })(step));
     // The forge effects for the findings-section compose: the DEFAULT
     // publication leg's own effects. When deps.open is injected WITHOUT
     // deps.gh, the injected leg owns the forge — no effects are constructed

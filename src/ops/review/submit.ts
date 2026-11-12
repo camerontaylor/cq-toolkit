@@ -186,6 +186,10 @@ export const makeSubmit = (transport?: QueueTransport, beforeDispatch?: () => Pr
       try {
         const client = getClient();
         const capabilities = await client.capabilities();
+        if (wire.repeat && !capabilities.features.includes('repeat-generations-v1'))
+          throw new QueueUnsupported(
+            'repeat-generations-v1 capability unavailable — upgrade the runner before requesting another generation',
+          );
         if (snapshotPolicy === 'snapshot' && !wire.snapshot) {
           if (!capabilities.features.includes('original-commit-snapshot-v1'))
             throw new QueueUnsupported('original-commit snapshot capability unavailable');

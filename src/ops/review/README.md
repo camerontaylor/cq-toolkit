@@ -21,6 +21,15 @@ inherit synthetic receipt coverage. If the final tree equals the scope base
 final diff remains: no queue review starts and no vendor coverage is granted.
 The staged and unstaged scans still run.
 
+Uncommitted scope requires the real HEAD to be published on an origin branch
+and already fetched into the runner clone; unpublished HEAD refuses locally
+with publish-or-use-full guidance. After pushing, wait for the runner's next
+fetch tick before submission. The same fetch delay can affect reachable committed
+reviews. A refusal grants no coverage; retry the retained request after the fetch.
+Full dirty snapshots include the base..HEAD outgoing history and the overlay,
+subject to the snapshot object/content/wire limits even when HEAD is published.
+Sparse or skip-worktree checkouts must be materialized before dirty capture.
+
 `review.submit` accepts an explicit immutable `head` and `projection` for these
 snapshots; retries must preserve those selectors. Unpublished and synthetic
 snapshots require `CQ_AUTHOR_SNAPSHOT_SCANNER` on the author host (or an explicit
@@ -30,7 +39,9 @@ Submission persists its request under `.cq/queue-evidence/requests/` before
 network discovery. If delivery is unknown, retry with the reported `requestId`:
 the saved inputs and original head are reused even if the checkout has moved.
 Use a fresh request ID for a new submission. The server assigns identity and
-generation; `repeat=true` requests another generation explicitly. Managed cycles
+generation; `repeat=true` requests another generation explicitly and requires the
+runner's `repeat-generations-v1` capability. Failed-attempt recovery commands pin
+the reviewed head and preserve reachable proof or an explicit scanner. Managed cycles
 hash the current repository, target, base and reviewed head into their request
 ID; changed working content starts a distinct request.
 

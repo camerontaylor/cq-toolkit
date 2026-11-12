@@ -12,7 +12,7 @@ import { repoEffects, makeTestRepo } from '../dev/repo.js';
 import { configureAgentRepo } from './run.helpers.js';
 
 describe('review.run', () => {
-  it('dispatches a queue-blocked CodeRabbit fixture through the CLI', async () => {
+  it('dispatches a queue-blocked managed CodeRabbit fixture through the application CLI', async () => {
     const repo = await makeTestRepo();
     const opsRoot = await mkdtemp(join(tmpdir(), 'cq-review-cli-ops-'));
     const bin = await mkdtemp(join(tmpdir(), 'cq-review-cli-bin-'));
