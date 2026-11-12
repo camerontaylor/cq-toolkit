@@ -19,6 +19,10 @@ describe('scrubbedBuildEnv', () => {
       AWS_SECRET_ACCESS_KEY: 'e',
       ENCRYPTION_KEY: 'f',
       SIGNING_KEY: 'g',
+      SSH_PASSPHRASE: 'h',
+      GPG_PASSPHRASE: 'i',
+      KEY_PASSPHRASE: 'j',
+      AWS_ACCESS_KEY_ID: 'k',
     });
     expect(env).toEqual({ PATH: '/usr/bin', HOME: '/home/x' });
   });
