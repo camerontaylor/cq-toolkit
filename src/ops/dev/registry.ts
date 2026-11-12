@@ -241,6 +241,7 @@ export const registry: OpRegistryEntry[] = [
         import('../review/agentReviewer.js'),
         import('./agentReview.js'),
         import('node:fs/promises'),
+        import('../../shared/readCqConfigText.js'),
       ]).then(
         ([
           m,
@@ -253,8 +254,14 @@ export const registry: OpRegistryEntry[] = [
           agentReviewer,
           agentReview,
           fs,
+          sharedRead,
         ]) =>
-          (async (input: DevReviewInput) => {
+          // The wiring body runs INSIDE the family boundary: a
+          // schema-bypassing input keeps the `failed` taxonomy of
+          // guardDevOp (never a rejected promise, never a read fault
+          // masquerading as one), and the cq.json read fault below refuses
+          // only a schema-valid dispatch.
+          effects.guardDevOp('dev.review', DevReviewInputSchema, async (input: DevReviewInput) => {
             if (m.isAdmissionInput(input))
               return admission.envAuthorAdmission(
                 input,
@@ -267,7 +274,16 @@ export const registry: OpRegistryEntry[] = [
             // its optional patterns file; missing toolkit policy is never a
             // prerequisite for an adopter review.
             const readFile = (path: string) => fs.readFile(path, 'utf8');
-            const configText = await readFile(`${repoRoot}/cq.json`).catch(() => null);
+            // Only an ABSENT cq.json means "no config"; any other read fault
+            // refuses the review under needs-human instead of silently
+            // binding the default scanner and reviewer policy.
+            const configRead = await sharedRead.readCqConfigText(repoRoot, readFile);
+            if (configRead.outcome === 'fault')
+              return {
+                status: 'needs-human',
+                reason: `dev.review: ${sharedRead.cqConfigFaultText(configRead.error)}`,
+              };
+            const configText = configRead.outcome === 'text' ? configRead.text : null;
             const packageName = await agentReview.readPackageName(readFile, repoRoot);
             const scanSecrets = denylist.makePortableReviewScanner(
               repoRoot,
@@ -312,7 +328,7 @@ export const registry: OpRegistryEntry[] = [
                 run: agentReviewer.runAgentReviewer,
               }),
             })(input);
-          }) as Op<unknown, unknown>,
+          }),
       ),
   },
   {

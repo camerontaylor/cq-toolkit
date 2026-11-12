@@ -2,6 +2,8 @@
 // the readiness gate (a not-ready branch is refused with the gaps), the
 // clean-tree and remote-head rules, adopt-or-create (never a second PR),
 // the managed body section, and the dispositions comment.
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { DEV_LEDGER_VERSION, type DevLedgerFile } from '../../../src/ops/dev/record.js';
 import type { PrEffects } from '../../../src/ops/pr/assemblePrs.js';
@@ -108,6 +110,16 @@ async function ready(withDisposition = false) {
 const effects = () => repoEffects(repo);
 
 describe('pr.open', () => {
+  test('an unreadable cq.json (EISDIR) refuses instead of applying default policy', async () => {
+    await mkdir(join(repo.root, 'cq.json')); // present-but-unreadable; only ENOENT means "no config"
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(effects(), gh, stubScanner())({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('pr.open: cq.json could not be read (EISDIR)');
+    expect(calls).toEqual([]); // no forge write under a refused policy read
+  });
+
   test('applies configured readiness severities before opening a PR', async () => {
     await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
     await repo.write(

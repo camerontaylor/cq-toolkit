@@ -92,6 +92,7 @@ import {
   type KnownUsageSummary,
   type UsageObservation,
 } from '../../shared/knownUsage.js';
+import { cqConfigFaultText, readCqConfigText } from '../../shared/readCqConfigText.js';
 import { usageProvenanceOf } from '../../driver/usageProvenance.js';
 
 /**
@@ -562,7 +563,12 @@ function makeDevCycleCore(
     };
 
     // ---- policy (the reviewers/severities the readiness read honours) ----
-    const configText = await readFile(join(input.repoRoot, 'cq.json'), 'utf8').catch(() => null);
+    // Only an ABSENT cq.json means "no config"; any other read fault refuses
+    // under needs-human instead of silently applying the default policy.
+    const configRead = await readCqConfigText(input.repoRoot);
+    if (configRead.outcome === 'fault')
+      return { status: 'needs-human', reason: `dev.cycle: ${cqConfigFaultText(configRead.error)}` };
+    const configText = configRead.outcome === 'text' ? configRead.text : null;
     let policy:
       | {
           reviewers: readonly string[];

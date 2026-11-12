@@ -27,6 +27,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
+import { cqConfigFaultText, readCqConfigText } from '../../shared/readCqConfigText.js';
 
 /** One denylist rule as parsed from the patterns file. */
 export interface DenylistRule {
@@ -543,8 +544,16 @@ export async function checkScannerFor(
   effects: GitleaksEffects,
   readFile: (path: string) => Promise<string>,
 ): Promise<DiffSecretScanner | undefined> {
-  const configText = await readFile(`${root}/cq.json`).catch(() => null);
-  if (configText === null) return undefined;
+  const configRead = await readCqConfigText(root, readFile);
+  // A present-but-unreadable cq.json must never read as "no config": the
+  // scan binds a scanner that faults naming cq.json and the errno, so both
+  // legs refuse instead of silently dropping to defaults-only scanning.
+  if (configRead.outcome === 'fault')
+    return async () => {
+      throw new Error(`review config unreadable: ${cqConfigFaultText(configRead.error)}`);
+    };
+  if (configRead.outcome === 'absent') return undefined;
+  const configText = configRead.text;
   const packageText = await readFile(`${root}/package.json`).catch(() => '{}');
   let packageName = '';
   try {

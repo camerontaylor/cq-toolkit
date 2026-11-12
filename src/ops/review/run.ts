@@ -56,6 +56,7 @@ import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
 import { sameFindingContent } from './internal/durableDisposition.js';
 import { collectBoundedReviewContext } from './internal/reviewContext.js';
 import { foldKnownUsageSummaries, type KnownUsageSummary } from '../../shared/knownUsage.js';
+import { cqConfigFaultText, readCqConfigText } from '../../shared/readCqConfigText.js';
 
 export interface ReviewRunInput {
   areas?: boolean;
@@ -141,9 +142,17 @@ export function makeReviewRun(
     const started = Date.now();
     const effects =
       deps.effectsFactory?.(input.repoRoot) ?? makeSubprocessDevEffects(input.repoRoot);
-    const configText = await readFile(join(input.repoRoot, 'cq.json'), 'utf8').catch(() => null);
-    if (configText === null)
+    // Only an ABSENT cq.json reads as "no config here"; a present-but-
+    // unreadable one is a distinct needs-human reason naming the errno.
+    const configRead = await readCqConfigText(input.repoRoot);
+    if (configRead.outcome === 'absent')
       return { status: 'needs-human', reason: 'review.run: cq.json is required' };
+    if (configRead.outcome === 'fault')
+      return {
+        status: 'needs-human',
+        reason: `review.run: ${cqConfigFaultText(configRead.error)}`,
+      };
+    const configText = configRead.text;
     const parsedConfig = parseCqConfig(configText, input.repoRoot);
     if (!parsedConfig.ok)
       return { status: 'needs-human', reason: `review.run: ${parsedConfig.reason}` };

@@ -4,7 +4,7 @@
 // fails the library boundary BEFORE any effect (zero processes touched).
 import { describe, expect, test, vi } from 'vitest';
 import { registry } from '../../../src/ops/dev/registry.js';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeTestRepo, repoEffects } from './repo.js';
@@ -79,6 +79,24 @@ describe('dev family registry entries', () => {
       }
     },
   );
+
+  test('dev.review: an unreadable cq.json (EISDIR) refuses under needs-human before any leg', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await mkdir(join(repo.root, 'cq.json')); // present-but-unreadable; only ENOENT means "no config"
+      vi.spyOn(effectModule, 'makeSubprocessDevEffects').mockReturnValue(repoEffects(repo));
+      const op = await entryByName('dev.review').importer();
+      const result = (await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' })) as {
+        status: string;
+        reason?: string;
+      };
+      expect(result.status).toBe('needs-human');
+      expect(result.reason).toContain('dev.review: cq.json could not be read (EISDIR)');
+    } finally {
+      vi.restoreAllMocks();
+      await repo.cleanup();
+    }
+  });
 
   test('fresh adopter dispatch scans without the toolkit denylist script or policy file', async () => {
     const repo = await makeTestRepo();
