@@ -40,11 +40,23 @@ GIT_ENV = {
     "GIT_COMMITTER_DATE": "2026-01-01T00:00:00+0000",
 }
 
+# The oracle must not inherit the host's line-ending policy: the CRLF case
+# intentionally commits CRLF bytes, and `core.autocrlf=input` would otherwise
+# normalize them and change the blob/commit ids across environments.
+GIT_CONFIG = (
+    "-c",
+    "core.autocrlf=false",
+    "-c",
+    "core.eol=lf",
+    "-c",
+    "core.safecrlf=false",
+)
+
 
 def _git(root: Path, *args: str) -> str:
     env = {**os.environ, **GIT_ENV}
     result = subprocess.run(
-        ["git", *args],
+        ["git", *GIT_CONFIG, *args],
         cwd=root,
         env=env,
         text=True,

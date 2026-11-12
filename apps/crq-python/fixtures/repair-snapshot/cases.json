@@ -105,9 +105,9 @@
       "name": "crlf-astral",
       "job": {
         "job": "crq-oracle-F1",
-        "source_sha": "0d92d70cbaab67c54e24a646283e0bf55e5e71af",
+        "source_sha": "68897ffc45b46d76d7cb343faec122394c5b0202",
         "finding_sha256": "0ae741815f5c2d5463e13ad6caa5ec6594f5dfaa89a82d79aeaba71d452df1df",
-        "repair_base": "0d92d70cbaab67c54e24a646283e0bf55e5e71af",
+        "repair_base": "68897ffc45b46d76d7cb343faec122394c5b0202",
         "origin_job": "crq-historical-F1",
         "finding": {
           "path": "src/lock.ts",
@@ -116,20 +116,20 @@
           "body": "Finding data"
         },
         "revalidation": {
-          "source_blob_sha": "6127a2a16e7fea4af9baf9aaca0475d081f65168",
+          "source_blob_sha": "2876ddacb55d9389b5c033c5263b8afcd344067c",
           "verdict": "still-valid"
         }
       },
       "source_text": "alpha\r\n\u03b2eta\r\n\ud83d\ude00 line\r\n",
-      "observed_blob": "6127a2a16e7fea4af9baf9aaca0475d081f65168",
+      "observed_blob": "2876ddacb55d9389b5c033c5263b8afcd344067c",
       "source_path": "src/lock.ts",
       "expected": {
         "ok": true,
         "snapshot": {
-          "source_sha": "0d92d70cbaab67c54e24a646283e0bf55e5e71af",
+          "source_sha": "68897ffc45b46d76d7cb343faec122394c5b0202",
           "finding_sha256": "0ae741815f5c2d5463e13ad6caa5ec6594f5dfaa89a82d79aeaba71d452df1df",
           "origin_job": "crq-historical-F1",
-          "source_blob_sha": "6127a2a16e7fea4af9baf9aaca0475d081f65168",
+          "source_blob_sha": "2876ddacb55d9389b5c033c5263b8afcd344067c",
           "path": "src/lock.ts",
           "line_start": 1,
           "line_end": 3,
