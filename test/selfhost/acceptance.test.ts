@@ -26,8 +26,10 @@ import {
   judgeAcceptance,
   parseAcceptanceArgs,
   resolveAcceptanceTrust,
+  resolveAcceptanceTrustFromCqEnv,
 } from '../../src/selfhost/acceptance.js';
 import type { AcceptanceInput } from '../../src/selfhost/acceptance.js';
+import { readCqEnv } from '../../src/config/env.js';
 import {
   CONSERVATIVE_TRUST_POLICY,
   STRUCTURAL_EXCLUDED_LOGINS,
@@ -558,6 +560,57 @@ describe('resolveAcceptanceTrust', () => {
     [TRUSTED_BOTS_ENV, 'two words'],
   ])('%s=%s throws naming the key', (key, value) => {
     expect(() => resolveAcceptanceTrust({ [key]: value })).toThrow(new RegExp(`^${key}: `));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveAcceptanceTrustFromCqEnv
+// ---------------------------------------------------------------------------
+
+describe('resolveAcceptanceTrustFromCqEnv', () => {
+  test('resolves from the entry snapshot; later changes to the source do not leak in', () => {
+    const env: Record<string, string | undefined> = {
+      [TRUSTED_BOTS_ENV]: ' coderabbitai[bot] ,renovate ',
+      [ACCEPT_REVIEW_STATES_ENV]: 'approved, Commented',
+      [TRUSTED_ASSOCIATIONS_ENV]: 'owner',
+    };
+    const snapshot = readCqEnv(env);
+    env[TRUSTED_BOTS_ENV] = 'intruder[bot]';
+    env[ACCEPT_REVIEW_STATES_ENV] = 'LGTM';
+    delete env[TRUSTED_ASSOCIATIONS_ENV];
+    const trust = resolveAcceptanceTrustFromCqEnv(snapshot);
+    expect([...trust.policy.trustedBots].sort()).toEqual(['coderabbitai', 'renovate']);
+    expect([...trust.policy.acceptStates].sort()).toEqual(['APPROVED', 'COMMENTED']);
+    expect([...trust.policy.trustedAssociations]).toEqual(['OWNER']);
+    expect(trust.layers).toEqual({
+      trustedBots: 'env',
+      acceptReviewStates: 'env',
+      trustedAssociations: 'env',
+    });
+    expect(trust.report).toEqual([
+      'CQ_MERGE_TRUSTED_BOTS=coderabbitai,renovate (env)',
+      'CQ_MERGE_ACCEPT_REVIEW_STATES=APPROVED,COMMENTED (env)',
+      'CQ_MERGE_TRUSTED_ASSOCIATIONS=OWNER (env)',
+    ]);
+  });
+
+  test('blank snapshot values are the conservative default layer', () => {
+    const trust = resolveAcceptanceTrustFromCqEnv(
+      readCqEnv({ [TRUSTED_BOTS_ENV]: '', [ACCEPT_REVIEW_STATES_ENV]: '   ' }),
+    );
+    expect(trust.layers).toEqual({
+      trustedBots: 'default',
+      acceptReviewStates: 'default',
+      trustedAssociations: 'default',
+    });
+    expect(trust.report).toEqual(resolveAcceptanceTrust({}).report);
+  });
+
+  test('an invalid snapshot value is refused by name, never narrowed to the default', () => {
+    const snapshot = readCqEnv({ [ACCEPT_REVIEW_STATES_ENV]: 'LGTM' });
+    expect(() => resolveAcceptanceTrustFromCqEnv(snapshot)).toThrow(
+      /^acceptance: invalid CQ_\* environment — CQ_MERGE_ACCEPT_REVIEW_STATES/,
+    );
   });
 });
 
