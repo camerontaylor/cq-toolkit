@@ -57,7 +57,7 @@ export function foldKnownUsageSummaries(
   return folded;
 }
 
-function validTokens(value: unknown): value is number {
+export function validTokens(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 

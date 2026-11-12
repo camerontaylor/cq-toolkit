@@ -5,6 +5,7 @@
 import type { DriverFactory } from '../../driver/factory.js';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { requireAgenticTokenBudget, resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
+import { cqConfigFaultText, readCqConfigText } from '../../shared/readCqConfigText.js';
 import type { runAgentReviewer } from '../review/agentReviewer.js';
 import type { DiffSecretScanner } from './denylist.js';
 import type { DevReviewDeps } from './review.js';
@@ -40,9 +41,17 @@ export function makeAgentReviewRunner(deps: {
     if (role !== 'reviewer')
       return { status: 'needs-human', reason: `unsupported configured reviewer role '${role}'` };
     const { signal, remainingWallMs, ...engineInput } = reviewInput;
-    const configText = await deps.readFile(`${deps.repoRoot}/cq.json`).catch(() => null);
-    if (configText === null)
+    // The injected readFile seam stays injectable; only ENOENT reads as "no
+    // config" and any other fault names cq.json and the errno.
+    const configRead = await readCqConfigText(deps.repoRoot, deps.readFile);
+    if (configRead.outcome === 'fault')
+      return {
+        status: 'needs-human',
+        reason: `agent reviewer: ${cqConfigFaultText(configRead.error)}`,
+      };
+    if (configRead.outcome === 'absent')
       return { status: 'needs-human', reason: 'agent reviewer requires cq.json' };
+    const configText = configRead.text;
     const parsed = parseCqConfig(configText, deps.repoRoot);
     if (!parsed.ok)
       return { status: 'needs-human', reason: `agent reviewer config: ${parsed.reason}` };

@@ -5,6 +5,11 @@ import { ghJson, ghNameOk, makeGhRunner, type GhFn } from '../adapters/forge-git
 import { observeOpenPrs, type ObserveOpenPrsResult } from './merge-recheck.js';
 import { processEnv } from '../config/process-env.js';
 
+/** An argv/config fault: the I1 usage class (exit 2), not a runtime throw (exit 1). */
+class UsageError extends Error {
+  override name = 'UsageError';
+}
+
 export async function observeRepository(
   gh: GhFn,
   repository: string,
@@ -12,7 +17,9 @@ export async function observeRepository(
   observe: typeof observeOpenPrs = observeOpenPrs,
 ): Promise<ObserveOpenPrsResult> {
   const [owner = '', repo = '', ...extra] = repository.split('/');
-  if (extra.length || !ghNameOk(owner) || !ghNameOk(repo)) throw new Error('invalid repository');
+  if (extra.length || !ghNameOk(owner) || !ghNameOk(repo)) {
+    throw new UsageError('invalid repository');
+  }
   // Read the FULL open set before invoking the writer: a partial listing
   // would prune other PRs' anchors. A listing fault must never write.
   const pages = await ghJson<unknown>(gh, [
@@ -55,6 +62,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     }
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
+    // I1: a bad repository argument is a usage error (2); anything else is a throw (1).
+    process.exitCode = error instanceof UsageError ? 2 : 1;
   }
 }

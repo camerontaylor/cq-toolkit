@@ -28,6 +28,7 @@ import { DispatchError } from '../../../src/driver/errors.js';
 import type { DriverFactory, DriverRequest } from '../../../src/driver/factory.js';
 import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/types.js';
 import { currentJobContext, runLadder } from '../../../src/kernel/governor.js';
+import { KnownUsageSummarySchema } from '../../../src/kernel/schema.js';
 
 function failureOf(overrides: Partial<CheckFailure>): CheckFailure {
   return {
@@ -266,7 +267,16 @@ describe('makeAgenticRemediation (the driver-factory seam)', () => {
       ),
     );
     const exhausted = await budgetOp(baseInput());
-    expect(exhausted).toEqual({ status: 'budget-exhausted' });
+    // #1195: the budget stop carries the settled spend on the result envelope.
+    expect(exhausted).toEqual({
+      status: 'budget-exhausted',
+      usageSummary: {
+        usage: { input: 9, output: 0, cacheRead: 0, cacheWrite: 0 },
+        knownCount: 1,
+        unknownCount: 0,
+        unpricedCount: 1,
+      },
+    });
 
     const abortOp = makeAgenticRemediation(
       fakeFactory(
@@ -578,5 +588,115 @@ describe('makeAgenticRemediation correlation forwarding (M5b2)', () => {
         role: ('role' in governed ? governed.role : undefined) ?? 'fixer',
       });
     });
+  });
+});
+
+// #1195: spend on every exit where it is known — every DRIVER-SERVED terminal
+// verdict carries the one-observation usage envelope beside the frozen
+// taxonomy, so a standalone caller (direct dispatch, no governed job context)
+// sees the invocation's settled spend. Pre-dispatch refusals and throw
+// mappings ran no driver, so they carry NO envelope.
+describe('#1195 usageSummary on terminal results', () => {
+  const DRIVER_USAGE = { input: 120, output: 40, cacheRead: 0, cacheWrite: 0 };
+
+  test('the ok verdict carries the envelope: one known, unpriced observation; value verbatim', async () => {
+    const result = await makeAgenticRemediation(fakeFactory(fakeDriver(COMPLETE)))(baseInput());
+    expect(result.status).toBe('ok');
+    // The WorkerResult still passes through verbatim (the op never re-judges).
+    if (result.status === 'ok') expect(result.value).toBe(COMPLETE);
+    expect(KnownUsageSummarySchema.parse(result.usageSummary)).toEqual({
+      usage: DRIVER_USAGE,
+      knownCount: 1,
+      unknownCount: 0,
+      unpricedCount: 1,
+    });
+  });
+
+  test('a priced observation folds costUSD in and unpricedCount stays 0', async () => {
+    const priced: WorkerResult = {
+      ...COMPLETE,
+      usage: { input: 5, output: 5, cacheRead: 0, cacheWrite: 0 },
+      costUSD: 0.01,
+    };
+    const result = await makeAgenticRemediation(fakeFactory(fakeDriver(priced)))(baseInput());
+    expect(KnownUsageSummarySchema.parse(result.usageSummary)).toEqual({
+      usage: { input: 5, output: 5, cacheRead: 0, cacheWrite: 0 },
+      costUSD: 0.01,
+      knownCount: 1,
+      unknownCount: 0,
+      unpricedCount: 0,
+    });
+  });
+
+  test('a driver error verdict (failed) carries the envelope too', async () => {
+    const result = await makeAgenticRemediation(
+      fakeFactory(
+        fakeDriver({
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+          stopReason: 'error',
+          errorClass: 'output-invalid',
+        }),
+      ),
+    )(baseInput());
+    expect(result.status).toBe('failed');
+    expect(KnownUsageSummarySchema.parse(result.usageSummary)).toEqual({
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      knownCount: 1,
+      unknownCount: 0,
+      unpricedCount: 1,
+    });
+  });
+
+  test('an aborted run (indeterminate) still carries the spend of the partial work', async () => {
+    const result = await makeAgenticRemediation(
+      fakeFactory(
+        fakeDriver({
+          usage: { input: 9, output: 1, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+          stopReason: 'aborted',
+        }),
+      ),
+    )(baseInput());
+    expect(result.status).toBe('indeterminate');
+    expect(KnownUsageSummarySchema.parse(result.usageSummary)).toEqual({
+      usage: { input: 9, output: 1, cacheRead: 0, cacheWrite: 0 },
+      knownCount: 1,
+      unknownCount: 0,
+      unpricedCount: 1,
+    });
+  });
+
+  test('a corrupt usage measurement counts as UNKNOWN, never trusted in part (#1189 rule)', async () => {
+    const result = await makeAgenticRemediation(
+      fakeFactory(
+        fakeDriver({
+          usage: { input: -5, output: 1, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+          stopReason: 'complete',
+        }),
+      ),
+    )(baseInput());
+    expect(result.status).toBe('ok');
+    expect(KnownUsageSummarySchema.parse(result.usageSummary)).toEqual({
+      knownCount: 0,
+      unknownCount: 1,
+      unpricedCount: 1,
+    });
+  });
+
+  test('no-driver exits carry NO envelope: the no-factory refusal and a dispatch-class throw', async () => {
+    const noFactory = await makeAgenticRemediation(undefined)(baseInput());
+    expect(noFactory.status).toBe('failed');
+    expect(Object.hasOwn(noFactory, 'usageSummary')).toBe(false);
+
+    const broken: Driver = {
+      run: async () => {
+        throw new DispatchError('auth', 'the provider rejected the configured key');
+      },
+    };
+    const thrown = await makeAgenticRemediation(fakeFactory(broken))(baseInput());
+    expect(thrown.status).toBe('needs-human');
+    expect(Object.hasOwn(thrown, 'usageSummary')).toBe(false);
   });
 });

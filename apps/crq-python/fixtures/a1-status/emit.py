@@ -90,8 +90,14 @@ def _capture_document(paths: List[Dict[str, Any]], **overrides: Any) -> Dict[str
         "reviewer": REVIEWER,
         "reviewer_version": "fixture",
     }
-    capture["equivalence"] = review_receipt.current_equivalence(capture)
+    # Overrides land before the equivalence identity: the equivalence binds
+    # the FINAL capture (target/tree/scope included), not the template. The
+    # bounded case below overrides only `target` and expects every receipt to
+    # verify; computing equivalence first made each receipt self-inconsistent
+    # (equivalence of target-only fields vs. identity of TARGET) and merged_current
+    # demoted all 34 receipts to unverified instead of 32 captured + 2 omitted.
     capture.update(overrides)
+    capture["equivalence"] = review_receipt.current_equivalence(capture)
     return capture
 
 
@@ -1471,7 +1477,14 @@ def utilization_family() -> Dict[str, Any]:
     cases.append(case("infinity-now-overflow", now=float("inf")))
     cases.append(case("nan-now-value-error", now=float("nan")))
     cases.append(case("year-out-of-range", now=1e15))
-    cases.append(case("platform-time-error", now=1e18))
+    # fromtimestamp(1e18) fails inside the libc gmtime call, so str(OSError)
+    # is the host errno text (glibc records "[Errno 75] Value too large for
+    # defined data type"; other libcs report a different string). Record the
+    # exception class only; the differential runner skips the message for
+    # this case, keeping --check byte-identical on every host.
+    platform_time_error = case("platform-time-error", now=1e18)
+    del platform_time_error["expect"]["message"]
+    cases.append(platform_time_error)
     return _family(
         "utilization",
         cases,

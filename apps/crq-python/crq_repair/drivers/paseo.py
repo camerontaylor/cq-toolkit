@@ -97,13 +97,13 @@ def invoke(config, role, job, wt, directory):
         # spend. A failed stop must be visible and must not archive the agent
         # out of the normal listing, and neither call may replace the verdict.
         try:
-            stopped = command(['paseo', '--host', endpoint, 'stop', agent]).returncode == 0
+            stopped = command(['paseo', '--host', endpoint, 'stop', agent], timeout=60).returncode == 0
         except Exception as exc:
             stopped = False
             print('paseo stop failed for ' + str(agent) + ': ' + str(exc), file=sys.stderr)
         if stopped:
             try:
-                if command(['paseo', '--host', endpoint, 'archive', agent]).returncode:
+                if command(['paseo', '--host', endpoint, 'archive', agent], timeout=60).returncode:
                     print('paseo archive failed for ' + str(agent), file=sys.stderr)
             except Exception as exc:
                 print('paseo archive failed for ' + str(agent) + ': ' + str(exc), file=sys.stderr)

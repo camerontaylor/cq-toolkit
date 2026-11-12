@@ -356,6 +356,16 @@ function setObjectKeys(
 }
 
 /**
+ * `crq.py repair-prepare`'s evidence injection: `evidence["fix_instructions"]
+ * = text`. Python dict assignment keeps an existing key's position and appends
+ * a missing key last; the evidence value itself is never mutated. The text is
+ * whatever the caller read (Python keeps a trailing newline).
+ */
+export function withFixInstructions(evidence: JsonObject, text: string): JsonObject {
+  return setObjectKeys(evidence, [['fix_instructions', text]]);
+}
+
+/**
  * Apply Python's exact queue mutation to a copy: stale-mark the old record,
  * append the new run record, and preserve insertion order. No write.
  */

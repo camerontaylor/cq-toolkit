@@ -61,6 +61,18 @@ export async function scratch(): Promise<string> {
   return root;
 }
 
+/**
+ * A sessions dir OUTSIDE the bound repo root (Annex A, issue #1197: the
+ * session binding file must live outside the model-editable tree).
+ * Registered in the shared roots cleanup alongside the repo root.
+ */
+export async function scratchSessions(root: string): Promise<string> {
+  const dir = `${root}-sessions`;
+  roots.push(dir);
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
+
 const mockUsage = () => ({
   inputTokens: { total: 3, noCache: 3, cacheRead: 0, cacheWrite: 0 },
   outputTokens: { total: 2, text: 2, reasoning: 0 },
@@ -152,12 +164,19 @@ export function wireFactory(
   root: string,
   model: MockLanguageModelV4,
   calls: WireCall[],
-  options: { resolveRg?: AiSdkDriverOptions['resolveRg'] } = {},
+  options: { resolveRg?: AiSdkDriverOptions['resolveRg']; sessionsDir?: string } = {},
 ): DriverFactory {
+  // The default sibling is registered for the shared afterEach cleanup
+  // here (the store creates it at first write; rm with force tolerates a
+  // run that never reaches it).
+  const sessionsDir = options.sessionsDir ?? `${root}-sessions`;
+  if (options.sessionsDir === undefined && !roots.includes(sessionsDir)) roots.push(sessionsDir);
   return {
     resolve: (request) => {
       const driver = new AiSdkDriver({
-        sessionsDir: join(root, 'sessions'),
+        // The session binding file lives OUTSIDE the model-editable repo
+        // root (Annex A, issue #1197).
+        sessionsDir,
         ...(request.harness === undefined ? {} : { harnessConfig: request.harness }),
         // Deterministic probe default; tests inject their own when they need
         // a specific capability outcome.
