@@ -1900,32 +1900,6 @@
         }
       ]
     },
-    "1585": {
-      "tuple": {
-        "head": "6a6732ef1d8036f8ddbd5b328d2aa24a8ab82340",
-        "base": "7663a61480ed73694ce42ded43a9c813f024bd1c",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-12T05:18:53.383Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1586": {
-      "tuple": {
-        "head": "b28dd32f96dac00b379b3c1a999ff87621458588",
-        "base": "7663a61480ed73694ce42ded43a9c813f024bd1c",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-12T05:31:58.429Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1587": {
       "tuple": {
         "head": "f8276ceb06f5a56c4fe36be79905c8cec45ce45e",
