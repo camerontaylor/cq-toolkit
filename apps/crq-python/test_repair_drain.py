@@ -168,6 +168,19 @@ class RepairDrainTest(unittest.TestCase):
         self.assertTrue((self.root / 'b').exists())
         self.assertFalse((self.root / 'never').exists())
 
+    def test_fallback_observes_another_items_new_provider_cooldown(self):
+        self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
+        calls = []
+        def invoke(config, role, job, wt, directory, judge):
+            calls.append(role['model'])
+            # A different worker exhausts the fallback while this call is live.
+            service.remember_provider_limit('deepseek', {'retry_after_ms': 60000})
+            return {'stop': 'rate-limit', 'retry_after_ms': 60000}
+        with mock.patch.object(service, 'provider_ready', return_value=True), mock.patch.object(service, '_dispatch', side_effect=invoke):
+            report = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root / 'attempt')
+        self.assertEqual(calls, [ROLES['fixer']['model']])
+        self.assertEqual(report['stop'], 'rate-limit')
+
     def test_concurrency_config_refuses_invalid_limits(self):
         for limit in (True, 0, 11, 2.5, '10', None):
             self.config['repair']['max_concurrent_items'] = limit

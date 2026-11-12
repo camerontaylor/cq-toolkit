@@ -197,7 +197,6 @@ def dispatch(config, role, job, wt, directory, judge=False):
     if role['driver'] != 'cq' or not config.get('repair', {}).get('fallback_models'):
         with correlation(job, judge):
             return _dispatch(config, role, job, wt, directory, judge)
-    state = provider_cooldowns()
     deadline = time.monotonic() + config['repair']['budget']['wall_clock_min'] * 60
     waits = []
     baseline = git(wt, 'rev-parse', 'HEAD') if not judge else None
@@ -210,6 +209,7 @@ def dispatch(config, role, job, wt, directory, judge=False):
             if provider in seen or not provider_ready(candidate):
                 continue
             seen.add(provider)
+            state = provider_cooldowns()  # another item may have exhausted it
             if state.get(provider, '') > utc():
                 waits.append(state[provider])
                 continue
