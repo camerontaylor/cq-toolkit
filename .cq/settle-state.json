@@ -1954,13 +1954,13 @@
     },
     "1594": {
       "tuple": {
-        "head": "8ccada02b7f009f09a2f139bf08477679a1c9495",
+        "head": "1033d6dac199fe715e289c416b7305e63d29cd30",
         "base": "b33413f3cf619a420da1132a4598494f2e4bf1e9",
         "forcePushEpoch": 1
       },
       "observations": [
         {
-          "observedAt": "2026-11-12T06:31:00.969Z",
+          "observedAt": "2026-11-12T06:47:03.895Z",
           "by": "self-merge-prs:observe"
         }
       ]
