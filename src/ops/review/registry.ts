@@ -88,6 +88,13 @@ import {
   QueueReportInputSchema,
 } from './internal/queueProtocol.js';
 
+// The queue family entries' importers pass the host's resolved CQ_* snapshot
+// into `makeQueueOps` so every alias read is entry-time (ADR-0009 resolve
+// once): the ops are constructed with the run's snapshot, and a later ambient
+// env change cannot alter queue configuration. The explicit `undefined` keeps
+// the transport unbound while the default-parameter rule applies the run's
+// snapshot when the wiring carries none (library behavior preserved).
+
 // ---------------------------------------------------------------------------
 // Adapter helpers — the one fold every library op rides (module doc)
 // ---------------------------------------------------------------------------
@@ -700,36 +707,56 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'review.retry',
     inputSchema: QueueRetryInputSchema,
-    importer: async () => (await import('./queue.js')).makeQueueOps().retry as Op<unknown, unknown>,
+    importer: async (wiring) =>
+      (await import('./queue.js')).makeQueueOps(undefined, wiring?.cqEnv).retry as Op<
+        unknown,
+        unknown
+      >,
   },
   {
     name: 'review.drain',
     inputSchema: QueueDrainInputSchema,
-    importer: async () => (await import('./queue.js')).makeQueueOps().drain as Op<unknown, unknown>,
+    importer: async (wiring) =>
+      (await import('./queue.js')).makeQueueOps(undefined, wiring?.cqEnv).drain as Op<
+        unknown,
+        unknown
+      >,
   },
   {
     name: 'review.enqueue',
     inputSchema: QueueEnqueueInputSchema,
-    importer: async () =>
-      (await import('./queue.js')).makeQueueOps().enqueue as Op<unknown, unknown>,
+    importer: async (wiring) =>
+      (await import('./queue.js')).makeQueueOps(undefined, wiring?.cqEnv).enqueue as Op<
+        unknown,
+        unknown
+      >,
   },
   {
     name: 'review.queueHealth',
     inputSchema: QueueHealthReferenceSchema,
-    importer: async () =>
-      (await import('./queue.js')).makeQueueOps().queueHealth as Op<unknown, unknown>,
+    importer: async (wiring) =>
+      (await import('./queue.js')).makeQueueOps(undefined, wiring?.cqEnv).queueHealth as Op<
+        unknown,
+        unknown
+      >,
   },
   {
     name: 'review.queueStatus',
     inputSchema: QueueReferenceSchema,
-    importer: async () =>
-      (await import('./queue.js')).makeQueueOps().queueStatus as Op<unknown, unknown>,
+    importer: async (wiring) =>
+      (await import('./queue.js')).makeQueueOps(undefined, wiring?.cqEnv).queueStatus as Op<
+        unknown,
+        unknown
+      >,
   },
   {
     name: 'review.report',
     inputSchema: QueueReportInputSchema,
-    importer: async () =>
-      (await import('./queue.js')).makeQueueOps().report as Op<unknown, unknown>,
+    importer: async (wiring) =>
+      (await import('./queue.js')).makeQueueOps(undefined, wiring?.cqEnv).report as Op<
+        unknown,
+        unknown
+      >,
   },
   {
     name: 'review.address',
