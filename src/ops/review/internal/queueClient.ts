@@ -31,7 +31,6 @@ import {
 } from './queueEvidence.js';
 import type { CqEnv } from '../../../config/env.js';
 import { currentCqEnv } from '../../../config/run-env.js';
-import { processEnv } from '../../../config/process-env.js';
 
 const CommonPage = z.object({
   version: z.literal(1),
@@ -93,10 +92,14 @@ export class QueueReadFault extends Error {
 export class QueueUnsupported extends Error {}
 export class QueueConfigurationError extends Error {}
 
-/** Production factory shared by Q6; configuration never rides caller JSON. */
-export function makeConfiguredQueueClient() {
-  const alias = processEnv()['CQ_QUEUE_SSH_ALIAS'];
-  if (!alias)
+/** Production factory shared by Q6; configuration never rides caller JSON.
+ * The alias is the operator's CQ_QUEUE_SSH_ALIAS resolved in the run's CqEnv
+ * snapshot — an entry-time or run-time snapshot the caller passes, defaulting
+ * to the enclosing run's snapshot (config contract: resolve once; an ambient
+ * change after entry never alters the configured client). */
+export function makeConfiguredQueueClient(cqEnv: CqEnv = currentCqEnv()) {
+  const alias = cqEnv.values['CQ_QUEUE_SSH_ALIAS'];
+  if (typeof alias !== 'string' || !alias)
     throw new QueueConfigurationError(
       'Configure CQ_QUEUE_SSH_ALIAS for reviewed D1C queue-v1 capability',
     );
@@ -488,8 +491,10 @@ export function makeReviewClient(transport: QueueTransport) {
       options?.signal?.throwIfAborted();
       if (Date.now() >= retryUntil || (lifetimeRemaining(options) ?? Infinity) <= 0) throw fault;
     }
+    const historyResponse = parsed.op === 'review-history' && 'status' in result;
     if (
       parsed.op !== 'capabilities' &&
+      !historyResponse &&
       ((!('state' in result) && !(parsed.op === 'result' && 'index' in result)) ||
         ('request_id' in result &&
           result.request_id !== undefined &&

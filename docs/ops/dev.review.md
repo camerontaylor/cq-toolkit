@@ -14,110 +14,48 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "anyOf": [
-    {
-      "additionalProperties": false,
-      "properties": {
-        "action": {
-          "const": "cycle",
-          "type": "string"
-        },
-        "base": {
-          "pattern": "^[0-9a-fA-F]{7,64}$",
-          "type": "string"
-        },
-        "includeIntegration": {
-          "type": "boolean"
-        },
-        "repoRoot": {
-          "minLength": 1,
-          "type": "string"
-        },
-        "reviewer": {
-          "pattern": "^(coderabbit|agent:[A-Za-z0-9][A-Za-z0-9._/@-]*)$",
-          "type": "string"
-        },
-        "target": {
-          "minLength": 1,
-          "type": "string"
-        },
-        "testFiles": {
-          "items": {
-            "minLength": 1,
-            "pattern": "^[^-]",
-            "type": "string"
-          },
-          "minItems": 1,
-          "type": "array"
-        },
-        "uncommitted": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "repoRoot"
-      ],
-      "type": "object"
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "const": "cycle",
+      "type": "string"
     },
-    {
-      "additionalProperties": false,
-      "oneOf": [
-        {
-          "required": [
-            "head"
-          ]
-        },
-        {
-          "required": [
-            "tree"
-          ]
-        }
-      ],
-      "properties": {
-        "action": {
-          "enum": [
-            "enroll",
-            "status",
-            "fallback"
-          ],
-          "type": "string"
-        },
-        "base": {
-          "pattern": "^[0-9a-f]{40}$",
-          "type": "string"
-        },
-        "cycle": {
-          "maximum": 2,
-          "minimum": 1,
-          "type": "integer"
-        },
-        "head": {
-          "pattern": "^[0-9a-f]{40}$",
-          "type": "string"
-        },
-        "requestId": {
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$",
-          "type": "string"
-        },
-        "target": {
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$",
-          "type": "string"
-        },
-        "tree": {
-          "pattern": "^[0-9a-f]{40}$",
-          "type": "string"
-        }
+    "base": {
+      "pattern": "^[0-9a-fA-F]{7,64}$",
+      "type": "string"
+    },
+    "includeIntegration": {
+      "type": "boolean"
+    },
+    "repoRoot": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "reviewer": {
+      "pattern": "^(coderabbit|agent:[A-Za-z0-9][A-Za-z0-9._/@-]*)$",
+      "type": "string"
+    },
+    "target": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "testFiles": {
+      "items": {
+        "minLength": 1,
+        "pattern": "^[^-]",
+        "type": "string"
       },
-      "required": [
-        "action",
-        "requestId",
-        "base",
-        "target",
-        "cycle"
-      ],
-      "type": "object"
+      "minItems": 1,
+      "type": "array"
+    },
+    "uncommitted": {
+      "type": "boolean"
     }
-  ]
+  },
+  "required": [
+    "repoRoot"
+  ],
+  "type": "object"
 }
 ```
 

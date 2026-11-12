@@ -1,0 +1,192 @@
+{
+  "schema": "cq.crq-a1-status-vector/v1",
+  "family": "client-health",
+  "note": "advisory runner health snapshot",
+  "cases": [
+    {
+      "name": "complete-and-aged",
+      "source": "client_health.snapshot",
+      "input": {
+        "queue": {
+          "client_health": {
+            "completed_at": "2026-11-09T11:50:00Z",
+            "complete": true,
+            "incomplete_ticks": 2,
+            "sha": "ffffffffffffffffffffffffffffffffffffffff"
+          },
+          "items": [
+            {
+              "state": "pending"
+            },
+            {
+              "state": "pending"
+            },
+            {
+              "state": "blocked"
+            },
+            {
+              "state": "reviewing"
+            }
+          ]
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "lastCompletedTick": "2026-11-09T11:50:00Z",
+          "ageSeconds": 600.0,
+          "discoveryComplete": true,
+          "incompleteTicks": 2,
+          "pending": 2,
+          "blocked": 1,
+          "deployedSha": "ffffffffffffffffffffffffffffffffffffffff"
+        }
+      }
+    },
+    {
+      "name": "missing-health-record",
+      "source": "client_health.snapshot",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "state": "pending"
+            }
+          ]
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "lastCompletedTick": null,
+          "ageSeconds": null,
+          "discoveryComplete": null,
+          "incompleteTicks": 0,
+          "pending": 1,
+          "blocked": 0,
+          "deployedSha": null
+        }
+      }
+    },
+    {
+      "name": "empty-completed-at-has-no-age",
+      "source": "client_health.snapshot",
+      "input": {
+        "queue": {
+          "client_health": {
+            "completed_at": "",
+            "complete": false
+          },
+          "items": []
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "lastCompletedTick": "",
+          "ageSeconds": null,
+          "discoveryComplete": false,
+          "incompleteTicks": 0,
+          "pending": 0,
+          "blocked": 0,
+          "deployedSha": null
+        }
+      }
+    },
+    {
+      "name": "invalid-completed-at-is-refused",
+      "source": "client_health.snapshot",
+      "input": {
+        "queue": {
+          "client_health": {
+            "completed_at": "garbage"
+          },
+          "items": []
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "Invalid isoformat string: 'garbage'"
+      }
+    },
+    {
+      "name": "non-string-completed-at-is-refused",
+      "source": "client_health.snapshot",
+      "input": {
+        "queue": {
+          "client_health": {
+            "completed_at": 123
+          },
+          "items": []
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": false,
+        "error": "AttributeError",
+        "message": "'int' object has no attribute 'replace'"
+      }
+    },
+    {
+      "name": "health-not-object-is-refused",
+      "source": "client_health.snapshot",
+      "input": {
+        "queue": {
+          "client_health": [],
+          "items": []
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": false,
+        "error": "AttributeError",
+        "message": "'list' object has no attribute 'get'"
+      }
+    },
+    {
+      "name": "item-not-object-is-refused",
+      "source": "client_health.snapshot",
+      "input": {
+        "queue": {
+          "client_health": {},
+          "items": [
+            1
+          ]
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": false,
+        "error": "AttributeError",
+        "message": "'int' object has no attribute 'get'"
+      }
+    },
+    {
+      "name": "items-missing-default-empty",
+      "source": "client_health.snapshot",
+      "input": {
+        "queue": {
+          "client_health": {}
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "lastCompletedTick": null,
+          "ageSeconds": null,
+          "discoveryComplete": null,
+          "incompleteTicks": 0,
+          "pending": 0,
+          "blocked": 0,
+          "deployedSha": null
+        }
+      }
+    }
+  ]
+}

@@ -163,11 +163,11 @@ reviews:
         (provenance headers).
     - path: scripts/**
       instructions: >-
-        Scripts are Node ESM (.mjs). The typecheck ratchet invokes tsc6,
-        never tsc (the bare name is alias-owned); baselines only tighten
-        (I5). .gitleaks.toml is the secret and publish-forbidden content
-        scan for CI; keep example strings out of other files, or mark a
-        deliberate fixture line with gitleaks:allow.
+        Scripts are Node ESM (.mjs). The typecheck ratchet invokes the pinned
+        TypeScript 7 compiler (node_modules/typescript/bin/tsc), never a bare
+        PATH tsc; baselines only tighten (I5). .gitleaks.toml is the secret
+        and publish-forbidden content scan for CI; keep example strings out of
+        other files, or mark a deliberate fixture line with gitleaks:allow.
     - path: policy/**
       instructions: >-
         Doctrine text: each invariant carries Rule, Why, and Enforcement;

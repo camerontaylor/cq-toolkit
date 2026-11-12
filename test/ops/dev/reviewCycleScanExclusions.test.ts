@@ -9,7 +9,7 @@ import {
   type DevReviewReport,
 } from '../../../src/ops/dev/review.js';
 import { stubScanner } from './fakes.js';
-import { capturingScanner, cycleReview, ran, reviewer, reviewerCalls } from './reviewTestKit.js';
+import { capturingScanner, cycleReview, managedTerminal, reviewerCalls } from './reviewTestKit.js';
 import { makeTestRepo, repoEffects, type TestRepo } from './repo.js';
 
 let repo: TestRepo;
@@ -64,24 +64,21 @@ describe('dev.review cycle', () => {
     expect(effects.openLedger('feature/x').load().records).toEqual([]);
   });
 
-  test('refuses CodeRabbit uploads when the configured corpus itself changed', async () => {
+  test('refuses managed queue submits when the configured corpus itself changed', async () => {
     await repo.write('custom/rules.yml', 'rules:\n');
     repo.commitAll('change configured scanner corpus');
-    let uploads = 0;
-    const effects = repoEffects(repo, (command) => {
-      if (command === 'coderabbit') uploads += 1;
-      return command === 'coderabbit' ? ran(0) : undefined;
-    });
+    const effects = repoEffects(repo);
     const result = await cycleReview(
       effects,
       stubScanner(),
       'custom/rules.yml',
+      managedTerminal(),
     )({
       repoRoot: repo.root,
     });
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') expect(result.reason).toContain('custom/rules.yml');
-    expect(uploads).toBe(0);
+    expect(reviewerCalls(effects)).toEqual([]);
     expect(effects.openLedger('feature/x').load().records).toEqual([]);
   });
 
@@ -93,11 +90,17 @@ describe('dev.review cycle', () => {
     await repo.write('README.md', '# edited\n');
     await repo.write('notes/new.env', 'KEY=1\n');
     const scanner = capturingScanner();
+    const submit = vi.fn(managedTerminal());
     const result = await cycleReview(
-      repoEffects(repo, reviewer(ran(0))),
+      repoEffects(repo),
       scanner,
-    )({ repoRoot: repo.root });
+      undefined,
+      submit,
+    )({
+      repoRoot: repo.root,
+    });
     expect(result.status).toBe('ok');
+    expect(submit).toHaveBeenCalledWith(expect.objectContaining({ workingTree: 'full' }));
     expect(scanner.seen.map((c) => [c.component, c.path])).toEqual([
       ['committed:bin/blob.dat', 'bin/blob.dat'],
       ['committed:src/a.ts', 'src/a.ts'],
@@ -115,46 +118,45 @@ describe('dev.review cycle', () => {
     await repo.write('policy/denylist/patterns.yml', 'LEGACY_SECRET_PROBE\n');
     repo.commitAll('legacy-named secret');
     const scanner = capturingScanner();
-    let uploads = 0;
-    const result = await cycleReview(
-      repoEffects(repo, (command) => {
-        if (command === 'coderabbit') uploads += 1;
-        return command === 'coderabbit' ? ran(0) : undefined;
-      }),
-      (components) => {
-        scanner.seen.push(...components);
-        const hit = components.some((component) => component.text.includes('LEGACY_SECRET_PROBE'));
-        return components.map((component) => ({
-          component: component.component,
-          hits:
-            hit && component.path === 'policy/denylist/patterns.yml'
-              ? [{ ruleId: 'fixture:legacy-secret', lines: [1] }]
-              : [],
-        }));
-      },
-    )({ repoRoot: repo.root });
+    const result = await cycleReview(repoEffects(repo), (components) => {
+      scanner.seen.push(...components);
+      const hit = components.some((component) => component.text.includes('LEGACY_SECRET_PROBE'));
+      return components.map((component) => ({
+        component: component.component,
+        hits:
+          hit && component.path === 'policy/denylist/patterns.yml'
+            ? [{ ruleId: 'fixture:legacy-secret', lines: [1] }]
+            : [],
+      }));
+    })({ repoRoot: repo.root });
     expect(result.status).toBe('needs-human');
     expect(scanner.seen.map((component) => component.path)).toContain(
       'policy/denylist/patterns.yml',
     );
-    expect(uploads).toBe(0);
   });
 
-  test('THE SCAN GATES THE UPLOAD: a hit or a scanner fault refuses before the reviewer runs', async () => {
-    const hit = repoEffects(repo, reviewer(ran(0)));
+  test('THE SCAN GATES THE SUBMIT: a hit or a scanner fault refuses before the managed leg runs', async () => {
+    const hit = repoEffects(repo);
     const refused = await cycleReview(
       hit,
       stubScanner([{ component: 'committed:src/a.ts', ruleId: 'class:secret' }]),
+      undefined,
+      managedTerminal(),
     )({ repoRoot: repo.root });
     expect(refused.status).toBe('needs-human');
     if (refused.status === 'needs-human')
       expect(refused.reason).toContain('class:secret in committed:src/a.ts');
     expect(reviewerCalls(hit)).toEqual([]);
 
-    const fault = repoEffects(repo, reviewer(ran(0)));
-    const faulted = await cycleReview(fault, () => {
-      throw new Error('gitleaks missing');
-    })({ repoRoot: repo.root });
+    const fault = repoEffects(repo);
+    const faulted = await cycleReview(
+      fault,
+      () => {
+        throw new Error('gitleaks missing');
+      },
+      undefined,
+      managedTerminal(),
+    )({ repoRoot: repo.root });
     expect(faulted.status).toBe('needs-human');
     if (faulted.status === 'needs-human') expect(faulted.reason).toContain('gitleaks missing');
     expect(reviewerCalls(fault)).toEqual([]);
@@ -163,8 +165,15 @@ describe('dev.review cycle', () => {
 
   test('an unscannable untracked file (symlink, oversized) refuses — never silently skipped', async () => {
     await symlink('/etc/hostname', join(repo.root, 'link'));
-    const linked = repoEffects(repo, reviewer(ran(0)));
-    const result = await cycleReview(linked, stubScanner())({ repoRoot: repo.root });
+    const linked = repoEffects(repo);
+    const result = await cycleReview(
+      linked,
+      stubScanner(),
+      undefined,
+      managedTerminal(),
+    )({
+      repoRoot: repo.root,
+    });
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') expect(result.reason).toContain("untracked file 'link'");
     expect(reviewerCalls(linked)).toEqual([]);
@@ -172,8 +181,10 @@ describe('dev.review cycle', () => {
     await rm(join(repo.root, 'link'));
     await repo.write('big.txt', 'x'.repeat(SCAN_COMPONENT_CAP_BYTES + 1));
     const big = await cycleReview(
-      repoEffects(repo, reviewer(ran(0))),
+      repoEffects(repo),
       stubScanner(),
+      undefined,
+      managedTerminal(),
     )({
       repoRoot: repo.root,
     });

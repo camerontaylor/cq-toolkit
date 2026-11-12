@@ -5,6 +5,7 @@ test_host_config_overlay.py, test_host_config_policy.py, test_host_config_render
 test_host_config_switch.py, test_host_config_units.py, test_host_config_prepare.py
 and test_host_config_legacy.py.
 """
+import json
 import os
 from pathlib import Path
 import shutil
@@ -116,6 +117,340 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
             with self.subTest(mapping=mapping), self.assertRaises(ValueError):
                 host.render_units(self.root, self.base / 'invalid', runtimes=mapping)
             self.assertFalse((self.base / 'invalid').exists())
+
+    @staticmethod
+    def _elf_header():
+        header = bytearray(20)
+        header[:5] = b'\x7fELF\x02'
+        header[5] = 1
+        header[18:20] = b'\x3e\x00'
+        return bytes(header)
+
+    def _node_artifact(self, sha, capabilities=None):
+        """Build a minimally packageable whole-artifact tree.
+
+        This is an extracted artifact, so it contains the manifest as well as
+        every package.REQUIRED_ENTRIES path. The provenance is derived from
+        package.staging_facts and validated with staging=root, matching the
+        package-runner accept rules without executing the runner.
+        """
+        package = host._package_runner()
+        root = self.base / '.local/opt' / ('crq-' + sha)
+        (root / 'dist/queue-runner').mkdir(parents=True)
+        (root / 'dist/queue-runner/crq.js').write_bytes(b'runner')
+        (root / 'package.json').write_text(
+            json.dumps({'name': 'crq-runner', 'version': '0.0.0'}))
+        fs_ext = root / 'node_modules/fs-ext'
+        (fs_ext / 'build/Release').mkdir(parents=True)
+        (fs_ext / 'package.json').write_text(
+            json.dumps({'name': 'fs-ext', 'version': package.FS_EXT_VERSION}))
+        (fs_ext / 'build/Release/fs_ext.node').write_bytes(self._elf_header())
+        if capabilities is not None:
+            (root / 'dist/queue-runner/capabilities.json').write_text(
+                json.dumps({'schema_version': 1,
+                            'commands': list(capabilities)}))
+        files = package.inventory(root)
+        facts = package.staging_facts(root)
+        provenance = {
+            'schema_version': package.PROVENANCE_VERSION,
+            'source_sha': sha,
+            'lockfile_sha256': '1' * 64,
+            'runtime': {
+                'node_version': 'v24.0.0',
+                'node_major': package.NODE_MAJOR,
+                'node_abi': '137',
+                'platform': package.PLATFORM,
+                'arch': package.ARCH,
+            },
+            'toolchain': {
+                'pnpm_version': '9.0.0',
+                'install_command': 'pnpm install',
+                'build_command': 'pnpm build',
+                'deploy_command': 'pnpm deploy',
+            },
+            'dependencies': facts['dependencies'],
+            'fs_ext': facts['fs_ext'],
+        }
+        manifest = {
+            'schema_version': package.SCHEMA_VERSION,
+            'source_sha': sha,
+            'content_sha256': package.content_digest(files),
+            'provenance': provenance,
+            'files': files,
+        }
+        package.validate_manifest(manifest)
+        package.validate_provenance(provenance, sha=sha, staging=root)
+        for required in package.REQUIRED_ENTRIES:
+            self.assertTrue((root / required).is_file(), required)
+        (root / package.MANIFEST_NAME).write_text(json.dumps(manifest))
+        return root
+
+    def test_node_artifact_fixture_matches_package_contract(self):
+        sha = 'f' * 40
+        artifact = self._node_artifact(sha)
+        package = host._package_runner()
+        manifest = json.loads((artifact / package.MANIFEST_NAME).read_text())
+        for required in package.REQUIRED_ENTRIES:
+            self.assertTrue((artifact / required).is_file(), required)
+        package.validate_provenance(manifest['provenance'], sha=sha,
+                                    staging=artifact)
+
+    def test_artifact_identity_requires_package_required_entries(self):
+        """A self-consistent manifest cannot waive a required package entry."""
+        sha = 'd' * 40
+        artifact = self._node_artifact(sha)
+        package = host._package_runner()
+        (artifact / 'package.json').unlink()
+        files = package.inventory(artifact, exclude=(package.MANIFEST_NAME,))
+        manifest_path = artifact / package.MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text())
+        manifest['files'] = files
+        manifest['content_sha256'] = package.content_digest(files)
+        package.validate_manifest(manifest)
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, 'required package entry'):
+            host.artifact_identity(artifact, 'node:' + sha)
+
+    def test_artifact_identity_rejects_provenance_that_disagrees_with_tree(self):
+        sha = 'e' * 40
+        artifact = self._node_artifact(sha)
+        package = host._package_runner()
+        manifest_path = artifact / package.MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text())
+        manifest['provenance']['fs_ext']['native_sha256'] = '0' * 64
+        package.validate_manifest(manifest)
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, 'provenance does not match'):
+            host.artifact_identity(artifact, 'node:' + sha)
+
+    def test_single_unit_render_matches_render_units_for_all_services(self):
+        sha = 'a' * 40
+        artifact = self._node_artifact(sha)
+        python_out = self.base / 'python-units'
+        node_out = self.base / 'node-units'
+        with mock.patch.object(host.Path, 'home', return_value=self.base):
+            host.render_units(self.root, python_out)
+            host.render_units(
+                self.root, node_out,
+                runtimes={unit: 'node:' + sha for unit in host.UNIT_COMMANDS})
+            for unit in sorted(host.UNIT_COMMANDS):
+                with self.subTest(unit=unit, runtime='python'):
+                    rendered = host.render_service(self.root, unit, 'python', sha=self.before)
+                    self.assertEqual(rendered['bytes'], (python_out / unit).read_bytes())
+                    self.assertEqual(rendered['source_sha'], self.before)
+                    self.assertEqual(rendered['template_path'],
+                                     'apps/crq-python/ops/systemd/' + unit)
+                    self.assertEqual(
+                        rendered['template_sha256'],
+                        host.digest((self.runner / 'ops/systemd' / unit).read_bytes()))
+                    self.assertIn(str(self.runner), rendered['exec_start'])
+                    self.assertNotIn('@CRQ_ROOT@', rendered['exec_start'])
+                    self.assertIsNone(rendered['artifact'])
+                with self.subTest(unit=unit, runtime='node'):
+                    rendered = host.render_service(
+                        self.root, unit, 'node:' + sha, sha=self.before)
+                    self.assertEqual(rendered['bytes'], (node_out / unit).read_bytes())
+                    self.assertIn('dist/queue-runner/crq.js', rendered['exec_start'])
+                    self.assertIn(host.UNIT_COMMANDS[unit], rendered['exec_start'])
+                    identity = rendered['artifact']
+                    self.assertEqual(identity['source_sha'], sha)
+                    self.assertEqual(identity['verification'],
+                                     'whole-artifact-inventory-matched')
+                    self.assertEqual(identity['authenticity'], 'not-established')
+                    self.assertEqual(identity['crq_js_sha256'], host.digest(b'runner'))
+        self.assertTrue(artifact.is_dir())
+
+    def test_render_service_source_binding_refuses_unknown_or_tampered_template(self):
+        with self.assertRaisesRegex(ValueError, 'unknown runtime unit'):
+            host.render_service(self.root, 'crq-other.service', 'python')
+        original_git = host.git
+
+        def missing_template(root, *args):
+            if args[:3] == ('ls-tree', '-r', '--name-only'):
+                return ''
+            return original_git(root, *args)
+
+        with mock.patch.object(host, 'git', side_effect=missing_template):
+            with self.assertRaisesRegex(ValueError, 'absent'):
+                host.render_service(self.root, 'crq-tick.service', 'python')
+        with mock.patch.object(host, 'run_bytes', return_value=b'tampered'):
+            with self.assertRaisesRegex(ValueError, 'Git blob'):
+                host.render_service(self.root, 'crq-tick.service', 'python')
+        with self.assertRaises(subprocess.CalledProcessError):
+            host.render_service(self.root, 'crq-tick.service', 'python', sha='0' * 40)
+
+    def test_render_service_rejects_malformed_committed_templates(self):
+        unit = self.runner / 'ops/systemd/crq-tick.service'
+        original = unit.read_text()
+        cases = {
+            'root placeholder': original.replace('@CRQ_ROOT@', '/tmp/not-a-runner'),
+            'exactly one ExecStart': original.replace('ExecStart=', '# ExecStart='),
+            'exactly one ExecStart ': original.replace(
+                'ExecStart=', 'ExecStart=/bin/true\nExecStart='),
+        }
+        for label, text in cases.items():
+            with self.subTest(label=label):
+                unit.write_text(text)
+                self.command('commit', '-qam', 'malformed ' + label)
+                bad = self.command('rev-parse', 'HEAD').strip()
+                with self.assertRaisesRegex(ValueError, label.strip()):
+                    host.render_service(self.root, 'crq-tick.service', 'python', sha=bad)
+                self.command('checkout', '-q', '--detach', self.before)
+        self.assertEqual(unit.read_text(), original)
+
+    def test_artifact_identity_reuses_package_runner_and_refuses_mismatch(self):
+        sha = 'a' * 40
+        artifact = self._node_artifact(sha)
+        runtime = 'node:' + sha
+        package = host._package_runner()
+        identity = host.artifact_identity(artifact, runtime)
+        self.assertEqual(identity['source_sha'], sha)
+        self.assertEqual(identity['observed_content_sha256'],
+                         identity['declared_content_sha256'])
+        self.assertEqual(identity['verification'], 'whole-artifact-inventory-matched')
+        self.assertEqual(identity['authenticity'], 'not-established')
+        self.assertEqual(
+            identity['crq_js_sha256'],
+            package.sha256_file(artifact / 'dist/queue-runner/crq.js'))
+        before = {path: (path.is_file() and path.read_bytes())
+                  for path in artifact.rglob('*')}
+        host.artifact_identity(artifact, runtime)
+        self.assertEqual(before, {path: (path.is_file() and path.read_bytes())
+                                  for path in artifact.rglob('*')})
+        with self.assertRaisesRegex(ValueError, 'source SHA'):
+            host.artifact_identity(artifact, 'node:' + 'b' * 40)
+        with self.assertRaisesRegex(ValueError, 'manifest is unavailable'):
+            host.artifact_identity(self.base, runtime)
+        entry = artifact / 'dist/queue-runner/crq.js'
+        entry.write_bytes(b'tampered')
+        with self.assertRaisesRegex(ValueError, 'inventory'):
+            host.artifact_identity(artifact, runtime)
+        entry.write_bytes(b'runner')
+        (artifact / 'extra').write_bytes(b'x')
+        with self.assertRaisesRegex(ValueError, 'inventory'):
+            host.artifact_identity(artifact, runtime)
+        (artifact / 'extra').unlink()
+        original_mode = entry.stat().st_mode & 0o777
+        entry.chmod(0o600 if original_mode != 0o600 else 0o644)
+        with self.assertRaisesRegex(ValueError, 'inventory'):
+            host.artifact_identity(artifact, runtime)
+        entry.chmod(original_mode)
+        manifest_path = artifact / package.MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text())
+        manifest['content_sha256'] = '0' * 64
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, 'manifest is invalid'):
+            host.artifact_identity(artifact, runtime)
+        manifest_path.write_text('{')
+        with self.assertRaisesRegex(ValueError, 'manifest is invalid'):
+            host.artifact_identity(artifact, runtime)
+        other = self._node_artifact('c' * 40)
+        other_manifest = other / package.MANIFEST_NAME
+        manifest = json.loads(other_manifest.read_text())
+        manifest['provenance']['runtime']['node_abi'] = 'not-numeric'
+        other_manifest.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, 'manifest is invalid'):
+            host.artifact_identity(other, 'node:' + 'c' * 40)
+
+    def _rewrite_artifact_manifest(self, artifact):
+        package = host._package_runner()
+        files = package.inventory(artifact, exclude=(package.MANIFEST_NAME,))
+        manifest_path = artifact / package.MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text())
+        manifest['files'] = files
+        manifest['content_sha256'] = package.content_digest(files)
+        package.validate_manifest(manifest)
+        manifest_path.write_text(json.dumps(manifest))
+
+    def test_artifact_identity_returns_declared_capabilities(self):
+        sha = 'a' * 40
+        artifact = self._node_artifact(sha, capabilities=['watchdog'])
+        identity = host.artifact_identity(artifact, 'node:' + sha)
+        self.assertEqual(identity['capabilities'], ['watchdog'])
+
+    def test_artifact_identity_without_declaration_declares_no_commands(self):
+        sha = 'a' * 40
+        artifact = self._node_artifact(sha)
+        identity = host.artifact_identity(artifact, 'node:' + sha)
+        self.assertEqual(identity['capabilities'], [])
+
+    def test_artifact_identity_refuses_malformed_capability_declarations(self):
+        sha = 'a' * 40
+        artifact = self._node_artifact(sha)
+        path = artifact / 'dist/queue-runner/capabilities.json'
+        cases = [
+            ('{', 'invalid'),
+            ('[]', 'unexpected fields'),
+            ('{"schema_version": 2, "commands": []}', 'schema version'),
+            ('{"schema_version": 1, "commands": "watchdog"}',
+             'list of strings'),
+            ('{"schema_version": 1, "commands": ["bogus"]}',
+             'unknown unit command'),
+            ('{"schema_version": 1, "commands": ["watchdog", "watchdog"]}',
+             'duplicates'),
+            ('{"schema_version": 1, "commands": [], "extra": 1}',
+             'unexpected fields'),
+        ]
+        for payload, message in cases:
+            with self.subTest(payload=payload):
+                path.write_text(payload)
+                self._rewrite_artifact_manifest(artifact)
+                with self.assertRaisesRegex(ValueError, message):
+                    host.artifact_identity(artifact, 'node:' + sha)
+
+    def test_artifact_identity_refuses_tampered_capability_declaration(self):
+        sha = 'a' * 40
+        artifact = self._node_artifact(sha, capabilities=['watchdog'])
+        path = artifact / 'dist/queue-runner/capabilities.json'
+        path.write_text('{"schema_version": 1, "commands": ["slot"]}')
+        with self.assertRaisesRegex(ValueError, 'inventory'):
+            host.artifact_identity(artifact, 'node:' + sha)
+
+    def test_artifact_identity_refuses_symlink_capability_declaration(self):
+        sha = 'a' * 40
+        artifact = self._node_artifact(sha, capabilities=['watchdog'])
+        path = artifact / 'dist/queue-runner/capabilities.json'
+        path.unlink()
+        path.symlink_to('crq.js')
+        self._rewrite_artifact_manifest(artifact)
+        with self.assertRaisesRegex(ValueError, 'not a regular file'):
+            host.artifact_identity(artifact, 'node:' + sha)
+
+    def test_node_artifact_source_binds_to_pointer_not_template_commit(self):
+        sha = 'a' * 40
+        artifact = self._node_artifact(sha)
+        rendered = host.render_service(
+            self.root, 'crq-tick.service', 'node:' + sha,
+            sha=self.before, artifact_root=artifact)
+        self.assertEqual(rendered['source_sha'], self.before)
+        self.assertEqual(rendered['artifact']['source_sha'], sha)
+        self.assertNotEqual(rendered['source_sha'], sha)
+        with self.assertRaisesRegex(ValueError, 'source SHA'):
+            host.render_service(
+                self.root, 'crq-tick.service', 'node:' + 'b' * 40,
+                sha=self.before, artifact_root=artifact)
+
+    def test_render_service_and_artifact_identity_are_read_only(self):
+        sha = 'a' * 40
+        artifact = self._node_artifact(sha)
+        before = self.command('status', '--porcelain')
+        tree_before = {path: (path.is_file() and path.read_bytes())
+                       for path in artifact.rglob('*')}
+        host.render_service(self.root, 'crq-tick.service', 'python', sha=self.before)
+        host.render_service(
+            self.root, 'crq-tick.service', 'node:' + sha,
+            sha=self.before, artifact_root=artifact)
+        host.artifact_identity(artifact, 'node:' + sha)
+        self.assertEqual(self.command('status', '--porcelain'), before)
+        self.assertEqual(tree_before, {path: (path.is_file() and path.read_bytes())
+                                       for path in artifact.rglob('*')})
+
+    def test_render_service_rejects_invalid_runtime_before_git(self):
+        with mock.patch.object(host, 'git', side_effect=AssertionError('git called')):
+            for runtime in ('node:../bad', 'node:' + 'a' * 39, 'python3'):
+                with self.subTest(runtime=runtime):
+                    with self.assertRaisesRegex(ValueError, 'runtime must be'):
+                        host.render_service(self.root, 'crq-tick.service', runtime)
 
     @unittest.skipUnless(shutil.which('systemd-analyze'), 'systemd-analyze runs in Linux CI')
     def test_systemd_analyze_verify_detached_render(self):

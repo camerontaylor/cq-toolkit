@@ -594,7 +594,10 @@ describe('R3S anchor validator: changed-hunk overlap', () => {
     ).toContain('no-hunk-information');
   });
 
-  it('rejects a hunk list mixing valid ranges with a zero-length point', () => {
+  it('ignores a zero-length point beside a real hunk instead of rejecting the whole side', () => {
+    // A pure deletion on the head side contributes a [n, n) hunk. That point
+    // changes no line, but it must not veto an anchor that overlaps the real
+    // changed hunk on the same side.
     const mixed = new Map(context.blobs);
     mixed.set(MODIFIED, {
       base: modifiedBase,
@@ -606,9 +609,19 @@ describe('R3S anchor validator: changed-hunk overlap', () => {
       ],
     });
     const mixedContext: AnchorValidationContext = { blobs: mixed, renames: context.renames };
-    expect(invalidReasons(validateFindingEvidence(evidence(), mixedContext))).toContain(
-      'no-hunk-information',
+    valid(
+      validateFindingEvidence(
+        evidence({
+          primary: anchor({ start: 1, end: 1, quote: 'import { parse } from "./parser.js";' }),
+        }),
+        mixedContext,
+      ),
     );
+    // Filtering the empty hunk must not weaken the overlap rule: the untouched
+    // line 3 still rejects as outside the changed hunks.
+    expect(invalidReasons(validateFindingEvidence(evidence(), mixedContext))).toEqual([
+      'outside-changed-hunks',
+    ]);
   });
 
   it('accepts a primary anchor against non-empty positive hunk controls on both sides', () => {

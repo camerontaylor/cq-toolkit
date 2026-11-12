@@ -99,12 +99,15 @@ function validateAnchor(
   if (expected !== anchor.quote) return ['quote-mismatch'];
   if (requireHunkOverlap) {
     const hunks = anchor.side === 'base' ? blob.baseHunks : blob.headHunks;
-    // Every accepted hunk is a non-empty half-open range [start, end): a
-    // zero-length hunk names a pure insertion/deletion point and changes no
-    // line, so it cannot anchor evidence to changed content.
-    if (hunks.length === 0) return ['no-hunk-information'];
-    if (hunks.some((hunk) => hunk.start >= hunk.end)) return ['no-hunk-information'];
-    const overlaps = hunks.some((hunk) => anchor.start < hunk.end && hunk.start <= anchor.end);
+    // Only non-empty half-open ranges [start, end) can anchor evidence to
+    // changed content. A zero-length hunk names a pure insertion/deletion
+    // point on this side: git reports a side that loses lines as a range of
+    // length 0, so such a hunk is dropped rather than treated as a reason to
+    // reject every anchor on the side. The side is unusable only when no
+    // non-empty hunk remains.
+    const changed = hunks.filter((hunk) => hunk.start < hunk.end);
+    if (changed.length === 0) return ['no-hunk-information'];
+    const overlaps = changed.some((hunk) => anchor.start < hunk.end && hunk.start <= anchor.end);
     if (!overlaps) return ['outside-changed-hunks'];
   }
   return [];

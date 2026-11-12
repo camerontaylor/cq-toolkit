@@ -7,11 +7,12 @@
 /**
  * Names that carry credentials; the build needs none of them. A bare `_KEY`
  * suffix is not enough on its own (BUILD_KEY, CACHE_KEY are not credentials),
- * so each key class is named: API, private, encryption and signing keys all
- * hold a secret.
+ * so each key class is named: API, access, private, encryption and signing
+ * keys all hold a secret. Passwords are named `PASSWORD`, `PASSWD` or
+ * `PASSPHRASE` (SSH_PASSPHRASE, GPG_PASSPHRASE), so all three spellings match.
  */
 const CREDENTIAL_NAME =
-  /token|secret|password|passwd|credential|(?:api|private|encryption|signing)_?key|auth/i;
+  /token|secret|pass(?:word|wd|phrase)|credential|(?:api|access|private|encryption|signing)_?key|auth/i;
 
 /**
  * Connection-string names (DATABASE_URL, REDIS_URL, SENTRY_DSN, ...) usually

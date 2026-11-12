@@ -209,7 +209,12 @@ const isResponder = (authorLogin: string | null, responder: string | null): bool
   authorLogin !== null && authorLogin === responder;
 
 /** Trust is opt-in at the SDK boundary: legacy callers without a policy retain
- * the historical behaviour, while resolved v1.1 config fails closed. */
+ * the historical behaviour, while resolved v1.1 config fails closed. GitHub
+ * logins are case-insensitive, so the DENY side (the automation identity and
+ * `excludedLogins`) folds case on BOTH sides: a differently-cased exclusion
+ * must never fail open, or re-listing that account in `trustedAuthors` under
+ * another casing would restore its trust. The allow side stays an exact
+ * match — a casing mismatch there only fails closed. */
 const isTrusted = (
   authorLogin: string | null,
   authorType: string | null,
@@ -222,7 +227,11 @@ const isTrusted = (
   )
     return true;
   if (authorLogin === null) return false;
-  if (authorLogin === config.automationLogin || config.excludedLogins?.includes(authorLogin))
+  const login = authorLogin.toLowerCase();
+  if (
+    login === config.automationLogin?.toLowerCase() ||
+    config.excludedLogins?.some((excluded) => excluded.toLowerCase() === login)
+  )
     return false;
   return (config.trustedAuthors ?? []).some(
     (entry) => entry === authorLogin || entry === `${authorLogin}:${authorType ?? ''}`,
