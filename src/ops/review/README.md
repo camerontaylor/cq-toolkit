@@ -8,11 +8,42 @@ all outgoing objects. For commits already reachable on the authorized remote,
 `reachable=true` omits the snapshot; the server still verifies the Git objects.
 Staged, unstaged and untracked exclusions are reported without prompting.
 
+Managed `dev.review` and `review.run` also review dirty content through one
+queued snapshot of the final working tree, including staged-only and untracked
+files. They scan staged, unstaged and untracked content separately before capture.
+A private index produces a deterministic synthetic commit without changing the
+author's index, HEAD or refs. Full scope compares the pinned base to that commit;
+uncommitted scope compares the author's HEAD to it. Receipts use distinct
+`working-tree-full-v1` or `working-tree-uncommitted-v1` projections. The local
+cycle retains the real HEAD and dirty hash; a same-tree real PR commit does not
+inherit synthetic receipt coverage. If the final tree equals the scope base
+(including an uncommitted staged change fully reversed on disk), no reviewable
+final diff remains: no queue review starts and no vendor coverage is granted.
+The staged and unstaged scans still run.
+
+Uncommitted scope requires the real HEAD to be published on an origin branch
+and already fetched into the runner clone; unpublished HEAD refuses locally
+with publish-or-use-full guidance. After pushing, wait for the runner's next
+fetch tick before submission. The same fetch delay can affect reachable committed
+reviews. A refusal grants no coverage; retry the retained request after the fetch.
+Full dirty snapshots include the base..HEAD outgoing history and the overlay,
+subject to the snapshot object/content/wire limits even when HEAD is published.
+Sparse or skip-worktree checkouts must be materialized before dirty capture.
+
+`review.submit` accepts an explicit immutable `head` and `projection` for these
+snapshots; retries must preserve those selectors. Unpublished and synthetic
+snapshots require `CQ_AUTHOR_SNAPSHOT_SCANNER` on the author host (or an explicit
+absolute scanner). It must scan outgoing objects and commit metadata.
+
 Submission persists its request under `.cq/queue-evidence/requests/` before
 network discovery. If delivery is unknown, retry with the reported `requestId`:
 the saved inputs and original head are reused even if the checkout has moved.
 Use a fresh request ID for a new submission. The server assigns identity and
-generation; `repeat=true` requests another generation explicitly.
+generation; `repeat=true` requests another generation explicitly and requires the
+runner's `repeat-generations-v1` capability. Failed-attempt recovery commands pin
+the reviewed head and preserve reachable proof or an explicit scanner. Managed cycles
+hash the current repository, target, base and reviewed head into their request
+ID; changed working content starts a distinct request.
 
 `review.status` observes, `review.wait` polls at 15 seconds with jitter for ten
 minutes by default, and `review.cancel` withdraws request interest. Wait expiry
@@ -49,8 +80,11 @@ is at least once; messages include the stable terminal event ID for deduplicatio
 A replacement can race an in-flight message. The publisher service loads the
 optional Paseo environment file and runs independently of ledger rollout.
 
-The earlier `review.enqueue`, `review.queueStatus`, `review.drain` and
-`review.report` operations remain available. See the
+S2b-ii retired the public `review.enqueue`, `review.queueStatus`, `review.drain`
+and `review.report` operations. The queue-v1 SDK (`makeQueueOps`,
+`makeConfiguredQueueClient`, `makeQueueClient`) and the internal bulk-address
+enqueue path remain; `review.submit`/`status`/`wait`/`result`/`cancel`/`retry`
+and `review.queueHealth` ride the same client. See the
 [queue client protocol](../../../docs/queue-client.md) for queue-v1 and deferred
 pre-PR bindings.
 
@@ -102,11 +136,13 @@ execution head, even when admission waits across a sibling commit. The engine
 returns that identity to the loop, which verifies its ancestry before validating
 citations or stamping replies. Git operations use literal pathspecs and path lists
 use NUL delimiters, retaining pathspec-like names, Unicode, whitespace, newlines
-and quotes as literal filenames. Terminal cancellation settlement is the
-exception for the attempted file: it refuses a name containing a glob character
-(`*?[]{}`) instead of treating it literally. Foreign tracked names may contain
-glob characters because settlement only reads and hashes them, without using
-them as Git pathspecs. Parent cancellation reaches baseline, related and broader check
+and quotes as literal filenames. Terminal cancellation settlement treats those
+names literally too: the attempted file may contain glob characters, a tracked
+symlink (mode 120000) is verified by its link-target bytes — or by the
+checked-out file bytes when `core.symlinks=false` — a submodule pointer
+(mode 160000) is skipped, and a foreign tracked file may be hard linked,
+because settlement only reads and hashes foreign entries without using them as
+Git pathspecs. Parent cancellation reaches baseline, related and broader check
 subprocesses; the engine awaits child termination before candidate cleanup,
 restoration or releasing its serial validation boundary.
 

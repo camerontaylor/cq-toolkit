@@ -11,20 +11,28 @@
 // Callers keep their explicit-config overrides (`this.sessionsDir ??`,
 // factory `sessionsDirFor`); this helper is only the shared LAST resort.
 // `CQ_SESSIONS_DIR` is the environment escape hatch (ops can point every
-// lane at one place without touching config files); it is read at CALL
-// time, so tests can set it per invocation, and an empty/blank value is
+// lane at one place without touching config files). It is a REGISTERED CQ_*
+// key, so an entry/run snapshot wins when one is supplied (or when a run
+// context exists); otherwise the snapshot fallback is one fresh read at CALL
+// time, so tests can still set it per invocation. An empty/blank value is
 // ignored rather than honored (a blank path must never become the store).
+// `XDG_STATE_HOME` is FOREIGN, not a CQ_* key: it keeps its live process
+// semantics and is never snapshotted.
 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { currentCqEnv } from '../config/run-env.js';
+import type { CqEnv } from '../config/env.js';
 import { processEnv } from '../config/process-env.js';
 
 /**
  * The default sessions directory: durable, XDG-respecting, one copy.
+ * `cqEnv` is the caller's entry/run snapshot; absent, the enclosing run's
+ * snapshot applies, and outside a run one fresh read is the live fallback.
  */
-export function defaultSessionsDir(): string {
-  const override = processEnv()['CQ_SESSIONS_DIR'];
-  if (override !== undefined && override.trim() !== '') {
+export function defaultSessionsDir(cqEnv?: CqEnv): string {
+  const override = (cqEnv ?? currentCqEnv()).values['CQ_SESSIONS_DIR'];
+  if (typeof override === 'string' && override.trim() !== '') {
     return override.trim();
   }
   const stateHome = processEnv()['XDG_STATE_HOME'];

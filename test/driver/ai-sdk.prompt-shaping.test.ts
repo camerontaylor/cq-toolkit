@@ -2,7 +2,7 @@
 // "ai-sdk driver specifics (mock model)"): the system preamble and per-turn
 // wording (#483, #468), response_format vs prompted schemas, the repair's
 // retained tool evidence, and the parseReplyJson tool-call-markup contract.
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
@@ -224,7 +224,12 @@ describe('ai-sdk driver specifics (mock model)', () => {
     'repair retains tool evidence exactly once: %s (#483)',
     async (provider) => {
       const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-evidence-'));
-      await writeFile(join(scratchDir, 'evidence.txt'), 'observed evidence 483');
+      // The session binding file lives OUTSIDE the model-editable workspace
+      // (Annex A, issue #1197): sessions stay at the scratch root, the bound
+      // workspace is the child holding the model-visible fixture.
+      const workspace = join(scratchDir, 'workspace');
+      await mkdir(workspace);
+      await writeFile(join(workspace, 'evidence.txt'), 'observed evidence 483');
       let calls = 0;
       const mock = new MockLanguageModelV4({
         modelId: 'mock-1',
@@ -244,7 +249,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
         const result = await driver.run(
           invocation({
             modelSpec: { provider, model: 'mock-1' },
-            workspace: { path: scratchDir },
+            workspace: { path: workspace },
             toolPolicy: { mode: 'allowlist', allow: ['read'] },
             outputSchema: toOutputSchema('test/evidence/v1', z.object({ answer: z.string() })),
           }),
@@ -282,6 +287,11 @@ describe('ai-sdk driver specifics (mock model)', () => {
 
   test('forced final step keeps the request and adds the final-step turn (#468, #502)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-final-contract-'));
+    // The session binding file lives OUTSIDE the model-editable workspace
+    // (Annex A, issue #1197): sessions stay at the scratch root, the bound
+    // workspace is the child holding the model-visible fixture.
+    const workspace = join(scratchDir, 'workspace');
+    await mkdir(workspace);
     const hookKinds: string[] = [];
     let calls = 0;
     const mock = new MockLanguageModelV4({
@@ -303,7 +313,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       },
     });
     try {
-      await writeFile(join(scratchDir, 'evidence.txt'), 'safe tool output');
+      await writeFile(join(workspace, 'evidence.txt'), 'safe tool output');
       const driver = new AiSdkDriver({
         providers: { 'opencode-go': () => mock },
         sessionsDir: join(scratchDir, 'sessions'),
@@ -314,7 +324,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       const result = await driver.run(
         invocation({
           modelSpec: { provider: 'opencode-go', model: 'mock-1' },
-          workspace: { path: scratchDir },
+          workspace: { path: workspace },
           toolPolicy: { mode: 'allowlist', allow: ['read'] },
           outputSchema: toOutputSchema('test/final/v1', z.object({ answer: z.string() })),
         }),

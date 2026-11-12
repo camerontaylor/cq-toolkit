@@ -32,7 +32,10 @@ function runner(files: Record<string, string>) {
     repoRoot: '/repo',
     readFile: async (path) => {
       const text = files[path];
-      if (text === undefined) throw new Error('ENOENT');
+      if (text === undefined)
+        throw Object.assign(new Error(`ENOENT: no such file, open '${path}'`), {
+          code: 'ENOENT',
+        });
       return text;
     },
     drivers,
@@ -75,6 +78,25 @@ describe('makeAgentReviewRunner', () => {
     });
     expect(bad).toMatchObject({ status: 'needs-human' });
     expect((bad as { reason: string }).reason).toMatch(/^agent reviewer config: /);
+  });
+
+  it('names cq.json and the errno when the config read faults (never silence)', async () => {
+    const run = vi.fn(async () => ({ status: 'ok' as const, value: { findings: [] } }));
+    const review = makeAgentReviewRunner({
+      repoRoot: '/repo',
+      readFile: async (): Promise<string> => {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      },
+      drivers,
+      scanSecrets,
+      run: run as never,
+    });
+    const outcome = await review({ ...reviewInput, role: 'reviewer' });
+    expect(outcome.status).toBe('needs-human');
+    expect((outcome as { reason: string }).reason).toBe(
+      'agent reviewer: cq.json could not be read (EACCES) — permission denied',
+    );
+    expect(run).not.toHaveBeenCalled();
   });
 
   it('requires a reviewer role and a token budget', async () => {

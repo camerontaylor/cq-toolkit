@@ -11,6 +11,7 @@ import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import {
   conformanceHarnessConfig,
   bindGenerateTextCapture,
+  generateTextCapture,
   invocation,
   lastGenerateTextArgs,
   mockUsage,
@@ -456,6 +457,56 @@ describe('ai-sdk driver specifics (mock model)', () => {
       });
       const unknownResult = await unknown.run(invocation());
       expect(unknownResult.costUSD).toBeUndefined(); // derived-only: never fabricated
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('sessionsDir at or under the bound workspace is a pre-dispatch config throw writing no session file (issue #1197)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-sesscontain-'));
+    try {
+      const workspaceDir = join(scratchDir, 'workspace');
+      await mkdir(workspaceDir);
+      // A FRESH run with sessionsDir inside the workspace refuses before
+      // any session state exists: the provider never runs, no file lands.
+      const inside = join(workspaceDir, '.s');
+      const provider = vi.fn(() => modelFor({ kind: 'reply', text: 'must never run' }));
+      const driver = new AiSdkDriver({
+        providers: { mock: provider },
+        sessionsDir: inside,
+      });
+      const err = await thrownBy(driver.run(invocation({ workspace: { path: workspaceDir } })));
+      expect(err).toMatchObject({ name: 'DispatchError' });
+      expect(String((err as Error).message)).toContain('resolves inside the bound workspace');
+      expect(errorClassOf(err)).toBe('config');
+      // No model call was dispatched (the provider factory itself runs at
+      // model resolution — pre-existing dispatch order, before workspace
+      // binding too — but generateText never fired) and no file lands.
+      const generatedBefore = generateTextCapture.generateTextArgs.length;
+      await expect(driver.run(invocation({ workspace: { path: workspaceDir } }))).rejects.toThrow(
+        'resolves inside the bound workspace',
+      );
+      expect(generateTextCapture.generateTextArgs.length).toBe(generatedBefore);
+      await expect(readdir(inside)).rejects.toMatchObject({ code: 'ENOENT' });
+      // The DEFAULT dir is covered the same way: CQ_SESSIONS_DIR under the
+      // workspace refuses (XDG_STATE_HOME semantics untouched — blank
+      // CQ_SESSIONS_DIR still falls through to the live foreign read).
+      vi.stubEnv('CQ_SESSIONS_DIR', join(workspaceDir, '.s-default'));
+      try {
+        const defaulted = new AiSdkDriver({ providers: { mock: provider } });
+        const generatedBeforeDefault = generateTextCapture.generateTextArgs.length;
+        await expect(
+          defaulted.run(invocation({ workspace: { path: workspaceDir } })),
+        ).rejects.toMatchObject({ name: 'DispatchError' });
+        expect(generateTextCapture.generateTextArgs.length).toBe(generatedBeforeDefault);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+      // A RESUME through the same contained dir refuses too (no sidecar,
+      // no record read past the refusal).
+      await expect(
+        driver.run(invocation({ workspace: { path: workspaceDir }, sessionRef: 'ses-absent' })),
+      ).rejects.toThrow('resolves inside the bound workspace');
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

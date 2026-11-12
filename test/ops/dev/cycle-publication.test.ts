@@ -8,7 +8,7 @@ import { DEV_READINESS_GAPS_SECTION_MARKER } from '../../../src/ops/pr/open.js';
 import type { PrOpenInput } from '../../../src/ops/pr/open.js';
 import type { DevEffects } from '../../../src/ops/dev/effects.js';
 import type { WorkState } from '../../../src/ops/dev/internal/workState.js';
-import { dispositionRecord } from './fakes.js';
+import { dispositionRecord, stubScanner } from './fakes.js';
 import { makeTestRepo, repoEffects, seed, type TestRepo } from './repo.js';
 import {
   addressReport,
@@ -93,9 +93,10 @@ describe('dev.cycle', () => {
       address: roundCapAddress(state),
       open: ((input: PrOpenInput) => {
         opens.push(input);
-        return makePrOpen(effects(), gh)(input);
+        return makePrOpen(effects(), gh, stubScanner())(input);
       }) as never,
       gh,
+      publicationScanner: stubScanner(),
       git: async (args) =>
         args.includes('push')
           ? { code: 0, stdout: '', stderr: '' }
@@ -145,6 +146,7 @@ describe('dev.cycle', () => {
       address: roundCapAddressProductionShape(state),
       open: openFake(opens, 45, false),
       gh,
+      publicationScanner: stubScanner(),
       git: async (args) =>
         args.includes('push')
           ? { code: 0, stdout: '', stderr: '' }
@@ -190,6 +192,7 @@ describe('dev.cycle', () => {
         address: structuredStopAddress(state, stop, reason),
         open: openFake(opens),
         gh,
+        publicationScanner: stubScanner(),
         git: async (args) => {
           if (args.includes('push')) {
             pushCalls++;
@@ -234,6 +237,37 @@ describe('dev.cycle', () => {
     },
   );
 
+  test('a stopped-run draft whose findings section trips the denylist scan refuses the body edit', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const opens: PrOpenInput[] = [];
+    const { gh, bodies } = ghFake();
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      address: structuredStopAddress(
+        state,
+        'budget',
+        'review.address: token or wall budget exhausted; report: /tmp/r.json',
+      ),
+      open: openFake(opens),
+      gh,
+      // The round-cap findings compose scans under the author root's rules:
+      // a hit refuses the body edit while the draft itself stays open.
+      publicationScanner: stubScanner([{ component: 'pr-body', ruleId: 'author-secret' }]),
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(opens).toHaveLength(1);
+    expect(result).toMatchObject({
+      status: 'needs-human',
+      reason:
+        'dev.cycle (pr body): draft PR #42 is open but the findings section could not be composed — PR publication refused by denylist scan: author-secret at line 1',
+    });
+    expect(bodies).toEqual([]);
+  });
+
   test('a stopped-run draft whose findings section cannot be composed says the draft is open without it', async () => {
     const state = await seed(repo);
     await seedReadyLedger(state);
@@ -255,6 +289,7 @@ describe('dev.cycle', () => {
           throw new Error('body write refused');
         },
       },
+      publicationScanner: stubScanner(),
       git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
     });
     const result = await op({ repoRoot: repo.root });
@@ -334,6 +369,7 @@ describe('dev.cycle', () => {
       address: rereviewBlockedAddress(state),
       open: openFake(opens),
       gh,
+      publicationScanner: stubScanner(),
       git: async (args) => {
         if (args.includes('push')) pushCalls++;
         return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
@@ -398,6 +434,7 @@ describe('dev.cycle', () => {
       address: cleanAddress(state),
       open: openFake(opens, 44, false),
       gh,
+      publicationScanner: stubScanner(),
       git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
     });
     const result = await op({ repoRoot: repo.root });
@@ -421,5 +458,85 @@ describe('dev.cycle', () => {
     expect(bodies[0]).toContain('## Open findings after a clean address run (readiness gaps)');
     expect(bodies[0]).toContain('review.address finished clean');
     expect(bodies[0]).not.toContain('round cap');
+  });
+
+  // #1212/F1: the DEFAULT author publication leg binds the injected
+  // publication scanner end to end (real pr.open over the gh fake).
+  test('the default open leg publishes the DRAFT with a configured scanner', async () => {
+    const state = await seed(repo);
+    repo.git('push', '-q', 'origin', 'feature/x');
+    await seedReadyLedger(state);
+    await repoEffects(repo)
+      .openLedger(state.branch)
+      .mutate((ledger) => ({
+        ledger: {
+          version: ledger.version,
+          branch: ledger.branch,
+          records: [
+            ...ledger.records.map((record) =>
+              record.kind === 'cycle'
+                ? {
+                    ...record,
+                    findings: [
+                      ...record.findings,
+                      {
+                        id: 'c001-aaaaaaaa#f1',
+                        severity: 'major' as const,
+                        fileName: 'src/a.ts',
+                        excerpt: 'Replace BAD with GOOD',
+                      },
+                    ],
+                  }
+                : record,
+            ),
+          ],
+        },
+        value: undefined,
+      }));
+    const { gh, bodies } = ghFake();
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      address: roundCapAddress(state),
+      // No `open`: the default leg runs the real pr.open with the scanner.
+      publicationScanner: stubScanner(),
+      gh,
+      git: async (args) =>
+        args.includes('push')
+          ? { code: 0, stdout: '', stderr: '' }
+          : { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' },
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status !== 'needs-human') return;
+    expect(result.reason).toContain('NOT READY');
+    expect(result.reason).toContain('draft PR #43');
+    expect(result.reason).toContain('and the attempt log');
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toContain(DEV_READINESS_GAPS_SECTION_MARKER);
+    expect(bodies[0]).toContain(DEV_FINDINGS_SECTION_MARKER);
+  });
+
+  test('the default open leg refuses without a publication scanner', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const { gh, bodies } = ghFake();
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      address: roundCapAddress(state),
+      // No `open` and no scanner: the default leg fails closed.
+      gh,
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('dev.cycle (pr.open)');
+      expect(result.error).toContain('no PR payload denylist scanner is configured');
+    }
+    expect(bodies).toEqual([]);
   });
 });
