@@ -223,22 +223,27 @@ def invoke(config, role, job, wt, directory):
         if not isinstance(data, dict):
             raise ValueError('cq output must be an object')
     except ValueError:
-        return {'stop': 'error', 'changed': False, 'summary': 'invalid cq output', 'commits': []}
-    # The session link (item 2.3), written even on a non-ok verdict: the
-    # session exists. `review.fixItem` does not put the worker sessionId in
-    # its JSON value, so the job-local store is the source of truth: it holds
-    # one `<sessionId>.jsonl` per session this job's runner created. A
-    # value-level sessionId (if a later runner returns one) wins, and the
-    # current session is taken from `created` only: a deferred rung that
-    # retries in the same directory and then fails before creating a session
-    # must not claim an earlier run's session.
+        data = {}
+        invalid = True
+    else:
+        invalid = False
     result = data.get('value')
     if result is None:
         result = data.get('result')
     if result is None:
         result = {}
     if not isinstance(result, dict):
-        return {'stop': 'error', 'changed': False, 'summary': 'invalid cq output', 'commits': []}
+        invalid, result = True, {}
+    # The session link (item 2.3), written even on a non-ok verdict or
+    # unparseable output: the session exists. A cq process that crashes after
+    # creating a session usually yields non-JSON stdout, and the link is the
+    # only surviving evidence of it. `review.fixItem` does not put the worker
+    # sessionId in its JSON value, so the job-local store is the source of
+    # truth: it holds one `<sessionId>.jsonl` per session this job's runner
+    # created. A value-level sessionId (if a later runner returns one) wins,
+    # and the current session is taken from `created` only: a deferred rung
+    # that retries in the same directory and then fails before creating a
+    # session must not claim an earlier run's session.
     from crq_repair import atomic as _atomic
     try:  # best-effort: the session link never outranks the verdict
         stored = sorted(f.stem for f in sessions_dir.glob('*.jsonl')) if sessions_dir.is_dir() else []
@@ -253,6 +258,8 @@ def invoke(config, role, job, wt, directory):
         })
     except OSError:
         pass
+    if invalid:  # the link above is written first, so the evidence survives
+        return {'stop': 'error', 'changed': False, 'summary': 'invalid cq output', 'commits': []}
     if p.returncode or data.get('status') != 'ok':
         signals = data.get('providerSignals') or {}
         error = str(data.get('error') or '')
