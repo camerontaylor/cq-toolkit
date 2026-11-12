@@ -299,8 +299,37 @@ def build(repo, sha, staging, output, node='node', pnpm='pnpm',
     return report
 
 
+def _machine_error(kind, subcommand, message, exit_code):
+    """One JSON error artifact on stdout; stderr stays empty (doctrine I1)."""
+    artifact = {'error': {'kind': kind, 'subcommand': subcommand,
+                          'message': message, 'exitCode': exit_code}}
+    sys.stdout.write(json.dumps(artifact, sort_keys=True, indent=2) + '\n')
+    raise SystemExit(exit_code)
+
+
+class _MachineArgumentParser(argparse.ArgumentParser):
+    """Argument parser whose usage errors honor machine mode (doctrine I1).
+
+    `--json` is detected in argv before parsing; in machine mode an argparse
+    usage error writes one JSON error artifact to stdout, keeps stderr empty
+    and exits 2 instead of narrating on stderr.
+    """
+
+    def __init__(self, *args, machine=False, subcommand=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._machine = machine
+        self._subcommand = subcommand
+
+    def error(self, message):
+        if self._machine:
+            _machine_error('usage', self._subcommand, message, 2)
+        super().error(message)
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    machine = '--json' in sys.argv[1:]
+    parser = _MachineArgumentParser(description=__doc__, machine=machine,
+                                    subcommand='build-runner')
     parser.add_argument('--repo', required=True, type=Path)
     parser.add_argument('--sha', required=True)
     parser.add_argument('--staging', required=True, type=Path)
@@ -315,12 +344,14 @@ def main():
         report = build(args.repo, args.sha, args.staging, args.output,
                        node=args.node, pnpm=args.pnpm,
                        keep_staging=args.keep_staging)
+        data = json.dumps(report, sort_keys=True, indent=2) + '\n'
+        if args.report is not None:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(data)
     except (BuildError, OSError, ValueError) as exc:
+        if machine:
+            _machine_error('thrown', 'build-runner', str(exc), 1)
         parser.exit(1, 'build-runner: ' + str(exc) + '\n')
-    data = json.dumps(report, sort_keys=True, indent=2) + '\n'
-    if args.report is not None:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(data)
     if args.json:
         sys.stdout.write(data)
     else:
