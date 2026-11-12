@@ -86,7 +86,7 @@ class ScriptedGh {
       config.get('merged') === true,
       optionalString(config.get('head')) ?? 'a'.repeat(40),
       optionalString(config.get('base')) ?? 'b'.repeat(40),
-      optionalString(config.get('reviews')) ?? '',
+      optionalString(config.get('reviews')) ?? '[]',
       config.has('compare') ? scriptStep(config.get('compare') as JsonValue) : defaultCompare(),
       post,
       config.has('script') ? asArrayValue(config.get('script')).map(scriptStep) : [],
@@ -111,7 +111,11 @@ class ScriptedGh {
     }
     const target = argv.find((argument) => argument.startsWith('repos/')) ?? '';
     if (target.endsWith('/reviews?per_page=100')) {
-      return ghProcess(0, applyReviewsJq(argv, this.reviews), '');
+      const modelled = applyReviewsJq(argv, this.reviews);
+      if (typeof modelled === 'object') {
+        return modelled as GhResult;
+      }
+      return ghProcess(0, modelled as string, '');
     }
     if (target.includes('/compare/')) {
       return stepResult(argv, this.compare);
@@ -131,7 +135,10 @@ class ScriptedGh {
  * drops either predicate changes the argv, so the fake returns unfiltered
  * rows and the recorded calls/delivery result expose the difference.
  */
-function applyReviewsJq(argv: readonly string[], raw: string): string {
+function applyReviewsJq(
+  argv: readonly string[],
+  raw: string,
+): GhResult | string {
   let jq = '';
   for (const [index, argument] of argv.entries()) {
     if (argument === '--jq' && index + 1 < argv.length) {
@@ -140,21 +147,34 @@ function applyReviewsJq(argv: readonly string[], raw: string): string {
     }
   }
   const loginMatch = jq.match(/select\(\.user\.login == "((?:[^"\\]|\\.)*)"/);
-  if (loginMatch === null) return raw;
-  const login = JSON.parse(`"${loginMatch[1] as string}"`) as string;
   const literalMatch = jq.match(/(startswith|contains)\("((?:[^"\\]|\\.)*)"\)/);
-  const predicate = literalMatch?.[1] ?? '';
-  const wanted = literalMatch ? (JSON.parse(`"${literalMatch[2] as string}"`) as string) : '';
+  if (loginMatch === null || literalMatch === null) {
+    // Unmodelled selector: refuse rather than fake agreement.
+    return { returncode: 3, stdout: '', stderr: 'jq: unmodelled selector in fake' };
+  }
+  const login = JSON.parse(`"${loginMatch[1] as string}"`) as string;
+  const predicate = literalMatch[1];
+  const wanted = JSON.parse(`"${literalMatch[2] as string}"`) as string;
+  let page: unknown;
+  try {
+    page = JSON.parse(raw);
+  } catch {
+    return { returncode: 2, stdout: '', stderr: 'jq: error (at <stdin>:0): parse error' };
+  }
+  if (!Array.isArray(page)) {
+    return { returncode: 2, stdout: '', stderr: 'jq: error (at <stdin>:0): Cannot iterate over null' };
+  }
   const outLines: string[] = [];
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue;
-    let row: unknown;
-    try {
-      row = JSON.parse(line);
-    } catch {
-      continue;
+  for (const row of page) {
+    if (row === null || typeof row !== 'object' || Array.isArray(row)) {
+      // Real jq exits 5 on the first non-object row after emitting earlier
+      // matches; delivery aborts on the returncode either way.
+      return {
+        returncode: 5,
+        stdout: outLines.map((line) => `${line}\n`).join(''),
+        stderr: 'jq: error (at <stdin>:0): Cannot index string with string ("user")',
+      };
     }
-    if (row === null || typeof row !== 'object' || Array.isArray(row)) continue;
     const record = row as unknown as Record<string, JsonValue>;
     const user = record['user'];
     const loginValue =

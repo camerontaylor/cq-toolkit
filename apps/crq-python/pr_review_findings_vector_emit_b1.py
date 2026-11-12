@@ -163,7 +163,7 @@ class EndpointGh:
     """Answers by endpoint shape; a script step overrides the next call."""
 
     def __init__(self, state="open", merged=False, head=HEAD, base=BASE,
-                 reviews="", compare=ok(json.dumps(
+                 reviews="[]", compare=ok(json.dumps(
                      [{"filename": FILE_NAME, "status": "modified", "patch": PATCH}])),
                  post=None, script=None):
         self.calls: List[Dict[str, Any]] = []
@@ -196,8 +196,10 @@ class EndpointGh:
         target = next(a for a in argv[2:] if a.startswith("repos/"))
         if target.endswith("/reviews?per_page=100"):
             raw = self.reviews["stdout"] if isinstance(self.reviews, dict) else self.reviews
-            stdout = _apply_reviews_jq(argv, raw)
-            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+            modelled = _apply_reviews_jq(argv, raw)
+            if isinstance(modelled, SimpleNamespace):
+                return modelled
+            return SimpleNamespace(returncode=0, stdout=modelled, stderr="")
         if "/compare/" in target:
             step = self.compare
             if isinstance(step, dict):
@@ -218,35 +220,46 @@ class EndpointGh:
 
 
 
-def _apply_reviews_jq(argv: List[str], raw: str) -> str:
-    """Apply the oracle's review-list jq filter: rows whose `user.login`
-    equals the selector's login and whose body satisfies the marker
-    predicate (`startswith` or `contains` with the quoted literal). A
-    regression that drops either predicate from the caller changes the argv,
-    and the fake then returns unfiltered rows, which the recorded calls and
-    the delivery result expose."""
+def _apply_reviews_jq(argv, raw):
+    """Model real `gh api --jq` over the recorded raw API page.
+
+    Real gh hands the JSON response (an array page) to jq and emits one
+    compact projected object per matching row. Modelled here:
+
+    - non-array or unparsable input -> jq parse failure (returncode 2),
+    - a non-object row -> jq's "Cannot index string with string" runtime
+      error (returncode 5) after emitting any earlier matches,
+    - rows are filtered by the selector's `user.login` and marker predicate
+      (`startswith`/`contains`) and projected to `{id, url: .html_url}`.
+
+    A caller regression that drops a predicate changes the argv, so the
+    fake returns unfiltered rows and the delivery result exposes it.
+    """
     jq = ""
     for index, arg in enumerate(argv):
         if arg == "--jq" and index + 1 < len(argv):
             jq = argv[index + 1]
             break
     login_match = re.search(r'select\(\.user\.login == "((?:[^"\\]|\\.)*)"', jq)
-    if login_match is None:
-        return raw
-    login = json.loads('"' + login_match.group(1) + '"')
     literal_match = re.search(r'(startswith|contains)\("((?:[^"\\]|\\.)*)"\)', jq)
-    predicate = literal_match.group(1) if literal_match else ""
-    wanted = json.loads('"' + literal_match.group(2) + '"') if literal_match else ""
+    def _fail(returncode, detail):
+        return SimpleNamespace(returncode=returncode, stdout="", stderr=detail)
+    if login_match is None or literal_match is None:
+        # Unmodelled selector: refuse rather than fake agreement.
+        return _fail(3, "jq: unmodelled selector in fake")
+    login = json.loads('"' + login_match.group(1) + '"')
+    predicate = literal_match.group(1)
+    wanted = json.loads('"' + literal_match.group(2) + '"')
+    try:
+        page = json.loads(raw)
+    except ValueError:
+        return _fail(2, "jq: error (at <stdin>:0): parse error")
+    if not isinstance(page, list):
+        return _fail(2, 'jq: error (at <stdin>:0): Cannot iterate over null')
     out_lines = []
-    for line in raw.splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
+    for row in page:
         if not isinstance(row, dict):
-            continue
+            return _fail(5, 'jq: error (at <stdin>:0): Cannot index string with string ("user")')
         if (row.get("user") or {}).get("login") != login:
             continue
         body = row.get("body") or ""
@@ -255,7 +268,7 @@ def _apply_reviews_jq(argv: List[str], raw: str) -> str:
         if predicate == "contains" and wanted not in body:
             continue
         out_lines.append(json.dumps({"id": row.get("id"), "url": row.get("html_url")}))
-    return "".join(line + "\n" for line in out_lines)
+    return SimpleNamespace(returncode=0, stdout="".join(line + "\n" for line in out_lines), stderr="")
 
 def timeout_step(argv: List[str]) -> Dict[str, Any]:
     detail = str(subprocess.TimeoutExpired(list(argv), pr_review_findings.GH_TIMEOUT))
@@ -606,6 +619,18 @@ def build_review_cases() -> List[Dict[str, Any]]:
     add("clip-tab-fence-not-opened", meta_full,
         [dict(severity="none", path=None, start=None, end=None, title="",
               text="prose\n\t```python\n@user\n" + "x" * 12000)], hunks)
+    add("clip-tab-prefixed-closer-closes", meta_full,
+        [dict(severity="none", path=None, start=None, end=None, title="",
+              text="```py\n@user\n\t```\n" + "x" * 12000)], hunks)
+    add("clip-four-backtick-closed", meta_full,
+        [dict(severity="none", path=None, start=None, end=None, title="",
+              text="````py\n@user\n" + "x" * 12000)], hunks)
+    add("clip-five-tilde-closed", meta_full,
+        [dict(severity="none", path=None, start=None, end=None, title="",
+              text="~~~~~md\n@user\n" + "x" * 12000)], hunks)
+    add("body-cap-fence-closed", meta_full,
+        [dict(severity="none", path=None, start=None, end=None, title="",
+              text="```py\n" + "x" * 12000) for _ in range(6)], hunks)
     add("body-truncated-large", meta_full,
         [dict(severity="none", path=None, start=None, end=None, title="t", text="q" * 30000),
          dict(severity="none", path=None, start=None, end=None, title="t", text="q" * 30000)],
@@ -641,8 +666,8 @@ def deliver_cases() -> List[Dict[str, Any]]:
     marker_body = pr_review_findings.marker(RUN_ID) + " body"
 
     def reviews_page(*rows: Dict[str, Any]) -> str:
-        """gh --paginate with a `.[]` jq emits one JSON object per line."""
-        return "".join(json.dumps(row) + "\n" for row in rows)
+        """The raw API page real gh feeds to `--jq`: one JSON array."""
+        return json.dumps(list(rows))
 
     cases: List[Dict[str, Any]] = []
 
@@ -694,7 +719,7 @@ def deliver_cases() -> List[Dict[str, Any]]:
     add("existing-by-marker", REPO, 77, META, nd,
         gh=EndpointGh(reviews=reviews_page(
             {"id": 7, "user": {"login": "crq-host"}, "body": marker_body,
-             "url": "https://github.com/x/r/pull/77"})))
+             "html_url": "https://github.com/x/r/pull/77"})))
     add("existing-marker-other-author-ignored", REPO, 77, META, nd,
         gh=EndpointGh(reviews=reviews_page(
             {"id": 8, "user": {"login": "someone-else"}, "body": marker_body,
@@ -817,7 +842,7 @@ def deliver_cases() -> List[Dict[str, Any]]:
         gh=EndpointGh(reviews=reviews_page(
             {"id": 5, "user": {"login": "crq-host"}, "body": "other"},
             {"id": 7, "user": {"login": "crq-host"}, "body": marker_body,
-             "url": "u"})))
+             "html_url": "https://github.com/x/r/pull/77#review-7"})))
     return cases
 
 

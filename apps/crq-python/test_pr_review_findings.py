@@ -360,6 +360,49 @@ elif '--paginate' not in args:
             prf.deliver(REPO, 7, {**META, "run_id": "bad run -->"}, write_ndjson(self.td.name, [ANCHORED]), gh=gh)
         self.assertEqual(gh.calls, [])
 
+    def test_clip_closes_severed_fence_with_full_opener_run(self):
+        """R4 F1: the closure is the full opener run, not three characters."""
+        for opener in ("```", "````", "`````", "~~~", "~~~~~"):
+            with self.subTest(opener=opener):
+                cut = prf._clip(opener + "py\n@user\n" + "x" * 12000, 200)
+                body, sep, trailer = cut.partition("\n\n… (truncated")
+                self.assertNotEqual(sep, "", "truncation trailer must be present")
+                self.assertTrue(body.endswith("\n" + opener),
+                                f"{opener}: cut must close with the full run")
+                self.assertTrue(trailer.startswith("; full text in the crq run artifacts)"))
+
+    def test_clip_tab_prefixed_closer_closes_but_tab_opener_does_not_open(self):
+        """Closers follow the neutralise rule (line.strip()); openers are
+        spaces-only, so a tab-indented delimiter never opens a fence."""
+        closed = prf._clip("```py\n@user\n\t```\n" + "x" * 12000, 200)
+        self.assertFalse(closed.split("\n\n… (truncated")[0].endswith("\n```"))
+        opened = prf._clip("text\n\t```py\n" + "x" * 12000, 200)
+        self.assertFalse(opened.split("\n\n… (truncated")[0].endswith("\n```"))
+
+    def test_body_cap_closes_severed_fence_within_budget(self):
+        """R4 F2: the MAX_BODY cut closes a severed fence, keeps the final
+        body at MAX_BODY units, and preserves the identity marker."""
+        findings = [{"severity": "none", "path": None, "start": None, "end": None,
+                     "title": "", "text": "```py\n" + "x" * 12000} for _ in range(6)]
+        review = prf.build_review({"head": HEAD, "base": BASE, "run_id": "r-ok"}, findings, None)
+        body = review["body"]
+        self.assertEqual(len(body), prf.MAX_BODY)
+        self.assertTrue(body.startswith(prf.marker("r-ok")))
+        self.assertIn("… (truncated; full text in the crq run artifacts)", body)
+        self.assertIsNone(prf._fence_state(body.split("\n")),
+                          "fence must be closed at the end of the capped body")
+
+    def test_body_cap_no_fence_keeps_previous_shape(self):
+        """Without an open fence the cap keeps the historical 60000+trailer
+        shape and no closure bytes appear."""
+        findings = [{"severity": "none", "path": None, "start": None, "end": None,
+                     "title": "", "text": "y" * 12000} for _ in range(6)]
+        review = prf.build_review({"head": HEAD, "base": BASE, "run_id": "r-ok"}, findings, None)
+        body = review["body"]
+        self.assertGreater(len(body), prf.MAX_BODY)
+        self.assertTrue(body.startswith(prf.marker("r-ok")))
+        self.assertTrue(body.endswith("… (truncated; full text in the crq run artifacts)\n"))
+
 
 class CrqIntegrationTest(unittest.TestCase):
     def harvest(self, item, events, findings):

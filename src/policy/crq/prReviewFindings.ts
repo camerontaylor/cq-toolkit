@@ -805,11 +805,24 @@ function clip(text: string, limit: number): string {
   let cut = pythonSlice(text, 0, limit);
   cut = pythonRstrip(cut);
   // A clip can sever a code fence; close it so the trailer renders as
-  // prose (same policy in the Python oracle).
+  // prose (same policy in the Python oracle). The closure is the full
+  // opener run, matching what neutralisation appends, so a 4-backtick or
+  // 5-tilde fence is genuinely closed.
+  const fence = fenceState(cut.split('\n'));
+  if (fence !== null) cut += `\n${fence}`;
+  return `${cut}\n\n… (truncated; full text in the crq run artifacts)`;
+}
+
+/**
+ * The open fence run after scanning lines with the module's own rules.
+ * Openers are matchFenceOpen over the RAW line (spaces-only indent, so a
+ * tab-indented delimiter never opens). Closers use the neutralise rule:
+ * pythonStrip, so a tab-prefixed closer of the same character with at
+ * least the opener's length does close, exactly as in neutraliseMentions.
+ */
+function fenceState(lines: readonly string[]): string | null {
   let fence: string | null = null;
-  for (const line of cut.split('\n')) {
-    // Same opener rule as neutralisation: matchFenceOpen over the RAW line
-    // (spaces-only indent), so a tab-indented delimiter is not a fence.
+  for (const line of lines) {
     const opened = matchFenceOpen(line);
     if (fence === null) {
       if (opened !== null) fence = opened;
@@ -827,8 +840,7 @@ function clip(text: string, limit: number): string {
       fence = null;
     }
   }
-  if (fence !== null) cut += `\n${fence[0]?.repeat(3) ?? ''}`;
-  return `${cut}\n\n… (truncated; full text in the crq run artifacts)`;
+  return fence;
 }
 
 /** Python `str.rstrip()` (default whitespace) over a JavaScript string. */
@@ -947,10 +959,26 @@ ${text}`,
   }
   let body = `${rstripTrailingNewlines(lines.join('\n'))}\n`;
   if (pythonLength(body) > MAX_BODY) {
-    body = `${pythonSlice(body, 0, MAX_BODY)}
-
-… (truncated; full text in the crq run artifacts)
-`;
+    const trailer = '\n\n… (truncated; full text in the crq run artifacts)\n';
+    let prefix = pythonSlice(body, 0, MAX_BODY);
+    const fence = fenceState(prefix.split('\n'));
+    if (fence !== null) {
+      // Reserve the closure and trailer from the budget so the final body
+      // keeps its MAX_BODY size with the fence genuinely closed; identity
+      // and summary lines sit at the top and survive any tail cut.
+      // Shortening can change which fence is open, so rescan.
+      let closure = `\n${fence}`;
+      prefix = pythonSlice(body, 0, MAX_BODY - pythonLength(closure) - pythonLength(trailer));
+      const rescanned = fenceState(prefix.split('\n'));
+      if (rescanned !== null) {
+        closure = `\n${rescanned}`;
+      } else {
+        closure = '';
+      }
+      body = `${prefix}${closure}${trailer}`;
+    } else {
+      body = `${prefix}${trailer}`;
+    }
   }
   const review: Array<readonly [string, JsonValue]> = [
     ['event', 'COMMENT'],

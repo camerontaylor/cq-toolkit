@@ -200,16 +200,16 @@ def _lines(finding: Dict[str, Any]) -> str:
     return f"lines {finding['start']}-{finding['end']}"
 
 
-def _clip(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    cut = text[:limit].rstrip()
-    # A clip can sever a code fence; close it so the trailer renders as
-    # prose (same policy in the TypeScript port).
+def _fence_state(lines):
+    """The open fence run after scanning lines with the module's own rules.
+
+    Openers are FENCE_OPEN over the RAW line (spaces-only indent, so a
+    tab-indented delimiter never opens). Closers use the neutralise rule:
+    `line.strip()`, so a tab-prefixed closer of the same character with at
+    least the opener's length does close, exactly as in `_neutralise`.
+    """
     fence = None
-    for line in cut.split("\n"):
-        # Same opener rule as neutralisation: FENCE_OPEN over the RAW line
-        # (spaces-only indent), so a tab-indented delimiter is not a fence.
+    for line in lines:
         opened = FENCE_OPEN.match(line)
         if fence is None:
             if opened:
@@ -219,8 +219,20 @@ def _clip(text: str, limit: int) -> str:
         indent = len(line) - len(line.lstrip(" "))
         if indent <= 3 and stripped and set(stripped) == {fence[0]} and len(stripped) >= len(fence):
             fence = None
+    return fence
+
+
+def _clip(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rstrip()
+    # A clip can sever a code fence; close it so the trailer renders as
+    # prose (same policy in the TypeScript port). The closure is the full
+    # opener run, matching what _neutralise appends, so a 4-backtick or
+    # 5-tilde fence is genuinely closed.
+    fence = _fence_state(cut.split("\n"))
     if fence is not None:
-        cut += "\n" + fence[0] * 3
+        cut += "\n" + fence
     return cut + "\n\n… (truncated; full text in the crq run artifacts)"
 
 
@@ -262,7 +274,24 @@ def build_review(meta: Dict[str, Any], findings: List[Dict[str, Any]],
             lines += [f"{heading}{' (' + where + ')' if where else ''}", "", _clip(text, MAX_COMMENT), ""]
     body = "\n".join(lines).rstrip() + "\n"
     if len(body) > MAX_BODY:
-        body = body[:MAX_BODY] + "\n\n… (truncated; full text in the crq run artifacts)\n"
+        trailer = "\n\n… (truncated; full text in the crq run artifacts)\n"
+        prefix = body[:MAX_BODY]
+        fence = _fence_state(prefix.split("\n"))
+        if fence is not None:
+            # Reserve the closure and trailer from the budget so the final
+            # body keeps its MAX_BODY size with the fence genuinely closed;
+            # identity/summary lines sit at the top and survive any tail cut.
+            # Shortening can change which fence is open, so rescan.
+            closure = "\n" + fence
+            prefix = body[:MAX_BODY - len(closure) - len(trailer)]
+            fence = _fence_state(prefix.split("\n"))
+            if fence is not None:
+                closure = "\n" + fence
+            else:
+                closure = ""
+            body = prefix + closure + trailer
+        else:
+            body = prefix + trailer
     review: Dict[str, Any] = {"event": "COMMENT", "body": body, "comments": comments}
     if hunks is not None:
         review["commit_id"] = head
