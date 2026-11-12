@@ -111,9 +111,7 @@ test('malformed injected policies are rejected instead of silently disabling res
     { rescueBase: Infinity },
     { rescuePerPackageCap: -1 },
   ])
-    expect(() => nextEscalation(state, { ...policy, ...malformed }, request)).toThrow(
-      'escalation',
-    );
+    expect(() => nextEscalation(state, { ...policy, ...malformed }, request)).toThrow('escalation');
   expect(() => rescueAllocation(state, { ...policy, rescuePerFixed: 0 })).toThrow('rescuePerFixed');
 });
 test('occurrence fingerprints preserve multiplicity and distinguish signatures rather than counting task rows', () => {
