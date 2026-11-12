@@ -66,6 +66,8 @@ import { makePrOpen } from '../pr/open.js';
 import type { ReviewAddressInput, ReviewAddressReport } from '../review/address.js';
 import type { AddressFix } from '../review/addressWorker.js';
 import { makeReviewAddress } from '../review/address.js';
+import type { ExpectationChange } from '../gates/expectationChanges.js';
+import type { ValidationVerdict } from '../fix/validate.js';
 import type { FindingsRecord } from '../review/findings.js';
 import type { ReviewRunInput } from '../review/run.js';
 import { makeReviewRun } from '../review/run.js';
@@ -222,6 +224,31 @@ function mdLine(text: string): string {
 }
 
 /**
+ * Every distinct expectation change the address run reported (#1198), in
+ * first-seen order: attempt rows carry per-invocation verdicts and fixes the
+ * final ones; the same rewrite seen on both sides dedups to one line. This
+ * reads the validation evidence verbatim — the reviewer-facing projection of
+ * the oracle-dispute observation, never an adjudication of it.
+ */
+function expectationChangesOfReport(report: ReviewAddressReport): ExpectationChange[] {
+  const seen = new Set<string>();
+  const changes: ExpectationChange[] = [];
+  const collect = (verdicts: readonly ValidationVerdict[] | undefined): void => {
+    for (const verdict of verdicts ?? []) {
+      for (const change of verdict.expectationChanges ?? []) {
+        const key = `${change.file}\u0000${String(change.line)}\u0000${change.before}\u0000${change.after}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        changes.push(change);
+      }
+    }
+  };
+  for (const attempt of report.attempts) collect(attempt.validation);
+  for (const fix of report.fixes) collect(fix.validation);
+  return changes;
+}
+
+/**
  * The not-ready draft's public record: the open findings (severity and file,
  * one line each) and every attempt logged against them, markdown-safe. The
  * attempts ARE the spec's "attempt logs" — finding id, tier/invocation,
@@ -291,6 +318,20 @@ export function renderFindingsSection(
     lines.push(
       `  - \`${mdLine(attempt.finding)}\` ${attempt.tier}/${attempt.invocation} #${String(attempt.attempt)} — ${mdLine(attempt.reason)} (${mdLine(attempt.model.model)}${attempt.usage === undefined ? '' : `, tokens ${String(attempt.usage.input + attempt.usage.output)}`}, ${String(attempt.wallMs)}ms)`,
     );
+  }
+  // The oracle-dispute record (#1198; contract item 10, Giles Q32): every
+  // test expectation an attempt rewrote in place, with the before/after
+  // pair, so the independent reviewer can apply Q32 to the exact change.
+  // Evidence only — the listing never adjudicates the dispute. No attempt
+  // carried an observation means NO section, never an empty one.
+  const expectationChanges = expectationChangesOfReport(report);
+  if (expectationChanges.length > 0) {
+    lines.push('- Expectation changes:');
+    for (const change of expectationChanges) {
+      lines.push(
+        `  - \`${mdLine(change.file)}:${String(change.line)}\` — ${mdLine(change.before)} → ${mdLine(change.after)}`,
+      );
+    }
   }
   lines.push('<!-- /cq:dev-findings -->');
   return lines.join('\n');
