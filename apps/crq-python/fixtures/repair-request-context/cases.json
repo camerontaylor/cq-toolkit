@@ -1,0 +1,716 @@
+{
+  "schema": "cq.crq-repair-request-context-vector/v1",
+  "source": [
+    "apps/crq-python/crq_repair.py:process_item (pinned worktree path)",
+    "apps/crq-python/crq_repair.py:process (rung-0 role selection)",
+    "apps/crq-python/crq_repair.py:_dispatch (driver gate)",
+    "apps/crq-python/crq_repair/drivers/cq.py:invoke (repo/worktree/driver/budget)",
+    "apps/crq-python/crq_repair/drivers/cq.py:budget"
+  ],
+  "context_fields": [
+    "repo",
+    "worktree",
+    "driver",
+    "budget"
+  ],
+  "cases": [
+    {
+      "name": "canonical-fixer",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": {
+        "repo": "example/repo",
+        "worktree": {
+          "path": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+          "branch": "detached"
+        },
+        "driver": {
+          "provider": "zai",
+          "model": "glm-5.3-flash"
+        },
+        "budget": {
+          "maxOutputTokens": 500000,
+          "maxContextTokens": 200000,
+          "wallClockMs": 1200000
+        }
+      },
+      "context_json": "{\n  \"repo\": \"example/repo\",\n  \"worktree\": {\n    \"path\": \"/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n    \"branch\": \"detached\"\n  },\n  \"driver\": {\n    \"provider\": \"zai\",\n    \"model\": \"glm-5.3-flash\"\n  },\n  \"budget\": {\n    \"maxOutputTokens\": 500000,\n    \"maxContextTokens\": 200000,\n    \"wallClockMs\": 1200000\n  }\n}\n",
+      "error": null
+    },
+    {
+      "name": "escalation-role",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer_escalation",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": {
+        "repo": "example/repo",
+        "worktree": {
+          "path": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+          "branch": "detached"
+        },
+        "driver": {
+          "provider": "zai",
+          "model": "glm-5.3"
+        },
+        "budget": {
+          "maxOutputTokens": 500000,
+          "maxContextTokens": 200000,
+          "wallClockMs": 1200000
+        }
+      },
+      "context_json": "{\n  \"repo\": \"example/repo\",\n  \"worktree\": {\n    \"path\": \"/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n    \"branch\": \"detached\"\n  },\n  \"driver\": {\n    \"provider\": \"zai\",\n    \"model\": \"glm-5.3\"\n  },\n  \"budget\": {\n    \"maxOutputTokens\": 500000,\n    \"maxContextTokens\": 200000,\n    \"wallClockMs\": 1200000\n  }\n}\n",
+      "error": null
+    },
+    {
+      "name": "role-budget-overrides",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\",\n        \"budget\": {\n          \"max_output_tokens\": 12345,\n          \"max_context_tokens\": 6789\n        }\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": {
+        "repo": "example/repo",
+        "worktree": {
+          "path": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+          "branch": "detached"
+        },
+        "driver": {
+          "provider": "zai",
+          "model": "glm-5.3-flash"
+        },
+        "budget": {
+          "maxOutputTokens": 12345,
+          "maxContextTokens": 6789,
+          "wallClockMs": 1200000
+        }
+      },
+      "context_json": "{\n  \"repo\": \"example/repo\",\n  \"worktree\": {\n    \"path\": \"/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n    \"branch\": \"detached\"\n  },\n  \"driver\": {\n    \"provider\": \"zai\",\n    \"model\": \"glm-5.3-flash\"\n  },\n  \"budget\": {\n    \"maxOutputTokens\": 12345,\n    \"maxContextTokens\": 6789,\n    \"wallClockMs\": 1200000\n  }\n}\n",
+      "error": null
+    },
+    {
+      "name": "role-budget-partial",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\",\n        \"budget\": {\n          \"max_output_tokens\": 4321\n        }\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": {
+        "repo": "example/repo",
+        "worktree": {
+          "path": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+          "branch": "detached"
+        },
+        "driver": {
+          "provider": "zai",
+          "model": "glm-5.3-flash"
+        },
+        "budget": {
+          "maxOutputTokens": 4321,
+          "maxContextTokens": 200000,
+          "wallClockMs": 1200000
+        }
+      },
+      "context_json": "{\n  \"repo\": \"example/repo\",\n  \"worktree\": {\n    \"path\": \"/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n    \"branch\": \"detached\"\n  },\n  \"driver\": {\n    \"provider\": \"zai\",\n    \"model\": \"glm-5.3-flash\"\n  },\n  \"budget\": {\n    \"maxOutputTokens\": 4321,\n    \"maxContextTokens\": 200000,\n    \"wallClockMs\": 1200000\n  }\n}\n",
+      "error": null
+    },
+    {
+      "name": "base-token-defaults",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": {
+        "repo": "example/repo",
+        "worktree": {
+          "path": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+          "branch": "detached"
+        },
+        "driver": {
+          "provider": "zai",
+          "model": "glm-5.3-flash"
+        },
+        "budget": {
+          "maxOutputTokens": 500000,
+          "maxContextTokens": 200000,
+          "wallClockMs": 1200000
+        }
+      },
+      "context_json": "{\n  \"repo\": \"example/repo\",\n  \"worktree\": {\n    \"path\": \"/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n    \"branch\": \"detached\"\n  },\n  \"driver\": {\n    \"provider\": \"zai\",\n    \"model\": \"glm-5.3-flash\"\n  },\n  \"budget\": {\n    \"maxOutputTokens\": 500000,\n    \"maxContextTokens\": 200000,\n    \"wallClockMs\": 1200000\n  }\n}\n",
+      "error": null
+    },
+    {
+      "name": "fractional-wall-clock",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 0.123456789,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": {
+        "repo": "example/repo",
+        "worktree": {
+          "path": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+          "branch": "detached"
+        },
+        "driver": {
+          "provider": "zai",
+          "model": "glm-5.3-flash"
+        },
+        "budget": {
+          "maxOutputTokens": 500000,
+          "maxContextTokens": 200000,
+          "wallClockMs": 7407
+        }
+      },
+      "context_json": "{\n  \"repo\": \"example/repo\",\n  \"worktree\": {\n    \"path\": \"/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n    \"branch\": \"detached\"\n  },\n  \"driver\": {\n    \"provider\": \"zai\",\n    \"model\": \"glm-5.3-flash\"\n  },\n  \"budget\": {\n    \"maxOutputTokens\": 500000,\n    \"maxContextTokens\": 200000,\n    \"wallClockMs\": 7407\n  }\n}\n",
+      "error": null
+    },
+    {
+      "name": "fractional-wall-clock-rounding",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 1.9999,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": {
+        "repo": "example/repo",
+        "worktree": {
+          "path": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+          "branch": "detached"
+        },
+        "driver": {
+          "provider": "zai",
+          "model": "glm-5.3-flash"
+        },
+        "budget": {
+          "maxOutputTokens": 500000,
+          "maxContextTokens": 200000,
+          "wallClockMs": 119994
+        }
+      },
+      "context_json": "{\n  \"repo\": \"example/repo\",\n  \"worktree\": {\n    \"path\": \"/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n    \"branch\": \"detached\"\n  },\n  \"driver\": {\n    \"provider\": \"zai\",\n    \"model\": \"glm-5.3-flash\"\n  },\n  \"budget\": {\n    \"maxOutputTokens\": 500000,\n    \"maxContextTokens\": 200000,\n    \"wallClockMs\": 119994\n  }\n}\n",
+      "error": null
+    },
+    {
+      "name": "model-with-extra-slash",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"openrouter/nous/hermes-4\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": {
+        "repo": "example/repo",
+        "worktree": {
+          "path": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+          "branch": "detached"
+        },
+        "driver": {
+          "provider": "openrouter",
+          "model": "nous/hermes-4"
+        },
+        "budget": {
+          "maxOutputTokens": 500000,
+          "maxContextTokens": 200000,
+          "wallClockMs": 1200000
+        }
+      },
+      "context_json": "{\n  \"repo\": \"example/repo\",\n  \"worktree\": {\n    \"path\": \"/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n    \"branch\": \"detached\"\n  },\n  \"driver\": {\n    \"provider\": \"openrouter\",\n    \"model\": \"nous/hermes-4\"\n  },\n  \"budget\": {\n    \"maxOutputTokens\": 500000,\n    \"maxContextTokens\": 200000,\n    \"wallClockMs\": 1200000\n  }\n}\n",
+      "error": null
+    },
+    {
+      "name": "item-and-job-punctuation",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr 7 (merged)",
+        "job": "crq-backfill-ab/c"
+      },
+      "worktree": "/work/crq-repair-pr 7 (merged)-crq-backfill-ab/c",
+      "context": {
+        "repo": "example/repo",
+        "worktree": {
+          "path": "/work/crq-repair-pr 7 (merged)-crq-backfill-ab/c",
+          "branch": "detached"
+        },
+        "driver": {
+          "provider": "zai",
+          "model": "glm-5.3-flash"
+        },
+        "budget": {
+          "maxOutputTokens": 500000,
+          "maxContextTokens": 200000,
+          "wallClockMs": 1200000
+        }
+      },
+      "context_json": "{\n  \"repo\": \"example/repo\",\n  \"worktree\": {\n    \"path\": \"/work/crq-repair-pr 7 (merged)-crq-backfill-ab/c\",\n    \"branch\": \"detached\"\n  },\n  \"driver\": {\n    \"provider\": \"zai\",\n    \"model\": \"glm-5.3-flash\"\n  },\n  \"budget\": {\n    \"maxOutputTokens\": 500000,\n    \"maxContextTokens\": 200000,\n    \"wallClockMs\": 1200000\n  }\n}\n",
+      "error": null
+    },
+    {
+      "name": "worktree-root-trailing-slash",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work/trees/\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/trees/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": {
+        "repo": "example/repo",
+        "worktree": {
+          "path": "/work/trees/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+          "branch": "detached"
+        },
+        "driver": {
+          "provider": "zai",
+          "model": "glm-5.3-flash"
+        },
+        "budget": {
+          "maxOutputTokens": 500000,
+          "maxContextTokens": 200000,
+          "wallClockMs": 1200000
+        }
+      },
+      "context_json": "{\n  \"repo\": \"example/repo\",\n  \"worktree\": {\n    \"path\": \"/work/trees/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n    \"branch\": \"detached\"\n  },\n  \"driver\": {\n    \"provider\": \"zai\",\n    \"model\": \"glm-5.3-flash\"\n  },\n  \"budget\": {\n    \"maxOutputTokens\": 500000,\n    \"maxContextTokens\": 200000,\n    \"wallClockMs\": 1200000\n  }\n}\n",
+      "error": null
+    },
+    {
+      "name": "worktree-root-single-slash",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": {
+        "repo": "example/repo",
+        "worktree": {
+          "path": "/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+          "branch": "detached"
+        },
+        "driver": {
+          "provider": "zai",
+          "model": "glm-5.3-flash"
+        },
+        "budget": {
+          "maxOutputTokens": 500000,
+          "maxContextTokens": 200000,
+          "wallClockMs": 1200000
+        }
+      },
+      "context_json": "{\n  \"repo\": \"example/repo\",\n  \"worktree\": {\n    \"path\": \"/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n    \"branch\": \"detached\"\n  },\n  \"driver\": {\n    \"provider\": \"zai\",\n    \"model\": \"glm-5.3-flash\"\n  },\n  \"budget\": {\n    \"maxOutputTokens\": 500000,\n    \"maxContextTokens\": 200000,\n    \"wallClockMs\": 1200000\n  }\n}\n",
+      "error": null
+    },
+    {
+      "name": "worktree-root-double-slash",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"//\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "//crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": {
+        "repo": "example/repo",
+        "worktree": {
+          "path": "//crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+          "branch": "detached"
+        },
+        "driver": {
+          "provider": "zai",
+          "model": "glm-5.3-flash"
+        },
+        "budget": {
+          "maxOutputTokens": 500000,
+          "maxContextTokens": 200000,
+          "wallClockMs": 1200000
+        }
+      },
+      "context_json": "{\n  \"repo\": \"example/repo\",\n  \"worktree\": {\n    \"path\": \"//crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1\",\n    \"branch\": \"detached\"\n  },\n  \"driver\": {\n    \"provider\": \"zai\",\n    \"model\": \"glm-5.3-flash\"\n  },\n  \"budget\": {\n    \"maxOutputTokens\": 500000,\n    \"maxContextTokens\": 200000,\n    \"wallClockMs\": 1200000\n  }\n}\n",
+      "error": null
+    },
+    {
+      "name": "unicode-item-and-job",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr-\u96ea",
+        "job": "crq-\ud83d\ude00-F1"
+      },
+      "worktree": "/work/crq-repair-pr-\u96ea-crq-\ud83d\ude00-F1",
+      "context": {
+        "repo": "example/repo",
+        "worktree": {
+          "path": "/work/crq-repair-pr-\u96ea-crq-\ud83d\ude00-F1",
+          "branch": "detached"
+        },
+        "driver": {
+          "provider": "zai",
+          "model": "glm-5.3-flash"
+        },
+        "budget": {
+          "maxOutputTokens": 500000,
+          "maxContextTokens": 200000,
+          "wallClockMs": 1200000
+        }
+      },
+      "context_json": "{\n  \"repo\": \"example/repo\",\n  \"worktree\": {\n    \"path\": \"/work/crq-repair-pr-\\u96ea-crq-\\ud83d\\ude00-F1\",\n    \"branch\": \"detached\"\n  },\n  \"driver\": {\n    \"provider\": \"zai\",\n    \"model\": \"glm-5.3-flash\"\n  },\n  \"budget\": {\n    \"maxOutputTokens\": 500000,\n    \"maxContextTokens\": 200000,\n    \"wallClockMs\": 1200000\n  }\n}\n",
+      "error": null
+    },
+    {
+      "name": "missing-repair-block",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"worktree_root\": \"/work\"\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": null,
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "worktree",
+        "type": "KeyError",
+        "key": "repair"
+      }
+    },
+    {
+      "name": "missing-roles",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": null\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "role",
+        "type": "TypeError"
+      }
+    },
+    {
+      "name": "missing-roles-key",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "role",
+        "type": "KeyError",
+        "key": "roles"
+      }
+    },
+    {
+      "name": "role-not-object",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": 5,\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "dispatch",
+        "type": "TypeError"
+      }
+    },
+    {
+      "name": "unknown-role",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer_escalation",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "role",
+        "type": "KeyError",
+        "key": "fixer_escalation"
+      }
+    },
+    {
+      "name": "role-missing-model",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "dispatch",
+        "type": "KeyError",
+        "key": "model"
+      }
+    },
+    {
+      "name": "role-missing-driver",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "dispatch",
+        "type": "KeyError",
+        "key": "driver"
+      }
+    },
+    {
+      "name": "model-not-string",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": null\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "dispatch",
+        "type": "AttributeError",
+        "attribute": "split"
+      }
+    },
+    {
+      "name": "model-without-separator",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "dispatch",
+        "type": "ValueError"
+      }
+    },
+    {
+      "name": "non-cq-fixer-driver",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"paseo\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "dispatch",
+        "type": "ValueError"
+      }
+    },
+    {
+      "name": "missing-repo",
+      "config_text": "{\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "dispatch",
+        "type": "KeyError",
+        "key": "repo"
+      }
+    },
+    {
+      "name": "missing-budget",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": null,\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "dispatch",
+        "type": "AttributeError",
+        "attribute": "get"
+      }
+    },
+    {
+      "name": "missing-budget-key",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "dispatch",
+        "type": "KeyError",
+        "key": "budget"
+      }
+    },
+    {
+      "name": "missing-wall-clock",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"max_tokens\": 400000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "dispatch",
+        "type": "KeyError",
+        "key": "wall_clock_min"
+      }
+    },
+    {
+      "name": "non-numeric-wall-clock",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": null,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "dispatch",
+        "type": "TypeError"
+      }
+    },
+    {
+      "name": "budget-not-object",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": [],\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "dispatch",
+        "type": "AttributeError",
+        "attribute": "get"
+      }
+    },
+    {
+      "name": "role-budget-not-object",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\",\n        \"budget\": \"large\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": "/work/crq-repair-pr1-merged-crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1",
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "dispatch",
+        "type": "AttributeError",
+        "attribute": "get"
+      }
+    },
+    {
+      "name": "missing-worktree-root",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": null,
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "worktree",
+        "type": "KeyError",
+        "key": "worktree_root"
+      }
+    },
+    {
+      "name": "worktree-root-not-string",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": null,\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": "crq-revalidated-cb466c2a4e9f4881d7b6c47c-F1"
+      },
+      "worktree": null,
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "worktree",
+        "type": "TypeError"
+      }
+    },
+    {
+      "name": "job-id-not-string",
+      "config_text": "{\n  \"repo\": \"example/repo\",\n  \"clone\": \"/clone\",\n  \"worktree_root\": \"/work\",\n  \"repair\": {\n    \"cq_bin\": \"/unused/cli.js\",\n    \"budget\": {\n      \"wall_clock_min\": 20,\n      \"max_tokens\": 400000,\n      \"max_output_tokens\": 500000,\n      \"max_context_tokens\": 200000\n    },\n    \"roles\": {\n      \"fixer\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"fixer_escalation\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      },\n      \"judge\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3-flash\"\n      },\n      \"judge_critical\": {\n        \"driver\": \"cq\",\n        \"model\": \"zai/glm-5.3\"\n      }\n    }\n  }\n}\n",
+      "role": "fixer",
+      "pinned": {
+        "item": "pr1-merged",
+        "job": null
+      },
+      "worktree": null,
+      "context": null,
+      "context_json": null,
+      "error": {
+        "stage": "worktree",
+        "type": "AttributeError",
+        "attribute": "rsplit"
+      }
+    }
+  ]
+}
