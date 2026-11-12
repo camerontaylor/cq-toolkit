@@ -2703,7 +2703,14 @@ def rank(item: Dict[str, Any]) -> int:
     if item["kind"] == "delta" and item.get("followup") != "merged":
         return 1
     if item["kind"] == local_review_runtime.KIND:
-        if item.get("generation", 1) == 1 and item.get("repeat_requested") is not True:
+        # First review unless generation, explicit repeat, or a verified/observed
+        # ancestral predecessor in the same task/branch classifies it a repeat
+        # (S3a; branch/task continuity without ancestry never counts).
+        if (
+            item.get("generation", 1) == 1
+            and item.get("repeat_requested") is not True
+            and item.get("ancestry_repeat") is not True
+        ):
             return 0
         created = parse_utc(item.get("created_at"))
         aged = created is not None and (now() - created).total_seconds() >= CONFIG.get("local_review_aging_minutes", 60) * 60

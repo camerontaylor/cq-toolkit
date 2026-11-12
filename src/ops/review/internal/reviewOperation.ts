@@ -10,6 +10,19 @@ const Base64Schema = z.string().refine((value) => {
   if (value[end - 1] === '=') end--;
   return !/[^A-Za-z0-9+/]/.test(value.slice(0, end));
 }, 'invalid base64');
+const RequestIdSchema = z
+  .string()
+  .min(1)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/);
+const SlotSchema = z.string().regex(new RegExp('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'));
+const CommitSchema = z.string().regex(new RegExp('^[0-9a-f]{40}$'));
+const DigestSchema = z.string().regex(new RegExp('^[0-9a-f]{64}$'));
+const ObservedSchema = z
+  .object({
+    ancestor: z.boolean(),
+    commits_ahead: z.number().int().min(0).nullable().optional(),
+  })
+  .strict();
 export const IdentitySchema = z
   .object({
     v: z.literal(1),
@@ -53,6 +66,90 @@ const NotifyStateSchema = z
     reason: z.string().min(1).optional(),
   })
   .strict();
+const HistoryCueSchema = z
+  .object({
+    v: z.literal(1),
+    digest: DigestSchema,
+    status: z.enum(['ok', 'degraded']),
+    cue: z.string().min(1).optional(),
+    reason: z.string().min(1).optional(),
+  })
+  .strict();
+const HistoryEntryDeltaSchema = z
+  .object({
+    method: z.literal('tree'),
+    files: z.number().int().min(0).nullable(),
+    insertions: z.number().int().min(0).nullable(),
+    deletions: z.number().int().min(0).nullable(),
+    binary_files: z.number().int().min(0).nullable(),
+    partial: z.boolean(),
+  })
+  .strict();
+const HistoryDeltaSchema = HistoryEntryDeltaSchema.extend({
+  commits_ahead: z.number().int().min(0).nullable(),
+  ancestry: z.enum(['server', 'client']).nullable(),
+}).strict();
+const HistorySummarySchema = z
+  .object({
+    requests: z.number().int().min(0),
+    invocations: z.number().int().min(0),
+    completed: z.number().int().min(0),
+    failed: z.number().int().min(0),
+  })
+  .strict();
+const HistoryPredecessorSchema = z
+  .object({
+    request_id: RequestIdSchema.nullable(),
+    item: z.string().min(1),
+    generation: z.number().int().min(1),
+    state: z.string().min(1),
+    created_at: z.string().nullable(),
+    head_commit: CommitSchema,
+    head_tree: CommitSchema,
+    same_task: z.boolean(),
+    same_branch: z.boolean(),
+    relationship: z.enum(['ancestral', 'possible', 'unrelated']),
+    ancestry: z.enum(['server', 'client']).nullable(),
+    commits_ahead: z.number().int().min(0).nullable(),
+  })
+  .strict();
+const HistoryEntrySchema = z
+  .object({
+    item: z.string().min(1),
+    request_id: RequestIdSchema.nullable(),
+    generation: z.number().int().min(1),
+    state: z.string().min(1),
+    created_at: z.string().nullable(),
+    head_commit: CommitSchema,
+    head_tree: CommitSchema,
+    task: z.string().nullable(),
+    branch: z.string().nullable(),
+    same_task: z.boolean(),
+    same_branch: z.boolean(),
+    relationship: z.enum(['ancestral', 'possible', 'unrelated']),
+    ancestry: z.enum(['server', 'client']).nullable(),
+    commits_ahead: z.number().int().min(0).nullable(),
+    delta: HistoryEntryDeltaSchema.nullable(),
+  })
+  .strict();
+export const HistorySchema = z
+  .object({
+    v: z.literal(1),
+    status: z.enum(['ok', 'degraded']),
+    reason: z.string().min(1).optional(),
+    scope: z.enum(['task', 'branch', 'none']),
+    relation: z.enum(['none', 'ancestral', 'possible']),
+    repeat: z.boolean(),
+    predecessor: HistoryPredecessorSchema.nullable(),
+    delta: HistoryDeltaSchema.nullable(),
+    summary: HistorySummarySchema.nullable(),
+    cue: z.string().nullable(),
+    entries: z.array(HistoryEntrySchema).max(50),
+    cursor: z.number().int().min(0),
+    next_cursor: z.number().int().min(0).nullable(),
+    digest: DigestSchema,
+  })
+  .strict();
 export const RequestSchema = z
   .object({
     v: z.literal(1),
@@ -67,6 +164,10 @@ export const RequestSchema = z
       .min(1)
       .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/)
       .optional(),
+    task: z.string().min(1).optional(),
+    branch: z.string().min(1).optional(),
+    predecessor: RequestIdSchema.optional(),
+    observed: ObservedSchema.optional(),
     notify: NotifyDestinationSchema.optional(),
   })
   .strict();
@@ -126,6 +227,10 @@ export const WireSchema = z.union([
         .min(1)
         .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/)
         .optional(),
+      task: z.string().min(1).optional(),
+      branch: z.string().min(1).optional(),
+      predecessor: RequestIdSchema.optional(),
+      observed: ObservedSchema.optional(),
     })
     .strict(),
   z
@@ -159,6 +264,25 @@ export const WireSchema = z.union([
         .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/),
     })
     .strict(),
+  z
+    .object({
+      v: z.literal(1),
+      op: z.literal('review-history'),
+      request_id: RequestIdSchema.optional(),
+      repo: SlotSchema.optional(),
+      target: z.string().min(1).optional(),
+      base_commit: CommitSchema.optional(),
+      base_tree: CommitSchema.optional(),
+      head_commit: CommitSchema.optional(),
+      head_tree: CommitSchema.optional(),
+      task: z.string().min(1).optional(),
+      branch: z.string().min(1).optional(),
+      predecessor: RequestIdSchema.optional(),
+      observed: ObservedSchema.optional(),
+      limit: z.number().int().min(1),
+      cursor: z.number().int().min(0),
+    })
+    .strict(),
 ]);
 export const ResponseSchema = z.union([
   z
@@ -178,17 +302,32 @@ export const ResponseSchema = z.union([
       receipt_id: z.string().regex(new RegExp('^[0-9a-f]{64}$')).optional(),
       next_action: z.enum(['resubmit']).optional(),
       reason: z.string().min(1).optional(),
+      history: HistoryCueSchema.optional(),
     })
     .strict(),
+  HistorySchema,
   z
     .object({
       v: z.literal(1),
       command: z.literal('review-v1'),
       operations: z.array(
-        z.enum(['capabilities', 'submit', 'status', 'result', 'cancel', 'notify-update']),
+        z.enum([
+          'capabilities',
+          'submit',
+          'status',
+          'result',
+          'cancel',
+          'notify-update',
+          'review-history',
+        ]),
       ),
       features: z.array(
-        z.enum(['original-commit-snapshot-v1', 'chunked-result-v1', 'repeat-generations-v1']),
+        z.enum([
+          'original-commit-snapshot-v1',
+          'chunked-result-v1',
+          'repeat-generations-v1',
+          'review-history-v1',
+        ]),
       ),
       limits: z
         .object({
@@ -302,6 +441,7 @@ export const ReviewOperationSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('request'), value: RequestSchema }).strict(),
   z.object({ type: z.literal('wire'), value: WireSchema }).strict(),
   z.object({ type: z.literal('response'), value: ResponseSchema }).strict(),
+  z.object({ type: z.literal('history'), value: HistorySchema }).strict(),
   z.object({ type: z.literal('receipt'), value: ReceiptSchema }).strict(),
   z.object({ type: z.literal('outbox'), value: OutboxSchema }).strict(),
   z.object({ type: z.literal('snapshot'), value: SnapshotSchema }).strict(),
@@ -366,6 +506,29 @@ export const SubmitInputSchema = z
       .min(1)
       .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/)
       .optional(),
+    task: z.string().min(1).optional(),
+    branch: z.string().min(1).optional(),
+    predecessor: z
+      .string()
+      .min(1)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/)
+      .optional(),
+    observed: ObservedSchema.optional(),
     waitMs: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+export const HistoryInputSchema = z
+  .object({
+    cwd: z.string().default('.'),
+    repo: SlotSchema,
+    target: z.string().min(1),
+    requestId: RequestIdSchema.optional(),
+    base: z.string().min(1).optional(),
+    head: CommitSchema.optional(),
+    task: z.string().min(1).optional(),
+    branch: z.string().min(1).optional(),
+    predecessor: RequestIdSchema.optional(),
+    limit: z.number().int().min(1).max(50).default(20),
+    cursor: z.number().int().min(0).default(0),
   })
   .strict();
