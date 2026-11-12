@@ -264,18 +264,20 @@ def _apply_reviews_jq(argv, raw):
         try:
             page = json.loads(line)
         except ValueError:
-            return _fail(2, f"jq: parse error: Invalid literal at line {line_index}",
+            # Real jq 1.8.2: parse errors exit 5 and report the 1-based input
+            # line (which equals the document line for line-per-page input).
+            return _fail(5, f"jq: parse error: Invalid literal at line {line_index}",
                          keep="".join(l + "\n" for l in out_lines))
         if not isinstance(page, list):
-            return _fail(2,
-                         f"jq: error (at <stdin>:{line_index - 1}): Cannot iterate over null",
+            return _fail(5,
+                         f"jq: error (at <stdin>:{line_index}): Cannot iterate over null",
                          keep="".join(l + "\n" for l in out_lines))
         for row in page:
             if not isinstance(row, dict):
                 noun = row_type[type(row)]
                 return _fail(5,
                              'jq: error (at <stdin>:%d): Cannot index %s with string ("user")'
-                             % (line_index - 1, noun),
+                             % (line_index, noun),
                              keep="".join(l + "\n" for l in out_lines))
             if (row.get("user") or {}).get("login") != login:
                 continue
@@ -656,6 +658,8 @@ def build_review_cases() -> List[Dict[str, Any]]:
            dict(severity="none", path=None, start=None, end=None, title="",
                 text="~" * 5600 + "\n" + "~" * 5600 + "\n```python\n" + "z" * 200)],
         None)
+    add("body-cap-degenerate-trailing-spaces", dict(META, summary="prose   \n" + "~" * 60000),
+        [], None)
     add("body-truncated-large", meta_full,
         [dict(severity="none", path=None, start=None, end=None, title="t", text="q" * 30000),
          dict(severity="none", path=None, start=None, end=None, title="t", text="q" * 30000)],
@@ -867,6 +871,11 @@ def deliver_cases() -> List[Dict[str, Any]]:
     add("reviews-page-two-row-error", REPO, 77, META, nd,
         gh=EndpointGh(reviews=
             json.dumps([{"id": 1, "user": {"login": "crq-host"}, "body": marker_body}]) + "\n"
+            + json.dumps([["row"]]) + "\n"))
+    add("reviews-page-three-row-error", REPO, 77, META, nd,
+        gh=EndpointGh(reviews=
+            json.dumps([{"id": 1, "user": {"login": "crq-host"}, "body": marker_body}]) + "\n"
+            + json.dumps([{"id": 2, "user": {"login": "crq-host"}, "body": marker_body}]) + "\n"
             + json.dumps([["row"]]) + "\n"))
     add("reviews-row-id-float", REPO, 77, META, nd,
         gh=EndpointGh(reviews=reviews_page(

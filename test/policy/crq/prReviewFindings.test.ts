@@ -175,17 +175,19 @@ function applyReviewsJq(argv: readonly string[], raw: string): GhResult | string
     try {
       page = JSON.parse(pageLine);
     } catch {
+      // Real jq 1.8.2: parse errors exit 5 and report the 1-based input
+      // line (which equals the document line for line-per-page input).
       return {
-        returncode: processCode(2),
+        returncode: processCode(5),
         stdout: keep(),
         stderr: `jq: parse error: Invalid literal at line ${pageIndex + 1}`,
       };
     }
     if (!Array.isArray(page)) {
       return {
-        returncode: processCode(2),
+        returncode: processCode(5),
         stdout: keep(),
-        stderr: `jq: error (at <stdin>:${pageIndex}): Cannot iterate over null`,
+        stderr: `jq: error (at <stdin>:${pageIndex + 1}): Cannot iterate over null`,
       };
     }
     for (const row of page) {
@@ -195,7 +197,7 @@ function applyReviewsJq(argv: readonly string[], raw: string): GhResult | string
         return {
           returncode: processCode(5),
           stdout: keep(),
-          stderr: `jq: error (at <stdin>:${pageIndex}): Cannot index ${nounOf(row)} with string ("user")`,
+          stderr: `jq: error (at <stdin>:${pageIndex + 1}): Cannot index ${nounOf(row)} with string ("user")`,
         };
       }
       const record = row as unknown as Record<string, JsonValue>;

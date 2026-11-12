@@ -890,9 +890,9 @@ function bodyCap(body: string, limit: number): string {
     if (matchFenceOpen(line) !== null) {
       const prefix = pythonSlice(body, 0, offset);
       if (prefix.length > 0) {
-        return `${pythonRstrip(prefix)}${trailer}`;
+        return `${pythonRstripNewlines(prefix)}${trailer}`;
       }
-      return pythonStrip(trailer);
+      return pythonLstripNewlines(trailer);
     }
     offset += [...line].length + 1;
   }
@@ -912,6 +912,25 @@ function pythonRstrip(text: string): string {
     end -= 1;
   }
   return characters.slice(0, end).join('');
+}
+
+/** Python `str.rstrip("\\n")`: newlines only, other trailing whitespace kept. */
+function pythonRstripNewlines(text: string): string {
+  const characters = [...text];
+  let end = characters.length;
+  while (end > 0 && characters[end - 1] === '\n') {
+    end -= 1;
+  }
+  return characters.slice(0, end).join('');
+}
+
+/** Python `str.lstrip("\\n")`: leading newlines only. */
+function pythonLstripNewlines(text: string): string {
+  let start = 0;
+  while (start < text.length && text[start] === '\n') {
+    start += 1;
+  }
+  return text.slice(start);
 }
 
 /** Python `"\n".join(lines).rstrip()` before the final newline. */
