@@ -121,6 +121,22 @@ class DeliveryTests(unittest.TestCase):
             notify.drain(self.c, self.now + timedelta(days=n))
         self.assertEqual(self.q["review_requests"]["r1"]["notify_status"]["state"], "error")
 
+    def test_repeated_destination_keeps_sent_rows_and_rearms_retryable_rows(self):
+        self.ok = True
+        notify.drain(self.c, self.now)
+        self.assertEqual(len(self.sent), 1)
+        notify.update(self.q, "r1", DEST, CONFIG)
+        self.assertEqual(self.q["review_requests"]["r1"]["notify_status"]["state"], "sent")
+        self.assertEqual(notify.drain(self.c, self.now + timedelta(minutes=1)), 0)
+        self.assertEqual(len(self.sent), 1)
+        self.q["review_notify_outbox"] = {k: dict(v, state="error")
+                                          for k, v in self.q["review_notify_outbox"].items()}
+        notify.update(self.q, "r1", DEST, CONFIG)
+        row = next(iter(self.q["review_notify_outbox"].values()))
+        self.assertEqual(row["state"], "pending")
+        notify.drain(self.c, self.now + timedelta(minutes=2))
+        self.assertEqual(len(self.sent), 2)
+
     def test_replace_withdraw_and_bound(self):
         replacement = {**DEST, "paseo_host": None}
         notify.update(self.q, "r1", replacement, CONFIG)
