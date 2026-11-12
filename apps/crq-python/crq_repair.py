@@ -787,7 +787,7 @@ def process_item(config, jobs):
             last_run = job['run']
         job['repair_base'] = base
         wt = Path(config['worktree_root']) / ('crq-repair-' + item + '-' + job['job'])
-        if not wt.exists():
+        if pending(job['job']) and not wt.exists():
             p = command(['git', 'worktree', 'add', '--detach', str(wt), base], cwd=config['clone'])
             if p.returncode:
                 raise RuntimeError('repair worktree creation failed')
