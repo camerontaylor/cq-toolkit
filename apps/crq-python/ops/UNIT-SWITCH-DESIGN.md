@@ -1,11 +1,15 @@
 # Per-unit switch and recovery: design for review
 
-Status: proposed, not a cutover authorization. The controller CLI now composes
-the injected switch path (`switch --unit ... --runtime ...`), and the adapter
-reads a machine-readable capability declaration from the verified artifact.
-There is still no unit-recovery adapter. The recovery snapshot's structure and
-host operations still need an independent design review and disposable-VM
-proof.
+Status: proposed, not a cutover authorization. The controller CLI composes the
+injected switch path (`switch --unit ... --runtime ...`) and the production
+recovery entry point (`recover --record ...`), and the adapter reads a
+machine-readable capability declaration from the verified artifact. A unit
+recovery adapter exists: `ProductionUnitAdapter` implements `validate_snapshot`,
+`restore` and `restore_activation`, and the controller's `recover_unit` seam is
+reachable from the production CLI. What is missing is live evidence, not the
+adapter or the entry point: the recovery snapshot's host operations still need
+an independent design review and disposable-VM proof, and no production switch
+or recovery has run on a host.
 
 A bounded proof vehicle now exercises the actual ``switch_unit``/``recover_unit``
 seam against two declared harmless fixtures in a disposable KVM guest. The
@@ -180,6 +184,17 @@ provider retains the pre-install baseline across the controller's post-drain
 masked re-read, so a masked observation cannot lower it and a prior runtime
 invocation cannot be credited to the selected runtime.
 
+Recovery composes through the same factory for the record's `prior_runtime`, not
+for the abandoned target: the target's artifact may no longer be installed and
+the retained snapshot is authoritative for the restored bytes, modes, ownership
+and activation. The controller invokes that composition callback under its
+existing lock, after record-shape validation (including
+`snapshot.runtime == prior_runtime`) and the read-only queue-drain gate, and
+before `validate_snapshot`. Composition therefore cannot race a second record
+read, and a composition failure is an ordinary refusal before any unit mutation
+or journal write, never a `recovery_required` state. The composed render is not
+consumed by recovery.
+
 `test_unit_switch_factory.py` runs the real adapter, the real completion port
 and the real renderer through the actual `switch_unit`/`recover_unit` seams over
 real temporary unit files, with a structured systemd port and a journal source
@@ -235,6 +250,9 @@ journal schema, store, lock or new capability mechanism is introduced.
    not establish real process ownership or systemd behavior. Queue data is
    never restored from the snapshot. Actual controller retries and interruption
    at each phase require VM proof; synthetic recovery is not that proof.
+   The production entry point does not change this contract: it composes an
+   adapter for the record's prior runtime, so an ambiguous activation is still
+   stopped and drained before the rc-3 refusal, with the record bytes unchanged.
 
 The installed templates provide tick, slot, backfill and watchdog timers;
 repair and publisher each have both timer and path activators. The host adapter

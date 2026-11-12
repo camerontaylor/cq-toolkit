@@ -86,6 +86,28 @@ class ControllerUnitSwitchWiringTests(FactoryFixture):
         return [json.loads(path.read_text())
                 for path in self.overlay_records.glob("controller-*.json")]
 
+    def pending_record(self, *, phase="drained", drain=False):
+        """A retained pending record written from real adapter observations."""
+        adapter, _selection = self.compose()
+        snapshot = adapter.snapshot(UNIT)
+        adapter.validate_snapshot(UNIT, snapshot)
+        if drain:
+            adapter.stop_and_drain(UNIT)
+        record = {
+            "schema_version": dc.JOURNAL_SCHEMA,
+            "transaction_id": "b" * 32,
+            "operation": "unit_switch",
+            "unit": UNIT,
+            "runtime": "python",
+            "prior_runtime": NODE_RUNTIME,
+            "outcome": "pending",
+            "at": "2026-11-12T00:00:00Z",
+            "snapshot": snapshot,
+            "state": dc.captured_state(self.effects),
+            "phase": phase,
+        }
+        return self.effects.journal_append(record), snapshot
+
     def test_cli_composes_the_live_adapter_and_refuses_foreign_discovery(self):
         self.fake.foreign = ["injected foreign activator"]
         before = (self.unit_dir / UNIT).read_bytes()
@@ -264,6 +286,86 @@ class ControllerUnitSwitchWiringTests(FactoryFixture):
         code, _stdout, _stderr = self.run_cli(loader=loader)
         self.assertEqual(code, 2)
         self.assertEqual(loader.call_count, 1)
+
+    def test_cli_recover_completes_a_pending_record(self):
+        path, _snapshot = self.pending_record(drain=True)
+        transaction = json.loads(path.read_text())["transaction_id"]
+        expected = self.node_service(UNIT)
+        code, stdout, stderr = self.run_cli(
+            args=("recover", "--record", str(path)), systemd=self.systemd)
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(stderr, "")
+        artifact = json.loads(stdout)
+        self.assertEqual(artifact, self.records()[0],
+                         "stdout must be exactly the persisted record")
+        self.assertEqual(artifact["transaction_id"], transaction)
+        self.assertEqual(artifact["operation"], "unit_switch")
+        self.assertEqual(artifact["outcome"], "rolled_back")
+        self.assertEqual(artifact["phase"], "restore_activation_pending")
+        self.assertEqual(artifact["unit"], UNIT)
+        self.assertEqual(artifact["runtime"], "python")
+        self.assertEqual(artifact["prior_runtime"], NODE_RUNTIME)
+        service = self.unit_dir / UNIT
+        self.assertEqual(service.read_bytes(), expected["bytes"])
+        self.assertEqual(service.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual(self.systemd.active["crq-tick.timer"], "active")
+        self.assertFalse(
+            (self.unit_dir / ("." + UNIT + ".staged")).exists())
+
+    def test_cli_recover_refuses_a_record_outside_the_record_dir(self):
+        outside = self.base / "controller-outside.json"
+        outside.write_text(json.dumps({"schema_version": dc.JOURNAL_SCHEMA}))
+        loader = self.make_loader()
+        code, stdout, stderr = self.run_cli(
+            args=("recover", "--record", str(outside)), loader=loader)
+        self.assertEqual(code, 2)
+        self.assertIn("invalid controller transaction record path", stderr)
+        artifact = json.loads(stdout)["error"]
+        self.assertEqual(artifact["kind"], "refused")
+        self.assertEqual(artifact["subcommand"], "recover")
+        loader.assert_not_called()
+
+    def test_cli_recover_refuses_activation_pending_with_rc3(self):
+        path, _snapshot = self.pending_record(phase="activation_pending",
+                                              drain=True)
+        before = path.read_bytes()
+        code, stdout, stderr = self.run_cli(
+            args=("recover", "--record", str(path)), systemd=self.systemd)
+        self.assertEqual(code, 3)
+        recorded = json.loads(stdout)
+        self.assertEqual(recorded["outcome"], "pending")
+        self.assertEqual(recorded["phase"], "activation_pending")
+        self.assertEqual(recorded["record_path"], str(path))
+        self.assertIn("activation may have occurred", recorded["reason"])
+        self.assertIn("recovery required:", stderr)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_cli_recover_loads_the_live_binding_once(self):
+        path, _snapshot = self.pending_record(drain=True)
+        loader = self.make_loader()
+        code, _stdout, stderr = self.run_cli(
+            args=("recover", "--record", str(path)), loader=loader,
+            systemd=self.systemd)
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(loader.call_count, 1)
+
+    def test_health_never_loads_the_live_binding(self):
+        loader = mock.Mock(
+            side_effect=AssertionError("health loaded the binding"))
+        stdout = io.StringIO()
+        with mock.patch.object(dc, "_load_live_binding", loader), \
+                mock.patch.object(dc, "two_slot_health",
+                                  return_value={"healthy": True}), \
+                contextlib.redirect_stdout(stdout):
+            code = dc.main([
+                "--root", str(self.root),
+                "--overlay", str(self.overlay_path),
+                "--record-dir", str(self.overlay_records),
+                "health", "--interval-seconds", "0",
+            ])
+        self.assertEqual(code, 0)
+        loader.assert_not_called()
+        self.assertEqual(json.loads(stdout.getvalue())["operation"], "health")
 
     def test_live_binding_loader_caches_the_default_binding(self):
         first = dc._load_live_binding()
