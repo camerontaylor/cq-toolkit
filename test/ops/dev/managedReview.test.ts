@@ -12,7 +12,7 @@
 //     server starts NO second review, and both submits resolve completed
 //     with the same receipt.
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, test } from 'vitest';
 import { makeManagedReviewSubmit } from '../../../src/ops/dev/managedReview.js';
@@ -174,6 +174,11 @@ test('S2b-i e2e: fake-transport submit completes and rejoins without a second re
     base,
     head,
     remainingWallMs: () => 60_000,
+    // Caller-attested: this fake server resolves the commits by
+    // construction (same repo), so no snapshot proof is needed. Absent
+    // any attestation the seam forwards nothing and the submit leg
+    // takes its honest snapshot default.
+    reachable: true,
   });
   await completing;
   expect(first).toMatchObject({
@@ -208,13 +213,99 @@ test('S2b-i e2e: fake-transport submit completes and rejoins without a second re
     request_id: requestId,
     inputs: { repo: 'owner/repo', target: 'merge-queue', base_commit: base, head_commit: head },
   });
+  // No silent reachability inference: absent proof forwards neither, so
+  // the submit leg takes its honest snapshot default (explicit scanner,
+  // else CQ_AUTHOR_SNAPSHOT_SCANNER, else a configuration refusal). The
+  // first submit below attests reachable explicitly - the caller knows
+  // this fake server resolves the commits (same repo). Proof the
+  // attestation reached the submit leg: the submit succeeds with no
+  // scanner configured (without it, the leg would fail closed demanding
+  // one). The snapshot path is covered by the test below.
+  expect(submitWires[0]).not.toHaveProperty('snapshot');
 
   // The second submit rejoins the same queue item: the server starts no
   // second review and the same completed receipt resolves again. The
   // durable request file persists, so the rejoin spends no new mutation.
+  // The persisted request replays the first submit's replay wire,
+  // including its reachable attestation.
   const second = await submit({ cwd: root, target: 'merge-queue', base, head });
   expect(second).toMatchObject({ status: 'completed', value: { receiptId } });
   expect(reviewsStarted).toBe(1);
   expect(submitWires).toHaveLength(2);
   expect(submitWires[1]).toMatchObject({ op: 'submit', request_id: requestId });
+});
+
+test('S2b-i e2e: explicit scanner rides snapshot transport for unpublished work', async () => {
+  // Unpublished commits (the runner cannot resolve them) ride the snapshot
+  // transport: an explicit absolute scanner produces the original-commit
+  // snapshot the server installs. This proves the preserved snapshot path
+  // through the managed seam - the seam never infers reachability, and the
+  // default above forwards no silent reachable:true claim.
+  const root = repo.root;
+  const base = repo.git('rev-parse', 'origin/merge-queue').trim();
+  const head = repo.git('rev-parse', 'HEAD').trim();
+  const scanner = join(root, 'scan');
+  await writeFile(scanner, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  const seen: unknown[] = [];
+  const transport = async (raw: string): Promise<string> => {
+    const wire = JSON.parse(raw) as { op: string; request_id?: string; snapshot?: unknown };
+    if (wire.op === 'capabilities') return JSON.stringify(caps);
+    if (wire.op === 'submit') {
+      seen.push(wire);
+      return JSON.stringify({
+        v: 1,
+        action: 'created',
+        state: 'completed',
+        reviewedHead: head,
+        request_id: wire.request_id,
+      });
+    }
+    if (wire.op === 'result')
+      return JSON.stringify({
+        v: 1,
+        action: 'observed',
+        state: 'completed',
+        receipt_id: '0'.repeat(64),
+        index: 0,
+        chunks: 0,
+        bytes: 0,
+        sha256: '0'.repeat(64),
+        encoding: 'base64-utf8-json',
+        data: '',
+        chunk_sha256: '0'.repeat(64),
+        next_index: null,
+        reviewedHead: head,
+        reviewOutcome: 'unknown',
+        scopeAdequate: false,
+      });
+    throw new Error(`unexpected op ${wire.op}`);
+  };
+  const submit = makeManagedReviewSubmit(
+    () => transport,
+    async () => 'owner/repo',
+  );
+  // The submission is refused for inadequate scope (no fetchable receipt),
+  // but that refusal PROVES the wire carried the snapshot: the real
+  // captureSnapshot ran the scanner over the repo and attached the
+  // original-commit objects to the submit wire.
+  const refused = await submit({
+    cwd: root,
+    target: 'merge-queue',
+    base,
+    head,
+    scanner,
+  });
+  expect(refused.status).toBe('refused');
+  expect(seen).toHaveLength(1);
+  expect(seen[0]).toHaveProperty('snapshot');
+  expect(seen[0]).toMatchObject({
+    op: 'submit',
+    inputs: { repo: 'owner/repo', base_commit: base, head_commit: head },
+  });
+  const snapshot = (seen[0] as { snapshot: { v: number; tree: string; objects: unknown[] } })
+    .snapshot;
+  expect(snapshot.v).toBe(1);
+  // The snapshot tree pins exactly the submitted head tree.
+  expect(snapshot.tree).toBe(repo.git('rev-parse', `${head}^{tree}`).trim());
+  expect(snapshot.objects.length).toBeGreaterThan(0);
 });

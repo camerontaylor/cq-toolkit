@@ -44,6 +44,20 @@ export interface ManagedReviewSubmit {
     head: string;
     signal?: AbortSignal;
     remainingWallMs?: () => number;
+    /**
+     * How the runner proves the pinned commits: an absolute scanner
+     * executable producing the original-commit snapshot for unpublished
+     * work, or a caller-attested reachable-ref proof when the caller knows
+     * the runner's clone resolves them. Both absent forwards neither — the
+     * submit leg takes its own default (snapshot path: explicit scanner,
+     * else CQ_AUTHOR_SNAPSHOT_SCANNER, else an honest configuration
+     * refusal). The seam never infers reachability from the local
+     * checkout: the local machine having the commits says nothing about
+     * the queue host. The server re-derives every hashed fact and refuses
+     * a mismatch (plan D2), so this is a transport hint, never authority.
+     */
+    scanner?: string;
+    reachable?: boolean;
   }): Promise<ManagedReviewOutcome>;
 }
 
@@ -187,11 +201,16 @@ export function makeManagedReviewSubmit(
       target: input.target,
       base: input.base,
       requestId,
-      // S2b-i e2e note: the bare clone on the CI runner is reachable from
-      // the fake server by construction (same repo), so the submit skips the
-      // original-commit snapshot proof — exactly like the A-2 durable-request
-      // tests. Production queue runners keep snapshot enforcement server-side.
-      reachable: true,
+      // The submitter declares how the runner proves the pinned commits:
+      // a snapshot scanner for unpublished work, or a caller-attested
+      // reachable-ref proof when the caller knows the runner's clone
+      // resolves them. Both absent forwards neither — the submit leg takes
+      // its own default (snapshot path, else an honest configuration
+      // refusal). The seam never infers reachability: the local machine
+      // having the commits says nothing about the queue host. The server
+      // re-derives every hashed fact and refuses a mismatch (plan D2).
+      ...(input.scanner !== undefined ? { scanner: input.scanner } : {}),
+      ...(input.reachable !== undefined ? { reachable: input.reachable } : {}),
     });
     if (submitted.status !== 'ok') return opRefused('submit', submitted);
     if (typeof submitted.value !== 'object' || submitted.value === null)
@@ -397,6 +416,17 @@ export async function runManagedReviewSpan(options: {
   submit: ManagedReviewSubmit;
   signal?: AbortSignal;
   remainingWallMs?: () => number;
+  /**
+   * Snapshot proof for unpublished commits, forwarded to the submit leg:
+   * an absolute scanner executable, or a caller-attested reachable-ref
+   * proof. Both absent forwards neither — the submit leg takes its own
+   * snapshot default (else an honest configuration refusal). The span
+   * never infers reachability. The server re-derives every hashed fact
+   * and refuses a mismatch (plan D2), so this is a transport hint, never
+   * authority.
+   */
+  scanner?: string;
+  reachable?: boolean;
   refuseDrift: (when: string) => Promise<void>;
 }): Promise<
   | { ok: true; span: ManagedSpan; budgetStopped?: true }
@@ -413,6 +443,8 @@ export async function runManagedReviewSpan(options: {
     submit,
     signal,
     remainingWallMs,
+    scanner,
+    reachable,
     refuseDrift,
   } = options;
   // The queue review attests committed objects only (base..head trees). The
@@ -435,6 +467,11 @@ export async function runManagedReviewSpan(options: {
       head: state.head,
       ...(signal ? { signal } : {}),
       ...(remainingWallMs ? { remainingWallMs } : {}),
+      // Snapshot proof for unpublished work rides through; both absent
+      // forwards neither, so the submit leg takes its honest snapshot
+      // default instead of a silent reachable inference.
+      ...(scanner !== undefined ? { scanner } : {}),
+      ...(reachable !== undefined ? { reachable } : {}),
     });
   } catch (error) {
     return {
