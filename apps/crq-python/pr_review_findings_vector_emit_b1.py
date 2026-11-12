@@ -658,7 +658,7 @@ def build_review_cases() -> List[Dict[str, Any]]:
            dict(severity="none", path=None, start=None, end=None, title="",
                 text="~" * 5600 + "\n" + "~" * 5600 + "\n```python\n" + "z" * 200)],
         None)
-    add("body-cap-degenerate-trailing-spaces", dict(META, summary="prose   \n" + "~" * 60000),
+    add("body-cap-degenerate-trailing-spaces", dict(META, run_id="r-ok", summary="prose   \n" + "~" * 60000),
         [], None)
     add("body-truncated-large", meta_full,
         [dict(severity="none", path=None, start=None, end=None, title="t", text="q" * 30000),
