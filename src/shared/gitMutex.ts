@@ -224,8 +224,16 @@ export function makeGitMutex(config: GitMutexConfig): GitMutex {
         }
       } catch (err) {
         if (signal?.aborted) throw signal.reason;
+        // Only GENUINE contention — proper-lockfile's ELOCKED, the one fault
+        // the bounded waiter budget exists to outlast — may be reported as
+        // "still held". A permission or disk fault (EACCES, ENOSPC) or any
+        // other unexpected acquire error says nothing about a holder, and
+        // labelling it "still held" sends the operator after a phantom lock.
+        const contended = err instanceof Error && 'code' in err && err.code === 'ELOCKED';
         throw new Error(
-          `git-mutex: could not acquire '${config.lockPath}' — still held after the waiter budget (${String(retries)} retries, ~${String(budgetMs)} ms backoff floor at ${String(retryBaseMs)} ms base, stale window ${String(staleMs)} ms) — ${err instanceof Error ? err.message : String(err)}`,
+          contended
+            ? `git-mutex: could not acquire '${config.lockPath}' — still held after the waiter budget (${String(retries)} retries, ~${String(budgetMs)} ms backoff floor at ${String(retryBaseMs)} ms base, stale window ${String(staleMs)} ms) — ${err instanceof Error ? err.message : String(err)}`
+            : `git-mutex: could not acquire '${config.lockPath}' — unexpected acquire fault — ${err instanceof Error ? err.message : String(err)}`,
           { cause: err },
         );
       }
