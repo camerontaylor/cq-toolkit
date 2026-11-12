@@ -56,9 +56,10 @@ class ExpectedIdentity:
     ``service_sha256`` is the digest of the exact rendered service bytes that
     preflight selected and install released. ``source_sha`` and
     ``template_blob_oid`` name the pinned source. Node additionally carries the
-    whole-artifact inventory identity produced by ``prepare-host``. The
-    adapter is responsible for re-rendering and verifying the artifact tree;
-    this provider binds the service file and requires the expected fields.
+    whole-artifact observed inventory identity produced by ``prepare-host``
+    (``observed_content_sha256``). The adapter is responsible for re-rendering
+    and verifying the artifact tree; this provider binds the service file and
+    requires the expected fields.
     """
     unit: str
     runtime: str
@@ -80,6 +81,10 @@ class ExpectedIdentity:
         """
         if not isinstance(render, Mapping):
             raise CompletionRefused("render identity is not an object")
+        if render.get("unit") != unit:
+            raise CompletionRefused("render identity names a different unit")
+        if render.get("runtime") != runtime:
+            raise CompletionRefused("render identity names a different runtime")
         artifact = render.get("artifact")
         if artifact is not None and not isinstance(artifact, Mapping):
             raise CompletionRefused("render artifact identity is not an object")
@@ -90,14 +95,22 @@ class ExpectedIdentity:
                 raise CompletionRefused("render identity lacks " + key)
             return item
 
+        artifact_content_sha256 = None
+        if artifact is not None:
+            observed = value("observed_content_sha256", artifact)
+            declared = value("declared_content_sha256", artifact)
+            if observed != declared:
+                raise CompletionRefused(
+                    "render artifact digests disagree")
+            artifact_content_sha256 = observed
+
         return cls(
             unit=unit,
             runtime=runtime,
             service_sha256=value("sha256", render),
             source_sha=value("source_sha", render),
             template_blob_oid=value("template_blob_oid", render),
-            artifact_content_sha256=(value("content_sha256", artifact)
-                                     if artifact is not None else None),
+            artifact_content_sha256=artifact_content_sha256,
             artifact_source_sha=(value("source_sha", artifact)
                                  if artifact is not None else None),
             crq_js_sha256=(value("crq_js_sha256", artifact)

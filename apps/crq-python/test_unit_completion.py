@@ -415,7 +415,8 @@ class IdentityTests(CompletionFixture):
     def test_identity_from_python_render(self):
         identity = completion.ExpectedIdentity.from_render(
             unit=UNIT, runtime="python",
-            render={"sha256": _sha256(_python_unit()),
+            render={"unit": UNIT, "runtime": "python",
+                    "sha256": _sha256(_python_unit()),
                     "source_sha": SOURCE_SHA,
                     "template_blob_oid": TEMPLATE_BLOB,
                     "artifact": None})
@@ -426,13 +427,16 @@ class IdentityTests(CompletionFixture):
     def test_identity_from_node_render(self):
         identity = completion.ExpectedIdentity.from_render(
             unit=UNIT, runtime="node:" + NODE_SHA,
-            render={"sha256": _sha256(_node_unit()),
+            render={"unit": UNIT, "runtime": "node:" + NODE_SHA,
+                    "sha256": _sha256(_node_unit()),
                     "source_sha": SOURCE_SHA,
                     "template_blob_oid": TEMPLATE_BLOB,
-                    "artifact": {"content_sha256": "e" * 64,
+                    "artifact": {"declared_content_sha256": "e" * 64,
+                                 "observed_content_sha256": "e" * 64,
                                  "source_sha": NODE_SHA,
                                  "crq_js_sha256": "1" * 64}})
         identity.validate()
+        self.assertEqual(identity.artifact_content_sha256, "e" * 64)
         self.assertEqual(identity.artifact_source_sha, NODE_SHA)
         self.assertEqual(identity.crq_js_sha256, "1" * 64)
 
@@ -440,7 +444,42 @@ class IdentityTests(CompletionFixture):
         with self.assertRaises(completion.CompletionRefused):
             completion.ExpectedIdentity.from_render(
                 unit=UNIT, runtime="python",
-                render={"source_sha": SOURCE_SHA,
+                render={"unit": UNIT, "runtime": "python",
+                        "source_sha": SOURCE_SHA,
+                        "template_blob_oid": TEMPLATE_BLOB})
+
+    def test_identity_from_render_requires_observed_artifact_digest(self):
+        with self.assertRaises(completion.CompletionRefused):
+            completion.ExpectedIdentity.from_render(
+                unit=UNIT, runtime="node:" + NODE_SHA,
+                render={"unit": UNIT, "runtime": "node:" + NODE_SHA,
+                        "sha256": _sha256(_node_unit()),
+                        "source_sha": SOURCE_SHA,
+                        "template_blob_oid": TEMPLATE_BLOB,
+                        "artifact": {"content_sha256": "e" * 64,
+                                     "source_sha": NODE_SHA,
+                                     "crq_js_sha256": "1" * 64}})
+
+    def test_identity_from_render_rejects_disagreeing_artifact_digests(self):
+        with self.assertRaises(completion.CompletionRefused):
+            completion.ExpectedIdentity.from_render(
+                unit=UNIT, runtime="node:" + NODE_SHA,
+                render={"unit": UNIT, "runtime": "node:" + NODE_SHA,
+                        "sha256": _sha256(_node_unit()),
+                        "source_sha": SOURCE_SHA,
+                        "template_blob_oid": TEMPLATE_BLOB,
+                        "artifact": {"declared_content_sha256": "d" * 64,
+                                     "observed_content_sha256": "e" * 64,
+                                     "source_sha": NODE_SHA,
+                                     "crq_js_sha256": "1" * 64}})
+
+    def test_identity_from_render_rejects_a_different_selection(self):
+        with self.assertRaises(completion.CompletionRefused):
+            completion.ExpectedIdentity.from_render(
+                unit=UNIT, runtime="python",
+                render={"unit": "crq-slot.service", "runtime": "python",
+                        "sha256": _sha256(_python_unit()),
+                        "source_sha": SOURCE_SHA,
                         "template_blob_oid": TEMPLATE_BLOB})
 
     def test_python_identity_requires_source_and_template(self):

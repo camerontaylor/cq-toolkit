@@ -20,7 +20,8 @@ Evidence must bind:
 * **Selected identity**: the installed service SHA-256 equals the expected
   rendered service digest, and the evidence carries the selected source commit
   and template blob. Node also carries the whole-artifact content digest,
-  artifact source SHA and `crq.js` digest. The adapter is responsible for
+  observed artifact content digest, artifact source SHA and `crq.js` digest.
+  The adapter is responsible for
   re-rendering and verifying the artifact tree against the manifest; this
   provider requires the selected values and rejects a bare current-file echo.
 * **Invocation**: `systemctl show` `InvocationID` is 32 lowercase hex, is not
@@ -140,7 +141,8 @@ The adapter changes, if it is wired later:
    `ExpectedIdentity.from_render(unit=unit, runtime=runtime,
    render=self._rendered[(unit, runtime)])`. That cached `render_service`
    result already carries `sha256`, `source_sha`, `template_blob_oid` and, for
-   Node, the nested `artifact` identity. No preflight return change is needed.
+   Node, the nested `artifact` identity including its verified
+   `observed_content_sha256`. No preflight return change is needed.
 4. In `completion()`, require the first completion invocation to equal
    `self._service_invocation`, then clear the expectation. Require
    `service_sha256` to equal both `self._install["sha256"]` and
