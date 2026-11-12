@@ -516,3 +516,57 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
             self.assertEqual(self.call_review(self.review)["action"], "created")
             fetch.assert_called_once_with(clone=clone)
         self.assertEqual(self.saved["items"][0]["identity_inputs"]["repo"], foreign)
+
+    def fetch_primary(self, *, empty=False):
+        clone = self.destination
+        if empty:
+            clone = self.repo / "empty-primary"
+            clone.mkdir()
+            author_snapshot.git(clone, "init", "-q")
+            self.runner.CLONE = clone
+        author_snapshot.git(clone, "remote", "add", "origin", str(self.repo))
+        self.runner.fetch = lambda **kw: crq.fetch(**kw)
+        return clone
+
+    def test_primary_missing_reachable_head_fetches_before_admission(self):
+        clone = self.fetch_primary()
+        self.git("update-ref", "refs/heads/available", self.head)
+        self.review.pop("snapshot")
+        with mock.patch.object(crq, "fetch", wraps=crq.fetch) as fetch:
+            self.assertEqual(self.call_review(self.review)["action"], "created")
+            fetch.assert_called_once_with(clone=clone)
+        self.assertEqual(self.saved["items"][0]["identity_inputs"]["head_commit"], self.head)
+
+    def test_primary_snapshot_missing_base_fetches_without_published_head(self):
+        clone = self.fetch_primary(empty=True)
+        self.git("update-ref", "refs/heads/available", self.base)
+        with mock.patch.object(crq, "fetch", wraps=crq.fetch) as fetch:
+            self.assertEqual(self.call_review(self.review)["action"], "created")
+            fetch.assert_called_once_with(clone=clone)
+        self.assertEqual(author_snapshot.git(clone, "cat-file", "commit", self.head),
+                         author_snapshot.git(self.repo, "cat-file", "commit", self.head))
+
+    def test_primary_present_objects_and_unpublished_snapshot_do_not_fetch(self):
+        self.runner.fetch = mock.Mock(side_effect=AssertionError("unnecessary fetch"))
+        self.assertEqual(self.call_review(self.review)["action"], "created")
+        self.review.pop("snapshot")
+        self.review["request_id"] = "already-present"
+        self.assertEqual(self.call_review(self.review)["action"], "joined")
+        self.runner.fetch.assert_not_called()
+
+    def test_primary_fetch_failure_or_persistent_missing_objects_never_admits(self):
+        clone = self.fetch_primary()
+        self.git("update-ref", "refs/heads/available", self.base)
+        self.review.pop("snapshot")
+        before = copy.deepcopy(self.saved)
+        with mock.patch.object(crq, "fetch", wraps=crq.fetch) as fetch:
+            with self.assertRaises(author_snapshot.AuthorRefused):
+                self.call_review(self.review)
+            fetch.assert_called_once_with(clone=clone)
+        self.assertEqual(self.saved, before)
+        author_snapshot.git(clone, "remote", "set-url", "origin", str(self.repo / "absent"))
+        with mock.patch.object(crq, "fetch", wraps=crq.fetch) as fetch:
+            with self.assertRaises(RuntimeError):
+                self.call_review(self.review)
+            fetch.assert_called_once_with(clone=clone)
+        self.assertEqual(self.saved, before)
