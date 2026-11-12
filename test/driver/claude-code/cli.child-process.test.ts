@@ -103,10 +103,7 @@ describe('claude-code driver, CLI transport specifics (fake agent CLI)', () => {
     await withScratch(async (scratchDir) => {
       const child = spawnManaged({
         command: process.execPath,
-        args: [
-          '-e',
-          `process.stdout.write('final-out'); process.stderr.write('final-err');`,
-        ],
+        args: ['-e', `process.stdout.write('final-out'); process.stderr.write('final-err');`],
         cwd: scratchDir,
         maxRetainedBytes: 64 * 1024,
       });
