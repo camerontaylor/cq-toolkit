@@ -85,7 +85,7 @@ export async function snapshotAddressDependencies(
       // POSIX bin shims can embed paths relative to their original
       // directory. A private launcher preserves that location without
       // exposing the original shim to in-place writes through a link.
-      if (process.platform !== 'win32' && dirname(source) === resolve(installed, '.bin')) {
+      if (process.platform !== 'win32' && resolve(dirname(source)) === resolve(installed, '.bin')) {
         const stat = await lstat(source);
         if (stat.isFile() && (stat.mode & 0o111) !== 0) {
           const quoted = "'" + resolve(source).replaceAll("'", "'\\''") + "'";

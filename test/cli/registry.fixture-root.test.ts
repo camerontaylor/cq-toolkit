@@ -17,9 +17,21 @@ import {
 registerRegistryTmpCleanup();
 
 describe('fixture-root DI (test/fixtures/cli-ops)', () => {
-  test('the fixture family resolves exactly its six ops through the same seam', async () => {
+  test('the fixture family resolves exactly its eight ops through the same seam', async () => {
     const names = (await list({ opsRoot: join(fixtureOps) })).map((entry) => entry.name).sort();
-    expect(names).toEqual(['boom', 'budget', 'echo', 'garbage', 'indet', 'needshuman']);
+    // plainthrow/spendthrow are the #1195 throw twins (a bare rejection and a
+    // rejection carrying the settled-usage carrier) — machine-mode-pins
+    // dispatches them through the thrown-exit artifact contract.
+    expect(names).toEqual([
+      'boom',
+      'budget',
+      'echo',
+      'garbage',
+      'indet',
+      'needshuman',
+      'plainthrow',
+      'spendthrow',
+    ]);
   });
 
   // POSIX-only: on Windows '\' is a path separator, so `${tmp}\\dir` is a

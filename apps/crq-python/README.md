@@ -95,6 +95,20 @@ publication then discards the result. Prepared (`repair-prepare`) jobs keep the
 strict one-job selector, so a moved tip makes them `STALE`.
 `--job/--source-sha/--finding-sha256` still repairs exactly one prepared job.
 
+For an already merged, published legacy FIXED repair whose source changed after
+publication, `crq repair-revalidate-fixed JOB --revalidation FILE` records an
+explicit semantic review in the existing publication journal under the tick lock.
+It does not dispatch work or publish feedback; a later natural tick reconciles it.
+The JSON must include `reviewer`, `reason`, `verdict` (`fixed`), `job`, `item`,
+`run`, `finding_sha256` (the canonical JSON digest of the inbox finding), `pr`,
+`published_head`, `actual_head`, `merge_commit`, and `source_sha` (the observed
+current default-branch tip). `sources` maps the finding path and every non-test
+path in the published commits to objects with `published`, `actual`, and `current`
+entries: each is `[git mode, blob SHA]`, or null for a deleted path. All bindings
+are checked again before feedback; a changed tip or PR requires fresh evidence.
+This optional path applies to a single FIXED legacy job and does not replace the
+canonical finding disposition workflow.
+
 Repair dispatch tries the configured role, then `repair.fallback_models` in order:
 OpenCode Go DeepSeek V4.1 Flash, then direct DeepSeek Flash. Fixers and judges
 share durable provider cooldowns in `state/repair/provider-cooldowns.json`.

@@ -1,3 +1,4 @@
+import { managedTerminal } from '../dev/reviewTestKit.js';
 // Split provenance: test/ops/review/settledPredecessorFindings.test.ts was split into the
 // settledPredecessorFindings.*.test.ts siblings in this directory; shared fixtures live in
 // settledPredecessorFindings.helpers.ts.
@@ -38,6 +39,7 @@ test.each(['major', 'clean'] as const)(
       });
     });
     const result = await makeReviewRun({
+      managedSubmit: managedTerminal([]),
       drivers: cleanDrivers(),
       queueClient: terminal.client,
       effectsFactory: () => f.effects,
@@ -55,7 +57,7 @@ test.each(['major', 'clean'] as const)(
     expect(result.value.sources.find((s) => s.kind === 'coderabbit')).toMatchObject({
       status: 'terminal',
     });
-    expect(f.effects.calls.filter((c) => c.command === 'coderabbit')).toHaveLength(1);
+    expect(f.effects.calls.filter((c) => c.command === 'coderabbit')).toHaveLength(0);
     expect(notifications).toContainEqual({ settled: true, beforeVendor: true });
     const completed = ledger.records.filter((r) => r.kind === 'vendor-debt').at(-1)!.debt;
     expect(completed.vendorCompleted).toBe(true);

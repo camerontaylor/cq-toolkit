@@ -10,11 +10,12 @@ Stack parent/base: `queue/q1-merged-current` at
 `1eea0b5b323de8b23a9388a72da4e97f8e631450`.
 
 `queue-v1` is a separate forced-command capability. Deployment must explicitly
-allow it; author-v1/v2 bytes and grants are unchanged. No credentials or custody
-change is part of Q3. Old runners are unsupported and require a reviewed runner
-capability deployment. No inline reviewer starts are provided; bounded observation
-(`review.drain`) and explicit transient retry (`review.retry`) are described under
-Q3R below.
+allow it. S2b-ii retired the SDK's `author-v1` client command; the Python
+server route remains for deployed compatibility and no installed author SSH
+identity exists. No credentials or custody change is part of Q3. Old runners
+are unsupported and require a reviewed runner capability deployment. No inline
+reviewer starts are provided; bounded observation (`makeQueueOps().drain`) and
+explicit transient retry (`review.retry`) are described under Q3R below.
 
 The typed seam in `src/ops/review/internal/queueProtocol.ts` binds a stable
 requestId to either merged-current provenance or a deferred-author intent.
@@ -36,8 +37,11 @@ full-branch readiness, independent acceptance or remediation completion.
 
 ## SDK and generated CLI
 
-Import `makeConfiguredQueueClient` (uses operator `CQ_QUEUE_SSH_ALIAS`) or
-`makeQueueClient(transport)` from the SDK review family. The client exposes
+Import `makeConfiguredQueueClient` (uses the operator `CQ_QUEUE_SSH_ALIAS`
+resolved in the CqEnv snapshot: the caller's snapshot argument, or the
+enclosing run's snapshot — the value the entry captured when the process
+started, so changing the ambient variable afterwards has no effect on an
+existing client) or `makeQueueClient(transport)` from the SDK review family. The client exposes
 `enqueue(reference)`, `bind({...reference, pr, mergeSha?})`, `cancel(reference)`,
 `status(reference)` and `report(reference, evidenceDir)`. Every call requires
 the original immutable `{requestId, binding}`; a failed read creates no ID.
@@ -45,17 +49,13 @@ Producer is the forge PR author login; target is its base branch. Q6 owns the
 known-PR refresh and unique author/head/base publication recovery. It preserves
 server-only principal and delivery/consumption fields.
 
-```sh
-cq review.enqueue --requestId=missed-12 --binding='{"kind":"merged-current","repo":"owner/repo","pr":12,"mergeSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","targetSelector":"promoted-main"}'
-cq review.queueStatus --requestId=missed-12 --binding='{"kind":"merged-current","repo":"owner/repo","pr":12,"mergeSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","targetSelector":"promoted-main"}'
-cq review.report --requestId=missed-12 --binding='{"kind":"merged-current","repo":"owner/repo","pr":12,"mergeSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","targetSelector":"promoted-main"}' --evidenceDir=.cq/queue-evidence
-```
-
-`review.enqueue --action=bind --pr=12 [--mergeSha=…]` attaches a deferred
-binding; `--action=cancel` retains unpublished debt as cancelled. No positional
-arguments or caller-selected remote paths/commands are supported. A command
-success is distinct from review verdict. Stdout contains the I1 JSON artifact;
-the generated CLI owns exit mapping and stderr narration.
+S2b-ii retired the generated `cq review.enqueue`, `cq review.queueStatus`,
+`cq review.drain` and `cq review.report` commands. Use the SDK methods above:
+`enqueue(reference)` binds or cancels through its `action`
+(`bind --pr=12 [--mergeSha=…]`, `cancel`), `status(reference)` reads state and
+`report(reference, evidenceDir)` imports a receipt. No positional arguments or
+caller-selected remote paths/commands are supported. A call success is distinct
+from review verdict.
 
 Reports verify the entire receipt before create-only durable import and ack.
 Interrupted readers restart at the manifest and safely replay bounded chunks;
@@ -102,7 +102,7 @@ runner import or queue access: activation requires JSON boolean `true`; missing
 or boolean `false` remains unsupported. Other activation types, non-object
 policies, malformed repository/selector/capacity values, and allowlists that are
 not arrays of nonempty strings refuse. Read covers status/report; write covers
-enqueue/bind/cancel/ack. A consuming `review.report` caller must be listed in
+enqueue/bind/cancel/ack. A consuming `report` caller must be listed in
 both: it reads receipt pages under `read` and acknowledges consumption with
 `ack` under `write`.
 Requests are permanently principal/repository/source/target bound. Forge source
@@ -165,7 +165,7 @@ then return `unsupported` with no restart; malformed or unauthorized requests ar
 still refused earlier. For full rollback, revoke server authorization first by
 commenting out the `authorized_keys` line, keep managed backups, then retire the
 client key and alias. Queue requests and receipts are never deleted; deferred
-debt stays inspectable and can be cancelled with `review.enqueue --action=cancel`.
+debt stays inspectable and can be cancelled with the client's `cancel` call.
 
 ## Reading reconciled inventory
 
@@ -182,7 +182,7 @@ For `already-enrolled` subjects, the inventory's proposed `reconcile-…` ID may
 no stored mapping: use the existing mapped request ID for that exact subject,
 which the operator must identify from queue state. Do not grant the proposed ID
 unless it has a stored mapping. The client uses the existing SDK
-`status` / `report` methods or `review.queueStatus` / `review.report` commands.
+`status` / `report` methods.
 No enqueue alias is needed. The principal must also have ordinary read authority;
 acknowledgement still requires write authority. A read validates forge source and
 allowed base branch, the exact stored mapping and unique item, and capacity, but
@@ -403,7 +403,8 @@ only `health`; it grants no status/report or write authority.
 
 ### Bounded observation and explicit transient retry (Q3R)
 
-`review.drain` takes `requests` (requestId/binding references), `waitMs` (0–3600000)
+The drain operation (`makeQueueOps().drain`) takes `requests`
+(requestId/binding references), `waitMs` (0–3600000)
 and optional `pollMs` (1000–60000, default 1000). It only reads status, returns
 `{action:"observed",accepted:false,unfinished:[...requestIds]}`, and can resume
 with the same references after disconnect. Successful per-ID `observations` are retained alongside per-ID `errors`. Busy and stale reads are revisited

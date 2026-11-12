@@ -79,6 +79,10 @@ async function partitionSessionOnWire(options: {
 }): Promise<PartitionWireValue> {
   const root = await mkdtemp(join(tmpdir(), 'cq-review-partition-wire-'));
   roots.push(root);
+  // The session binding file lives OUTSIDE the model-editable repo root
+  // (Annex A, issue #1197); the sibling is cleaned with the root.
+  const sessionsDir = `${root}-sessions`;
+  roots.push(sessionsDir);
   const resolveRg = options.resolveRg;
   if (options.file !== undefined) {
     await mkdir(join(root, dirname(options.file.path)), { recursive: true });
@@ -102,7 +106,7 @@ async function partitionSessionOnWire(options: {
   const factory: DriverFactory = {
     resolve: (request) => {
       const driver = new AiSdkDriver({
-        sessionsDir: join(root, 'sessions'),
+        sessionsDir,
         ...(request.harness === undefined ? {} : { harnessConfig: request.harness }),
         ...(resolveRg === undefined ? {} : { resolveRg }),
         ...(request.beforeRequest === undefined ? {} : { beforeRequest: request.beforeRequest }),
@@ -190,7 +194,8 @@ it('records a denied final-step call without manufacturing a clean source beyond
   expect(session.deliveries).toHaveLength(1);
   expect(value.coverage.pieces[0]).toMatchObject({ state: 'completed' });
   const transcript = await readFile(
-    join(roots.at(-1)!, 'sessions', `${value.sessionId}.jsonl`),
+    // roots.at(-1) is the sessions sibling pushed after the repo root.
+    join(roots.at(-1)!, `${value.sessionId}.jsonl`),
     'utf8',
   );
   expect(transcript).toContain('FINAL_STEP');

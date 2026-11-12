@@ -70,7 +70,7 @@ const regression = {
 };
 
 const reports = [];
-for (const name of await readdir(artifactDir).catch(() => [])) {
+for (const name of (await readdir(artifactDir).catch(() => [])).sort()) {
   if (!/^evidence-[\w-]+\.json$/.test(name)) continue;
   let report;
   try {

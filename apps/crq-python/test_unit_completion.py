@@ -159,6 +159,38 @@ class SequenceTests(CompletionFixture):
         self.source.complete("", 0, load="masked")
         self.assertEqual(self.port().sequence(UNIT), 0)
 
+    def test_masked_reread_does_not_credit_the_prior_invocation(self):
+        self.source.complete("1" * 32, 100)
+        port = self.port()
+        self.assertEqual(port.sequence(UNIT), 100)
+        # The controller re-reads after its drain/mask. The established
+        # baseline must survive so the prior runtime's invocation cannot be
+        # returned as a completion of the selected runtime.
+        self.source.complete("", 0, load="masked")
+        baseline = port.sequence(UNIT)
+        self.assertEqual(baseline, 100)
+        self.source.complete("1" * 32, 100)
+        self.assertIsNone(port.read(UNIT, "python", baseline))
+
+    def test_a_newer_prior_invocation_raises_the_baseline(self):
+        self.source.complete("1" * 32, 100)
+        port = self.port()
+        self.assertEqual(port.sequence(UNIT), 100)
+        self.source.complete("2" * 32, 130)
+        self.assertEqual(port.sequence(UNIT), 130)
+
+    def test_a_stale_prior_invocation_does_not_lower_the_baseline(self):
+        self.source.complete("a" * 32, 940)
+        port = self.port()
+        self.assertEqual(port.sequence(UNIT), 940)
+        # A later observation of an older successful prior invocation must not
+        # replace the established baseline. Otherwise the prior runtime's
+        # invocation could be credited to the selected runtime. The M15-only
+        # mutant that accepts a lower monotonic value sets 700 here.
+        self.source.complete("c" * 32, 700)
+        self.assertEqual(port.sequence(UNIT), 940)
+        self.assertIsNone(port.read(UNIT, "python", 940))
+
     def test_completed_invocation_is_baseline(self):
         self.source.complete("1" * 32, 100)
         self.assertEqual(self.port().sequence(UNIT), 100)
@@ -273,9 +305,9 @@ class ReadTests(CompletionFixture):
             port.read(UNIT, "python", 100)
 
     def test_runtime_mismatch_refuses(self):
-        port = self.port()
-        self.baseline(invocation="1" * 32, exit_monotonic=100)
         self.unit_path.write_bytes(_node_unit())
+        port = self.port(service_sha256=_sha256(_node_unit()))
+        self.baseline(invocation="1" * 32, exit_monotonic=100)
         self.source.complete("2" * 32, 200)
         with self.assertRaises(completion.CompletionRefused):
             port.read(UNIT, "python", 100)
@@ -552,6 +584,12 @@ class IdentityTests(CompletionFixture):
         with self.assertRaises(completion.CompletionRefused):
             port.read(UNIT, "python", 100)
 
+    def test_service_identity_still_refuses_a_timer_unit(self):
+        with self.assertRaises(completion.CompletionRefused) as raised:
+            self.identity(unit="crq-tick.timer").validate()
+        self.assertEqual(str(raised.exception),
+                         "expected identity names an invalid unit")
+
 
 class ParserTests(unittest.TestCase):
     def test_show_output_parses_values_and_empty_strings(self):
@@ -669,6 +707,22 @@ class ParserTests(unittest.TestCase):
             popen=lambda *a, **k: self.fail("invalid unit must not run"))
         with self.assertRaises(completion.CompletionRefused):
             source.show("--help", ["LoadState"])
+
+    def test_source_accepts_activator_unit_reads(self):
+        source = self.source_for(
+            "import sys; sys.stdout.write('ActiveState=active\\n')")
+        for unit in ("crq-tick.timer", "crq-tick.path", "crq-tick.socket"):
+            self.assertEqual(source.show(unit, ["ActiveState"]),
+                             {"ActiveState": "active"})
+
+    def test_source_refuses_unsupported_unit_types(self):
+        source = completion.SystemdJournalSource(
+            popen=lambda *a, **k: self.fail("invalid unit must not run"))
+        for unit in ("crq-tick.mount", "crq-tick.swap", "crq-tick.slice",
+                     "crq-tick"):
+            with self.assertRaises(completion.CompletionRefused) as raised:
+                source.show(unit, ["LoadState"])
+            self.assertEqual(str(raised.exception), "invalid unit name")
 
     def test_source_accepts_output_at_the_exact_bound(self):
         source = self.source_for(

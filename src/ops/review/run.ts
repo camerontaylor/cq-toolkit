@@ -56,6 +56,7 @@ import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
 import { sameFindingContent } from './internal/durableDisposition.js';
 import { collectBoundedReviewContext } from './internal/reviewContext.js';
 import { foldKnownUsageSummaries, type KnownUsageSummary } from '../../shared/knownUsage.js';
+import { cqConfigFaultText, readCqConfigText } from '../../shared/readCqConfigText.js';
 
 export interface ReviewRunInput {
   areas?: boolean;
@@ -97,6 +98,13 @@ export interface ReviewRunDeps {
     effects: DevEffects,
     patternsFile?: string,
   ) => DiffSecretScanner;
+  /**
+   * S2b-i managed CodeRabbit route: submit the pinned (base, head) through
+   * review-v1 instead of the CLI. Threaded into the CodeRabbit leg's
+   * dev.review call. Absent means the managed route is unavailable and the
+   * leg reports it (no silent CLI fallback).
+   */
+  managedSubmit?: import('../dev/managedReview.js').ManagedReviewSubmit;
 }
 
 /** A blocked run still exposes the persisted record so consumers can surface advisories. */
@@ -141,9 +149,17 @@ export function makeReviewRun(
     const started = Date.now();
     const effects =
       deps.effectsFactory?.(input.repoRoot) ?? makeSubprocessDevEffects(input.repoRoot);
-    const configText = await readFile(join(input.repoRoot, 'cq.json'), 'utf8').catch(() => null);
-    if (configText === null)
+    // Only an ABSENT cq.json reads as "no config here"; a present-but-
+    // unreadable one is a distinct needs-human reason naming the errno.
+    const configRead = await readCqConfigText(input.repoRoot);
+    if (configRead.outcome === 'absent')
       return { status: 'needs-human', reason: 'review.run: cq.json is required' };
+    if (configRead.outcome === 'fault')
+      return {
+        status: 'needs-human',
+        reason: `review.run: ${cqConfigFaultText(configRead.error)}`,
+      };
+    const configText = configRead.text;
     const parsedConfig = parseCqConfig(configText, input.repoRoot);
     if (!parsedConfig.ok)
       return { status: 'needs-human', reason: `review.run: ${parsedConfig.reason}` };
@@ -358,11 +374,12 @@ export function makeReviewRun(
           configuredReviewers: policy.review.reviewers,
           ...(deadline.signal ? { signal: deadline.signal } : {}),
           remainingWallMs,
-          ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }),
           scanSecrets: scanner,
           ...(policy.review.denylistPatternsFile === undefined
             ? {}
             : { patternsFile: policy.review.denylistPatternsFile }),
+          // S2b-i: the CodeRabbit leg rides the managed queue route.
+          ...(deps.managedSubmit === undefined ? {} : { managedSubmit: deps.managedSubmit }),
         })({
           repoRoot: input.repoRoot,
           reviewer: 'coderabbit',

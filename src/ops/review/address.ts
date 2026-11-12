@@ -275,6 +275,7 @@ export interface ReviewAddressDeps {
   /** Durable receipts and per-PR exclusion domain for isolated bulk checkouts. */
   coordinationRoot?: string;
   drivers?: DriverFactory;
+  managedSubmit?: import('../dev/managedReview.js').ManagedReviewSubmit;
   git?: GhFn;
   gh?: GhFn;
   worktreeRegistry?: SlotWorktreeRegistry;
@@ -902,7 +903,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // ADR-0008 T31: sanitize the WHOLE persisted artifact at the same
       // boundary T30 uses (runFix), not just the observation surface — every
       // string that reaches disk passes the same redaction/cap discipline.
+      const plannedReportPath = report.reportPath;
       Object.assign(report, sanitizeObservation(report));
+      // The write target is engine-owned identity, not observational text:
+      // sanitizing it would strip a credential-looking prefix from a journal
+      // path whose parent directory holds an `@` and resolve the write against
+      // the process cwd instead.
+      report.reportPath = plannedReportPath;
       try {
         if (parent?.aborted) return finish('needs-human', 'parent cancelled');
         if (addressLease) await addressLease.assertOwned();
@@ -1289,6 +1296,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         deps.review ??
         makeReviewRun({
           drivers: reviewDrivers,
+          ...(deps.managedSubmit ? { managedSubmit: deps.managedSubmit } : {}),
           ...(deps.queueClient ? { queueClient: deps.queueClient } : {}),
           ...(parent ? { parentSignal: parent } : {}),
           writeFindingsRecord: async (path, content) => {
