@@ -1,5 +1,5 @@
 import { realpathSync, statSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { SessionRecord, SessionStore } from '../../harness/session.js';
 import { describeError } from '../error-text.js';
 import { DispatchError } from '../errors.js';
@@ -23,6 +23,88 @@ export function boundWorkspacePath(workspace: WorkspaceBinding, lane: string): s
       `${lane}: workspace.path '${workspace.path}' does not name an existing directory — ${describeError(err)}`,
     );
   }
+}
+
+/**
+ * Refuse a sessions directory at or inside a bound workspace (Annex A:
+ * the per-session binding file must live outside the model-editable
+ * tree). Resolves directory aliases first (`realpathSync` follows
+ * symlinks), so a `<workspace>/link -> <outside>` alias is accepted while
+ * a `<workspace>/inside` dir — or a symlink to one — is refused. A
+ * not-yet-existing sessions dir resolves through its nearest existing
+ * ancestor (the store creates the dir at first write), so a refusal lands
+ * BEFORE any session file is written. A relative sessions dir resolves
+ * against the process cwd — always outside a bound (absolute, existing)
+ * workspace in practice, but compared the same way. Throws a structured
+ * 'config' DispatchError naming both paths.
+ */
+export function assertSessionsDirOutsideWorkspace(
+  sessionsDir: string,
+  boundWorkspace: string,
+  lane: string,
+): void {
+  const realWorkspace = realpathSync(boundWorkspace);
+  const realSessions = realpathOfExistingOrNearestAncestor(sessionsDir);
+  if (isInsideDir(realSessions, realWorkspace)) {
+    throw new DispatchError(
+      'config',
+      `${lane}: sessionsDir '${sessionsDir}' resolves inside the bound workspace ` +
+        `('${realSessions}' is at or under '${realWorkspace}') — the session binding ` +
+        `file must live outside the model-editable tree`,
+    );
+  }
+}
+
+/**
+ * Resolve `dir`, following symlinks; when it does not yet exist (the store
+ * creates it at first write), resolve the nearest existing ancestor and
+ * re-append the missing tail — so every EXISTING segment is compared in
+ * realpath space and a refusal lands before any session file is written.
+ */
+function realpathOfExistingOrNearestAncestor(dir: string): string {
+  const missing: string[] = [];
+  let current = resolve(dir);
+  for (;;) {
+    try {
+      const real = realpathSync(current);
+      return missing.length === 0 ? real : resolve(real, ...missing.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current)
+        throw new DispatchError('config', `sessions: cannot resolve '${dir}'`);
+      missing.push(relative(parent, current));
+      current = parent;
+    }
+  }
+}
+
+/**
+ * True when `candidate` is at or under `parent` (both realpathed absolute
+ * paths). Platform-aware: the containment is judged with `path.relative`,
+ * so Windows backslash paths and the POSIX filesystem root compare
+ * correctly (a `parent + '/'` prefix check fails both: `C:\work` never
+ * starts with `C:\work/`, and descendants of `/` never start with `//`).
+ * `equal` (`''`), nested (`sub/dir`) and root-child (`sessions` under
+ * `/`) relations are inside; `..`-leading (sibling, sibling-prefix like
+ * `workspace2`, parent) and different-drive (absolute `relative` result)
+ * relations are outside. A literal `..x` child name is inside: only a `..`
+ * PATH SEGMENT escapes. `pathImpl` is the `node:path` namespace (default)
+ * or `node:path/win32` in tests.
+ */
+export function isInsideDir(
+  candidate: string,
+  parent: string,
+  pathImpl: Pick<typeof import('node:path'), 'relative' | 'isAbsolute' | 'sep'> = {
+    relative,
+    isAbsolute,
+    sep,
+  },
+): boolean {
+  const rel = pathImpl.relative(parent, candidate);
+  return (
+    rel === '' ||
+    (!pathImpl.isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${pathImpl.sep}`))
+  );
 }
 
 /** Resume old records whose workspace may predate realpath normalization. */

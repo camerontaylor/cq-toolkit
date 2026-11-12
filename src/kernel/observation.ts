@@ -41,6 +41,7 @@ import type {
   KernelRunLinkedJournalEvent,
   ObservationEvent,
   ObservationStream,
+  RunStartedJournalEvent,
   RunStartedV3JournalEvent,
 } from './types.js';
 
@@ -60,15 +61,44 @@ function isEnoent(err: unknown): boolean {
 export type ObservationPersistence = 'durable' | 'unavailable';
 
 /**
- * One kernel v3 run a fold may resolve kernel-run-linked events against:
- * the run id, the plan it belongs to, and its v3 header (for the
- * correlation.workId join).
+ * One kernel run a fold may resolve kernel-run-linked events against: the
+ * run id, the plan it belongs to, and the run-started header EXACTLY AS THE
+ * KERNEL WROTE IT, discriminated by the header's own journal version. The
+ * version discriminant is enforced BY THE TYPE (v1 headers cannot carry a
+ * v2 journalVersion and vice versa), so the read model is sound by
+ * construction while the runtime header stays verbatim. A v3 header
+ * carries the correlation.workId the fold joins on; v1/v2 headers carry
+ * only the envelope facts (runId/at/planId, plus seq/governance for v2) —
+ * real evidence, never upgraded or padded: no correlation, provenance or
+ * availability is ever invented for them (T04 ruling 2026-11-12). This is
+ * a plain internal read model: it changes no kernel journal schema, no
+ * writer and no frozen OpResult shape.
  */
-export interface KernelRunDescriptor {
-  runId: string;
-  planId: string;
-  header: RunStartedV3JournalEvent;
-}
+export type KernelRunDescriptor =
+  | {
+      journalVersion: 1;
+      runId: string;
+      planId: string;
+      header: RunStartedJournalEvent & { journalVersion?: undefined };
+    }
+  | {
+      journalVersion: 2;
+      runId: string;
+      planId: string;
+      header: RunStartedJournalEvent & { journalVersion: 2 };
+    }
+  | { journalVersion: 3; runId: string; planId: string; header: RunStartedV3JournalEvent };
+
+/** Runtime discriminant: a header the kernel persisted WITHOUT journalVersion. */
+const isV1RunStarted = (
+  header: RunStartedJournalEvent,
+): header is RunStartedJournalEvent & { journalVersion?: undefined } =>
+  header.journalVersion === undefined;
+
+/** Runtime discriminant: a header the kernel persisted WITH journalVersion 2. */
+const isV2RunStarted = (
+  header: RunStartedJournalEvent,
+): header is RunStartedJournalEvent & { journalVersion: 2 } => header.journalVersion === 2;
 
 /** A kernel-run-linked event after fold resolution (ADR-0008: never guessed). */
 export type ResolvedKernelRunLink =
@@ -339,12 +369,18 @@ function observationUuid(value: string): boolean {
 }
 
 /**
- * Kernel v3 run descriptors a fold resolves links against, read STRICTLY
+ * Kernel run descriptors a fold resolves links against, read STRICTLY
  * through the kernel's own reader (openRunLog().read): a corrupt kernel
  * file throws — corruption is never folded into descriptors — and each
  * file's FIRST event must be its run-started header with the file's runId.
- * A v1/v2-era (or missing) header yields no descriptor: those links stay
- * unknown with a reason, never guessed.
+ * Every header the kernel actually writes yields a descriptor (T04 ruling
+ * 2026-11-12): v3 headers as-is, and v1/v2 headers as-is with only the
+ * facts they provably carry — the descriptor never upgrades a legacy
+ * header or invents correlation/provenance/availability to fill the fold's
+ * join. The fold keeps the workId join UNKNOWN for those legacy runs with
+ * a version-accurate reason instead. Missing/empty files yield no
+ * descriptor (unknown, not guessed); torn tails are the kernel reader's
+ * tolerance and stay non-descriptors.
  */
 export async function readKernelRunDescriptors(
   journalDir: string,
@@ -379,10 +415,24 @@ export async function readKernelRunDescriptors(
           'misattributed evidence, refused',
       );
     }
-    if (first.journalVersion !== 3) {
-      continue; // v1/v2-era run: no v3 header, so its links stay unknown
+    if (first.journalVersion === 3) {
+      descriptors.push({ journalVersion: 3, runId, planId: first.planId, header: first });
+    } else if (isV2RunStarted(first)) {
+      // v2: the kernel reader's schema already validated the exact persisted
+      // shape (journalVersion 2 + exactly one of governance/ungoverned). The
+      // descriptor reports the header VERBATIM — runId/planId are proven
+      // facts; correlation and friends do not exist on this record, so none
+      // are synthesized here.
+      descriptors.push({ journalVersion: 2, runId, planId: first.planId, header: first });
+    } else if (isV1RunStarted(first)) {
+      // v1 (journalVersion absent): same verbatim discipline, no invented
+      // fields.
+      descriptors.push({ journalVersion: 1, runId, planId: first.planId, header: first });
+    } else {
+      // Defense in depth: the kernel reader accepts only v1/v2/v3 headers,
+      // so this arm is unreachable unless that guarantee regresses.
+      throw new Error(`kernel run '${runId}' header carries unsupported journalVersion — refused`);
     }
-    descriptors.push({ runId, planId: first.planId, header: first });
   }
   return descriptors;
 }
@@ -462,9 +512,12 @@ export async function readObservations(journalDir: string): Promise<ObservationS
  * Fold observation streams against their kernel runs (ADR-0008): the join
  * resolves each kernel-run-linked event by planId + kernelRunId + the
  * header's correlation.workId. Each link is `resolved` when the referenced
- * kernel v3 run exists with the same planId AND a matching workId;
- * otherwise `unknown` with the reason — never guessed, never dropped. File
- * order is preserved within each stream; streams sort by workId then
+ * kernel v3 run exists with the same planId AND a matching workId.
+ * A v1/v2 descriptor (run + plan match) is NEVER resolved on runId alone:
+ * its header carries no correlation.workId, so the link stays `unknown`
+ * with a version-accurate reason — never guessed, never dropped, and no
+ * legacy header is upgraded to manufacture the join. File order is
+ * preserved within each stream; streams sort by workId then
  * compositionRunId. Kernel replay consumes only kernel streams;
  * observational events never alter reservations, sequence claims or job
  * statuses.
@@ -502,13 +555,28 @@ export function foldObservations(
               `not '${event.payload.planId}'`,
           };
         }
-        if (byId.header.correlation.workId !== validated.workId) {
+        // The workId join exists only on v3 headers. A v1/v2 header proves
+        // the run and the plan but not the composition identity: resolving
+        // on runId alone would forge the join, so it stays unknown with the
+        // actual journal version named.
+        const headerWorkId = byId.journalVersion === 3 ? byId.header.correlation.workId : undefined;
+        if (headerWorkId === undefined) {
+          return {
+            state: 'unknown',
+            event,
+            reason:
+              `kernel run '${event.payload.kernelRunId}' is a journalVersion ` +
+              `${byId.journalVersion} run: its run-started header carries no ` +
+              'correlation.workId, so the composition workId join cannot be proven',
+          };
+        }
+        if (headerWorkId !== validated.workId) {
           return {
             state: 'unknown',
             event,
             reason:
               `kernel run '${event.payload.kernelRunId}' carries workId ` +
-              `'${byId.header.correlation.workId}', not this stream's '${validated.workId}'`,
+              `'${headerWorkId}', not this stream's '${validated.workId}'`,
           };
         }
         return { state: 'resolved', event, kernelRunId: byId.runId, planId: byId.planId };

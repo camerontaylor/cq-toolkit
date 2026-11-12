@@ -14,6 +14,7 @@ import {
   fixInstructionsScanPatch,
   fullSourceScanPatch,
   pythonSplitlines,
+  withFixInstructions,
 } from '../../../src/policy/crq/repairGates.js';
 import {
   JsonNumber,
@@ -334,5 +335,44 @@ describe('canonical handoff precondition against the Python oracle', () => {
       ok: false,
       refusal: 'canonical-handoff-mismatch',
     });
+  });
+});
+
+describe('fix-instruction evidence injection (crq.py repair-prepare)', () => {
+  test('replaces an existing key in place', () => {
+    const evidence = new JsonObject([
+      ['source_sha', 'a'.repeat(40)],
+      ['fix_instructions', 'old guidance'],
+      ['verdict', 'still-valid'],
+    ]);
+    const injected = withFixInstructions(evidence, 'new guidance');
+    expect(injected.entries.map(([key]) => key)).toEqual([
+      'source_sha',
+      'fix_instructions',
+      'verdict',
+    ]);
+    expect(injected.get('fix_instructions')).toBe('new guidance');
+    expect(injected.get('verdict')).toBe('still-valid');
+    // The caller's evidence value is never mutated.
+    expect(evidence.get('fix_instructions')).toBe('old guidance');
+  });
+
+  test('appends a missing key last', () => {
+    const evidence = new JsonObject([
+      ['source_sha', 'a'.repeat(40)],
+      ['verdict', 'still-valid'],
+    ]);
+    const injected = withFixInstructions(evidence, 'guidance');
+    expect(injected.entries.map(([key]) => key)).toEqual([
+      'source_sha',
+      'verdict',
+      'fix_instructions',
+    ]);
+    expect(injected.get('fix_instructions')).toBe('guidance');
+  });
+
+  test('keeps unicode text and a trailing newline exactly as read', () => {
+    const injected = withFixInstructions(new JsonObject([]), '雪\nfix it\n');
+    expect(injected.get('fix_instructions')).toBe('雪\nfix it\n');
   });
 });

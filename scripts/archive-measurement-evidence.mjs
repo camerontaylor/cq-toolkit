@@ -205,7 +205,7 @@ async function captureRoot(root, bundleDir) {
   if (!expected.length) return [];
   let rootPath;
   try {
-    rootPath = await realpath(resolve(root.path ?? ''));
+    rootPath = await realpath(resolve(root.path));
   } catch (error) {
     return expected.map((path) => ({
       root: root.name,
@@ -252,6 +252,8 @@ export async function buildMeasurementBundle(input) {
   for (const root of input.roots ?? []) {
     if (typeof root.name !== 'string' || !SAFE_NAME.test(root.name) || names.has(root.name))
       throw new Error('measurement-bundle: invalid, duplicate or reserved root name');
+    if (typeof root.path !== 'string' || root.path.trim() === '')
+      throw new Error(`measurement-bundle: root ${root.name} requires an explicit path`);
     names.add(root.name);
   }
   await mkdir(dirname(bundleDir), { recursive: true, mode: 0o700 });

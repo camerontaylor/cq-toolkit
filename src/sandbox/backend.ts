@@ -344,15 +344,6 @@ export function containerAdapter(options: ContainerAdapterOptions = {}): Sandbox
       try {
         let created: SandboxLaunchResult;
         try {
-          const envFile = join(envDir, 'child.env');
-          await writeFile(envFile, envFileText, { mode: 0o600 });
-          const createArgs = containerArgv(
-            resolved,
-            request.workspace,
-            request.network,
-            envFile,
-            request.argv,
-          ).slice(3); // omit `<cli> run --rm`
           // Ensure the image in its own step: `create` pulls a missing image
           // by default, so a cold first launch would pull inside the 15 s
           // control budget and time out.  `image inspect` decides locally —
@@ -370,13 +361,28 @@ export function containerAdapter(options: ContainerAdapterOptions = {}): Sandbox
                 ...controlOptions,
                 timeoutMs: CONTAINER_PULL_TIMEOUT_MS,
               });
-          created = pulled.ok
-            ? await runChild(
-                launcher,
-                ['create', '--pull', 'never', '--name', name, ...createArgs],
-                controlOptions,
-              )
-            : pulled;
+          if (pulled.ok) {
+            // Only now, just before `create` reads it, is the scrubbed env
+            // file written: a cold pull can occupy the full pull budget, so
+            // the file must not sit on disk (holding passthrough values)
+            // while inspect/pull run.
+            const envFile = join(envDir, 'child.env');
+            await writeFile(envFile, envFileText, { mode: 0o600 });
+            const createArgs = containerArgv(
+              resolved,
+              request.workspace,
+              request.network,
+              envFile,
+              request.argv,
+            ).slice(3); // omit `<cli> run --rm`
+            created = await runChild(
+              launcher,
+              ['create', '--pull', 'never', '--name', name, ...createArgs],
+              controlOptions,
+            );
+          } else {
+            created = pulled;
+          }
         } finally {
           await rm(envDir, { recursive: true, force: true });
         }

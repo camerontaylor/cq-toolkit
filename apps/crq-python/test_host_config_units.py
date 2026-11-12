@@ -126,7 +126,7 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         header[18:20] = b'\x3e\x00'
         return bytes(header)
 
-    def _node_artifact(self, sha):
+    def _node_artifact(self, sha, capabilities=None):
         """Build a minimally packageable whole-artifact tree.
 
         This is an extracted artifact, so it contains the manifest as well as
@@ -145,6 +145,10 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         (fs_ext / 'package.json').write_text(
             json.dumps({'name': 'fs-ext', 'version': package.FS_EXT_VERSION}))
         (fs_ext / 'build/Release/fs_ext.node').write_bytes(self._elf_header())
+        if capabilities is not None:
+            (root / 'dist/queue-runner/capabilities.json').write_text(
+                json.dumps({'schema_version': 1,
+                            'commands': list(capabilities)}))
         files = package.inventory(root)
         facts = package.staging_facts(root)
         provenance = {
@@ -347,6 +351,70 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         other_manifest.write_text(json.dumps(manifest))
         with self.assertRaisesRegex(ValueError, 'manifest is invalid'):
             host.artifact_identity(other, 'node:' + 'c' * 40)
+
+    def _rewrite_artifact_manifest(self, artifact):
+        package = host._package_runner()
+        files = package.inventory(artifact, exclude=(package.MANIFEST_NAME,))
+        manifest_path = artifact / package.MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text())
+        manifest['files'] = files
+        manifest['content_sha256'] = package.content_digest(files)
+        package.validate_manifest(manifest)
+        manifest_path.write_text(json.dumps(manifest))
+
+    def test_artifact_identity_returns_declared_capabilities(self):
+        sha = 'a' * 40
+        artifact = self._node_artifact(sha, capabilities=['watchdog'])
+        identity = host.artifact_identity(artifact, 'node:' + sha)
+        self.assertEqual(identity['capabilities'], ['watchdog'])
+
+    def test_artifact_identity_without_declaration_declares_no_commands(self):
+        sha = 'a' * 40
+        artifact = self._node_artifact(sha)
+        identity = host.artifact_identity(artifact, 'node:' + sha)
+        self.assertEqual(identity['capabilities'], [])
+
+    def test_artifact_identity_refuses_malformed_capability_declarations(self):
+        sha = 'a' * 40
+        artifact = self._node_artifact(sha)
+        path = artifact / 'dist/queue-runner/capabilities.json'
+        cases = [
+            ('{', 'invalid'),
+            ('[]', 'unexpected fields'),
+            ('{"schema_version": 2, "commands": []}', 'schema version'),
+            ('{"schema_version": 1, "commands": "watchdog"}',
+             'list of strings'),
+            ('{"schema_version": 1, "commands": ["bogus"]}',
+             'unknown unit command'),
+            ('{"schema_version": 1, "commands": ["watchdog", "watchdog"]}',
+             'duplicates'),
+            ('{"schema_version": 1, "commands": [], "extra": 1}',
+             'unexpected fields'),
+        ]
+        for payload, message in cases:
+            with self.subTest(payload=payload):
+                path.write_text(payload)
+                self._rewrite_artifact_manifest(artifact)
+                with self.assertRaisesRegex(ValueError, message):
+                    host.artifact_identity(artifact, 'node:' + sha)
+
+    def test_artifact_identity_refuses_tampered_capability_declaration(self):
+        sha = 'a' * 40
+        artifact = self._node_artifact(sha, capabilities=['watchdog'])
+        path = artifact / 'dist/queue-runner/capabilities.json'
+        path.write_text('{"schema_version": 1, "commands": ["slot"]}')
+        with self.assertRaisesRegex(ValueError, 'inventory'):
+            host.artifact_identity(artifact, 'node:' + sha)
+
+    def test_artifact_identity_refuses_symlink_capability_declaration(self):
+        sha = 'a' * 40
+        artifact = self._node_artifact(sha, capabilities=['watchdog'])
+        path = artifact / 'dist/queue-runner/capabilities.json'
+        path.unlink()
+        path.symlink_to('crq.js')
+        self._rewrite_artifact_manifest(artifact)
+        with self.assertRaisesRegex(ValueError, 'not a regular file'):
+            host.artifact_identity(artifact, 'node:' + sha)
 
     def test_node_artifact_source_binds_to_pointer_not_template_commit(self):
         sha = 'a' * 40

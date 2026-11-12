@@ -48,10 +48,14 @@ export type {
   QueueTransport,
   QueueReason,
 } from './internal/queueProtocol.js';
-import { processEnv } from '../../config/process-env.js';
+import { currentCqEnv } from '../../config/run-env.js';
+import type { CqEnv } from '../../config/env.js';
 
 type Unsupported = { state: 'unsupported'; reason: string };
-export function makeQueueOps(transport?: QueueTransport): {
+export function makeQueueOps(
+  transport?: QueueTransport,
+  cqEnv: CqEnv = currentCqEnv(),
+): {
   retry: Op<QueueRetryInput, unknown>;
   drain: Op<QueueDrainInput, unknown>;
   enqueue: Op<QueueEnqueueInput, QueueStatus | Unsupported>;
@@ -96,8 +100,12 @@ export function makeQueueOps(transport?: QueueTransport): {
       } catch (error) {
         return { status: 'failed', error: messageOf(error) };
       }
-      const alias = processEnv()['CQ_QUEUE_SSH_ALIAS'];
-      if (!transport && !alias)
+      // The alias is the operator's CQ_QUEUE_SSH_ALIAS resolved in the run's
+      // CqEnv snapshot (captured at construction by default): an ambient env
+      // change after the entry snapshot never alters queue configuration.
+      const raw = cqEnv.values['CQ_QUEUE_SSH_ALIAS'];
+      const alias = typeof raw === 'string' && raw !== '' ? raw : undefined;
+      if (!transport && alias === undefined)
         return {
           status: 'needs-human',
           reason:

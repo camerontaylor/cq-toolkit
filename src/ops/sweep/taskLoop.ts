@@ -27,6 +27,7 @@ import {
   type FixerDeadline,
 } from './internal/fixerBudget.js';
 import { finishAttempt, type FinishAttemptStop } from '../fix/attemptRecord.js';
+import { validTokens } from '../../shared/knownUsage.js';
 import type { AttemptFinishedJournalEvent } from '../../kernel/types.js';
 import type { SweepUnitBindings, SweepUnitReport, UnitProbe } from './unit.js';
 import type { WorkUnit } from './planSweep.js';
@@ -123,6 +124,42 @@ export function promptRound(
             ...(validation.regression ? { regression: true } : {}),
           },
         }),
+  };
+}
+
+/**
+ * Read the usage a REJECTING driver attached to its fault (issue #1195) so a
+ * thrown attempt still records the spend its run already settled. Every field
+ * must satisfy the success path's non-negative safe-integer rule
+ * (`validTokens`, issue #1189's rule in dev.cycle's rejection metering): a
+ * negative, fractional, unsafe or missing field voids the whole attachment —
+ * it contributes nothing and the thrown attempt row records usage unknown,
+ * exactly like the success path's `normalizeUsageObservation` semantics. A
+ * corrupt report is never trusted in part, so malformed usage can neither
+ * shrink nor enlarge the budget evidence; valid usage lands on the thrown
+ * attempt row (tokens, usage channels, requests) through the finally
+ * boundary, and on the report's attempt record.
+ */
+function usageOfRejection(err: unknown): Usage | undefined {
+  if (typeof err !== 'object' || err === null || !('usage' in err)) return undefined;
+  const usage: unknown = (err as { usage: unknown }).usage;
+  if (typeof usage !== 'object' || usage === null) return undefined;
+  const fields = usage as Record<string, unknown>;
+  const { input, output, cacheRead, cacheWrite, reasoning } = fields;
+  if (
+    !validTokens(input) ||
+    !validTokens(output) ||
+    !validTokens(cacheRead) ||
+    !validTokens(cacheWrite) ||
+    (reasoning !== undefined && !validTokens(reasoning))
+  )
+    return undefined;
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    ...(reasoning !== undefined ? { reasoning } : {}),
   };
 }
 
@@ -591,6 +628,17 @@ async function runTaskLoopInner(
               // Only a driver-call rejection is a driver-sourced cause; loop
               // throws must not be misattributed to the driver.
               driverThrew = true;
+              // A rejecting driver may attach the usage its run already
+              // settled (#1195): validated above (#1189's rule), it lands on
+              // the attempt record and the thrown attempt-finished row via
+              // the finally boundary below — tokens, usage channels and
+              // requests: one metered request, however the driver then
+              // failed. A corrupt or absent attachment changes nothing.
+              const rejectedUsage = usageOfRejection(driverError);
+              if (rejectedUsage !== undefined) {
+                usage = rejectedUsage;
+                if (attempt !== undefined) attempt.usage = rejectedUsage;
+              }
               throw driverError;
             }
             try {

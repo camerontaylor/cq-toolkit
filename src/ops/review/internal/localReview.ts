@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 import { execFile } from 'node:child_process';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { SnapshotConfigError } from '../../dev/internal/snapshot.js';
 import type { Op } from '../../../kernel/types.js';
@@ -78,3 +79,21 @@ export async function headMessage(cwd: string, reviewed: string) {
 }
 
 export const evidenceRoot = async (cwd: string) => git(cwd, 'rev-parse', '--show-toplevel');
+
+/** Per-request evidence file; a non-repository cwd simply has no cache. */
+export async function evidenceRequestPath(
+  cwd: string,
+  requestId: string,
+): Promise<string | undefined> {
+  try {
+    return join(await evidenceRoot(cwd), '.cq/queue-evidence/requests', requestId + '.json');
+  } catch {
+    return undefined;
+  }
+}
+
+/** "Once per material change": identical digests carry no repeat cue. */
+export function withoutHistoryCue<T extends { cue?: unknown }>(history: T): Omit<T, 'cue'> {
+  const { cue: _cue, ...rest } = history;
+  return rest;
+}
