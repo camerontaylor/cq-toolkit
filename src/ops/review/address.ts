@@ -275,6 +275,7 @@ export interface ReviewAddressDeps {
   /** Durable receipts and per-PR exclusion domain for isolated bulk checkouts. */
   coordinationRoot?: string;
   drivers?: DriverFactory;
+  managedSubmit?: import('../dev/managedReview.js').ManagedReviewSubmit;
   git?: GhFn;
   gh?: GhFn;
   worktreeRegistry?: SlotWorktreeRegistry;
@@ -1289,6 +1290,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         deps.review ??
         makeReviewRun({
           drivers: reviewDrivers,
+          ...(deps.managedSubmit ? { managedSubmit: deps.managedSubmit } : {}),
           ...(deps.queueClient ? { queueClient: deps.queueClient } : {}),
           ...(parent ? { parentSignal: parent } : {}),
           writeFindingsRecord: async (path, content) => {

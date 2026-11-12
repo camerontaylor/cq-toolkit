@@ -24,6 +24,10 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "default": ".",
       "type": "string"
     },
+    "head": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
     "notify": {
       "additionalProperties": false,
       "properties": {
@@ -42,6 +46,15 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
         "paseo_host"
       ],
       "type": "object"
+    },
+    "projection": {
+      "default": "full-diff",
+      "enum": [
+        "full-diff",
+        "working-tree-full-v1",
+        "working-tree-uncommitted-v1"
+      ],
+      "type": "string"
     },
     "reachable": {
       "default": false,

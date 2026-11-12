@@ -98,6 +98,13 @@ export interface ReviewRunDeps {
     effects: DevEffects,
     patternsFile?: string,
   ) => DiffSecretScanner;
+  /**
+   * S2b-i managed CodeRabbit route: submit the pinned (base, head) through
+   * review-v1 instead of the CLI. Threaded into the CodeRabbit leg's
+   * dev.review call. Absent means the managed route is unavailable and the
+   * leg reports it (no silent CLI fallback).
+   */
+  managedSubmit?: import('../dev/managedReview.js').ManagedReviewSubmit;
 }
 
 /** A blocked run still exposes the persisted record so consumers can surface advisories. */
@@ -367,11 +374,12 @@ export function makeReviewRun(
           configuredReviewers: policy.review.reviewers,
           ...(deadline.signal ? { signal: deadline.signal } : {}),
           remainingWallMs,
-          ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }),
           scanSecrets: scanner,
           ...(policy.review.denylistPatternsFile === undefined
             ? {}
             : { patternsFile: policy.review.denylistPatternsFile }),
+          // S2b-i: the CodeRabbit leg rides the managed queue route.
+          ...(deps.managedSubmit === undefined ? {} : { managedSubmit: deps.managedSubmit }),
         })({
           repoRoot: input.repoRoot,
           reviewer: 'coderabbit',

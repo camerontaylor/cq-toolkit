@@ -9,6 +9,8 @@ import { createHash } from 'node:crypto';
 import type { DiffSecretScanner, ScanComponentInput } from '../../../src/ops/dev/denylist.js';
 import type { Op } from '../../../src/kernel/types.js';
 import type { CommandResult } from '../../../src/ops/dev/effects.js';
+import type { DevFinding } from '../../../src/ops/dev/record.js';
+import type { ManagedReviewSubmit } from '../../../src/ops/dev/managedReview.js';
 import {
   makeDevReview,
   type DevCycleInput,
@@ -27,12 +29,48 @@ export const cycleReview = (
   effects: Parameters<typeof makeDevReview>[0]['effects'],
   scanSecrets: DiffSecretScanner,
   patternsFile?: string,
+  managedSubmit?: ManagedReviewSubmit,
 ) =>
   makeDevReview({
     effects,
     scanSecrets,
     ...(patternsFile === undefined ? {} : { patternsFile }),
+    ...(managedSubmit === undefined ? {} : { managedSubmit }),
   }) as Op<DevCycleInput, DevReviewReport>;
+
+/**
+ * S2b-i: a scripted managed queue leg. The tests script the submit outcome
+ * directly (the submit-wait-fetch leg itself is covered in managedReview.test.ts
+ * over a fake transport); these fixtures carry the same finding shapes the
+ * CLI stream parser emitted, so cycle assertions are unchanged.
+ */
+export const managedTerminal = (
+  findings: Omit<DevFinding, 'id'>[] = [
+    { severity: 'major', fileName: 'src/a.ts', excerpt: 'fix this' },
+    { severity: 'minor', excerpt: 'nit' },
+  ],
+  receiptId = 'r'.repeat(64),
+): ManagedReviewSubmit =>
+  (async () => ({
+    status: 'completed',
+    value: { receiptId, completion: { kind: 'terminal' }, findings, advisories: [] },
+  })) as ManagedReviewSubmit;
+
+export const managedBlocked = (
+  reason: string,
+  findings: Omit<DevFinding, 'id'>[] = [],
+  receiptId = 'b'.repeat(64),
+): ManagedReviewSubmit =>
+  (async () => ({
+    status: 'completed',
+    value: { receiptId, completion: { kind: 'blocked', reason }, findings, advisories: [] },
+  })) as ManagedReviewSubmit;
+
+export const managedRefused = (reason: string, transient?: true): ManagedReviewSubmit =>
+  (async () =>
+    transient === true
+      ? { status: 'refused', reason, transient: true as const }
+      : { status: 'refused', reason }) as ManagedReviewSubmit;
 
 /** The admission branch: the composed op with the given transport (effects never touched). */
 export const admissionReview = (transport: AuthorTransport) =>

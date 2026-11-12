@@ -675,15 +675,18 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'review.addressMany',
     inputSchema: ReviewAddressManyInputSchema,
-    importer: async (wiring) =>
-      (await import('./addressMany.js')).makeReviewAddressMany({
+    importer: async (wiring) => {
+      const managed = await import('../dev/managedReview.js');
+      return (await import('./addressMany.js')).makeReviewAddressMany({
+        managedSubmit: managed.makeConfiguredManagedReviewSubmit(wiring?.cqEnv),
         drivers: createDriverFactory({
           ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
             : {}),
           ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
         }),
-      }) as Op<unknown, unknown>,
+      }) as Op<unknown, unknown>;
+    },
   },
   {
     name: 'review.submit',
@@ -769,8 +772,9 @@ export const registry: OpRegistryEntry[] = [
     name: 'review.address',
     inputSchema: ReviewAddressInputSchema,
     importer: async (wiring) => {
-      const { makeReviewAddress } = await import('./address.js');
-      return makeReviewAddress({
+      const managed = await import('../dev/managedReview.js');
+      return (await import('./address.js')).makeReviewAddress({
+        managedSubmit: managed.makeConfiguredManagedReviewSubmit(wiring?.cqEnv),
         drivers: createDriverFactory({
           ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
@@ -783,9 +787,15 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'review.run',
     inputSchema: ReviewRunInputSchema,
+    // S2b-i: the op's CodeRabbit leg rides the managed queue route
+    // (review-v1 on the queue identity) via run.ts's `managedSubmit` dep.
+    // The binding is inert at construction (closures only — no spawn, no
+    // env read), so resolving the entry still touches nothing. `gh` resolves
+    // the forge repo itself from the input repoRoot; the server re-derives
+    // every hashed fact and refuses a mismatch (plan D2).
     importer: (wiring) =>
-      import('./run.js').then(
-        (m) =>
+      Promise.all([import('./run.js'), import('../dev/managedReview.js')]).then(
+        ([m, managed]) =>
           m.makeReviewRun({
             drivers: createDriverFactory({
               ...(wiring?.onDeprecatedAlias !== undefined
@@ -793,6 +803,7 @@ export const registry: OpRegistryEntry[] = [
                 : {}),
               ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
             }),
+            managedSubmit: managed.makeConfiguredManagedReviewSubmit(wiring?.cqEnv),
           }) as Op<unknown, unknown>,
       ),
   },
