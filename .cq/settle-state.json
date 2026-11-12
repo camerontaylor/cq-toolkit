@@ -1912,6 +1912,32 @@
           "by": "self-merge-prs:observe"
         }
       ]
+    },
+    "1578": {
+      "tuple": {
+        "head": "6aad82e2d2f1462d688f4cde89632b238958a5a0",
+        "base": "d55cecf648d4bb2f6eb5cfbaa86ba4e67bb09d53",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-12T04:49:52.872Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "1579": {
+      "tuple": {
+        "head": "be87cd915cf46977bd927e0bb1111c10634b596d",
+        "base": "d55cecf648d4bb2f6eb5cfbaa86ba4e67bb09d53",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-12T04:49:52.872Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
     }
   }
 }
