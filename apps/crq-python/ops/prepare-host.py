@@ -696,8 +696,10 @@ def prepare(root, overlay, raw, output):
             output.mkdir(parents=True, exist_ok=True)
             for path in paths:
                 atomic_bytes(output / Path(path).name, Path(path).read_bytes())
-        atomic_bytes(root / CONFIG, data)
+        # Marker first: a crash before the config write leaves the host inert
+        # on its previous configuration instead of live without the marker.
         atomic_bytes(root / 'apps/crq-python/state/runner-disabled', b'Prepared inert; owner approval required to start.\n')
+        atomic_bytes(root / CONFIG, data)
     run(['systemctl', '--user', 'daemon-reload'])
     # Deliberately no start or enable here.
 
