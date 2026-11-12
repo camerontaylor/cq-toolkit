@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { readCqEnv, type CqEnv } from '../../../src/config/env.js';
+import { runWithCqEnv } from '../../../src/config/run-env.js';
 import { registry } from '../../../src/ops/gates/registry.js';
 import {
   HOOK_MS,
@@ -93,11 +94,18 @@ describe('gates.policyDiff registry entry: the posture comes from config only', 
     }
   });
 
-  test('without wiring (library use) the ambient snapshot is read at dispatch', async () => {
+  test('without wiring the importer uses the enclosing run snapshot (library fallback)', async () => {
     const subject = importCommits(repo, {
       'registry-lib': { files: { 'lint/x.txt': 'rule5\n' } },
     })['registry-lib']!;
-    const result = await dispatch(undefined, subject, 'diff-check');
+    // No wiring snapshot: the resolver's currentCqEnv() default is the
+    // authority. Running it inside a run makes the assertion deterministic
+    // (no dependence on the host's ambient CQ_* environment): the ambient
+    // 'human' below would answer needs-human under the pre-#1185 call-time
+    // process.env read.
+    const result = await runWithCqEnv(readCqEnv({ CQ_MERGE_PROTECTED_PATHS: 'diff-check' }), () =>
+      dispatch(undefined, subject, 'human'),
+    );
     expect(result).toMatchObject({
       status: 'ok',
       value: { verdict: 'pass', posture: 'diff-check', postureLayer: 'env' },
