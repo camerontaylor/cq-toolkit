@@ -110,7 +110,7 @@ describe('T29 unknown evidence', () => {
       await expect(readKernelRunDescriptors(dir, ['cr-mismatch'])).rejects.toThrow(
         /does not match/,
       );
-      // A v1 header yields a truthful v1 descriptor: the header as written,
+      // A v2 header yields a truthful v2 descriptor: the header as written,
       // only the facts it provably carries (no invented correlation).
       const v2Run = 'plan-x--k--v2';
       const v2Header = {

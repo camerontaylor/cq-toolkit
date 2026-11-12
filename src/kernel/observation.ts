@@ -63,18 +63,42 @@ export type ObservationPersistence = 'durable' | 'unavailable';
 /**
  * One kernel run a fold may resolve kernel-run-linked events against: the
  * run id, the plan it belongs to, and the run-started header EXACTLY AS THE
- * KERNEL WROTE IT, discriminated by the header's own journal version. A v3
- * header carries the correlation.workId the fold joins on; v1/v2 headers
- * carry only the envelope facts (runId/at/planId, plus seq/governance for
- * v2) — real evidence, never upgraded or padded: no correlation, provenance
- * or availability is ever invented for them (T04 ruling 2026-11-12). This is
+ * KERNEL WROTE IT, discriminated by the header's own journal version. The
+ * version discriminant is enforced BY THE TYPE (v1 headers cannot carry a
+ * v2 journalVersion and vice versa), so the read model is sound by
+ * construction while the runtime header stays verbatim. A v3 header
+ * carries the correlation.workId the fold joins on; v1/v2 headers carry
+ * only the envelope facts (runId/at/planId, plus seq/governance for v2) —
+ * real evidence, never upgraded or padded: no correlation, provenance or
+ * availability is ever invented for them (T04 ruling 2026-11-12). This is
  * a plain internal read model: it changes no kernel journal schema, no
  * writer and no frozen OpResult shape.
  */
 export type KernelRunDescriptor =
-  | { journalVersion: 1; runId: string; planId: string; header: RunStartedJournalEvent }
-  | { journalVersion: 2; runId: string; planId: string; header: RunStartedJournalEvent }
+  | {
+      journalVersion: 1;
+      runId: string;
+      planId: string;
+      header: RunStartedJournalEvent & { journalVersion?: undefined };
+    }
+  | {
+      journalVersion: 2;
+      runId: string;
+      planId: string;
+      header: RunStartedJournalEvent & { journalVersion: 2 };
+    }
   | { journalVersion: 3; runId: string; planId: string; header: RunStartedV3JournalEvent };
+
+/** Runtime discriminant: a header the kernel persisted WITHOUT journalVersion. */
+const isV1RunStarted = (
+  header: RunStartedJournalEvent,
+): header is RunStartedJournalEvent & { journalVersion?: undefined } =>
+  header.journalVersion === undefined;
+
+/** Runtime discriminant: a header the kernel persisted WITH journalVersion 2. */
+const isV2RunStarted = (
+  header: RunStartedJournalEvent,
+): header is RunStartedJournalEvent & { journalVersion: 2 } => header.journalVersion === 2;
 
 /** A kernel-run-linked event after fold resolution (ADR-0008: never guessed). */
 export type ResolvedKernelRunLink =
@@ -393,18 +417,21 @@ export async function readKernelRunDescriptors(
     }
     if (first.journalVersion === 3) {
       descriptors.push({ journalVersion: 3, runId, planId: first.planId, header: first });
-    } else {
-      // v1 (journalVersion absent) or v2 (journalVersion 2): the kernel
-      // reader's schemas already validated the exact persisted shape. The
+    } else if (isV2RunStarted(first)) {
+      // v2: the kernel reader's schema already validated the exact persisted
+      // shape (journalVersion 2 + exactly one of governance/ungoverned). The
       // descriptor reports the header VERBATIM — runId/planId are proven
-      // facts; correlation and friends do not exist on these records, so
-      // none are synthesized here.
-      descriptors.push({
-        journalVersion: first.journalVersion === undefined ? 1 : first.journalVersion,
-        runId,
-        planId: first.planId,
-        header: first,
-      });
+      // facts; correlation and friends do not exist on this record, so none
+      // are synthesized here.
+      descriptors.push({ journalVersion: 2, runId, planId: first.planId, header: first });
+    } else if (isV1RunStarted(first)) {
+      // v1 (journalVersion absent): same verbatim discipline, no invented
+      // fields.
+      descriptors.push({ journalVersion: 1, runId, planId: first.planId, header: first });
+    } else {
+      // Defense in depth: the kernel reader accepts only v1/v2/v3 headers,
+      // so this arm is unreachable unless that guarantee regresses.
+      throw new Error(`kernel run '${runId}' header carries unsupported journalVersion — refused`);
     }
   }
   return descriptors;

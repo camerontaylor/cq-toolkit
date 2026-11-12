@@ -16,7 +16,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { openRunLog } from '../../src/kernel/journal.js';
-import { foldObservations, readKernelRunDescriptors } from '../../src/kernel/observation.js';
+import {
+  foldObservations,
+  readKernelRunDescriptors,
+  readObservations,
+} from '../../src/kernel/observation.js';
+import { foldObservations as foldReport } from '../../src/ops/fix/reportFold.js';
 import { createGovernor } from '../../src/kernel/governor.js';
 import { runPlan } from '../../src/kernel/runner.js';
 import type { RunStartedJournalEvent } from '../../src/kernel/types.js';
@@ -33,7 +38,7 @@ import {
   CR_ID,
   WORK_ID,
   header as observationHeader,
-  linked,
+  linked as linkedEvent,
   writeStream,
 } from './observation.helpers.js';
 
@@ -110,11 +115,34 @@ describe('T04 producer probes: actual runPlan headers through the descriptor rea
       expect('correlation' in v2).toBe(false);
       expect('provenance' in v2).toBe(false);
       expect('availability' in v2).toBe(false);
-      // The T04 reader returns the run's actual header VERBATIM.
       const descriptors = await readKernelRunDescriptors(dir, [report.runId]);
       expect(descriptors).toHaveLength(1);
       expect(descriptors[0]).toMatchObject({ journalVersion: 2, runId: report.runId });
       expect(descriptors[0]?.header).toEqual(v2);
+      // End to end: the descriptor's legacy join surfaces in the assembled
+      // report too — the T36 wrapper composes the fold's version-accurate
+      // reason under its version-neutral prefix (never a bare prefix).
+      await writeStream(
+        dir,
+        [
+          observationHeader(),
+          linkedEvent(report.runId, 1, {
+            payload: { kernelRunId: report.runId, planId: 'plan-t04-v2', round: 1 },
+          }),
+        ],
+        CR_ID,
+        WORK_ID,
+      );
+      const assembled = foldReport({
+        streams: await readObservations(dir),
+        kernelRuns: descriptors,
+        producer: 'fix',
+      });
+      const journalLink = assembled.availability['/provenance/journalLink'];
+      expect(journalLink?.state).toBe('unavailable');
+      expect(journalLink?.reason).toContain('T04 kernel run descriptors unavailable');
+      expect(journalLink?.reason).toContain('journalVersion 2');
+      expect(journalLink?.reason).toContain(report.runId);
     },
     journalEnclosure(1),
   );
@@ -139,7 +167,7 @@ describe('T04 producer probes: actual runPlan headers through the descriptor rea
         dir,
         [
           observationHeader(),
-          linked(report.runId, 1, {
+          linkedEvent(report.runId, 1, {
             payload: { kernelRunId: report.runId, planId: 'plan-t04-fold', round: 1 },
           }),
         ],
