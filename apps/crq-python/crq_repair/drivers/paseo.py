@@ -7,6 +7,10 @@ import sys
 import time
 from crq_repair import atomic, command
 
+# Cleanup must end spend promptly, so `stop`/`archive` never inherit
+# command()'s 20-minute default.
+CLEANUP_TIMEOUT_SECONDS = 30
+
 
 def _budget_stop():
     """The exhausted-budget verdict, for the loop and for a stalled poll."""
@@ -96,14 +100,19 @@ def invoke(config, role, job, wt, directory):
         # Stop the exact owned agent before archival; never leave timed-out
         # spend. A failed stop must be visible and must not archive the agent
         # out of the normal listing, and neither call may replace the verdict.
+        # Both are bounded by a short explicit timeout: cleanup exists to end
+        # spend, so a stalled host must not hold it for command()'s 20-minute
+        # default long after the wall-clock budget is gone.
         try:
-            stopped = command(['paseo', '--host', endpoint, 'stop', agent], timeout=60).returncode == 0
+            stopped = command(['paseo', '--host', endpoint, 'stop', agent],
+                              timeout=CLEANUP_TIMEOUT_SECONDS).returncode == 0
         except Exception as exc:
             stopped = False
             print('paseo stop failed for ' + str(agent) + ': ' + str(exc), file=sys.stderr)
         if stopped:
             try:
-                if command(['paseo', '--host', endpoint, 'archive', agent], timeout=60).returncode:
+                if command(['paseo', '--host', endpoint, 'archive', agent],
+                           timeout=CLEANUP_TIMEOUT_SECONDS).returncode:
                     print('paseo archive failed for ' + str(agent), file=sys.stderr)
             except Exception as exc:
                 print('paseo archive failed for ' + str(agent) + ': ' + str(exc), file=sys.stderr)
