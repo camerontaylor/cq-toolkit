@@ -10,11 +10,49 @@ import { lock } from 'proper-lockfile';
 import { DISPATCH_RECORD_VERSION } from '../../ops/review/replyAndResolve.js';
 import type { DispatchLog, DispatchRecord } from '../../ops/review/replyAndResolve.js';
 
+/** The action kinds a dispatch record may carry (the ReviewAction union). */
+const RECORD_KINDS: ReadonlySet<string> = new Set([
+  'review_reply',
+  'issue_comment',
+  'resolve_thread',
+]);
+
 /**
- * Validate one parsed line (ADR-0005 decision 10): an ABSENT version is a
- * legacy v1 line and reads as v1, `version: 1` is accepted, and any other
- * value is refused fail-closed. A non-object line is refused too: it can
- * never be a dispatch record.
+ * Describe the first shape fault in a candidate record, or null when the
+ * shape is one this reader may dispatch past. Extra keys are tolerated:
+ * the version field (not key strictness) is the forward-compat mechanism,
+ * so a v1 line carrying an unfamiliar extra key still loads while a line
+ * missing or mistyping a REQUIRED field never does.
+ */
+function recordShapeFault(value: Record<string, unknown>): string | null {
+  const actionId: unknown = value.actionId;
+  if (typeof actionId !== 'string' || actionId.length === 0) {
+    return `actionId must be a non-empty string (the dedupe key) — got ${JSON.stringify(actionId)}`;
+  }
+  const kind: unknown = value.kind;
+  if (typeof kind !== 'string' || !RECORD_KINDS.has(kind)) {
+    return `kind must be "review_reply", "issue_comment" or "resolve_thread" — got ${JSON.stringify(kind)}`;
+  }
+  const resultRef: unknown = value.resultRef;
+  if (typeof resultRef !== 'string') {
+    return `resultRef must be a string — got ${JSON.stringify(resultRef)}`;
+  }
+  const at: unknown = value.at;
+  if (typeof at !== 'number' || !Number.isFinite(at)) {
+    return `at must be a finite number — got ${JSON.stringify(at)}`;
+  }
+  return null;
+}
+
+/**
+ * Validate one parsed line (ADR-0005 decision 10 + issue #1199): an ABSENT
+ * version is a legacy v1 line and reads as v1, `version: 1` is accepted,
+ * and any other value is refused fail-closed. A non-object line is refused
+ * too — and so is an object whose REQUIRED fields are missing or mistyped
+ * (a renamed `actionId`, a stray record of another shape): without the
+ * dedupe key the action would silently re-dispatch (a repost), so a
+ * well-formed-JSON line that is not a record throws exactly like a corrupt
+ * mid-file line does. A non-object line can never be a dispatch record.
  */
 function parseDispatchLine(value: unknown, path: string, where: string): DispatchRecord {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -26,6 +64,12 @@ function parseDispatchLine(value: unknown, path: string, where: string): Dispatc
   if (version !== undefined && version !== DISPATCH_RECORD_VERSION) {
     throw new Error(
       `fileDispatchLog: dispatch log at ${JSON.stringify(path)} ${where} has unsupported record version ${JSON.stringify(version)} — this reader accepts ${DISPATCH_RECORD_VERSION} or a legacy record with no version; refusing to dispatch on top of an unreadable log; fix or remove the file and re-run`,
+    );
+  }
+  const fault = recordShapeFault(value as Record<string, unknown>);
+  if (fault !== null) {
+    throw new Error(
+      `fileDispatchLog: dispatch log at ${JSON.stringify(path)} ${where} has a malformed record (${fault}) — refusing to dispatch on top of an unreadable log; fix or remove the file and re-run`,
     );
   }
   // Return the normalized record: legacy v1 gains its explicit version.
@@ -54,6 +98,12 @@ function parseDispatchLine(value: unknown, path: string, where: string): Dispatc
  * line without one is a legacy v1 record (old logs exist in runner caches)
  * and reads as v1, while any other version is refused fail-closed — a
  * format this reader cannot truthfully interpret is never dispatched past.
+ * SHAPE (issue #1199): every parsed line must also carry the required
+ * record fields (`actionId`, `kind`, `resultRef`, `at`) with their
+ * producer shapes — a renamed field or a stray record of another shape
+ * throws naming the line, so a missing dedupe key can never silently
+ * re-dispatch (a repost). Extra keys are tolerated; `record()` applies the
+ * same shape rule before appending, so the writer cannot poison its own log.
  */
 export function fileDispatchLog(path: string): DispatchLog {
   const load = async (): Promise<DispatchRecord[]> => {
@@ -101,6 +151,14 @@ export function fileDispatchLog(path: string): DispatchLog {
     if (entry.version !== DISPATCH_RECORD_VERSION) {
       throw new Error(
         `fileDispatchLog: refusing to record a dispatch with version ${JSON.stringify(entry.version)} — this writer writes ${DISPATCH_RECORD_VERSION} only`,
+      );
+    }
+    // The writer never self-poisons the log: a malformed entry is refused
+    // here rather than appended into a line the next load() must throw on.
+    const fault = recordShapeFault(entry as unknown as Record<string, unknown>);
+    if (fault !== null) {
+      throw new Error(
+        `fileDispatchLog: refusing to record a malformed dispatch record (${fault}) — nothing was appended; fix the caller and re-run`,
       );
     }
     // A discarded partial tail is truncated before the retry appends, so a
