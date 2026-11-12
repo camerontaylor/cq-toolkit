@@ -178,7 +178,8 @@ def phases():
                    "process": {"pid": 4001, "alive": True,
                                "starttime": "100"}},
         "queue": {"before_sha256": "1" * 64, "after_sha256": "1" * 64,
-                  "baseline_sha256": "0" * 64, "restored_sha256": "0" * 64},
+                  "baseline_sha256": STATE["queue.json"],
+                  "restored_sha256": STATE["queue.json"]},
         "records_before": [HISTORY_PATH],
         "records_after": [HISTORY_PATH],
         "completions_before": 4, "completions_after": 4,
@@ -211,7 +212,8 @@ def phases():
                                     "after": {"pid": 4003, "alive": True,
                                               "starttime": "102"}}},
         "queue": {"before_sha256": "2" * 64, "after_sha256": "2" * 64,
-                  "baseline_sha256": "0" * 64, "restored_sha256": "0" * 64},
+                  "baseline_sha256": STATE["queue.json"],
+                  "restored_sha256": STATE["queue.json"]},
         "before": observation(NODE), "after": observation(NODE),
     }
     harvest_node = _record("harvest-node", {
@@ -712,6 +714,20 @@ class HarnessCheckTests(unittest.TestCase):
                 checks, problems = harness.build_checks(value)
                 self.assertFalse(checks["drain_alive_refused"])
                 self.assertTrue(problems)
+
+    def test_drain_refusal_binds_queue_digests_to_baseline_state(self):
+        for name, check in (("drain-alive", "drain_alive_refused"),
+                            ("drain-ambiguous", "drain_ambiguous_refused")):
+            for label, digest in (("baseline-mismatch", "9" * 64),
+                                  ("unbound-pair", "0" * 64)):
+                with self.subTest(phase=name, case=label):
+                    value = phases()
+                    value[name]["queue"]["baseline_sha256"] = digest
+                    if label == "unbound-pair":
+                        value[name]["queue"]["restored_sha256"] = digest
+                    checks, problems = harness.build_checks(value)
+                    self.assertFalse(checks[check])
+                    self.assertTrue(problems)
 
     def test_harvest_and_recovery_reject_absent_preservation_fields(self):
         for label, mutate in (
