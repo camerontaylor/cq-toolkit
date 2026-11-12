@@ -484,6 +484,11 @@ function pyTruthy(value: unknown): boolean {
     return value.kind === 'int' ? (value.integer as bigint) !== 0n : (value.float as number) !== 0;
   }
   if (Array.isArray(value)) return value.length > 0;
+  // A lossless JsonObject view is the parsed previous's cached value shape:
+  // Python dicts truth-test by entry count, so an empty cached title ({}) is
+  // falsy and the gh lookup still fires (a plain-object Object.keys probe
+  // cannot see a JsonObject's entries and reported truthy).
+  if (value instanceof JsonObject) return value.entries.length > 0;
   if (typeof value === 'object') return Object.keys(value).length > 0;
   return true;
 }

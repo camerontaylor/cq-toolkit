@@ -600,6 +600,90 @@ describe('publish-full oracle replay through publishSummary', () => {
     expect(result.text).toContain('"context_error":{"2":"first","1":"second"}');
   });
 
+  it('an empty cached title ({}) is falsy: the gh lookup still fires', () => {
+    // r5 residual (reproduced at af5a1b13): the lossless cache stores the
+    // previous's non-string titles as JsonObject views, and pyTruthy probed
+    // them with Object.keys, which cannot see JsonObject entries: an empty
+    // cached dict reported truthy, the gh gate stayed closed and the bytes
+    // published "title":{} where Python's `or` treats {} as falsy and calls
+    // gh (publishes the fetched title).
+    const previous = '{"last_tick":"x","pending_items":[{"repo":"r","pr":5,"title":{}}]}';
+    const calls: string[] = [];
+    const core = {
+      last_tick: 'x',
+      pending_items: [{ repo: 'r', pr: 5, title: null }],
+      starts_cap: 8,
+      generated_at: 'g',
+    };
+    const queue = { items: [], starts: [], last_tick: 'x' } as unknown as CrqRecord;
+    const result = publishSummary(
+      core,
+      queue,
+      {},
+      {},
+      {
+        root: '/state',
+        xdgStateHome: '/xdg',
+        now: 0,
+        previousBytes: new TextEncoder().encode(previous),
+        inbox: {
+          entries: [],
+          readResult: () => null,
+          hasResult: () => false,
+          hasProgress: () => false,
+        },
+        triageRows: [],
+        systemd: { error: 'x' },
+        systemdClock: { realtime: 0, monotonic: 0 },
+        ghTitle: (repo, pr) => {
+          calls.push(`repos/${repo}/pulls/${pr}`);
+          return 'Fresh 5';
+        },
+        readReceipt: () => null,
+      },
+    );
+    expect(calls).toEqual(['repos/r/pulls/5']);
+    expect(result.text).toContain('"title":"Fresh 5"');
+    expect(result.text).not.toContain('"title":{}');
+  });
+
+  it('preserves ordered mappings nested inside failure_class arrays byte-exactly', () => {
+    // r5 residual (reproduced at af5a1b13): the igxr fix view-wrapped only
+    // the TOP-level array items of a row field; failure_class values are
+    // lists of lists of dicts, and the inner arrays still projected their
+    // dict items through the plain-object hop, reordering {"2","1"} into
+    // {"1","2"}. Array elements keep nested mappings as views at any depth.
+    const row = new TextEncoder().encode(
+      '{"status":"needs-human","canonical_id":"c","target":"tip","finding":{"id":"i","title":"T","severity":"minor"},"failure_class":[[{"2":"first","1":"second"}]]}',
+    );
+    const core = { last_tick: 'x', pending_items: [], starts_cap: 8, generated_at: 'g' };
+    const queue = { items: [], starts: [], last_tick: 'x' } as unknown as CrqRecord;
+    const result = publishSummary(
+      core,
+      queue,
+      {},
+      {},
+      {
+        root: '/state',
+        xdgStateHome: '/xdg',
+        now: 0,
+        previousBytes: null,
+        inbox: {
+          entries: [],
+          readResult: () => null,
+          hasResult: () => false,
+          hasProgress: () => false,
+        },
+        triageRows: [{ name: 'a.json', bytes: row }],
+        systemd: { error: 'x' },
+        systemdClock: { realtime: 0, monotonic: 0 },
+        ghTitle: () => null,
+        readReceipt: () => null,
+      },
+    );
+    expect(result.text).toContain('"failure_class":[[{"2":"first","1":"second"}]]');
+  });
+
   it('preserves an explicitly null schedule_id; defaults only an absent key', () => {
     // Python `config.get("schedule_id", "crq-tick.timer")` defaults only an
     // ABSENT key; an explicit null publishes `"id": null` (the fixture

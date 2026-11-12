@@ -851,11 +851,12 @@ class TriageMapping {
     const entry: JsonValue | undefined = this.source.has(key) ? this.source.get(key) : undefined;
     if (entry === undefined) return undefined;
     // Nested mappings stay TriageMapping views so `.get` chains like Python's.
+    // This includes mappings nested INSIDE arrays at any depth: a plain-object
+    // projection there would reorder integer-like string keys before the
+    // row's view projection could preserve them (failure_class rows carry
+    // lists of ordered mappings).
     if (entry instanceof JsonObject) return TriageMapping.of(entry);
-    if (Array.isArray(entry))
-      return entry.map((item) =>
-        item instanceof JsonObject ? TriageMapping.of(item) : pyValue(item),
-      );
+    if (Array.isArray(entry)) return entry.map(viewItem);
     return pyValue(entry);
   }
 
@@ -892,6 +893,18 @@ class TriageMapping {
   entriesOfSource(): ReadonlyArray<readonly [string, JsonValue]> {
     return this.source.entries;
   }
+}
+
+/**
+ * Array elements keep nested mappings as views at any depth: a plain-object
+ * projection would reorder integer-like string keys inside inner arrays (a
+ * failure_class value like [[{"2":…, "1":…}]] is a list of lists of dicts,
+ * and only the top-level array's dict items were view-wrapped before).
+ */
+function viewItem(item: JsonValue): unknown {
+  if (item instanceof JsonObject) return TriageMapping.of(item);
+  if (Array.isArray(item)) return item.map(viewItem);
+  return pyValue(item);
 }
 
 function plainOf(value: JsonValue): unknown {
@@ -1056,15 +1069,43 @@ function jobKey(job: unknown): string {
 
 /**
  * The inbox stems whose content the digest will read: jobs listed in a
- * 'queued' run (any item kind) whose id passes the drain grammar. Best-effort
- * and never throwing: any queue defect here is raised by `repairDigest`
- * itself, with the producer's exact class and message, before its inbox
- * loop; this selector only tells the filesystem layer which files the
- * producer would open, so unreadable orphans are never touched (audit iO_c).
+ * 'queued' run (any item kind) whose id passes the drain grammar, minus every
+ * stem a verdict already consumed (`consumed.add(job)` runs over all verdicts
+ * before the drain selection, so a consumed job is never re-read — a stale
+ * verdict plus a chmod-000 result must not make the adapter eager-read where
+ * Python's digest skips the consumed stem before any result access). Best-
+ * effort and never throwing: any queue defect here is raised by
+ * `repairDigest` itself, with the producer's exact class and message, before
+ * its inbox loop; this selector only tells the filesystem layer which files
+ * the producer would open, so unreadable orphans are never touched (audit
+ * iO_c).
  */
 export function drainableStemsFromQueue(queue: unknown): ReadonlySet<string> {
   const selected = new Set<string>();
+  const consumed = new Set<string>();
   try {
+    for (const item of queueItems(queue)) {
+      for (const record of repairRuns(item).values()) {
+        const verdictsValue = recordGet(record, 'verdicts');
+        const verdicts = verdictsValue === undefined ? [] : verdictsValue;
+        if (Array.isArray(verdicts)) {
+          // Same clause the digest applies: only list elements reach the
+          // subscript; any other verdicts source is the digest's refusal and
+          // contributes no consumed stems here.
+          for (const verdictValue of verdicts) {
+            if (!isMapping(verdictValue)) continue;
+            const job = verdictValue.get('job');
+            if (job === undefined) continue;
+            try {
+              consumed.add(consumedKey(job));
+            } catch {
+              // An unhashable job is the digest's TypeError refusal, not a
+              // selection input; the stem stays selectable.
+            }
+          }
+        }
+      }
+    }
     for (const item of queueItems(queue)) {
       for (const record of repairRuns(item).values()) {
         if (recordGet(record, 'state') !== 'queued') continue;
@@ -1078,7 +1119,9 @@ export function drainableStemsFromQueue(queue: unknown): ReadonlySet<string> {
               ? [...jobs.entriesOfSource().map(([key]) => key)]
               : [];
         for (const job of jobElements) {
-          if (typeof job === 'string' && JOB_ID.test(job)) selected.add(job);
+          if (typeof job !== 'string' || !JOB_ID.test(job)) continue;
+          if (consumed.has(jobKey(job))) continue;
+          selected.add(job);
         }
       }
     }

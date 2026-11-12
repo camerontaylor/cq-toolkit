@@ -442,6 +442,56 @@ describe('summary publish route over real files', () => {
     }
   });
 
+  it('a consumed verdict stem is excluded from selection: stale verdict plus chmod-000 result never aborts', async () => {
+    // r5 residual (reproduced at af5a1b13): Python's digest adds every
+    // verdict's job to `consumed` before the drain selection, so a queued job
+    // crq-used-F1 whose stem already carries a STALE verdict is skipped
+    // before its result.json is ever opened; digest succeeds (stale:1,
+    // inbox:0) on a chmod-000 result. The selector lacked the consumed
+    // filter, so the adapter eager-read the unreadable result and assembly
+    // aborted where Python succeeds.
+    const root = await tempRoot();
+    const jobDir = join(root.state, 'repair', 'crq-used-F1');
+    await mkdir(jobDir, { recursive: true });
+    await writeFile(join(root.state, 'repair', 'inbox', 'crq-used-F1.json'), '{}');
+    await writeFile(join(jobDir, 'result.json'), '{"retry_after":null}');
+    await chmod(join(jobDir, 'result.json'), 0o000);
+    try {
+      const queue = {
+        items: [
+          {
+            id: 'i',
+            repair_runs: {
+              done: {
+                state: 'done',
+                verdicts: [{ job: 'crq-used-F1', verdict: 'STALE' }],
+              },
+              r: { state: 'queued', jobs: ['crq-used-F1'] },
+            },
+          },
+        ],
+      };
+      const effects = await summaryStateEffects(
+        { stateRoot: root.state, xdgStateHome: root.xdg, home: root.root },
+        async () => null,
+        [],
+        () => 1_700_000,
+        queue,
+      );
+      // The consumed stem's job was never opened at assembly.
+      const entry = effects.inbox.entries.find((e) => e.stem === 'crq-used-F1');
+      expect(entry).toBeDefined();
+      expect(entry?.jobBytes).toBeNull();
+      expect(entry?.jobError).toBeUndefined();
+      // And the digest succeeds like Python: stale:1, inbox:0.
+      const digest = repairDigest(queue as never, effects.inbox, 1_700_000);
+      expect(digest['verdicts']).toMatchObject({ stale: 1 });
+      expect(digest['inbox']).toBe(0);
+    } finally {
+      await chmod(join(jobDir, 'result.json'), 0o644);
+    }
+  });
+
   it('binds the repair inbox seam to real files', async () => {
     const root = await tempRoot();
     const jobDir = join(root.state, 'repair', 'job-1');
