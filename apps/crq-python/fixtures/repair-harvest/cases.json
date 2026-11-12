@@ -1,0 +1,1495 @@
+{
+  "schema": "cq.crq-repair-harvest-vector/v1",
+  "at": "2026-11-12T00:00:00Z",
+  "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "job": "crq-repair-F1",
+  "max_finding_retries": 2,
+  "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+  "harvest_cases": [
+    {
+      "name": "failed-exhausted",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "exhausted",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "a80465ca9d0c049d5842e88d875a19735d3f6fde13e016c5bd73c79377a10a30",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "needs-retriage"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        }
+      ],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "a80465ca9d0c049d5842e88d875a19735d3f6fde13e016c5bd73c79377a10a30",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "needs-retriage",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "exhausted",
+              "fix_pr": null,
+              "reason": "driver budget exhausted",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1"
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:8a71592efb12bb43093e5d5d99fc981cf0073d246d8aad219c45d94a24487ebd"
+        }
+      ],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "FAILED",
+        "failure_class": "exhausted",
+        "reason": "driver budget exhausted"
+      }
+    },
+    {
+      "name": "failed-transient",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "transient",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "4ba0db83d518e97e15e0e92b2fdd4bc362ccc2873a50e0fd0f79f52195e20b27",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "needs-retriage"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        }
+      ],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "4ba0db83d518e97e15e0e92b2fdd4bc362ccc2873a50e0fd0f79f52195e20b27",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "needs-retriage",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "transient",
+              "fix_pr": null,
+              "reason": "provider unavailable",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1"
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:aa01c7481edaf652e638b0c5c05fb6b4db0a628386271dcf61e80ce0a9450806"
+        }
+      ],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "FAILED",
+        "failure_class": "transient",
+        "reason": "provider unavailable"
+      }
+    },
+    {
+      "name": "failed-evidence",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "evidence",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "370c660d897c12ca43f4c7c57f8295e43cca480d5becbb3d34a0d15b19ffcabe",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "needs-retriage"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        }
+      ],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "370c660d897c12ca43f4c7c57f8295e43cca480d5becbb3d34a0d15b19ffcabe",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "needs-retriage",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "evidence",
+              "fix_pr": null,
+              "reason": "contract carried no usable evidence",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1"
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:9a164574f768548d604d0a4c0b2770578959b3dfc1de48912b61e49e965f0a95"
+        }
+      ],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "FAILED",
+        "failure_class": "evidence",
+        "reason": "contract carried no usable evidence"
+      }
+    },
+    {
+      "name": "failed-protected-path",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "protected-path",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "a25b7cb554216f95d357e58f4625a35b10bd0aadb16db9eb8351402b5ae84041",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "needs-retriage"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        }
+      ],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "a25b7cb554216f95d357e58f4625a35b10bd0aadb16db9eb8351402b5ae84041",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "needs-retriage",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "protected-path",
+              "fix_pr": null,
+              "reason": "worker may not edit workflows",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1"
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:b5d9fe1dfd56453001191a726d09812e5d3a610e8498e6d75f4137420a483382"
+        }
+      ],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "FAILED",
+        "failure_class": "protected-path",
+        "reason": "worker may not edit workflows"
+      }
+    },
+    {
+      "name": "failed-owner-decision",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "owner-decision",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "0cdcc86202095843ffd128a0aa93abbf1bd3e0ed18765ebd5fe11efad5012ca4",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "needs-human"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        }
+      ],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "0cdcc86202095843ffd128a0aa93abbf1bd3e0ed18765ebd5fe11efad5012ca4",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "needs-human",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "owner-decision",
+              "fix_pr": null,
+              "reason": "architectural choice required",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1"
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:e6ee1f1ff9a309cdbd4cf5fb83645c9abec7a468d53823acce4cce9151c2fbd9"
+        }
+      ],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "FAILED",
+        "failure_class": "owner-decision",
+        "reason": "architectural choice required"
+      }
+    },
+    {
+      "name": "failed-unknown-class-normalizes",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "exhausted",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "6cad7b99179656f4fc5a86a952e6a8a61578faea8a9077a5140dc24b7bee4f91",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "needs-retriage"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        }
+      ],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "6cad7b99179656f4fc5a86a952e6a8a61578faea8a9077a5140dc24b7bee4f91",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "needs-retriage",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "exhausted",
+              "fix_pr": null,
+              "reason": "unclassified stop",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1"
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:deb4ee0a744d2f6e0cab5d6ec9a5daf383e9e1441dbb244577e75e13c4c43b97"
+        }
+      ],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "FAILED",
+        "failure_class": "bogus",
+        "reason": "unclassified stop"
+      }
+    },
+    {
+      "name": "not-fixed-with-evidence",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "exhausted",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "4d10f3a6a8e0ca348560c4173d17f525be4dea9ac78e5435d0bf288ec4d67cdd",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "dismissed"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        }
+      ],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "4d10f3a6a8e0ca348560c4173d17f525be4dea9ac78e5435d0bf288ec4d67cdd",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "dismissed",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "exhausted",
+              "fix_pr": null,
+              "reason": "already fixed upstream",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1",
+              "source_evidence": [
+                {
+                  "line": 2,
+                  "path": "src/a.ts"
+                }
+              ]
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:e46facb06f320f6e1a6a9c18948e897a3a6dfcd71bf0f59627de137a2459e682"
+        }
+      ],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "NOT-FIXED",
+        "reason": "already fixed upstream",
+        "unchanged_evidence": [
+          {
+            "path": "src/a.ts",
+            "line": 2
+          }
+        ]
+      }
+    },
+    {
+      "name": "not-fixed-without-evidence",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "exhausted",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "6fe64c7306d6fb8aa00a9dbb49c6ae602527d04a18d4733b059e4e9f9528af4e",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "needs-retriage"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        }
+      ],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "6fe64c7306d6fb8aa00a9dbb49c6ae602527d04a18d4733b059e4e9f9528af4e",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "needs-retriage",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "exhausted",
+              "fix_pr": null,
+              "reason": "no source read",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1"
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:01b65d1c0677db1d53dbac119ccf80841f242c6036398270e529dbfb0d0681b6"
+        }
+      ],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "NOT-FIXED",
+        "reason": "no source read",
+        "unchanged_evidence": []
+      }
+    },
+    {
+      "name": "not-fixed-without-evidence-owner",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "owner-decision",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "73b439b766298de04b99c2068f95f7982d7c92d836b3a60b3e61971c9bbe154e",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "needs-human"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        }
+      ],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "73b439b766298de04b99c2068f95f7982d7c92d836b3a60b3e61971c9bbe154e",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "needs-human",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "owner-decision",
+              "fix_pr": null,
+              "reason": "substantial architectural change",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1"
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:16741f8aadbaa09158b8f3546f0f640581e64b04a41d34a574baf27b84c4094e"
+        }
+      ],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "NOT-FIXED",
+        "failure_class": "owner-decision",
+        "reason": "substantial architectural change"
+      }
+    },
+    {
+      "name": "stale-delivery",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "exhausted",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "83be3b3e11d93ced832ac024e23a74a21e47a789bb3c22eb1237af2cea8a9c30",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "needs-retriage"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        }
+      ],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "83be3b3e11d93ced832ac024e23a74a21e47a789bb3c22eb1237af2cea8a9c30",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "needs-retriage",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "exhausted",
+              "fix_pr": null,
+              "reason": "source moved",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1"
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:6359512146dcdb87f971d4ab21bd5f3dc360ad2affb1a7f9cacb5333788586cf"
+        }
+      ],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "STALE",
+        "reason": "source moved"
+      }
+    },
+    {
+      "name": "invalid-fixed-without-commits",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "exhausted",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "187c9a7c6fdabe47fd86cd1a4563d4889a3328a1735a1c8ea604035752b3e266",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "needs-retriage"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        }
+      ],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "187c9a7c6fdabe47fd86cd1a4563d4889a3328a1735a1c8ea604035752b3e266",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "needs-retriage",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "exhausted",
+              "fix_pr": null,
+              "reason": "invalid repair result: repair result claims FIXED without valid commits",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1"
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:0496ad142cd9d5f450b4390869bb05d4efc6f0c3d8c93b5d8fce363593fbbff8"
+        }
+      ],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "FIXED",
+        "reason": "claimed fixed"
+      }
+    },
+    {
+      "name": "retry-bound-reached",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "a0bff983931971683d312bbf970f41eef93bb8359da7674606a5d41ee0cd7d7d",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "exhausted",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "e6c9df082b87a08059b2b80913ac9aa747edd53e9c6f5b5adfb7aaac9755a078",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "needs-human"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        },
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "repair-outcome:seed-1",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+            "action": "needs-retriage",
+            "evidence": {
+              "repair_task": "crq-prior-1",
+              "reason": "prior outcome",
+              "fix_pr": null,
+              "failure_class": "exhausted"
+            },
+            "actor": "crq-repair"
+          },
+          "id": "956a8100373e91c52a1a2c8ce0e75e44d485bb22ff1a841a4a95ff30a78b3ab8"
+        },
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "repair-outcome:seed-2",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": "956a8100373e91c52a1a2c8ce0e75e44d485bb22ff1a841a4a95ff30a78b3ab8",
+            "action": "needs-human",
+            "evidence": {
+              "repair_task": "crq-prior-2",
+              "reason": "prior outcome",
+              "fix_pr": null,
+              "failure_class": "evidence"
+            },
+            "actor": "crq-repair"
+          },
+          "id": "a0bff983931971683d312bbf970f41eef93bb8359da7674606a5d41ee0cd7d7d"
+        }
+      ],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "e6c9df082b87a08059b2b80913ac9aa747edd53e9c6f5b5adfb7aaac9755a078",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "needs-human",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "exhausted",
+              "fix_pr": null,
+              "reason": "third bounded attempt",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1"
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "a0bff983931971683d312bbf970f41eef93bb8359da7674606a5d41ee0cd7d7d",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:c62055454b291b065b49009ae8d867c3ce7911a8d2b068948b0b5623b640ba20"
+        }
+      ],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "FAILED",
+        "failure_class": "exhausted",
+        "reason": "third bounded attempt"
+      }
+    },
+    {
+      "name": "retry-bound-owner-prior-not-counted",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "c5c0aebf02b6843c6f9c51816cd574f999fdf3268ad23d5b9488f5d021c0e624",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "evidence",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "43a7c4d27166cbfa9aa0b13cb989b7e75c5022601d2a6e9a53445fdd20334fab",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "needs-retriage"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        },
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "repair-outcome:seed-1",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+            "action": "needs-human",
+            "evidence": {
+              "repair_task": "crq-prior-1",
+              "reason": "prior outcome",
+              "fix_pr": null,
+              "failure_class": "owner-decision"
+            },
+            "actor": "crq-repair"
+          },
+          "id": "c5c0aebf02b6843c6f9c51816cd574f999fdf3268ad23d5b9488f5d021c0e624"
+        }
+      ],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "43a7c4d27166cbfa9aa0b13cb989b7e75c5022601d2a6e9a53445fdd20334fab",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "needs-retriage",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "evidence",
+              "fix_pr": null,
+              "reason": "another evidence gap",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1"
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "c5c0aebf02b6843c6f9c51816cd574f999fdf3268ad23d5b9488f5d021c0e624",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:c107290f50d8157a3b836d69aa6cd71f4cb0137bb45b8b975e9631c0d388d824"
+        }
+      ],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "FAILED",
+        "failure_class": "evidence",
+        "reason": "another evidence gap"
+      }
+    },
+    {
+      "name": "retry-bound-non-crq-actors-not-counted",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "1b4ccdf4c2cc99b9af1655f2cad5582702c1a988b9c1a199bd10e1cc9c5b134c",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "exhausted",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "a4baa18205f185d2fccdbb97a85bcde29fe798d1da74003a97c2e12b14cb5b74",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "needs-retriage"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        },
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "repair-outcome:seed-1",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+            "action": "needs-human",
+            "evidence": {
+              "repair_task": "crq-prior-1",
+              "reason": "prior outcome",
+              "fix_pr": null,
+              "failure_class": "exhausted"
+            },
+            "actor": "cq-review"
+          },
+          "id": "e88922861387b6fb85cfc4878efe95166f03621b66eb67022fd62764d78267d3"
+        },
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "repair-outcome:seed-2",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": "e88922861387b6fb85cfc4878efe95166f03621b66eb67022fd62764d78267d3",
+            "action": "needs-retriage",
+            "evidence": {
+              "repair_task": "crq-prior-2",
+              "reason": "prior outcome",
+              "fix_pr": null,
+              "failure_class": "exhausted"
+            },
+            "actor": "operator"
+          },
+          "id": "1b4ccdf4c2cc99b9af1655f2cad5582702c1a988b9c1a199bd10e1cc9c5b134c"
+        }
+      ],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "a4baa18205f185d2fccdbb97a85bcde29fe798d1da74003a97c2e12b14cb5b74",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "needs-retriage",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "exhausted",
+              "fix_pr": null,
+              "reason": "operator retried twice",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1"
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "1b4ccdf4c2cc99b9af1655f2cad5582702c1a988b9c1a199bd10e1cc9c5b134c",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:1bd065762804c8b11d23c1c7ce7c5ae1e86526098781f7f75233d082010bec4e"
+        }
+      ],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "FAILED",
+        "failure_class": "exhausted",
+        "reason": "operator retried twice"
+      }
+    },
+    {
+      "name": "idempotent-replay-after-spool",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "exhausted",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "7559fb9e391839709f72b18fbb5bed8579facbd9c83dc892881cda0425da17ef",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "needs-retriage"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        }
+      ],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "7559fb9e391839709f72b18fbb5bed8579facbd9c83dc892881cda0425da17ef",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "needs-retriage",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "exhausted",
+              "fix_pr": null,
+              "reason": "bounded deferral",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1"
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:281252afbc10834d736ddc34dbee5d95324d26eecade92b7b69c94dfea31fe92"
+        }
+      ],
+      "row_replayed": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "exhausted",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "7559fb9e391839709f72b18fbb5bed8579facbd9c83dc892881cda0425da17ef",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "needs-retriage"
+      },
+      "outcome": {
+        "verdict": "FAILED",
+        "failure_class": "exhausted",
+        "reason": "bounded deferral"
+      }
+    },
+    {
+      "name": "preserved-newer-generation",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-newer-F2"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-newer-F2"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        }
+      ],
+      "events_added": [],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "FAILED",
+        "failure_class": "exhausted",
+        "reason": "old job finished late"
+      }
+    },
+    {
+      "name": "row-not-delivered-preserved",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "confirmed"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "confirmed"
+      },
+      "retained_before": [
+        {
+          "schema": "cq.review-ledger/v1",
+          "event_type": "finding-event",
+          "source_key": "confirmed:seed-root",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "previous_event_id": null,
+            "action": "confirmed",
+            "evidence": {
+              "target": "promoted-main",
+              "anchor_verified": true
+            },
+            "actor": "cq-review"
+          },
+          "id": "283fbd08fcc4a042ca937c4646b3910108482a80fd805982a94509dbe40fce5c"
+        }
+      ],
+      "events_added": [],
+      "row_replayed": null,
+      "outcome": {
+        "verdict": "FAILED",
+        "failure_class": "exhausted",
+        "reason": "operator moved the row"
+      }
+    }
+  ],
+  "mark_cases": [
+    {
+      "name": "pre-merge-fixed-writes-nothing",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "event-1",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "event-1",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "retained_before": [],
+      "events_added": [],
+      "outcome": {
+        "verdict": "FIXED",
+        "commits": [
+          "dddddddddddddddddddddddddddddddddddddddd"
+        ],
+        "reason": "fix ready"
+      },
+      "merge": null
+    },
+    {
+      "name": "merged-fixed-writes-fixed",
+      "row_before": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "event-1",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "delivered"
+      },
+      "row_after": {
+        "canonical_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "failure_class": "exhausted",
+        "finding": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "previous_event_id": "594e340d1a0e9d9bf1533d0428814dbdf56cab70d37dfa919ddd61a7244df108",
+        "receipt": {
+          "repair_task": "crq-repair-F1"
+        },
+        "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "fixed"
+      },
+      "retained_before": [],
+      "events_added": [
+        {
+          "event_type": "finding-event",
+          "id": "594e340d1a0e9d9bf1533d0428814dbdf56cab70d37dfa919ddd61a7244df108",
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "payload": {
+            "action": "fixed",
+            "actor": "crq-repair",
+            "evidence": {
+              "failure_class": "exhausted",
+              "fix_pr": 7,
+              "fixing_commit": "dddddddddddddddddddddddddddddddddddddddd",
+              "reason": "verified merge",
+              "repair_base": "cccccccccccccccccccccccccccccccccccccccc",
+              "repair_task": "crq-repair-F1",
+              "verification": "verified merge"
+            },
+            "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "previous_event_id": "event-1",
+            "review_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "schema": "cq.review-ledger/v1",
+          "source_key": "repair-outcome:9637e8d88e731d27a20ca4ecb4b494c4fba36184642262697a17a24913348926"
+        }
+      ],
+      "outcome": {
+        "verdict": "FIXED",
+        "commits": [
+          "dddddddddddddddddddddddddddddddddddddddd"
+        ],
+        "reason": "verified merge"
+      },
+      "merge": "dddddddddddddddddddddddddddddddddddddddd"
+    }
+  ]
+}
