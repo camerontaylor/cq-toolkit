@@ -644,3 +644,50 @@ describe('the publication gate vs refs/replace substitutions (review P1 p528)', 
     }
   });
 });
+
+describe('the publication gate vs message-read encoding (review P1 q2-s)', () => {
+  test('a repo-set i18n.logOutputEncoding=UTF-16LE cannot hide a message token — the read pins UTF-8 and refuses', async () => {
+    const f = await publicationFixture();
+    try {
+      const fakeToken = ['ghp', 'encodinghidden123'].join('_');
+      const driver = new GitWorkerDriver(
+        { origin: f.origin, repoRoot: f.repoRoot },
+        async (worktree) => {
+          await writeFile(join(worktree, 'base.txt'), 'baseline\nresolved cleanly\n');
+          await gitIn(worktree, 'add', '-A');
+          await gitIn(
+            worktree,
+            'commit',
+            '--quiet',
+            '-m',
+            `resolve: rotate GITHUB_TOKEN=${fakeToken} now`,
+          );
+          // The worker poisons the repo config before reporting acted:
+          // without a pinned --encoding, git log emits UTF-16LE and the
+          // UTF-8 decode no longer sees contiguous token text.
+          await gitIn(worktree, 'config', 'i18n.logOutputEncoding', 'UTF-16LE');
+        },
+      );
+      const { scanner, lastComponents } = recordingScan(tokenScanner);
+      const op = makeResolveConflictOp({
+        effects: f.effects,
+        drivers: {
+          resolve: (): ResolvedDriver => ({ driver, lane: 'ai-sdk', modelSpec: MODEL_SPEC }),
+        },
+        loadPrompt: fakeLoadPrompt,
+        scan: scanner,
+      });
+      const result = await run(f, op);
+      expect(result.status, JSON.stringify(result, null, 2)).toBe('needs-human');
+      if (result.status === 'needs-human') {
+        expect(result.reason).toContain('github-pat');
+        expect(result.reason).toContain('commit message');
+        expect(result.reason).not.toContain(fakeToken);
+      }
+      expect(f.pushes).toEqual([]);
+      expect(lastComponents()).toBeDefined();
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+});

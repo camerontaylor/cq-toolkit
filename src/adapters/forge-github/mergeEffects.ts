@@ -289,14 +289,18 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
     case 'log': {
       // The commit-message read (review P2 ntJt, PR #1628): the gate scans
       // the resolution commit's subject/body before publishing. EXACT
-      // shape: `log -1 --format=%B <40hex>` — one commit, the raw message,
-      // one validateRef-derived sha.
+      // shape: `log -1 --encoding=UTF-8 --format=%B <40hex>` — one commit,
+      // the raw message, the pinned encoding (review P1 q2-s, PR #1641: a
+      // repo's i18n.logOutputEncoding would otherwise emit UTF-16LE and
+      // hide an ASCII token from the UTF-8 decoder), one
+      // validateRef-derived sha.
       const tail = rest.slice(1);
       if (
-        tail.length !== 3 ||
+        tail.length !== 4 ||
         tail[0] !== '-1' ||
-        tail[1] !== '--format=%B' ||
-        !/^[0-9a-f]{40}$/i.test(tail[2] ?? '')
+        tail[1] !== '--encoding=UTF-8' ||
+        tail[2] !== '--format=%B' ||
+        !/^[0-9a-f]{40}$/i.test(tail[3] ?? '')
       ) {
         throw unknown();
       }
@@ -514,11 +518,14 @@ export interface MergeEffects {
    */
   isAncestor(ancestor: string, descendant: string): Promise<GhResult>;
   /**
-   * The RAW commit message (`git log -1 --format=%B <sha>`, review P2
-   * ntJt) of one full 40-hex sha behind the safeArgs-pinned shape — the
-   * publication gate scans the subject/body with the same denylist rules
-   * as the file patch, because a credential in the message rides the push
-   * while absent from it. Deliberately UNTRUNCATED: a cap would hide a
+   * The RAW commit message (`git log -1 --encoding=UTF-8 --format=%B
+   * <sha>`, review P2 ntJt, encoding P1 q2-s) of one full 40-hex sha
+   * behind the safeArgs-pinned shape — the publication gate scans the
+   * subject/body with the same denylist rules as the file patch, because
+   * a credential in the message rides the push while absent from it. The
+   * encoding is PINNED because a repo's i18n.logOutputEncoding can
+   * otherwise make the output UTF-16LE and hide ASCII token text from
+   * the UTF-8 decoder. Deliberately UNTRUNCATED: a cap would hide a
    * secret placed past it; the caller bounds only what it quotes in
    * errors.
    */
@@ -673,8 +680,9 @@ export interface RealMergeEffectsOpts {
  *                   history — review P1 rounds 2-3)
  *   - isAncestor:    `git -C <repoRoot> merge-base --is-ancestor <sha>
  *                   <sha>` (is the merge parent public base history?)
- *   - readCommitMessage: `git -C <repoRoot> log -1 --format=%B <sha>`
- *                   (the gate's message scan input, review P2 ntJt)
+ *   - readCommitMessage: `git -C <repoRoot> log -1 --encoding=UTF-8
+ *                   --format=%B <sha>` (the gate's message scan input,
+ *                   review P2 ntJt; encoding pinned P1 q2-s)
  *   - objectExists:  `git -C <repoRoot> cat-file -e <sha>` (is the forge
  *                   base tip local yet? review P2 ntJj)
  *   - fetchBaseBranch: `git -C <repoRoot> fetch origin <branch>` (bring a
@@ -718,6 +726,10 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     // src/ops/dev/internal/snapshot.ts uses, via makeGhRunner's env
     // merge.
     env: {
+      // Git treats GIT_NO_REPLACE_OBJECTS as PRESENCE-checked: any value,
+      // including 0, disables refs/replace. Setting it to 1 is therefore
+      // not a toggle — do not "optimize" this to `process.env.X ?? '1'`
+      // and expect 0 to re-enable replacements (crq F1, PR #1641).
       GIT_NO_REPLACE_OBJECTS: '1',
       GIT_CONFIG_COUNT: '1',
       GIT_CONFIG_KEY_0: 'core.quotePath',
@@ -788,10 +800,13 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   const isAncestor = (ancestor: string, descendant: string): Promise<GhResult> =>
     git(['-C', repoRoot, 'merge-base', '--is-ancestor', ancestor, descendant]);
 
-  // The message read (review P2 ntJt): unpadded %B, the raw subject and
-  // body — never truncated (a cap would hide a secret placed past it).
+  // The message read (review P2 ntJt, encoding P1 q2-s): unpadded %B, the
+  // raw subject and body — never truncated (a cap would hide a secret
+  // placed past it). --encoding is pinned so a repo's
+  // i18n.logOutputEncoding cannot turn the bytes into UTF-16LE and hide
+  // ASCII token text from the UTF-8 decoder.
   const readCommitMessage = (sha: string): Promise<GhResult> =>
-    git(['-C', repoRoot, 'log', '-1', '--format=%B', sha]);
+    git(['-C', repoRoot, 'log', '-1', '--encoding=UTF-8', '--format=%B', sha]);
 
   // The object-presence read (review P2 ntJj): exit 0 = local, anything
   // else = absent-or-unreadable (the caller fetches and re-checks).
