@@ -22,6 +22,13 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_RATE_LIMIT_PAUSE = dt.timedelta(minutes=30)
 MAX_RATE_LIMIT_PAUSE = dt.timedelta(hours=24)
 TICK_LOCK_WAIT_S = 300
+# The only stamp shape remember_provider_limit persists (the policy schema's
+# provider-cooldowns value pattern). Anything else in the state file is corrupt.
+COOLDOWN_STAMP = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z')
+# Fail-closed marker dispatch_paused returns while persisted provider-cooldowns
+# state is corrupt: never a live timestamp, and lifted only by an operator
+# repairing state/repair/provider-cooldowns.json.
+OPERATOR_RECOVERY_PAUSE = 'operator recovery required (corrupt provider-cooldowns.json)'
 
 
 @contextlib.contextmanager
@@ -148,12 +155,37 @@ def provider_ready(role):
     return all(os.environ.get(key) for key in keys.get(provider, ()))
 
 
+class CooldownStateError(ValueError):
+    """Persisted provider-cooldown state is corrupt; operator recovery is required."""
+
+
+def valid_cooldown_stamp(stamp):
+    """A persisted stamp is usable only at the canonical UTC shape and a real
+    date: an empty string or any other invalid value must never compare as an
+    expired cooldown."""
+    if not isinstance(stamp, str) or not COOLDOWN_STAMP.fullmatch(stamp):
+        return False
+    try:
+        dt.datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+    except ValueError:
+        return False
+    return True
+
+
 def provider_cooldowns():
     path = ROOT / 'state/repair/provider-cooldowns.json'
     if not path.exists():
         return {}
-    # Corrupt state must not silently spend against a known exhausted provider.
-    return json.loads(path.read_text())
+    # Corrupt state must not silently spend against a known exhausted provider:
+    # validate the complete document and reject every invalid timestamp before a
+    # caller compares one with utc().
+    try:
+        state = json.loads(path.read_text())
+    except ValueError as exc:
+        raise CooldownStateError('provider-cooldowns.json is not valid JSON: ' + str(exc)[:200]) from exc
+    if not isinstance(state, dict) or not all(valid_cooldown_stamp(stamp) for stamp in state.values()):
+        raise CooldownStateError('provider-cooldowns.json holds an invalid cooldown timestamp')
+    return state
 
 
 def remember_provider_limit(provider, report):
@@ -184,7 +216,12 @@ def remember_provider_limit(provider, report):
 
 def dispatch_paused(config):
     if config['repair'].get('fallback_models'):
-        state = provider_cooldowns()
+        try:
+            state = provider_cooldowns()
+        except CooldownStateError:
+            # Fail closed rather than reading a corrupt stamp as expired: no
+            # provider spend until an operator repairs the persisted state.
+            return OPERATOR_RECOVERY_PAUSE
         now = utc()
         roles = [candidate for role in config['repair']['roles'].values()
                  for candidate in fallback_roles(config, role) if provider_ready(candidate)]
