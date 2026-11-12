@@ -5,7 +5,12 @@
 // is unknown. This module owns the ADAPTER only; `review.ts`'s
 // `makeDevReview` is the single registry op that dispatches on `action`
 // (`enroll | status | fallback` here, the CodeRabbit review cycle there),
-// and the wire schema lives at the registry boundary (`registry.ts`).
+// and the wire schema lives at the registry boundary (`registry.ts`). The
+// author-side environment (`CQ_AUTHOR_REPO`, `CQ_AUTHOR_SNAPSHOT_SCANNER`,
+// `CQ_AUTHOR_SSH_ALIAS`) resolves once from the dispatch wiring's CqEnv
+// snapshot — never the ambient environment at call time — with an explicit
+// raw record as the library/test seam and the capture override winning over
+// both.
 //
 // THE TRANSPORT CONTRACT IS UNCHANGED FROM THE MERGED PR: a separate
 // operator-configured SSH identity (no command/path supplied by input),
@@ -23,6 +28,8 @@ import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import type { Op, OpResult } from '../../kernel/types.js';
 import { DevTransportInputSchema, type DevTransportInput } from './registry.js';
+import { assertCqEnvName } from '../../config/entry.js';
+import type { CqEnv } from '../../config/env.js';
 import { processEnv } from '../../config/process-env.js';
 
 const DecisionSchema = z
@@ -118,16 +125,54 @@ export function sshAuthorTransport(alias: string): AuthorTransport {
     });
 }
 
+/** The author-side environment: an entry snapshot, or an explicit raw record. */
+export type AuthorEnv = CqEnv | Readonly<Record<string, string | undefined>>;
+
+/** A parsed snapshot (has `values`/`errors`), as opposed to a raw env record. */
+function isCqEnv(env: AuthorEnv): env is CqEnv {
+  const candidate = env as Partial<CqEnv>;
+  return (
+    typeof candidate.values === 'object' &&
+    candidate.values !== null &&
+    Array.isArray(candidate.errors)
+  );
+}
+
+/**
+ * Resolve the author-side repo path and snapshot scanner from the entry
+ * snapshot (or an explicit raw record), never the ambient environment at
+ * call time. Raw-record injection stays a first-class seam (tests, library
+ * callers); the snapshot branch additionally asserts the registry names
+ * before reading, so an invalid or denied key can never fall through to the
+ * built-in default.
+ */
+export function resolveAuthorEnv(env: AuthorEnv): {
+  repo: string | undefined;
+  scanner: string | undefined;
+} {
+  if (isCqEnv(env)) {
+    assertCqEnvName(env, 'dev.review', 'CQ_AUTHOR_REPO');
+    assertCqEnvName(env, 'dev.review', 'CQ_AUTHOR_SNAPSHOT_SCANNER');
+    const repo = env.values['CQ_AUTHOR_REPO'];
+    const scanner = env.values['CQ_AUTHOR_SNAPSHOT_SCANNER'];
+    return {
+      repo: typeof repo === 'string' ? repo : undefined,
+      scanner: typeof scanner === 'string' ? scanner : undefined,
+    };
+  }
+  const repo = env['CQ_AUTHOR_REPO'];
+  const scanner = env['CQ_AUTHOR_SNAPSHOT_SCANNER'];
+  return {
+    repo: repo === '' ? undefined : repo,
+    scanner: scanner === '' ? undefined : scanner,
+  };
+}
+
 /** One request only. No timeout-based local dispatch, automatic retry or CLI start. */
 export function makeAuthorAdmission(
   transport: AuthorTransport,
-  capture = (base: string, tree: string) =>
-    captureSnapshot(
-      processEnv()['CQ_AUTHOR_REPO'] ?? process.cwd(),
-      base,
-      tree,
-      processEnv()['CQ_AUTHOR_SNAPSHOT_SCANNER'],
-    ),
+  capture?: (base: string, tree: string) => Promise<{ head: string; snapshot: object }>,
+  env: AuthorEnv = processEnv(),
 ): Op<DevTransportInput, AuthorDecision> {
   return async (input) => {
     let i: DevTransportInput;
@@ -141,7 +186,12 @@ export function makeAuthorAdmission(
       binding = { request_id: i.requestId, base: i.base, head, target: i.target, cycle: i.cycle };
       let envelope: object = { v: 1, op: i.action, binding };
       if (i.tree && i.action === 'enroll') {
-        const captured = await capture(i.base, i.tree);
+        const resolved = resolveAuthorEnv(env);
+        const doCapture =
+          capture ??
+          ((base: string, tree: string) =>
+            captureSnapshot(resolved.repo ?? process.cwd(), base, tree, resolved.scanner));
+        const captured = await doCapture(i.base, i.tree);
         if (captured.head !== head) throw new Error('snapshot identity mismatch');
         envelope = { v: 2, op: i.action, binding, snapshot: captured.snapshot };
       }
@@ -191,18 +241,25 @@ export function makeAuthorAdmission(
 }
 
 /**
- * The registry dispatch's admission binding: the CQ_AUTHOR_SSH_ALIAS
- * environment variable names the operator-configured identity (verbatim
- * messages kept from the merged PR's registry adapter — a missing alias is
- * a needs-human configuration gap, an invalid alias a configuration fault).
+ * The registry dispatch's admission binding: the operator-configured SSH
+ * identity names the author-side forced command (verbatim messages kept
+ * from the merged PR's registry adapter — a missing alias is a
+ * needs-human configuration gap, an invalid alias a configuration fault).
+ * The alias resolves from the dispatch wiring's snapshot (or the explicit
+ * record); the ambient environment is the default only.
  */
 export function envAuthorAdmission(
   input: DevTransportInput,
+  env: AuthorEnv = processEnv(),
 ): Promise<OpResult<AuthorDecision> | { status: 'needs-human'; reason: string }> {
-  const alias = processEnv()['CQ_AUTHOR_SSH_ALIAS'];
-  if (!alias) return Promise.resolve({ status: 'needs-human', reason: AUTHOR_TRANSPORT_HINT });
+  if (isCqEnv(env)) {
+    assertCqEnvName(env, 'dev.review', 'CQ_AUTHOR_SSH_ALIAS');
+  }
+  const alias = isCqEnv(env) ? env.values['CQ_AUTHOR_SSH_ALIAS'] : env['CQ_AUTHOR_SSH_ALIAS'];
+  if (typeof alias !== 'string' || alias === '')
+    return Promise.resolve({ status: 'needs-human', reason: AUTHOR_TRANSPORT_HINT });
   try {
-    return makeAuthorAdmission(sshAuthorTransport(alias))(input);
+    return makeAuthorAdmission(sshAuthorTransport(alias), undefined, env)(input);
   } catch {
     return Promise.resolve({
       status: 'needs-human',

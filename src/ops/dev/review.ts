@@ -74,6 +74,7 @@ import {
   AUTHOR_TRANSPORT_HINT,
   makeAuthorAdmission,
   type AuthorDecision,
+  type AuthorEnv,
   type AuthorTransport,
 } from './review-transport.js';
 import {
@@ -259,6 +260,12 @@ export interface DevReviewDeps {
    * admission actions report the configuration gap.
    */
   transport?: AuthorTransport;
+  /**
+   * The entry CqEnv snapshot (or an explicit raw record) for the admission
+   * branch's author-side repo and scanner reads. Absent, the admission
+   * branch reads the ambient environment at call time (library default).
+   */
+  authorEnv?: AuthorEnv;
 }
 
 /** The dev.review report — the ok value of a TERMINAL cycle. */
@@ -328,7 +335,11 @@ export function makeDevReview(
       if (deps.transport === undefined) {
         return { status: 'needs-human', reason: AUTHOR_TRANSPORT_HINT };
       }
-      return makeAuthorAdmission(deps.transport)(input);
+      return makeAuthorAdmission(
+        deps.transport,
+        undefined,
+        ...(deps.authorEnv !== undefined ? [deps.authorEnv] : []),
+      )(input);
     }
     return cycle(input as DevCycleInput);
   };
