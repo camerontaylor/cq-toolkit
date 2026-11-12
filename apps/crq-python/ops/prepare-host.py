@@ -747,9 +747,13 @@ def switch(root, overlay, raw, target, tag):
         previous = git(root, 'rev-parse', 'HEAD')
         record(root, overlay, raw, current, 'switch-before', target=target, tag=tag)
         git(root, 'restore', '--', CONFIG)
-        if git(root, 'status', '--porcelain', '--untracked-files=all'):
-            raise ValueError('checkout not clean after config restore')
-        git(root, 'checkout', '--detach', target)
+        try:
+            if git(root, 'status', '--porcelain', '--untracked-files=all'):
+                raise ValueError('checkout not clean after config restore')
+            git(root, 'checkout', '--detach', target)
+        except BaseException:
+            atomic_bytes(root / CONFIG, current)
+            raise
         # Same tick lock spans drift check, checkout, render and audit.
         record(root, overlay, raw, destination, 'switch-render', previous_sha=previous, tag=tag)
         atomic_bytes(root / CONFIG, destination)
