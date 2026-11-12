@@ -256,6 +256,30 @@ class FactorySelectionTests(FactoryFixture):
                           journal_source=self.source,
                           queue_drain=self.queue)
 
+    def test_build_refuses_a_render_digest_that_does_not_match_its_bytes(self):
+        selection = factory.select(root=self.root, unit=UNIT,
+                                   runtime="python", source_sha=self.before)
+        identity = selection.identity
+        broken = factory.Selection(
+            root=selection.root, source_sha=selection.source_sha,
+            unit=selection.unit, runtime=selection.runtime,
+            artifact_root=selection.artifact_root,
+            render={**selection.render, "sha256": "0" * 64},
+            identity=type(identity)(
+                unit=identity.unit, runtime=identity.runtime,
+                service_sha256="0" * 64, source_sha=identity.source_sha,
+                template_blob_oid=identity.template_blob_oid,
+                artifact_content_sha256=identity.artifact_content_sha256,
+                artifact_source_sha=identity.artifact_source_sha,
+                crq_js_sha256=identity.crq_js_sha256))
+        with self.assertRaises(factory.FactoryRefused) as caught:
+            factory.build(broken, unit_dir=self.unit_dir,
+                          systemd=self.systemd, identity=LiveIdentity(),
+                          journal_source=self.source,
+                          queue_drain=self.queue)
+        self.assertEqual(str(caught.exception),
+                         "selected render digest does not match its bytes")
+
     def test_build_refuses_a_missing_journal_source(self):
         selection = factory.select(root=self.root, unit=UNIT,
                                    runtime="python", source_sha=self.before)

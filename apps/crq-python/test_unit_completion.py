@@ -179,6 +179,18 @@ class SequenceTests(CompletionFixture):
         self.source.complete("2" * 32, 130)
         self.assertEqual(port.sequence(UNIT), 130)
 
+    def test_a_stale_prior_invocation_does_not_lower_the_baseline(self):
+        self.source.complete("a" * 32, 940)
+        port = self.port()
+        self.assertEqual(port.sequence(UNIT), 940)
+        # A later observation of an older successful prior invocation must not
+        # replace the established baseline. Otherwise the prior runtime's
+        # invocation could be credited to the selected runtime. The M15-only
+        # mutant that accepts a lower monotonic value sets 700 here.
+        self.source.complete("c" * 32, 700)
+        self.assertEqual(port.sequence(UNIT), 940)
+        self.assertIsNone(port.read(UNIT, "python", 940))
+
     def test_completed_invocation_is_baseline(self):
         self.source.complete("1" * 32, 100)
         self.assertEqual(self.port().sequence(UNIT), 100)
