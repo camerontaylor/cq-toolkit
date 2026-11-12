@@ -119,7 +119,8 @@ The lock observation is read-only. It stats
 `<root>/apps/crq-python/state/controller.lock` without following a symlink,
 reports `dev:ino`, mode, owner and state-directory identity, and refuses a
 symlink, non-regular file, group/world-writable mode, foreign owner, or a state
-directory that resolves outside the root. It never creates the lock, never
+directory that resolves outside the root. The controller writes that lock mode
+0600 independently of the ambient umask. It never creates the lock, never
 acquires it and adds no new lock or store. Two `Effects` objects on one root
 observe the same inode; a second root does not. Cross-namespace identity and
 actual contention remain parent-owned.

@@ -584,6 +584,31 @@ class LayoutTests(ControllerFixture):
         with self.assertRaises(live.LiveBindingRefused):
             self.layout.validate()
 
+    def test_accepts_a_lock_created_under_a_permissive_umask(self):
+        # The writer and this reader must agree under an operator umask 002,
+        # not only under systemd's 022 (guest proof 20261112T214654Z).
+        previous = os.umask(0o002)
+        try:
+            with self.effects.controller_lock():
+                pass
+        finally:
+            os.umask(previous)
+        observed = self.layout.lock_identity()
+        self.assertEqual(observed["exists"], True)
+        self.assertEqual(observed["mode"], 0o600)
+
+    def test_accepts_a_normalised_preexisting_group_readable_lock(self):
+        state = self.root / "apps/crq-python/state"
+        state.mkdir(parents=True, exist_ok=True)
+        lock = state / dc.LOCK_NAME
+        lock.write_text("")
+        lock.chmod(0o664)
+        with self.effects.controller_lock():
+            pass
+        observed = self.layout.lock_identity()
+        self.assertEqual(observed["exists"], True)
+        self.assertEqual(observed["mode"], 0o600)
+
     def test_lock_identity_is_stable_for_one_root_and_differs_for_another(self):
         with self.effects.controller_lock():
             pass
