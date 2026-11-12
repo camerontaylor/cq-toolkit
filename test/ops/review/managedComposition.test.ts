@@ -15,6 +15,7 @@ import { fixture, useGitleaksPath } from './address-local.helpers.js';
 useGitleaksPath();
 
 test('configured review.run reports an explicitly missing queue alias as blocked without fallback', async () => {
+  const originalAlias = process.env['CQ_QUEUE_SSH_ALIAS'];
   const f = await fixture();
   try {
     const config = JSON.parse(await readFile(join(f.repo.root, 'cq.json'), 'utf8')) as CqConfig;
@@ -39,8 +40,10 @@ test('configured review.run reports an explicitly missing queue alias as blocked
     expect(forgeFactory).not.toHaveBeenCalled();
   } finally {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     await f.cleanup();
   }
+  expect(process.env['CQ_QUEUE_SSH_ALIAS']).toBe(originalAlias);
 });
 
 test('cycle default review reaches managed submit with a nonempty real diff', async () => {
