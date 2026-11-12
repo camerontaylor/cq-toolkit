@@ -89,6 +89,29 @@ class/CLI/capability wiring, real per-unit runtime-bound completion,
 exhaustive activation discovery, shared root/lock coverage, drain races, and
 restart/reboot/power-loss behavior remain separate acceptance work.
 
+## Unwired production adapter slice
+
+`ops/unit-adapter.py` now implements the injected seam with an injected
+`SystemdPort`, `IdentityPort`, `CapabilityPort`, `CompletionPort` and
+queue-drain observation. It reuses `render_service`, derives its declared
+six-unit inventory from the pinned template blobs, and reuses the guest
+snapshot payload's schema-version-1 top-level keys and state shapes. It is not
+wired to the CLI, has no production factory or live systemd binding, and
+refuses Node by default because no machine-readable artifact capability
+declaration exists.
+
+The slice remains fail-closed: discovery must enumerate the exact declared
+paths and units and report no foreign activators; unknown entries, missing
+completion or queue observations, live jobs, malformed cgroups, non-advancing
+or foreign completion evidence, and unsupported snapshot metadata refuse before
+mutation or at the fenced boundary. Restore stages the prior service behind the
+durable mask; only `restore_activation` releases it, and the caller must have
+persisted the pending journal first. The controller lock remains
+checkout-local, and the adapter claims no root, caller, arbitrary activator or
+production completion coverage. `test_unit_adapter.py` exercises both
+runtimes, forward and recovery, real temporary files and injected host ports
+only.
+
 ## Proposed stable-manager sequence
 
 1. Under the existing controller lock, validate the unit and target, artifact
