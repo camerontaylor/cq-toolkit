@@ -284,6 +284,7 @@ export const registry: OpRegistryEntry[] = [
         import('../review/agentReviewer.js'),
         import('./agentReview.js'),
         import('node:fs/promises'),
+        import('../../shared/readCqConfigText.js'),
         import('./managedReview.js'),
         import('../review/internal/queueClient.js'),
       ]).then(
@@ -298,42 +299,20 @@ export const registry: OpRegistryEntry[] = [
           agentReviewer,
           agentReview,
           fs,
+          sharedRead,
           managed,
           queueClient,
         ]) =>
-          (async (input: DevReviewInput) => {
-            if (m.isAdmissionInput(input))
-              return admission.envAuthorAdmission(
-                input,
-                ...(wiring?.cqEnv !== undefined ? [wiring.cqEnv] : []),
-              );
-            const { repoRoot } = input as DevCycleInput;
-            const dev = effects.makeSubprocessDevEffects(repoRoot);
-            // Portable default: gitleaks' built-in rules apply everywhere.
-            // A repo-specific scanner is added only when cq.json configures
-            // its optional patterns file; missing toolkit policy is never a
-            // prerequisite for an adopter review.
-            const readFile = (path: string) => fs.readFile(path, 'utf8');
-            const configText = await readFile(`${repoRoot}/cq.json`).catch(() => null);
-            const packageName = await agentReview.readPackageName(readFile, repoRoot);
-            const scanSecrets = denylist.makePortableReviewScanner(
-              repoRoot,
-              dev,
-              configText,
-              packageName,
-            );
-            let patternsFile: string | undefined;
-            let configuredReviewers: readonly string[] | undefined;
-            if (configText !== null) {
-              const parsed = cqConfig.parseCqConfig(configText, repoRoot);
-              if (parsed.ok) {
-                const policy = cqDefaults.resolveCqConfigDefaults(parsed.config, {
-                  packageName,
-                }).review;
-                patternsFile = policy.denylistPatternsFile;
-                configuredReviewers = policy.reviewers;
-              }
-            }
+          (async (raw: unknown) => {
+            // The per-dispatch bindings run BEFORE input validation (#1185 +
+            // S2b-i): even a schema-bypassing dispatch binds its driver
+            // factory and its managed-route submission (the driver-cqenv
+            // probes dispatch a schema-invalid dummy and still expect both
+            // lines to have run). Every construction here is inert:
+            // closure-only effects, and the queue alias is read only when
+            // the managed path actually submits.
+            const { repoRoot: rawRoot } = raw as DevCycleInput;
+            const dev = effects.makeSubprocessDevEffects(rawRoot);
             const drivers = driverFactory.createDriverFactory({
               // The dispatch wiring's snapshot wins when supplied (a direct
               // importer call with explicit wiring outside a run); inside a
@@ -346,26 +325,79 @@ export const registry: OpRegistryEntry[] = [
                 ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
                 : {}),
             });
-            return m.makeDevReview({
-              effects: dev,
-              scanSecrets,
-              ...(patternsFile === undefined ? {} : { patternsFile }),
-              ...(configuredReviewers === undefined ? {} : { configuredReviewers }),
-              runAgentReviewer: agentReview.makeAgentReviewRunner({
-                repoRoot,
-                readFile,
-                drivers,
-                scanSecrets,
-                run: agentReviewer.runAgentReviewer,
-              }),
-              // S2b-i managed route: review-v1 on the existing queue SSH
-              // identity (plan D1). The closure reads the alias only when the
-              // managed path actually submits.
-              managedSubmit: managed.makeManagedReviewSubmit(
-                () => queueClient.sshQueueTransport(reviewAlias(wiring?.cqEnv), 'review-v1'),
-                () => resolveForgeRepo(dev),
-              ),
-            })(input);
+            const managedSubmit = managed.makeManagedReviewSubmit(
+              () => queueClient.sshQueueTransport(reviewAlias(wiring?.cqEnv), 'review-v1'),
+              () => resolveForgeRepo(dev),
+            );
+            // The guarded body runs INSIDE the family boundary: a
+            // schema-bypassing input keeps the `failed` taxonomy of
+            // guardDevOp (never a rejected promise, never a read fault
+            // masquerading as one), and the cq.json read fault below refuses
+            // only a schema-valid dispatch.
+            return effects.guardDevOp(
+              'dev.review',
+              DevReviewInputSchema,
+              async (valid: DevReviewInput) => {
+                if (m.isAdmissionInput(valid))
+                  return admission.envAuthorAdmission(
+                    valid,
+                    ...(wiring?.cqEnv !== undefined ? [wiring.cqEnv] : []),
+                  );
+                const { repoRoot } = valid as DevCycleInput;
+                // `dev` is the per-dispatch effects bound BEFORE validation;
+                // for a schema-valid dispatch it binds this same repoRoot.
+                // Portable default: gitleaks' built-in rules apply everywhere.
+                // A repo-specific scanner is added only when cq.json configures
+                // its optional patterns file; missing toolkit policy is never a
+                // prerequisite for an adopter review.
+                const readFile = (path: string) => fs.readFile(path, 'utf8');
+                // Only an ABSENT cq.json means "no config"; any other read fault
+                // refuses the review under needs-human instead of silently
+                // binding the default scanner and reviewer policy.
+                const configRead = await sharedRead.readCqConfigText(repoRoot, readFile);
+                if (configRead.outcome === 'fault')
+                  return {
+                    status: 'needs-human',
+                    reason: `dev.review: ${sharedRead.cqConfigFaultText(configRead.error)}`,
+                  };
+                const configText = configRead.outcome === 'text' ? configRead.text : null;
+                const packageName = await agentReview.readPackageName(readFile, repoRoot);
+                const scanSecrets = denylist.makePortableReviewScanner(
+                  repoRoot,
+                  dev,
+                  configText,
+                  packageName,
+                );
+                let patternsFile: string | undefined;
+                let configuredReviewers: readonly string[] | undefined;
+                if (configText !== null) {
+                  const parsed = cqConfig.parseCqConfig(configText, repoRoot);
+                  if (parsed.ok) {
+                    const policy = cqDefaults.resolveCqConfigDefaults(parsed.config, {
+                      packageName,
+                    }).review;
+                    patternsFile = policy.denylistPatternsFile;
+                    configuredReviewers = policy.reviewers;
+                  }
+                }
+                return m.makeDevReview({
+                  effects: dev,
+                  scanSecrets,
+                  ...(patternsFile === undefined ? {} : { patternsFile }),
+                  ...(configuredReviewers === undefined ? {} : { configuredReviewers }),
+                  runAgentReviewer: agentReview.makeAgentReviewRunner({
+                    repoRoot,
+                    readFile,
+                    drivers,
+                    scanSecrets,
+                    run: agentReviewer.runAgentReviewer,
+                  }),
+                  // S2b-i managed route: review-v1 on the existing queue SSH
+                  // identity (plan D1), bound per dispatch before validation.
+                  managedSubmit,
+                })(valid);
+              },
+            )(raw);
           }) as Op<unknown, unknown>,
       ),
   },

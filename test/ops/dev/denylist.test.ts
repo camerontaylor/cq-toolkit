@@ -468,7 +468,10 @@ describe('checkScannerFor', () => {
     (cq: string | null, pkg = '{}') =>
     async (path: string) => {
       if (path.endsWith('/cq.json')) {
-        if (cq === null) throw new Error('ENOENT');
+        if (cq === null)
+          throw Object.assign(new Error(`ENOENT: no such file, open '${path}'`), {
+            code: 'ENOENT',
+          });
         return cq;
       }
       if (path.endsWith('/package.json')) return pkg;
@@ -492,6 +495,16 @@ describe('checkScannerFor', () => {
     const scanner = await checkScannerFor('/repo', effects, files(checksConfig));
     expect(scanner).toBeDefined();
     expect(await scanner!([{ component: 'a', text: 'clean\n', path: 'a.txt' }])).toHaveLength(1);
+  });
+
+  test('an unreadable cq.json (EACCES) binds a scanner that faults, never defaults-only', async () => {
+    const scanner = await checkScannerFor('/repo', effects, async (): Promise<string> => {
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    });
+    expect(scanner).toBeDefined();
+    await expect(scanner!([{ component: 'a', text: 'clean\n', path: 'a.txt' }])).rejects.toThrow(
+      /review config unreadable: cq\.json could not be read \(EACCES\)/,
+    );
   });
 });
 
