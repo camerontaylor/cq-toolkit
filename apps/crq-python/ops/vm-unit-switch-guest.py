@@ -22,6 +22,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -127,6 +128,33 @@ MATRIX_CASES = {
         "runtime": PYTHON_RUNTIME, "prior_runtime": NODE_RUNTIME,
         "record_dir": CASE_RECORDS["reboot"]},
 }
+
+# Production ``recover --record`` proof. It drives the shipped controller CLI,
+# which composes the live production adapter, against real systemd and the
+# real checkout. The node target is a minimally packageable fixture artifact;
+# the switch is interrupted externally at an observed journal phase, exactly
+# as the fixture modes kill their controller at a boundary.
+PRODUCTION = HOME / "production"
+PROD_RENDERS = PRODUCTION / "renders"
+PROD_OVERLAYS = PRODUCTION / "overlays"
+PROD_BASELINE = PRODUCTION / "baseline.json"
+PROD_DRAINED_RECORDS = HOME / "records-prod-drained"
+PROD_AMBIGUITY_RECORDS = HOME / "records-prod-ambiguity"
+PROD_COHERENCE_RECORDS = HOME / "records-prod-coherence"
+PROD_OUTSIDE_RECORDS = HOME / "records-prod-outside"
+PROD_UNIT = "crq-watchdog.service"
+PROD_TIMER = "crq-watchdog.timer"
+PROD_SERVICE = UNIT_DIR / PROD_UNIT
+PROD_TIMER_PATH = UNIT_DIR / PROD_TIMER
+PROD_WANTS = UNIT_DIR / "timers.target.wants" / PROD_TIMER
+PROD_STAGED = UNIT_DIR / (".crq-watchdog.service.staged")
+PROD_NODE_SHA = "b" * 40
+PROD_NODE_RUNTIME = "node:" + PROD_NODE_SHA
+PROD_ARTIFACT = HOME / ".local/opt" / ("crq-" + PROD_NODE_SHA)
+PROD_PHASES = ("production-prepare", "production-switch-drained",
+               "production-refuse-outside", "production-refuse-coherence",
+               "production-recover-drained", "production-switch-ambiguity",
+               "production-recover-ambiguity", "production-inspect")
 
 
 def sha256_bytes(data):
@@ -2623,6 +2651,703 @@ def activators_inspect(args):
             "preserved": check_preserved({"phase": "activators-inspect"})}
 
 
+def _registered_module(name, path):
+    """Load one uploaded script under a stable module name.
+
+    The production binding finds the controller module that owns an
+    ``Effects`` object through ``sys.modules``. Registering the loaded module
+    keeps refusal class identity at the controller seam for the in-guest
+    read-only preflight, exactly as ``__main__`` does for the CLI.
+    """
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def production_controller():
+    return _registered_module("crq_deploy_controller_prod",
+                              PROOF_BIN / "deploy-controller.py")
+
+
+def production_live_binding():
+    return _registered_module("crq_unit_live_binding_prod",
+                              PROOF_BIN / "unit-live-binding.py")
+
+
+def _write_bytes(path, data, mode=0o644):
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or path.exists():
+        path.unlink()
+    path.write_bytes(data)
+    path.chmod(mode)
+
+
+def _prod_records(directory):
+    return records_in(directory)
+
+
+def _only_pending(directory):
+    found = _prod_records(directory)
+    pending = []
+    for path in found:
+        record = json.loads(path.read_text())
+        if record.get("outcome") in ("pending", "recovery_required"):
+            pending.append((path, record))
+    require(len(pending) == 1,
+            "expected exactly one pending production record in "
+            + str(directory) + ", found " + str(len(pending)))
+    return pending[0]
+
+
+def production_overlay(name, record_dir):
+    PROD_OVERLAYS.mkdir(parents=True, exist_ok=True)
+    record_dir = pathlib.Path(record_dir)
+    record_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(record_dir, 0o700)
+    config = {
+        "clone": str(HOME / "clone"),
+        "worktree_root": str(HOME / "worktrees"),
+        "timeout_bin": "/usr/bin/timeout",
+        "paseo_hosts": ["paseo-a.invalid:1", "paseo-b.invalid:2"],
+        "alerts": {"alert_agent_host": "alert.invalid"},
+        "repair": {"enabled": False, "cq_bin": str(HOME / "cq"),
+                   "paseo_host": "paseo.invalid"},
+    }
+    overlay = {
+        "schema_version": 1,
+        "deploy_root": str(CHECKOUT),
+        "record_dir": str(record_dir),
+        "config": config,
+        "fleet_reader": {"ssh_host": "fleet.invalid",
+                         "source": str(HOME / "fleet-reader.json")},
+    }
+    path = PROD_OVERLAYS / (name + ".json")
+    _write_bytes(path, (json.dumps(overlay, indent=2, sort_keys=True)
+                        + "\n").encode(), 0o600)
+    return path
+
+
+def production_install_units():
+    """Install the pinned production templates for crq-watchdog only."""
+    prepare = _registered_module("crq_prepare_host_prod",
+                                 PROOF_BIN / "prepare-host.py")
+    if PROD_RENDERS.exists():
+        shutil.rmtree(PROD_RENDERS)
+    rendered = prepare.render_units(CHECKOUT, PROD_RENDERS, sha="HEAD")
+    require(len(rendered) >= 2, "production render produced no templates")
+    UNIT_DIR.mkdir(parents=True, exist_ok=True)
+    for path in list(UNIT_DIR.glob("crq-*")):
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+    for path in list(UNIT_DIR.glob(".*.staged")):
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+    for name in (PROD_UNIT, PROD_TIMER):
+        source = PROD_RENDERS / name
+        require(source.is_file() and not source.is_symlink(),
+                "production render is missing " + name)
+        _write_bytes(UNIT_DIR / name, source.read_bytes(), 0o600)
+    PROD_WANTS.parent.mkdir(parents=True, exist_ok=True)
+    for path in PROD_WANTS.parent.glob("crq-*"):
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+    PROD_WANTS.symlink_to("../" + PROD_TIMER)
+    result = systemctl("daemon-reload")
+    require(result["rc"] == 0, "daemon-reload after production install failed")
+    result = systemctl("start", PROD_TIMER)
+    require(result["rc"] == 0,
+            "production timer start failed: " + result["stderr"][:300])
+    # OnBootSec may already be elapsed; stop any immediate fixture-free run so
+    # preflight observes the stable inactive service the snapshot restores.
+    time.sleep(0.3)
+    service = show(PROD_UNIT, ["LoadState", "ActiveState", "SubState",
+                               "UnitFileState", "FragmentPath"])
+    if service["ActiveState"] not in ("inactive", "failed"):
+        systemctl("stop", PROD_UNIT)
+        systemctl("reset-failed", PROD_UNIT)
+        time.sleep(0.2)
+        service = show(PROD_UNIT, ["LoadState", "ActiveState", "SubState",
+                                   "UnitFileState", "FragmentPath"])
+    if service["ActiveState"] == "failed":
+        systemctl("reset-failed", PROD_UNIT)
+        time.sleep(0.2)
+        service = show(PROD_UNIT, ["LoadState", "ActiveState", "SubState",
+                                   "UnitFileState", "FragmentPath"])
+    timer = show(PROD_TIMER, ["LoadState", "ActiveState", "SubState",
+                              "UnitFileState", "FragmentPath"])
+    require(service["LoadState"] == "loaded"
+            and service["ActiveState"] == "inactive",
+            "installed production service is not loaded and inactive")
+    require(timer["ActiveState"] == "active",
+            "installed production timer is not active")
+    require(timer["UnitFileState"] == "enabled",
+            "installed production timer is not enabled")
+    return {"service": service, "timer": timer,
+            "service_sha256": sha256_file(UNIT_DIR / PROD_UNIT),
+            "timer_sha256": sha256_file(UNIT_DIR / PROD_TIMER),
+            "wants_target": os.readlink(PROD_WANTS)}
+
+
+def _elf_header():
+    header = bytearray(20)
+    header[:5] = b"\x7fELF\x02"
+    header[5] = 1
+    header[18:20] = b"\x3e\x00"
+    return bytes(header)
+
+
+def build_node_artifact():
+    """A minimally packageable node artifact fixture for the switch target.
+
+    This exercises the real whole-artifact identity check in
+    ``prepare-host.artifact_identity``; it is not a built CRQ runner.
+    """
+    package = _registered_module("crq_package_runner_prod",
+                                 PROOF_BIN / "package-runner.py")
+    if PROD_ARTIFACT.exists():
+        shutil.rmtree(PROD_ARTIFACT)
+    (PROD_ARTIFACT / "dist/queue-runner").mkdir(parents=True)
+    (PROD_ARTIFACT / "dist/queue-runner/crq.js").write_bytes(
+        b"setInterval(() => {}, 60000);\n")
+    (PROD_ARTIFACT / "package.json").write_text(
+        json.dumps({"name": "crq-runner", "version": "0.0.0"}))
+    fs_ext = PROD_ARTIFACT / "node_modules/fs-ext"
+    (fs_ext / "build/Release").mkdir(parents=True)
+    (fs_ext / "package.json").write_text(
+        json.dumps({"name": "fs-ext", "version": package.FS_EXT_VERSION}))
+    (fs_ext / "build/Release/fs_ext.node").write_bytes(_elf_header())
+    capabilities = ["watchdog"]
+    (PROD_ARTIFACT / "dist/queue-runner/capabilities.json").write_text(
+        json.dumps({"schema_version": 1, "commands": capabilities}))
+    files = package.inventory(PROD_ARTIFACT)
+    facts = package.staging_facts(PROD_ARTIFACT)
+    provenance = {
+        "schema_version": package.PROVENANCE_VERSION,
+        "source_sha": PROD_NODE_SHA,
+        "lockfile_sha256": "1" * 64,
+        "runtime": {
+            "node_version": "v24.0.0",
+            "node_major": package.NODE_MAJOR,
+            "node_abi": "137",
+            "platform": package.PLATFORM,
+            "arch": package.ARCH,
+        },
+        "toolchain": {
+            "pnpm_version": "9.0.0",
+            "install_command": "pnpm install",
+            "build_command": "pnpm build",
+            "deploy_command": "pnpm deploy",
+        },
+        "dependencies": facts["dependencies"],
+        "fs_ext": facts["fs_ext"],
+    }
+    manifest = {
+        "schema_version": package.SCHEMA_VERSION,
+        "source_sha": PROD_NODE_SHA,
+        "content_sha256": package.content_digest(files),
+        "provenance": provenance,
+        "files": files,
+    }
+    package.validate_manifest(manifest)
+    package.validate_provenance(provenance, sha=PROD_NODE_SHA,
+                                staging=PROD_ARTIFACT)
+    (PROD_ARTIFACT / package.MANIFEST_NAME).write_text(json.dumps(manifest))
+    prepare = _registered_module("crq_prepare_host_prod",
+                                 PROOF_BIN / "prepare-host.py")
+    identity = prepare.artifact_identity(PROD_ARTIFACT, PROD_NODE_RUNTIME)
+    return {"path": str(PROD_ARTIFACT), "source_sha": PROD_NODE_SHA,
+            "capabilities": capabilities,
+            "manifest_sha256": sha256_file(PROD_ARTIFACT / package.MANIFEST_NAME),
+            "content_sha256": manifest["content_sha256"],
+            "crq_js_sha256": package.sha256_file(
+                PROD_ARTIFACT / "dist/queue-runner/crq.js"),
+            "files": len(files), "identity": identity}
+
+
+def production_state():
+    return {
+        "at": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"),
+        "hostname": os.uname().nodename,
+        "user": os.getuid(),
+        "manager": manager_identity(),
+        "checkout_head": git("rev-parse", "HEAD"),
+        "checkout_status": git("status", "--porcelain",
+                               "--untracked-files=all"),
+        "units": {
+            PROD_UNIT: show(PROD_UNIT, ["LoadState", "ActiveState",
+                                        "SubState", "UnitFileState",
+                                        "FragmentPath", "InvocationID",
+                                        "Result"]),
+            PROD_TIMER: show(PROD_TIMER, ["LoadState", "ActiveState",
+                                          "SubState", "UnitFileState",
+                                          "FragmentPath", "InvocationID"]),
+        },
+        "files": {str(path): file_state(path)
+                  for path in (PROD_SERVICE, PROD_TIMER_PATH, PROD_WANTS,
+                               PROD_STAGED)},
+        "records": {str(path): [record_summary(item)
+                                for item in records_in(path)]
+                    for path in (PROD_DRAINED_RECORDS, PROD_AMBIGUITY_RECORDS,
+                                 PROD_COHERENCE_RECORDS,
+                                 PROD_OUTSIDE_RECORDS)
+                    if path.exists()},
+        "state": state_hashes(),
+        "jobs": jobs(),
+    }
+
+
+def production_preflight(overlay_path, record_dir):
+    """Compose and run the real production adapter read-only."""
+    dc = production_controller()
+    live = production_live_binding()
+    overlay = json.loads(pathlib.Path(overlay_path).read_text())
+    effects = dc.Effects(CHECKOUT, pathlib.Path(record_dir))
+    adapter, selection = live.production_adapter(
+        effects, overlay, unit=PROD_UNIT, runtime=PROD_NODE_RUNTIME)
+    before = adapter.preflight(PROD_UNIT, PROD_NODE_RUNTIME)
+    snapshot = adapter.snapshot(PROD_UNIT)
+    adapter.validate_snapshot(PROD_UNIT, snapshot)
+    recovery, recovery_selection = live.production_adapter(
+        effects, overlay, unit=PROD_UNIT, runtime=PYTHON_RUNTIME)
+    recovery.validate_snapshot(PROD_UNIT, snapshot)
+    render = before.get("render")
+    if isinstance(render, dict):
+        render = {key: value for key, value in render.items()
+                  if key != "bytes"}
+    return {
+        "cli": None,
+        "runtime": before.get("runtime"),
+        "discovery": before.get("discovery"),
+        "capability": before.get("capability"),
+        "render": render,
+        "completion_sequence": before.get("completion_sequence"),
+        "completion_window": before.get("completion_window"),
+        "snapshot": snapshot,
+        "selection_sha256": selection.render.get("sha256"),
+        "recovery_selection_sha256": recovery_selection.render.get("sha256"),
+    }
+
+
+def production_cli(overlay_path, record_dir, *command):
+    argv = [sys.executable, str(PROOF_BIN / "deploy-controller.py"),
+            "--root", str(CHECKOUT), "--overlay", str(overlay_path),
+            "--record-dir", str(record_dir),
+            "--helper", str(PROOF_BIN / "prepare-host.py"), *command]
+    return run(argv, timeout=240)
+
+
+def switch_and_kill(overlay_path, record_dir, phase):
+    require(not _prod_records(record_dir),
+            "production switch record directory is not empty")
+    service = show(PROD_UNIT, ["ActiveState"])
+    if service["ActiveState"] != "inactive":
+        systemctl("stop", PROD_UNIT)
+        systemctl("reset-failed", PROD_UNIT)
+        time.sleep(0.2)
+        service = show(PROD_UNIT, ["ActiveState"])
+    require(service["ActiveState"] == "inactive",
+            "production service is not stable before the switch: "
+            + str(service["ActiveState"]))
+    preflight = production_preflight(overlay_path, record_dir)
+    stdout_path = PRODUCTION / ("switch-" + phase + ".stdout")
+    stderr_path = PRODUCTION / ("switch-" + phase + ".stderr")
+    argv = [sys.executable, str(PROOF_BIN / "deploy-controller.py"),
+            "--root", str(CHECKOUT), "--overlay", str(overlay_path),
+            "--record-dir", str(record_dir),
+            "--helper", str(PROOF_BIN / "prepare-host.py"),
+            "switch", "--unit", PROD_UNIT, "--runtime", PROD_NODE_RUNTIME]
+    started = time.time()
+    with stdout_path.open("w") as out, stderr_path.open("w") as err:
+        process = subprocess.Popen(argv, stdout=out, stderr=err, env=env(),
+                                   start_new_session=True)
+    observed = None
+    polls = 0
+    while time.time() - started < 180:
+        polls += 1
+        for path in _prod_records(record_dir):
+            try:
+                record = json.loads(path.read_text())
+            except ValueError:
+                continue
+            if record.get("outcome") not in ("pending", "recovery_required"):
+                continue
+            if record.get("phase") != phase:
+                continue
+            try:
+                os.killpg(process.pid, signal.SIGSTOP)
+            except ProcessLookupError:
+                break
+            retained = json.loads(path.read_text())
+            if retained.get("phase") != phase:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=15)
+                raise RuntimeError(
+                    "controller advanced past " + phase + " before freeze")
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=15)
+            observed = (path, retained)
+            break
+        if observed is not None:
+            break
+        if process.poll() is not None:
+            break
+        time.sleep(0.001)
+    if observed is None:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=15)
+        raise RuntimeError(
+            "production switch did not reach " + phase + "; rc="
+            + str(process.returncode) + "; stderr="
+            + stderr_path.read_text()[-800:])
+    return {
+        "cli": {"argv": argv, "rc": process.returncode,
+                "stdout": stdout_path.read_text()[-12000:],
+                "stderr": stderr_path.read_text()[-12000:],
+                "timeout": False},
+        "observed_phase": phase,
+        "kill_at": phase,
+        "elapsed_seconds": round(time.time() - started, 3),
+        "polls": polls,
+        "preflight": preflight,
+        "record_path": str(observed[0]),
+        "record": record_summary(observed[0]),
+        "boundary": production_state(),
+    }
+
+
+def production_prepare(args):
+    require(os.uname().nodename == "crq-probe",
+            "proof driver only runs on the disposable crq-probe guest")
+    require(not (HOME / "repos").exists(),
+            "a production checkout directory is present in the guest")
+    previous = HOME / ".local/opt"
+    if previous.exists():
+        require(not [path for path in previous.glob("crq-*")
+                     if path != PROD_ARTIFACT],
+                "a production crq artifact directory is present in the guest")
+    required = ["deploy-controller.py", "unit-live-binding.py",
+                "unit-adapter.py", "unit-completion.py",
+                "unit-switch-factory.py", "prepare-host.py",
+                "package-runner.py", "crq-runner-source.tar.gz"]
+    for name in required:
+        path = PROOF_BIN / name
+        require(path.is_file() and not path.is_symlink(),
+                "missing uploaded production script: " + name)
+    require(shutil.which("git") is not None, "git is required")
+    require(shutil.which("node") is not None, "node is required")
+    require(shutil.which("python3") is not None, "python3 is required")
+    commit, runner_source = prepare_checkout()
+    git("checkout", "--detach")
+    require(git("rev-parse", "HEAD") == commit,
+            "detached checkout HEAD changed")
+    require(git("rev-parse", "--abbrev-ref", "HEAD") == "HEAD",
+            "production checkout is not detached")
+    for path in (PRODUCTION,):
+        if path.exists():
+            shutil.rmtree(path)
+    PRODUCTION.mkdir(parents=True)
+    for directory in (PROD_DRAINED_RECORDS, PROD_AMBIGUITY_RECORDS,
+                      PROD_COHERENCE_RECORDS, PROD_OUTSIDE_RECORDS):
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(directory, 0o700)
+        require(not list(directory.iterdir()),
+                "production record directory is not empty")
+    drains = production_overlay("drained", PROD_DRAINED_RECORDS)
+    ambiguity = production_overlay("ambiguity", PROD_AMBIGUITY_RECORDS)
+    coherence = production_overlay("coherence", PROD_COHERENCE_RECORDS)
+    artifact = build_node_artifact()
+    units = production_install_units()
+    preflight = production_preflight(drains, PROD_DRAINED_RECORDS)
+    baseline = {
+        "checkout_commit": commit,
+        "runner_source": runner_source,
+        "node_runtime": PROD_NODE_RUNTIME,
+        "python_runtime": PYTHON_RUNTIME,
+        "overlays": {"drained": str(drains), "ambiguity": str(ambiguity),
+                     "coherence": str(coherence)},
+        "overlay_sha256": {name: sha256_file(path)
+                           for name, path in (("drained", drains),
+                                              ("ambiguity", ambiguity),
+                                              ("coherence", coherence))},
+        "record_dirs": {"drained": str(PROD_DRAINED_RECORDS),
+                        "ambiguity": str(PROD_AMBIGUITY_RECORDS),
+                        "coherence": str(PROD_COHERENCE_RECORDS),
+                        "outside": str(PROD_OUTSIDE_RECORDS)},
+        "python_render": {
+            "sha256": sha256_file(PROD_RENDERS / PROD_UNIT),
+            "size": (PROD_RENDERS / PROD_UNIT).stat().st_size,
+            "exec_start": next(
+                (line[len("ExecStart="):] for line in
+                 (PROD_RENDERS / PROD_UNIT).read_text().splitlines()
+                 if line.startswith("ExecStart=")), None),
+        },
+        "node_render": {"sha256": None},
+        "artifact": artifact,
+        "units": units,
+        "state": state_hashes(),
+        "preflight": preflight,
+    }
+    baseline["node_render"] = {
+        "sha256": preflight["render"]["sha256"]
+        if isinstance(preflight.get("render"), dict) else None,
+    }
+    _write_bytes(PROD_BASELINE,
+                 (json.dumps(baseline, indent=2, sort_keys=True)
+                  + "\n").encode(), 0o600)
+    return {"prepared": baseline, "state": production_state()}
+
+
+def production_switch_drained(args):
+    drains = pathlib.Path(baseline()["overlays"]["drained"])
+    result = switch_and_kill(drains, PROD_DRAINED_RECORDS, "drained")
+    record = json.loads(pathlib.Path(result["record_path"]).read_text())
+    saved = baseline()
+    require(record.get("outcome") == "pending"
+            and record.get("phase") == "drained",
+            "interrupted switch did not retain a pending drained record")
+    require(record.get("unit") == PROD_UNIT
+            and record.get("runtime") == PROD_NODE_RUNTIME
+            and record.get("prior_runtime") == PYTHON_RUNTIME,
+            "interrupted switch record names another unit or runtime")
+    require((record.get("snapshot") or {}).get("runtime") == PYTHON_RUNTIME,
+            "interrupted switch snapshot does not name the prior runtime")
+    require(result["cli"]["rc"] == -signal.SIGKILL,
+            "interrupted switch did not retain SIGKILL")
+    result["snapshot_service_sha256"] = sha256_bytes(
+        __import__("base64").b64decode(
+            record["snapshot"]["paths"][str(PROD_SERVICE)]["bytes_b64"]))
+    require(result["snapshot_service_sha256"]
+            == saved["python_render"]["sha256"],
+            "interrupted switch snapshot is not the production python render")
+    return {"phase": "production-switch-drained", **result}
+
+
+def production_refuse_outside(args):
+    pending, record = _only_pending(PROD_DRAINED_RECORDS)
+    outside = PROD_OUTSIDE_RECORDS / pending.name
+    _write_bytes(outside, pending.read_bytes(), 0o600)
+    drains = pathlib.Path(baseline()["overlays"]["drained"])
+    before_pending = sha256_file(pending)
+    before_outside = sha256_file(outside)
+    before_state = production_state()
+    cli = production_cli(drains, PROD_DRAINED_RECORDS, "recover",
+                         "--record", outside)
+    after_state = production_state()
+    require(cli["rc"] == 2,
+            "recovery of an outside record did not refuse with rc 2")
+    require("invalid controller transaction record path" in cli["stderr"],
+            "outside-record refusal did not name the record path")
+    require(sha256_file(pending) == before_pending,
+            "outside-record refusal changed the retained pending record")
+    require(sha256_file(outside) == before_outside,
+            "outside-record refusal changed the outside copy")
+    require(before_state["files"] == after_state["files"]
+            and before_state["units"] == after_state["units"],
+            "outside-record refusal changed the installed unit state")
+    return {"phase": "production-refuse-outside", "cli": cli,
+            "record_path": str(outside), "record": record_summary(outside),
+            "record_before": {"sha256": before_pending},
+            "record_after": {"sha256": sha256_file(pending)},
+            "outside_before": {"sha256": before_outside},
+            "outside_after": {"sha256": sha256_file(outside)},
+            "before": before_state, "after": after_state}
+
+
+def production_refuse_coherence(args):
+    pending, record = _only_pending(PROD_DRAINED_RECORDS)
+    mutated = json.loads(pending.read_text())
+    mutated["snapshot"]["runtime"] = PROD_NODE_RUNTIME
+    target = PROD_COHERENCE_RECORDS / pending.name
+    _write_bytes(target, (json.dumps(mutated, indent=2, sort_keys=True)
+                          + "\n").encode(), 0o600)
+    coherence = pathlib.Path(baseline()["overlays"]["coherence"])
+    before = sha256_file(target)
+    before_state = production_state()
+    cli = production_cli(coherence, PROD_COHERENCE_RECORDS, "recover",
+                         "--record", target)
+    after_state = production_state()
+    require(cli["rc"] == 2,
+            "incoherent snapshot record did not refuse with rc 2")
+    require("invalid unit recovery record" in cli["stderr"],
+            "incoherent snapshot refusal did not name the record")
+    require(sha256_file(target) == before,
+            "incoherent snapshot refusal changed the retained record")
+    require(before_state["files"] == after_state["files"]
+            and before_state["units"] == after_state["units"],
+            "incoherent snapshot refusal changed the installed unit state")
+    return {"phase": "production-refuse-coherence", "cli": cli,
+            "record_path": str(target), "record": record_summary(target),
+            "snapshot_runtime": mutated["snapshot"]["runtime"],
+            "prior_runtime": mutated.get("prior_runtime"),
+            "record_before": {"sha256": before},
+            "record_after": {"sha256": sha256_file(target)},
+            "before": before_state, "after": after_state}
+
+
+def production_recover_drained(args):
+    pending, record = _only_pending(PROD_DRAINED_RECORDS)
+    saved = baseline()
+    drains = pathlib.Path(saved["overlays"]["drained"])
+    before = sha256_file(pending)
+    cli = production_cli(drains, PROD_DRAINED_RECORDS, "recover",
+                         "--record", pending)
+    require(cli["rc"] == 0,
+            "production recovery did not complete: " + cli["stderr"][:800])
+    completed = json.loads(cli["stdout"])
+    after = record_summary(pending)
+    state = production_state()
+    repeat = production_cli(drains, PROD_DRAINED_RECORDS, "recover",
+                            "--record", pending)
+    state_repeat = production_state()
+    require(repeat["rc"] == 2,
+            "repeated production recovery did not refuse with rc 2")
+    require(sha256_file(pending) == after["sha256"],
+            "repeated production recovery changed the record")
+    require(state["files"] == state_repeat["files"]
+            and state["units"] == state_repeat["units"],
+            "repeated production recovery changed the installed unit state")
+    service = state["files"][str(PROD_SERVICE)]
+    timer = state["units"][PROD_TIMER]
+    require(completed.get("outcome") == "rolled_back"
+            and completed.get("phase") == "restore_activation_pending",
+            "completed recovery did not retain a rolled_back record")
+    require(after.get("outcome") == "rolled_back"
+            and after.get("phase") == "restore_activation_pending",
+            "retained recovery record is not rolled_back")
+    require(service.get("type") == "file"
+            and service.get("sha256") == saved["python_render"]["sha256"],
+            "recovery did not restore the exact production python service")
+    require(state["files"][str(PROD_STAGED)]["type"] == "missing",
+            "recovery left a staged service")
+    require(timer.get("ActiveState") == "active"
+            and timer.get("UnitFileState") == "enabled",
+            "recovery did not restore the active enabled timer")
+    require(state["files"][str(PROD_WANTS)]["type"] == "symlink"
+            and state["files"][str(PROD_WANTS)]["target"]
+            == "../" + PROD_TIMER,
+            "recovery did not restore the timer enablement link")
+    require(state["state"] == saved["state"],
+            "recovery changed the preserved queue/heartbeat bytes")
+    recovered = PRODUCTION / "recovered-service"
+    _write_bytes(recovered, PROD_SERVICE.read_bytes(), 0o600)
+    require(sha256_file(recovered) == saved["python_render"]["sha256"],
+            "retained recovered service bytes are not the python render")
+    return {"phase": "production-recover-drained", "cli": cli,
+            "completed": completed,
+            "record_before": {"sha256": before},
+            "record_after": after, "state": state,
+            "repeat": repeat, "state_after_repeat": state_repeat,
+            "recovered_service": {"path": str(recovered),
+                                  "sha256": sha256_file(recovered)}}
+
+
+def production_switch_ambiguity(args):
+    ambiguity = pathlib.Path(baseline()["overlays"]["ambiguity"])
+    result = switch_and_kill(ambiguity, PROD_AMBIGUITY_RECORDS,
+                             "activation_pending")
+    record = json.loads(pathlib.Path(result["record_path"]).read_text())
+    saved = baseline()
+    require(record.get("outcome") == "pending"
+            and record.get("phase") == "activation_pending",
+            "interrupted switch did not retain a pending activation record")
+    require(record.get("runtime") == PROD_NODE_RUNTIME
+            and record.get("prior_runtime") == PYTHON_RUNTIME,
+            "activation record names another unit or runtime")
+    require(result["cli"]["rc"] == -signal.SIGKILL,
+            "activation interrupt did not retain SIGKILL")
+    result["snapshot_service_sha256"] = sha256_bytes(
+        __import__("base64").b64decode(
+            record["snapshot"]["paths"][str(PROD_SERVICE)]["bytes_b64"]))
+    require(result["snapshot_service_sha256"]
+            == saved["python_render"]["sha256"],
+            "activation snapshot is not the production python render")
+    return {"phase": "production-switch-ambiguity", **result}
+
+
+def production_recover_ambiguity(args):
+    pending, record = _only_pending(PROD_AMBIGUITY_RECORDS)
+    ambiguity = pathlib.Path(baseline()["overlays"]["ambiguity"])
+    before = sha256_file(pending)
+    cli = production_cli(ambiguity, PROD_AMBIGUITY_RECORDS, "recover",
+                         "--record", pending)
+    after = sha256_file(pending)
+    state = production_state()
+    require(cli["rc"] == 3,
+            "activation-pending recovery did not refuse with rc 3: "
+            + cli["stderr"][:800])
+    require("activation may have occurred" in cli["stderr"],
+            "rc-3 refusal did not name the activation ambiguity")
+    require(after == before,
+            "ambiguous recovery changed the retained record bytes")
+    retained = json.loads(pending.read_text())
+    require(retained.get("phase") == "activation_pending"
+            and retained.get("outcome") == "pending",
+            "ambiguous recovery changed the retained record phase")
+    service = state["files"][str(PROD_SERVICE)]
+    require(service.get("type") == "symlink"
+            and service.get("target") == "/dev/null",
+            "ambiguous recovery did not leave the durable service mask")
+    require(state["units"][PROD_TIMER].get("ActiveState")
+            in ("inactive", "failed"),
+            "ambiguous recovery left the timer active")
+    return {"phase": "production-recover-ambiguity", "cli": cli,
+            "recovery": json.loads(cli["stdout"])
+            if cli["stdout"].strip().startswith("{") else None,
+            "record_before": {"sha256": before},
+            "record_after": {"sha256": after},
+            "record": record_summary(pending), "state": state}
+
+
+def production_inspect(args):
+    saved = baseline()
+    state = production_state()
+    require(state["state"] == saved["state"],
+            "final state changed the preserved queue/heartbeat bytes")
+    require(state["checkout_head"] == saved["checkout_commit"],
+            "final checkout HEAD changed")
+    require(state["checkout_status"] == "",
+            "final checkout is not clean")
+    require(state["files"][str(PROD_SERVICE)].get("type") == "symlink"
+            and state["files"][str(PROD_SERVICE)].get("target") == "/dev/null",
+            "final state does not retain the durable ambiguity mask")
+    staged = state["files"][str(PROD_STAGED)]
+    require(staged["type"] == "missing"
+            or (staged["type"] == "file"
+                and staged["sha256"] == saved["node_render"]["sha256"]),
+            "final state retains an unexpected staged service")
+    require(state["units"][PROD_TIMER].get("ActiveState")
+            in ("inactive", "failed"),
+            "final ambiguity timer is active")
+    for name, directory in (("drained", PROD_DRAINED_RECORDS),
+                            ("ambiguity", PROD_AMBIGUITY_RECORDS),
+                            ("coherence", PROD_COHERENCE_RECORDS),
+                            ("outside", PROD_OUTSIDE_RECORDS)):
+        found = records_in(directory)
+        require(len(found) == 1,
+                "final state does not retain exactly one " + name + " record")
+    installed = sorted(path.name for path in UNIT_DIR.glob("crq-*"))
+    require(installed == [PROD_UNIT, PROD_TIMER]
+            or installed == [PROD_TIMER, PROD_UNIT],
+            "final unit directory contains unexpected crq entries: "
+            + json.dumps(installed))
+    return {"phase": "production-inspect", "state": state,
+            "installed": installed,
+            "artifact_manifest_sha256": sha256_file(
+                PROD_ARTIFACT / "artifact-manifest.json")}
+
+
 def main(argv=None):
     phases = ("prepare", "drain-alive", "switch-node", "drain-ambiguous",
               "switch-python", "drain-harvest", "interrupt",
@@ -2632,7 +3357,7 @@ def main(argv=None):
               "matrix-reset-python", "matrix-reset-python-final",
               *MATRIX_CASES.keys(),
               *(name + "-observe" for name in MATRIX_CASES),
-              *ACTIVATOR_PHASES)
+              *ACTIVATOR_PHASES, *PROD_PHASES)
     parser = argparse.ArgumentParser()
     parser.add_argument("phase", choices=phases)
     parser.add_argument("--record")
@@ -2697,6 +3422,22 @@ def main(argv=None):
             payload = activators_repeat(args)
         elif args.phase == "activators-inspect":
             payload = activators_inspect(args)
+        elif args.phase == "production-prepare":
+            payload = production_prepare(args)
+        elif args.phase == "production-switch-drained":
+            payload = production_switch_drained(args)
+        elif args.phase == "production-refuse-outside":
+            payload = production_refuse_outside(args)
+        elif args.phase == "production-refuse-coherence":
+            payload = production_refuse_coherence(args)
+        elif args.phase == "production-recover-drained":
+            payload = production_recover_drained(args)
+        elif args.phase == "production-switch-ambiguity":
+            payload = production_switch_ambiguity(args)
+        elif args.phase == "production-recover-ambiguity":
+            payload = production_recover_ambiguity(args)
+        elif args.phase == "production-inspect":
+            payload = production_inspect(args)
         else:
             payload = {"snapshot": snapshot()}
         PHASE_DIR.mkdir(parents=True, exist_ok=True)

@@ -42,6 +42,14 @@ UPLOADS = (
 )
 PARTIAL_GUEST = "vm-unit-switch-guest-partial.py"
 RUNNER_ARCHIVE = "crq-runner-source.tar.gz"
+PRODUCTION_UPLOADS = (
+    "unit-live-binding.py",
+    "unit-adapter.py",
+    "unit-completion.py",
+    "unit-switch-factory.py",
+    "prepare-host.py",
+    "package-runner.py",
+)
 HOST_MODULES = (
     "vm-unit-switch.py",
     "vm-feasibility.py",
@@ -137,6 +145,21 @@ PARTIAL_GUEST_PHASES = (
             "partial-restore-service-%s-observe" % regime))
     + ("partial-inspect",))
 
+# Production ``recover --record`` proof. It drives the shipped controller CLI
+# against real guest systemd and a real checkout. The switch target is a
+# minimally packageable node artifact fixture, and interruption is an external
+# SIGKILL at an observed journal phase.
+PRODUCTION_GUEST_PHASES = (
+    "production-prepare", "production-switch-drained",
+    "production-refuse-outside", "production-refuse-coherence",
+    "production-recover-drained", "production-switch-ambiguity",
+    "production-recover-ambiguity", "production-inspect")
+PROD_UNIT = "crq-watchdog.service"
+PROD_TIMER = "crq-watchdog.timer"
+PROD_NODE_RUNTIME = "node:" + "b" * 40
+PROD_RECORD_DIRS = ("records-prod-drained", "records-prod-ambiguity",
+                    "records-prod-coherence", "records-prod-outside")
+
 
 def phase_names(mode="base"):
     if mode == "matrix":
@@ -145,12 +168,16 @@ def phase_names(mode="base"):
         return ACTIVATOR_GUEST_PHASES
     if mode == "partial":
         return PARTIAL_GUEST_PHASES
+    if mode == "production-recover":
+        return PRODUCTION_GUEST_PHASES
     return GUEST_PHASES
 
 
 def uploads_for(mode="base"):
     if mode == "partial":
         return UPLOADS + (PARTIAL_GUEST,)
+    if mode == "production-recover":
+        return UPLOADS + PRODUCTION_UPLOADS
     return UPLOADS
 
 
@@ -253,6 +280,32 @@ PARTIAL_LIMITATIONS = [
     "deployed record location remain unresolved and are not tested here.",
     "A guest run is not power-loss, ACL, xattr or privileged-ownership proof.",
 ]
+PRODUCTION_LIMITATIONS = [
+    "One disposable guest exercises the shipped deploy-controller recover "
+    "--record entry point and the live production adapter composition against "
+    "real guest systemd. It is not a production host, and no production "
+    "checkout, credential or provider is present.",
+    "The switch target is a minimally packageable node artifact fixture. Its "
+    "whole-artifact identity, inventory and declared watchdog capability are "
+    "real production checks, but the artifact is not a built CRQ runner and "
+    "no real runtime completion exists.",
+    "The target node entry point is a non-exiting fixture, so an interrupt at "
+    "activation_pending cannot race a completed invocation. This is fixture "
+    "timing, not runtime evidence.",
+    "The interrupted switch is killed by the harness after observing the "
+    "durable journal phase. The controller has no proof-only kill hook on the "
+    "production path; a real host crash, power loss or kernel panic is not "
+    "proven.",
+    "The refusal cases use copies of one retained record: one outside the "
+    "record directory, one with a deliberately incoherent snapshot runtime. "
+    "They prove those validations refuse before mutation, not how a real "
+    "operator would produce such a record.",
+    "The proof covers crq-watchdog.service with its timer only. The full "
+    "production activator inventory, checkout deploy/rollback interop, "
+    "cross-directory journal resolution and enablement are not exercised.",
+    "Recovery is observed on the same guest boot. Reboot, power-loss and "
+    "cross-boot identity remain unproven for this entry point.",
+]
 
 
 def _load(name, path):
@@ -263,6 +316,12 @@ def _load(name, path):
 
 
 vm = _load("crq_vm_feasibility", OPS / "vm-feasibility.py")
+PROD_SERVICE = "/home/%s/.config/systemd/user/" % vm.GUEST_USER + PROD_UNIT
+PROD_TIMER_PATH = "/home/%s/.config/systemd/user/" % vm.GUEST_USER + PROD_TIMER
+PROD_WANTS = ("/home/%s/.config/systemd/user/timers.target.wants/"
+              % vm.GUEST_USER + PROD_TIMER)
+PROD_STAGED = ("/home/%s/.config/systemd/user/."
+               % vm.GUEST_USER + PROD_UNIT + ".staged")
 RECORDS_DIR = "/home/%s/records" % vm.GUEST_USER
 FIXTURE_DIR = "/home/%s/fixture" % vm.GUEST_USER
 UNIT_DIR = "/home/%s/.config/systemd/user" % vm.GUEST_USER
@@ -513,7 +572,20 @@ def fetch_raw(run, recorder, mode="base"):
         # The partial final state is a plain Python unit file; the whole unit
         # directory is retained so a staged or rogue entry cannot hide.
         extra = " records-partial-* .config/systemd/user "
-    if mode == "partial":
+    elif mode == "production-recover":
+        extra = (" production records-prod-drained records-prod-ambiguity "
+                 "records-prod-coherence records-prod-outside .local/opt "
+                 ".config/systemd/user "
+                 "checkout/apps/crq-python/ops/systemd ")
+    if mode == "production-recover":
+        remote = ("cd /home/%s && tar -czf - fixture production proof-bin "
+                  "records-prod-drained records-prod-ambiguity "
+                  "records-prod-coherence records-prod-outside .local/opt "
+                  ".config/systemd/user "
+                  "checkout/apps/crq-python/ops/systemd "
+                  "checkout/apps/crq-python/state | base64 -w0"
+                  % vm.GUEST_USER)
+    elif mode == "partial":
         remote = ("cd /home/%s && tar -czf - fixture records proof-bin "
                   "checkout/apps/crq-python/state%s | base64 -w0"
                   % (vm.GUEST_USER, extra))
@@ -549,6 +621,12 @@ def extract_raw_archive(raw_path, destination):
     def evidence_filter(member, dest_path):
         if (member.issym()
                 and member.name == ".config/systemd/user/crq-tick.service"
+                and member.linkname == "/dev/null"):
+            return member
+        if (member.issym()
+                and re.fullmatch(
+                    r"\.config/systemd/user/[A-Za-z0-9_.@-]+\.service",
+                    member.name) is not None
                 and member.linkname == "/dev/null"):
             return member
         return tarfile.data_filter(member, dest_path)
@@ -3765,11 +3843,265 @@ def _partial_checks(phases, restarts=None, reboots=None):
     return checks, problems
 
 
+def _prod_hex(value, length):
+    return isinstance(value, str) and re.fullmatch(
+        r"[0-9a-f]{%d}" % length, value) is not None
+
+
+def _prod_file(state, path, kind=None, sha=None, target=None):
+    entry = (state.get("files") or {}).get(path) if isinstance(state, dict) \
+        else None
+    if not isinstance(entry, dict):
+        return False
+    if kind is not None and entry.get("type") != kind:
+        return False
+    if sha is not None and entry.get("sha256") != sha:
+        return False
+    if target is not None and entry.get("target") != target:
+        return False
+    return True
+
+
+def _prod_unit(state, name, **fields):
+    entry = (state.get("units") or {}).get(name) if isinstance(state, dict) \
+        else None
+    if not isinstance(entry, dict):
+        return False
+    return all(entry.get(key) == value for key, value in fields.items())
+
+
+def _prod_record(summary, *, outcome=None, phase=None, unit=None,
+                 runtime=None, prior=None):
+    if not isinstance(summary, dict):
+        return False
+    for key, value in (("outcome", outcome), ("phase", phase),
+                       ("unit", unit), ("runtime", runtime),
+                       ("prior_runtime", prior)):
+        if value is not None and summary.get(key) != value:
+            return False
+    return _prod_hex(summary.get("sha256"), 64)
+
+
+def _production_checks(phases):
+    """Recompute the production recover proof from retained phase evidence."""
+    checks = {}
+    problems = []
+    prepare = phases.get("production-prepare") or {}
+    if not _ok_phase(prepare, "production-prepare", problems):
+        return checks, problems
+    prepared = prepare.get("prepared") or {}
+    initial = prepare.get("state") or {}
+    python_sha = (prepared.get("python_render") or {}).get("sha256")
+    node_sha = (prepared.get("node_render") or {}).get("sha256")
+    artifact = prepared.get("artifact") or {}
+    preflight = prepared.get("preflight") or {}
+    baseline_state = prepared.get("state") or {}
+    commit = prepared.get("checkout_commit")
+    runner_source = prepared.get("runner_source") or {}
+
+    checks["guest_isolation"] = (
+        initial.get("hostname") == "crq-probe"
+        and initial.get("user") == 1000
+        and isinstance(initial.get("manager"), dict))
+    checks["production_source_bound"] = (
+        _prod_hex(commit, 40)
+        and initial.get("checkout_head") == commit
+        and initial.get("checkout_status") == ""
+        and _prod_hex(runner_source.get("sha256"), 64)
+        and _prod_hex(runner_source.get("crq_sha256"), 64)
+        and type(runner_source.get("bytes")) is int
+        and runner_source["bytes"] > 0)
+    checks["production_units_installed"] = (
+        _prod_hex(python_sha, 64)
+        and _prod_file(initial, PROD_SERVICE, "file", python_sha)
+        and _prod_file(initial, PROD_TIMER_PATH, "file")
+        and _prod_file(initial, PROD_WANTS, "symlink",
+                       target="../" + PROD_TIMER)
+        and _prod_unit(initial, PROD_UNIT, LoadState="loaded",
+                       ActiveState="inactive")
+        and _prod_unit(initial, PROD_TIMER, ActiveState="active",
+                       UnitFileState="enabled"))
+    checks["production_artifact_verified"] = (
+        artifact.get("source_sha") == PROD_NODE_RUNTIME[5:]
+        and artifact.get("capabilities") == ["watchdog"]
+        and _prod_hex(artifact.get("manifest_sha256"), 64)
+        and _prod_hex(artifact.get("content_sha256"), 64)
+        and _prod_hex(artifact.get("crq_js_sha256"), 64)
+        and type(artifact.get("files")) is int
+        and artifact["files"] > 0)
+    checks["production_preflight_passed"] = (
+        preflight.get("runtime") == "python"
+        and (preflight.get("discovery") or {}).get("complete") is True
+        and (preflight.get("capability") or {}).get("command") == "watchdog"
+        and (preflight.get("capability") or {}).get("runtime")
+        == PROD_NODE_RUNTIME
+        and (preflight.get("snapshot") or {}).get("unit") == PROD_UNIT
+        and (preflight.get("snapshot") or {}).get("runtime") == "python"
+        and preflight.get("selection_sha256")
+        == (preflight.get("render") or {}).get("sha256")
+        and _prod_hex(preflight.get("recovery_selection_sha256"), 64)
+        and type(preflight.get("completion_sequence")) is int
+        and preflight["completion_sequence"] == 0
+        and isinstance(preflight.get("completion_window"), (int, float))
+        and preflight["completion_window"] > 0)
+
+    drained = phases.get("production-switch-drained") or {}
+    if _ok_phase(drained, "production-switch-drained", problems):
+        boundary = drained.get("boundary") or {}
+        staged = (boundary.get("files") or {}).get(PROD_STAGED) or {}
+        rendered = (drained.get("preflight") or {}).get("render") or {}
+        checks["switch_drained_interrupted"] = (
+            (drained.get("cli") or {}).get("rc") == -9
+            and drained.get("observed_phase") == "drained"
+            and _prod_record(drained.get("record"), outcome="pending",
+                             phase="drained", unit=PROD_UNIT,
+                             runtime=PROD_NODE_RUNTIME, prior="python")
+            and drained.get("snapshot_service_sha256") == python_sha
+            and _prod_file(boundary, PROD_SERVICE, "symlink",
+                           target="/dev/null")
+            and _prod_file(boundary, PROD_TIMER_PATH, "file")
+            and (staged.get("type") == "missing"
+                 or (staged.get("type") == "file"
+                     and staged.get("sha256") == rendered.get("sha256")))
+            and _prod_unit(boundary, PROD_TIMER, ActiveState="inactive"))
+    else:
+        checks["switch_drained_interrupted"] = False
+
+    outside = phases.get("production-refuse-outside") or {}
+    if _ok_phase(outside, "production-refuse-outside", problems):
+        before = outside.get("before") or {}
+        after = outside.get("after") or {}
+        checks["outside_record_refused"] = (
+            (outside.get("cli") or {}).get("rc") == 2
+            and "invalid controller transaction record path"
+            in (outside.get("cli") or {}).get("stderr", "")
+            and (outside.get("record_before") or {}).get("sha256")
+            == (outside.get("record_after") or {}).get("sha256")
+            and (outside.get("outside_before") or {}).get("sha256")
+            == (outside.get("outside_after") or {}).get("sha256")
+            and before.get("files") == after.get("files")
+            and before.get("units") == after.get("units"))
+    else:
+        checks["outside_record_refused"] = False
+
+    coherence = phases.get("production-refuse-coherence") or {}
+    if _ok_phase(coherence, "production-refuse-coherence", problems):
+        before = coherence.get("before") or {}
+        after = coherence.get("after") or {}
+        checks["coherence_record_refused"] = (
+            (coherence.get("cli") or {}).get("rc") == 2
+            and "invalid unit recovery record"
+            in (coherence.get("cli") or {}).get("stderr", "")
+            and coherence.get("snapshot_runtime") == PROD_NODE_RUNTIME
+            and coherence.get("prior_runtime") == "python"
+            and (coherence.get("record_before") or {}).get("sha256")
+            == (coherence.get("record_after") or {}).get("sha256")
+            and before.get("files") == after.get("files")
+            and before.get("units") == after.get("units"))
+    else:
+        checks["coherence_record_refused"] = False
+
+    recovery = phases.get("production-recover-drained") or {}
+    if _ok_phase(recovery, "production-recover-drained", problems):
+        state = recovery.get("state") or {}
+        repeat = recovery.get("state_after_repeat") or {}
+        completed = recovery.get("completed") or {}
+        retained = recovery.get("record_after") or {}
+        checks["recovery_completed"] = (
+            (recovery.get("cli") or {}).get("rc") == 0
+            and completed.get("outcome") == "rolled_back"
+            and completed.get("phase") == "restore_activation_pending"
+            and _prod_record(retained, outcome="rolled_back",
+                             phase="restore_activation_pending")
+            and (recovery.get("repeat") or {}).get("rc") == 2
+            and ((repeat.get("records") or {}).get(
+                "/home/%s/records-prod-drained" % vm.GUEST_USER) or [{}])[0]
+            .get("sha256") == retained.get("sha256"))
+        checks["recovery_restored_exact_python"] = (
+            _prod_file(state, PROD_SERVICE, "file", python_sha)
+            and _prod_file(state, PROD_STAGED, "missing")
+            and _prod_file(state, PROD_WANTS, "symlink",
+                           target="../" + PROD_TIMER)
+            and (_prod_unit(state, PROD_UNIT, ActiveState="inactive")
+                 or _prod_unit(state, PROD_UNIT, ActiveState="failed")
+                 or _prod_unit(state, PROD_UNIT, ActiveState="activating"))
+            and _prod_unit(state, PROD_TIMER, ActiveState="active",
+                           UnitFileState="enabled"))
+        checks["recovery_preserved_state"] = (
+            state.get("state") == baseline_state)
+    else:
+        checks["recovery_completed"] = False
+        checks["recovery_restored_exact_python"] = False
+        checks["recovery_preserved_state"] = False
+
+    ambiguity = phases.get("production-switch-ambiguity") or {}
+    if _ok_phase(ambiguity, "production-switch-ambiguity", problems):
+        boundary = ambiguity.get("boundary") or {}
+        checks["ambiguity_switch_interrupted"] = (
+            (ambiguity.get("cli") or {}).get("rc") == -9
+            and ambiguity.get("observed_phase") == "activation_pending"
+            and _prod_record(ambiguity.get("record"), outcome="pending",
+                             phase="activation_pending", unit=PROD_UNIT,
+                             runtime=PROD_NODE_RUNTIME, prior="python")
+            and ambiguity.get("snapshot_service_sha256") == python_sha
+            and _prod_unit(boundary, PROD_TIMER, ActiveState="inactive"))
+    else:
+        checks["ambiguity_switch_interrupted"] = False
+
+    ambiguous_recovery = phases.get("production-recover-ambiguity") or {}
+    if _ok_phase(ambiguous_recovery,
+                 "production-recover-ambiguity", problems):
+        state = ambiguous_recovery.get("state") or {}
+        checks["ambiguity_recovery_rc3"] = (
+            (ambiguous_recovery.get("cli") or {}).get("rc") == 3
+            and "activation may have occurred"
+            in (ambiguous_recovery.get("cli") or {}).get("stderr", "")
+            and (ambiguous_recovery.get("record_before") or {}).get("sha256")
+            == (ambiguous_recovery.get("record_after") or {}).get("sha256")
+            and _prod_record(ambiguous_recovery.get("record"),
+                             outcome="pending", phase="activation_pending")
+            and _prod_file(state, PROD_SERVICE, "symlink",
+                           target="/dev/null")
+            and _prod_unit(state, PROD_UNIT, ActiveState="inactive")
+            and _prod_unit(state, PROD_TIMER, ActiveState="inactive"))
+    else:
+        checks["ambiguity_recovery_rc3"] = False
+
+    final = phases.get("production-inspect") or {}
+    if _ok_phase(final, "production-inspect", problems):
+        state = final.get("state") or {}
+        records = state.get("records") or {}
+        checks["final_state_clean"] = (
+            state.get("state") == baseline_state
+            and state.get("checkout_head") == commit
+            and state.get("checkout_status") == ""
+            and _prod_file(state, PROD_SERVICE, "symlink",
+                           target="/dev/null")
+            and (_prod_file(state, PROD_STAGED, "missing")
+                 or _prod_file(state, PROD_STAGED, "file", node_sha))
+            and _prod_unit(state, PROD_UNIT, ActiveState="inactive")
+            and _prod_unit(state, PROD_TIMER, ActiveState="inactive")
+            and sorted(final.get("installed") or [])
+            == sorted([PROD_UNIT, PROD_TIMER])
+            and all(len(records.get("/home/%s/%s"
+                                    % (vm.GUEST_USER, name)) or []) == 1
+                    for name in PROD_RECORD_DIRS))
+    else:
+        checks["final_state_clean"] = False
+
+    for key, value in checks.items():
+        if value is not True:
+            problems.append(key + " is not satisfied")
+    return checks, problems
+
+
 def build_checks(phases, restarts=None, reboots=None, mode="base"):
     if mode == "activators":
         return _activator_checks(phases)
     if mode == "partial":
         return _partial_checks(phases, restarts or {}, reboots or {})
+    if mode == "production-recover":
+        return _production_checks(phases)
     checks = {}
     problems = []
     prepare = phases.get("prepare") or {}
@@ -4029,6 +4361,8 @@ def run_steps(mode="base"):
         return [("phase", name, {}) for name in GUEST_PHASES]
     if mode == "activators":
         return [("phase", name, {}) for name in ACTIVATOR_GUEST_PHASES]
+    if mode == "production-recover":
+        return [("phase", name, {}) for name in PRODUCTION_GUEST_PHASES]
     if mode == "partial":
         steps = [("phase", "prepare", {}), ("phase", "partial-install", {})]
         for case in PARTIAL_ORDER:
@@ -4085,6 +4419,8 @@ def build_report(run, boot, phases, restarts, reboots, stamps, image,
         "problems": problems,
         "limitations": (ACTIVATOR_LIMITATIONS if mode == "activators"
                         else PARTIAL_LIMITATIONS if mode == "partial"
+                        else PRODUCTION_LIMITATIONS
+                        if mode == "production-recover"
                         else MATRIX_LIMITATIONS if mode == "matrix"
                         else LIMITATIONS),
     }
@@ -4635,6 +4971,193 @@ def _verify_partial_raw(report, raw_root, problems, phases):
     return problems
 
 
+def _raw_json(path, label, problems):
+    path = pathlib.Path(path)
+    if path.is_symlink() or not path.is_file():
+        problems.append(label + " is missing from raw evidence")
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        problems.append(label + " is not readable JSON")
+        return None
+
+
+def _raw_module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _raw_record(directory, label, problems):
+    directory = pathlib.Path(directory)
+    if not directory.is_dir():
+        problems.append(label + " raw record directory is missing")
+        return None
+    entries = [path for path in directory.iterdir()
+               if path.is_file() and not path.is_symlink()]
+    if len(entries) != 1:
+        problems.append(label + " raw record directory does not retain "
+                        "exactly one record")
+        return None
+    return entries[0]
+
+
+def _verify_production_raw(report, raw_root, problems, phases):
+    prepared = (phases.get("production-prepare") or {}).get("prepared") or {}
+    baseline = _raw_json(raw_root / "production" / "baseline.json",
+                         "production baseline", problems)
+    if baseline is not None and baseline != prepared:
+        problems.append("production baseline contradicts the prepare phase")
+    if not isinstance(baseline, dict):
+        return
+
+    for name in ("drained", "ambiguity", "coherence"):
+        overlay = _raw_json(raw_root / "production" / "overlays"
+                            / (name + ".json"),
+                            "production overlay " + name, problems)
+        if overlay is None:
+            continue
+        if baseline.get("overlay_sha256", {}).get(name) \
+                != vm.sha256_bytes(
+                    (raw_root / "production" / "overlays"
+                     / (name + ".json")).read_bytes()):
+            problems.append("production overlay " + name
+                            + " digest contradicts the baseline")
+        if overlay.get("record_dir") != (
+                baseline.get("record_dirs") or {}).get(name):
+            problems.append("production overlay " + name
+                            + " names another record directory")
+
+    raw_prepare = _raw_module("crq_raw_prepare_host",
+                              raw_root / "proof-bin" / "prepare-host.py")
+    runner_root = "/home/%s/checkout/apps/crq-python" % vm.GUEST_USER
+    template_dir = (raw_root / "checkout" / "apps" / "crq-python"
+                    / "ops" / "systemd")
+    renders = raw_root / "production" / "renders"
+    for template_name, unit_name in (
+            ("crq-watchdog.service", PROD_UNIT),
+            ("crq-watchdog.timer", PROD_TIMER)):
+        template_path = template_dir / template_name
+        render_path = renders / unit_name
+        if not template_path.is_file() or not render_path.is_file():
+            problems.append("production render or template is missing: "
+                            + unit_name)
+            continue
+        expected = raw_prepare.render_service_text(
+            unit_name, template_path.read_text(), runner_root)
+        if expected.encode() != render_path.read_bytes():
+            problems.append("production render is not derived from the "
+                            "retained source template: " + unit_name)
+    service_render = renders / PROD_UNIT
+    if service_render.is_file():
+        exec_start = next(
+            (line[len("ExecStart="):] for line in
+             service_render.read_text().splitlines()
+             if line.startswith("ExecStart=")), None)
+        if exec_start != (baseline.get("python_render") or {}).get(
+                "exec_start"):
+            problems.append("production service ExecStart contradicts "
+                            "the baseline")
+        if exec_start is None or "/home/%s/checkout/" % vm.GUEST_USER \
+                not in exec_start:
+            problems.append("production service does not run from the "
+                            "retained guest checkout")
+    recovered = raw_root / "production" / "recovered-service"
+    if (not recovered.is_file() or not service_render.is_file()
+            or recovered.read_bytes() != service_render.read_bytes()):
+        problems.append("retained recovered service is not the production "
+                        "python render")
+
+    artifact_root = raw_root / ".local" / "opt" / (
+        "crq-" + PROD_NODE_RUNTIME[5:])
+    try:
+        identity = raw_prepare.artifact_identity(
+            artifact_root, PROD_NODE_RUNTIME)
+    except (OSError, ValueError) as exc:
+        problems.append("retained node artifact is not packageable: "
+                        + str(exc))
+    else:
+        if identity != (baseline.get("artifact") or {}).get("identity"):
+            problems.append("retained node artifact identity contradicts "
+                            "the baseline")
+
+    drained = phases.get("production-switch-drained") or {}
+    ambiguity = phases.get("production-switch-ambiguity") or {}
+    coherence = phases.get("production-refuse-coherence") or {}
+    outside = phases.get("production-refuse-outside") or {}
+    _retained_record_problem(drained.get("record_after"), raw_root,
+                             "records-prod-drained",
+                             "production drained recovery", problems)
+    _retained_record_problem(ambiguity.get("record"), raw_root,
+                             "records-prod-ambiguity",
+                             "production ambiguity switch", problems)
+    _retained_record_problem(coherence.get("record"), raw_root,
+                             "records-prod-coherence",
+                             "production coherence refusal", problems)
+    outside_path = _raw_record(raw_root / "records-prod-outside",
+                               "production outside refusal", problems)
+    outside_sha = (outside.get("outside_before") or {}).get("sha256")
+    if outside_path is not None and vm.sha256_bytes(
+            outside_path.read_bytes()) != outside_sha:
+        problems.append("outside record copy contradicts the refusal phase")
+    if outside_path is not None and outside_sha != (
+            drained.get("record_before") or {}).get("sha256"):
+        problems.append("outside record copy is not the interrupted drained "
+                        "record")
+    coherence_path = _raw_record(raw_root / "records-prod-coherence",
+                                 "production coherence refusal", problems)
+    if outside_path is not None and coherence_path is not None:
+        try:
+            original = json.loads(outside_path.read_text())
+            mutated = json.loads(coherence_path.read_text())
+        except ValueError:
+            problems.append("production refusal records are not JSON")
+        else:
+            original.setdefault("snapshot", {})["runtime"] = PROD_NODE_RUNTIME
+            if mutated != original:
+                problems.append("coherence record is not the retained record "
+                                "with one incoherent snapshot runtime")
+            if (mutated.get("snapshot") or {}).get("runtime") \
+                    == mutated.get("prior_runtime"):
+                problems.append("coherence record snapshot runtime is coherent")
+
+    unit_dir = raw_root / ".config" / "systemd" / "user"
+    service = unit_dir / PROD_UNIT
+    timer = unit_dir / PROD_TIMER
+    wants = unit_dir / "timers.target.wants" / PROD_TIMER
+    staged = unit_dir / ("." + PROD_UNIT + ".staged")
+    timer_render = renders / PROD_TIMER
+    if not service.is_symlink() or os.readlink(service) != "/dev/null":
+        problems.append("raw final service is not the production mask")
+    if (not timer.is_file() or not timer_render.is_file()
+            or timer.read_bytes() != timer_render.read_bytes()):
+        problems.append("raw final timer is not the production render")
+    if not wants.is_symlink() or os.readlink(wants) != "../" + PROD_TIMER:
+        problems.append("raw final timer enablement link is wrong")
+    if staged.is_symlink() or (staged.exists() and not staged.is_file()):
+        problems.append("raw final unit directory retains an invalid "
+                        "staged service")
+    elif staged.is_file():
+        node_render = renders / PROD_UNIT
+        if not node_render.is_file() \
+                or staged.read_bytes() != node_render.read_bytes():
+            problems.append("raw final staged service is not the node render")
+
+    state_dir = raw_root / "checkout" / "apps" / "crq-python" / "state"
+    for name, expected in (baseline.get("state") or {}).items():
+        path = state_dir / name
+        if expected is None:
+            if path.exists():
+                problems.append("raw preserved state " + name
+                                + " exists without a baseline digest")
+        elif not path.is_file() or vm.sha256_bytes(path.read_bytes()) \
+                != expected:
+            problems.append("raw preserved state " + name
+                            + " contradicts the baseline")
+
+
 def verify_raw_evidence(report, raw_root, mode="base"):
     """Compare a report with the retained raw phases, uploads and journals."""
     problems = []
@@ -4662,6 +5185,9 @@ def verify_raw_evidence(report, raw_root, mode="base"):
         return _verify_activators_raw(report, raw_root, problems, phases)
     if mode == "partial":
         return _verify_partial_raw(report, raw_root, problems, phases)
+    if mode == "production-recover":
+        _verify_production_raw(report, raw_root, problems, phases)
+        return problems
 
     # Only final journal states can be compared with the retained record set.
     # Earlier phase summaries are historical; their raw phase JSON is the
@@ -4976,7 +5502,8 @@ def cmd_verify(args):
     if report.get("schema_version") != SCHEMA_VERSION or report.get("kind") != KIND:
         problems.append("report schema or kind is not this proof")
     mode = report.get("mode", "base")
-    if mode not in ("base", "matrix", "activators", "partial"):
+    if mode not in ("base", "matrix", "activators", "partial",
+                    "production-recover"):
         problems.append("report mode is not this proof mode")
         mode = "base"
     phases = report.get("phases")
@@ -5017,7 +5544,8 @@ def cmd_verify(args):
     host_matches = isinstance(retained_host, str) and current_host == retained_host
     guest_matches = (isinstance(retained_guest, str)
                      and current_guest == retained_guest)
-    if mode in ("matrix", "activators") and not guest_matches:
+    if mode in ("matrix", "activators", "production-recover") \
+            and not guest_matches:
         problems.append("guest proof script differs from the retained "
                         + mode + " run; a fresh " + mode + " run is required")
     validator = {
@@ -5057,7 +5585,8 @@ def build_parser():
     run = sub.add_parser("run")
     run.add_argument("--source-commit", required=True)
     run.add_argument("--mode",
-                     choices=("base", "matrix", "activators", "partial"),
+                     choices=("base", "matrix", "activators", "partial",
+                              "production-recover"),
                      default="base")
     run.add_argument("--keep", action="store_true")
     verify = sub.add_parser("verify")

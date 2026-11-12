@@ -3072,3 +3072,201 @@ class PartialHarnessCheckTests(unittest.TestCase):
             harness._verify_partial_raw({}, root, problems, phases_value)
             self.assertTrue(any("record digest does not match" in item
                                 for item in problems), problems)
+
+
+class ProductionHarnessCheckTests(unittest.TestCase):
+    """Synthetic production recover evidence through the real host checks."""
+
+    UNIT = harness.PROD_UNIT
+    TIMER = harness.PROD_TIMER
+    SERVICE = harness.PROD_SERVICE
+    TIMER_PATH = harness.PROD_TIMER_PATH
+    WANTS = harness.PROD_WANTS
+    STAGED = harness.PROD_STAGED
+    NODE = harness.PROD_NODE_RUNTIME
+    PYTHON = "e" * 64
+    COMMIT = "f" * 40
+    STATE = {"queue.json": "c" * 64, "heartbeat.json": "d" * 64}
+    RECORD_SHA = "a" * 64
+
+    def _units(self, service="inactive", timer="inactive"):
+        return {
+            self.UNIT: {"LoadState": "loaded", "ActiveState": service,
+                        "UnitFileState": "loaded"},
+            self.TIMER: {"LoadState": "loaded", "ActiveState": timer,
+                         "UnitFileState": "enabled"},
+        }
+
+    def _files(self, service_type="file", staged="missing"):
+        if service_type == "mask":
+            service = {"type": "symlink", "target": "/dev/null"}
+        else:
+            service = {"type": "file", "sha256": self.PYTHON}
+        return {
+            self.SERVICE: service,
+            self.TIMER_PATH: {"type": "file"},
+            self.WANTS: {"type": "symlink",
+                         "target": "../" + self.TIMER},
+            self.STAGED: {"type": staged},
+        }
+
+    def _state(self, service="file", units=None, records=None):
+        return {
+            "hostname": "crq-probe", "user": 1000,
+            "manager": {"pid": "1", "invocation_id": "b" * 32},
+            "checkout_head": self.COMMIT, "checkout_status": "",
+            "units": units or self._units(),
+            "files": self._files(service),
+            "state": dict(self.STATE),
+            "records": records or {},
+        }
+
+    def _record(self, outcome, phase):
+        return {"sha256": self.RECORD_SHA, "outcome": outcome,
+                "phase": phase, "unit": self.UNIT,
+                "runtime": self.NODE, "prior_runtime": "python"}
+
+    def evidence(self):
+        node_render = "b" * 64
+        prepared = {
+            "checkout_commit": self.COMMIT,
+            "runner_source": {"sha256": "1" * 64, "crq_sha256": "2" * 64,
+                              "bytes": 1024},
+            "python_render": {
+                "sha256": self.PYTHON, "size": 100,
+                "exec_start": "/usr/bin/env python3 /home/probe/checkout/"
+                              "apps/crq-python/ops/crq-watchdog.py",
+            },
+            "artifact": {"source_sha": self.NODE[5:],
+                         "capabilities": ["watchdog"],
+                         "manifest_sha256": "3" * 64,
+                         "content_sha256": "4" * 64,
+                         "crq_js_sha256": "5" * 64, "files": 5},
+            "preflight": {
+                "runtime": "python", "discovery": {"complete": True},
+                "capability": {"command": "watchdog", "runtime": self.NODE},
+                "snapshot": {"unit": self.UNIT, "runtime": "python"},
+                "render": {"sha256": node_render},
+                "selection_sha256": node_render,
+                "recovery_selection_sha256": "6" * 64,
+                "completion_sequence": 0, "completion_window": 1080.0,
+            },
+            "state": dict(self.STATE),
+        }
+        initial = self._state(units=self._units(timer="active"))
+        drained_record = self._record("pending", "drained")
+        rolled = self._record("rolled_back", "restore_activation_pending")
+        phases = {
+            "production-prepare": {"prepared": prepared, "state": initial},
+            "production-switch-drained": {
+                "cli": {"rc": -9}, "observed_phase": "drained",
+                "record": drained_record,
+                "snapshot_service_sha256": self.PYTHON,
+                "boundary": {"files": self._files("mask"),
+                             "units": self._units(timer="inactive")},
+                "preflight": {"render": {"sha256": node_render}},
+            },
+            "production-refuse-outside": {
+                "cli": {"rc": 2,
+                        "stderr": "invalid controller transaction record path"},
+                "record_before": {"sha256": self.RECORD_SHA},
+                "record_after": {"sha256": self.RECORD_SHA},
+                "outside_before": {"sha256": self.RECORD_SHA},
+                "outside_after": {"sha256": self.RECORD_SHA},
+                "before": {"files": self._files("mask"),
+                           "units": self._units(timer="inactive")},
+                "after": {"files": self._files("mask"),
+                          "units": self._units(timer="inactive")},
+            },
+            "production-refuse-coherence": {
+                "cli": {"rc": 2,
+                        "stderr": "invalid unit recovery record"},
+                "snapshot_runtime": self.NODE,
+                "prior_runtime": "python",
+                "record_before": {"sha256": self.RECORD_SHA},
+                "record_after": {"sha256": self.RECORD_SHA},
+                "before": {"files": self._files("mask"),
+                           "units": self._units(timer="inactive")},
+                "after": {"files": self._files("mask"),
+                          "units": self._units(timer="inactive")},
+            },
+            "production-recover-drained": {
+                "cli": {"rc": 0},
+                "completed": {"outcome": "rolled_back",
+                              "phase": "restore_activation_pending"},
+                "record_after": rolled,
+                "state": self._state(
+                    units=self._units(timer="active")),
+                "repeat": {"rc": 2},
+                "state_after_repeat": {
+                    "records": {"/home/probe/records-prod-drained":
+                                [{"sha256": self.RECORD_SHA}]},
+                },
+            },
+            "production-switch-ambiguity": {
+                "cli": {"rc": -9}, "observed_phase": "activation_pending",
+                "record": self._record("pending", "activation_pending"),
+                "snapshot_service_sha256": self.PYTHON,
+                "boundary": {"units": self._units(timer="inactive")},
+            },
+            "production-recover-ambiguity": {
+                "cli": {"rc": 3,
+                        "stderr": "activation may have occurred"},
+                "record_before": {"sha256": self.RECORD_SHA},
+                "record_after": {"sha256": self.RECORD_SHA},
+                "record": self._record("pending", "activation_pending"),
+                "state": self._state(service="mask"),
+            },
+            "production-inspect": {
+                "state": self._state(
+                    service="mask", records={
+                        "/home/probe/" + name: [{"sha256": self.RECORD_SHA}]
+                        for name in harness.PROD_RECORD_DIRS}),
+                "installed": [self.UNIT, self.TIMER],
+            },
+        }
+        return phases
+
+    def test_production_evidence_passes(self):
+        checks, problems = harness.build_checks(
+            self.evidence(), mode="production-recover")
+        self.assertEqual(problems, [])
+        self.assertTrue(all(value is True for value in checks.values()))
+
+    def test_production_checks_reject_unfinished_recovery(self):
+        phases = self.evidence()
+        phases["production-recover-drained"]["record_after"]["outcome"] \
+            = "pending"
+        checks, problems = harness.build_checks(
+            phases, mode="production-recover")
+        self.assertIs(checks["recovery_completed"], False)
+        self.assertTrue(any("recovery_completed" in item
+                            for item in problems), problems)
+
+    def test_production_checks_reject_preserved_state_change(self):
+        phases = self.evidence()
+        phases["production-recover-drained"]["state"]["state"][
+            "queue.json"] = "0" * 64
+        checks, problems = harness.build_checks(
+            phases, mode="production-recover")
+        self.assertIs(checks["recovery_preserved_state"], False)
+        self.assertTrue(any("recovery_preserved_state" in item
+                            for item in problems), problems)
+
+    def test_production_checks_reject_final_mask_removal(self):
+        phases = self.evidence()
+        phases["production-inspect"]["state"]["files"][self.SERVICE] = {
+            "type": "file", "sha256": self.PYTHON}
+        checks, problems = harness.build_checks(
+            phases, mode="production-recover")
+        self.assertIs(checks["final_state_clean"], False)
+
+    def test_production_mode_plan(self):
+        self.assertEqual(harness.guest_script_for("production-recover"),
+                         "vm-unit-switch-guest.py")
+        self.assertEqual(len(harness.phase_names("production-recover")), 8)
+        self.assertEqual([name for _kind, name, _options
+                          in harness.run_steps("production-recover")],
+                         list(harness.phase_names("production-recover")))
+        self.assertIn("unit-live-binding.py",
+                      harness.uploads_for("production-recover"))
