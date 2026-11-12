@@ -231,6 +231,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   };
   const input = option('--input');
   if (input === undefined) {
+    // I1: the machine-readable error object goes to stdout and the human
+    // usage narration to stderr — never mixed onto one stream.
+    console.log(
+      JSON.stringify({ error: { message: 'missing required --input <readout-input.json>' } }),
+    );
     console.error(
       'usage: node scripts/measurement-rollup.mjs --input <readout-input.json> [--out <dir>]',
     );

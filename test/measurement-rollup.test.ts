@@ -946,7 +946,7 @@ describe('M10d failure evidence', () => {
     expect(failure.stderr).toContain('ENOENT');
     expect((failure.stderr ?? '').trim().startsWith('{')).toBe(false);
     // A missing --input is an argument error: exit code 2 (I1), with the
-    // usage narration on stderr.
+    // machine-readable error object on stdout and the usage narration on stderr.
     let usage: { code?: number; stdout?: string; stderr?: string } = {};
     try {
       await runCli(process.execPath, [resolve('scripts', 'measurement-rollup.mjs')]);
@@ -954,7 +954,10 @@ describe('M10d failure evidence', () => {
       usage = error as { code?: number; stdout?: string; stderr?: string };
     }
     expect(usage.code).toBe(2);
+    const usageReport = JSON.parse(usage.stdout ?? '{}') as { error: { message: string } };
+    expect(usageReport.error.message).toContain('missing required --input');
     expect(usage.stderr).toContain('usage: node scripts/measurement-rollup.mjs --input');
+    expect((usage.stderr ?? '').trim().startsWith('{')).toBe(false);
     // Only the input file and the out directory exist: nothing else was
     // written, and the failed run created nothing.
     expect((await readdir(cliDir)).sort()).toEqual(['out', 'readout-input.json']);
