@@ -2,10 +2,12 @@ import { realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as win32 from 'node:path/win32';
 import { describe, expect, test } from 'vitest';
 import {
   assertSessionsDirOutsideWorkspace,
   boundWorkspacePath,
+  isInsideDir,
   resumedRecordOrThrow,
 } from '../../src/driver/common/workspace.js';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
@@ -88,6 +90,29 @@ describe('shared driver workspace binding', () => {
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
+  });
+
+  test('isInsideDir is platform-aware: posix root children are inside, win32 backslash paths compare', () => {
+    // POSIX root: a `parent + '/'` prefix check looks for '//' and misses
+    // every child of `/` — the relative judgment gets it right.
+    expect(isInsideDir('/sessions', '/')).toBe(true);
+    expect(isInsideDir('/', '/')).toBe(true);
+    expect(isInsideDir('/other', '/sessions')).toBe(false);
+    // A literal `..x` child name is inside: only a `..` PATH SEGMENT escapes.
+    expect(isInsideDir('/ws/..x', '/ws')).toBe(true);
+    expect(isInsideDir('/ws/../other', '/ws')).toBe(false);
+    // Windows semantics via the node:path/win32 seam: backslash parents
+    // contain backslash children, siblings and sibling-prefixes do not, and
+    // a different drive is never inside (relative stays absolute).
+    expect(isInsideDir('C:\\work\\.sessions', 'C:\\work', win32)).toBe(true);
+    expect(isInsideDir('C:\\work', 'C:\\work', win32)).toBe(true);
+    expect(isInsideDir('C:\\work2', 'C:\\work', win32)).toBe(false);
+    expect(isInsideDir('C:\\other', 'C:\\work', win32)).toBe(false);
+    expect(isInsideDir('C:\\work\\..\\other', 'C:\\work', win32)).toBe(false);
+    expect(isInsideDir('D:\\sessions', 'C:\\work', win32)).toBe(false);
+    expect(isInsideDir('C:\\work\\..x', 'C:\\work', win32)).toBe(true);
+    expect(isInsideDir('C:\\', 'C:\\', win32)).toBe(true);
+    expect(isInsideDir('C:\\sessions', 'C:\\', win32)).toBe(true);
   });
 
   test('a removed legacy workspace retains its recorded identity', async () => {

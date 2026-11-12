@@ -1,5 +1,5 @@
 import { realpathSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { SessionRecord, SessionStore } from '../../harness/session.js';
 import { describeError } from '../error-text.js';
 import { DispatchError } from '../errors.js';
@@ -78,9 +78,33 @@ function realpathOfExistingOrNearestAncestor(dir: string): string {
   }
 }
 
-/** True when `candidate` is at or under `parent` (both realpathed absolute paths). */
-function isInsideDir(candidate: string, parent: string): boolean {
-  return candidate === parent || candidate.startsWith(parent + '/');
+/**
+ * True when `candidate` is at or under `parent` (both realpathed absolute
+ * paths). Platform-aware: the containment is judged with `path.relative`,
+ * so Windows backslash paths and the POSIX filesystem root compare
+ * correctly (a `parent + '/'` prefix check fails both: `C:\work` never
+ * starts with `C:\work/`, and descendants of `/` never start with `//`).
+ * `equal` (`''`), nested (`sub/dir`) and root-child (`sessions` under
+ * `/`) relations are inside; `..`-leading (sibling, sibling-prefix like
+ * `workspace2`, parent) and different-drive (absolute `relative` result)
+ * relations are outside. A literal `..x` child name is inside: only a `..`
+ * PATH SEGMENT escapes. `pathImpl` is the `node:path` namespace (default)
+ * or `node:path/win32` in tests.
+ */
+export function isInsideDir(
+  candidate: string,
+  parent: string,
+  pathImpl: Pick<typeof import('node:path'), 'relative' | 'isAbsolute' | 'sep'> = {
+    relative,
+    isAbsolute,
+    sep,
+  },
+): boolean {
+  const rel = pathImpl.relative(parent, candidate);
+  return (
+    rel === '' ||
+    (!pathImpl.isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${pathImpl.sep}`))
+  );
 }
 
 /** Resume old records whose workspace may predate realpath normalization. */
