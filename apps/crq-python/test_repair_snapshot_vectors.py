@@ -29,6 +29,13 @@ class RepairSnapshotVectorsTest(unittest.TestCase):
     def test_document_shape(self) -> None:
         document = emitter.build()
         self.assertEqual(document["schema"], "cq.crq-repair-snapshot-vector/v1")
+        self.assertEqual(
+            document["source"],
+            "apps/crq-python/crq_repair/bounded.py:source_snapshot",
+        )
+        self.assertEqual(document["source_path"], "apps/crq-python/crq_repair/bounded.py")
+        self.assertRegex(document["source_module_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(document["source_function_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(document["max_chars"], 16000)
         self.assertTrue(document["cases"])
         names = [case["name"] for case in document["cases"]]
