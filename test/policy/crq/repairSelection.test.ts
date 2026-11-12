@@ -229,6 +229,20 @@ function replaceOriginJob(value: JsonValue, origin: JsonValue): JsonValue {
   return value;
 }
 
+/** Replace every value stored under `key`, preserving the surrounding document. */
+function replaceKey(value: JsonValue, key: string, replacement: JsonValue): JsonValue {
+  if (value instanceof JsonObject) {
+    return new JsonObject(
+      value.entries.map(([name, child]) => [
+        name,
+        name === key ? replacement : replaceKey(child, key, replacement),
+      ]),
+    );
+  }
+  if (Array.isArray(value)) return value.map((child) => replaceKey(child, key, replacement));
+  return value;
+}
+
 describe('repair selection oracle parity', () => {
   test('fixture shape and every outcome is present', () => {
     expect(string(fixture.get('schema'))).toBe('cq.crq-repair-selection-vector/v1');
@@ -475,18 +489,56 @@ describe('repair explicit selection', () => {
     expect(result.selection.originJob).toEqual(jobOrigin);
   });
 
-  test('non-finite origin_job values never select, even when both sides match', () => {
+  test('numeric and boolean item ids match across independently parsed documents', () => {
     const entry = caseByName('select-prepared');
     const { input } = selectInputOf(entry);
     if (input.jobFile.kind !== 'value' || !(input.jobFile.value instanceof JsonObject)) {
       throw new Error('select-prepared job is not an object');
     }
     const jobValue = input.jobFile.value;
-    const nonFinite = (): JsonNumber => JsonNumber.float(Number.NaN);
+
+    // Production item ids are `JOB_ID` strings; these pairs are schema invalid
+    // and can only be constructed by hand. Python compares
+    // `i['id'] == job['item']` with `==`, so `1` matches `1.0` and `true`
+    // matches `1`. Each document is serialised and re-parsed separately, so no
+    // value instance is shared between the job and the queue.
+    const select = (item: JsonValue, id: JsonValue) => {
+      const job = asObject(parseJsonValue(receiptJsonText(replaceKey(jobValue, 'item', item))));
+      const queue = asObject(parseJsonValue(receiptJsonText(replaceKey(input.queue, 'id', id))));
+      expect(job.get('item')).not.toBe(asObject(asArray(queue.get('items'))[0]).get('id'));
+      return selectJob({ ...input, jobFile: { kind: 'value', value: job }, queue });
+    };
+
+    expect(select(JsonNumber.int(1), JsonNumber.float(1)).ok).toBe(true);
+    expect(select(JsonNumber.float(1), JsonNumber.int(1)).ok).toBe(true);
+    expect(select(true, JsonNumber.int(1)).ok).toBe(true);
+    expect(select(JsonNumber.int(1), true).ok).toBe(true);
+    expect(select(JsonNumber.int(1), JsonNumber.int(2))).toEqual({
+      ok: false,
+      refusal: 'no-queued-run',
+    });
+    expect(select('1', JsonNumber.int(1))).toEqual({
+      ok: false,
+      refusal: 'no-queued-run',
+    });
+  });
+
+  test('non-finite origin_job values follow Python: NaN never equal, infinities equal', () => {
+    const entry = caseByName('select-prepared');
+    const { input } = selectInputOf(entry);
+    if (input.jobFile.kind !== 'value' || !(input.jobFile.value instanceof JsonObject)) {
+      throw new Error('select-prepared job is not an object');
+    }
+    const jobValue = input.jobFile.value;
+    // Python's JSON reader accepts the non-standard non-finite constants.
+    const constant = (raw: string): JsonNumber =>
+      JsonNumber.float(
+        raw === 'Infinity' ? Infinity : raw === '-Infinity' ? -Infinity : Number.NaN,
+      );
     const parseDoc = (value: JsonValue, origin: JsonValue): JsonObject =>
       asObject(
         parseJsonValue(receiptJsonText(replaceOriginJob(value, origin)), {
-          parseConstant: nonFinite,
+          parseConstant: constant,
         }),
       );
     const select = (jobOrigin: JsonValue, queueOrigin: JsonValue) =>
@@ -499,18 +551,24 @@ describe('repair explicit selection', () => {
         queue: parseDoc(input.queue, queueOrigin),
       });
 
-    expect(select(nonFinite(), nonFinite())).toEqual({
+    expect(select(JsonNumber.float(Number.NaN), JsonNumber.float(Number.NaN))).toEqual({
       ok: false,
       refusal: 'revalidation-lineage-mismatch',
     });
-    const nested = new JsonObject([['deep', [nonFinite()]]]);
+    const nested = new JsonObject([['deep', [JsonNumber.float(Number.NaN)]]]);
     expect(select(nested, nested)).toEqual({
+      ok: false,
+      refusal: 'revalidation-lineage-mismatch',
+    });
+    // Python's `inf == inf` is true and `inf != -inf`.
+    expect(select(JsonNumber.float(Infinity), JsonNumber.float(Infinity)).ok).toBe(true);
+    expect(select(JsonNumber.float(Infinity), JsonNumber.float(-Infinity))).toEqual({
       ok: false,
       refusal: 'revalidation-lineage-mismatch',
     });
   });
 
-  test('finite origin_job numbers still compare by canonical text', () => {
+  test('origin_job lineages compare with Python value equality', () => {
     const entry = caseByName('select-prepared');
     const { input } = selectInputOf(entry);
     if (input.jobFile.kind !== 'value' || !(input.jobFile.value instanceof JsonObject)) {
@@ -529,8 +587,32 @@ describe('repair explicit selection', () => {
         queue: parseDoc(input.queue, queueOrigin),
       });
 
+    // Python `==`: `1 == 1.0`, `True == 1`, and `[False] == [0]`.
     expect(select(JsonNumber.int(1), JsonNumber.int(1)).ok).toBe(true);
-    expect(select(JsonNumber.int(1), JsonNumber.float(1))).toEqual({
+    expect(select(JsonNumber.int(1), JsonNumber.float(1)).ok).toBe(true);
+    expect(select(JsonNumber.float(1), JsonNumber.int(1)).ok).toBe(true);
+    expect(select(true, JsonNumber.int(1)).ok).toBe(true);
+    // A falsy lineage is refused as missing before the comparison, as Python does.
+    expect(select(JsonNumber.int(0), false)).toEqual({ ok: false, refusal: 'origin-job-missing' });
+    expect(select([false], [JsonNumber.int(0)]).ok).toBe(true);
+    expect(select([true], [JsonNumber.int(1)]).ok).toBe(true);
+    expect(
+      select(
+        new JsonObject([
+          ['b', JsonNumber.int(2)],
+          ['a', JsonNumber.int(1)],
+        ]),
+        new JsonObject([
+          ['a', JsonNumber.float(1)],
+          ['b', JsonNumber.int(2)],
+        ]),
+      ).ok,
+    ).toBe(true);
+    expect(select([false], [JsonNumber.int(1)])).toEqual({
+      ok: false,
+      refusal: 'revalidation-lineage-mismatch',
+    });
+    expect(select(JsonNumber.int(1), '1')).toEqual({
       ok: false,
       refusal: 'revalidation-lineage-mismatch',
     });
@@ -550,8 +632,13 @@ describe('repair explicit selection', () => {
   });
 
   test('selection never accepts a queue record that is not queued', () => {
-    const entry = caseByName('select-record-jobs-extra');
+    const entry = caseByName('select-record-state-not-queued');
     expect(selectJob(selectInputOf(entry).input)).toEqual({
+      ok: false,
+      refusal: 'no-queued-run',
+    });
+    const extra = caseByName('select-record-jobs-extra');
+    expect(selectJob(selectInputOf(extra).input)).toEqual({
       ok: false,
       refusal: 'no-queued-run',
     });
