@@ -1162,7 +1162,19 @@ function makeDevCycleCore(
                     verdict: 'fault',
                     detail: 'its dependency inputs differ and the reserve cannot cover a reinstall',
                   };
-                await installDeps(tmp, AbortSignal.timeout(reinstallMs));
+                try {
+                  await installDeps(tmp, AbortSignal.timeout(reinstallMs));
+                } catch (err) {
+                  // A rejected reinstall (a short AbortSignal, a broken
+                  // network) says nothing about this commit's gates, so it is
+                  // a fault verdict for THIS commit: the scan stops, keeps the
+                  // earlier probe lines and names the failing commit.
+                  return {
+                    commit,
+                    verdict: 'fault',
+                    detail: `dependency reinstall failed: ${(err instanceof Error ? err.message : String(err)).slice(0, 300)}`,
+                  };
+                }
                 installedAt = commit;
               }
             }
