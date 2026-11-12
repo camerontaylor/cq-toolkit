@@ -92,16 +92,6 @@ async function readTextStrict(path: string): Promise<string> {
   return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
 }
 
-/** The previous summary's exact text; null when absent, raise on bad bytes. */
-async function readPreviousText(path: string): Promise<string | null> {
-  try {
-    return await readTextStrict(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw error;
-  }
-}
-
 async function readOptionalBytes(path: string): Promise<Uint8Array | null> {
   try {
     return new Uint8Array(await readFile(path));
@@ -302,15 +292,42 @@ async function probeSystemd(runCommand: RunCommand): Promise<{
       clock: { realtime: 0, monotonic: 0 },
     };
   }
-  // Python reads `time.time()` and CLOCK_MONOTONIC right after the probe.
-  return { probe: { output }, clock: { realtime: Date.now() / 1000, monotonic: 0 } };
+  // Python reads `time.time()` and `time.clock_gettime(time.CLOCK_MONOTONIC)`
+  // right after the probe. CLOCK_MONOTONIC is boot-relative, which is exactly
+  // Node's `process.uptime()` basis (not a process-start clock and not zero);
+  // the composer's monotonic fallback computes
+  // `realtime + timespan - monotonic`, so a wrong basis shifts every timer
+  // ETA by the boot offset (the audit P2).
+  return {
+    probe: { output },
+    clock: { realtime: Date.now() / 1000, monotonic: process.uptime() },
+  };
 }
 
+/** The previous summary's exact bytes; null when absent, cache-void on bad bytes.
+ *
+ * Python's publication reads the prior summary inside one try/except that
+ * covers OSError AND json decode (ValueError, which invalid UTF-8 raises:
+ * `Path.read_text` decodes before `json.loads`, and a UnicodeDecodeError is a
+ * ValueError subclass): `except (OSError, ValueError, KeyError, TypeError):
+ * titles = {}`. A missing file is an empty cache, not an abort, and a
+ * corrupt file must be VOIDED the same way so the new summary can replace
+ * it. Only the cache seam gets this leniency; required state reads stay
+ * strict.
+ */
 export async function readPreviousSummaryBytes(
   roots: SummaryStateRoots,
 ): Promise<Uint8Array | null> {
-  const text = await readPreviousText(summaryTargetPath(roots.xdgStateHome, roots.home));
-  return text === null ? null : new TextEncoder().encode(text);
+  try {
+    const text = await readTextStrict(summaryTargetPath(roots.xdgStateHome, roots.home));
+    return new TextEncoder().encode(text);
+  } catch {
+    // Cache-void leniency: ENOENT (absent prior) and every OSError/decode
+    // failure read as an empty title cache, matching the producer's
+    // `except (OSError, ValueError, KeyError, TypeError): titles = {}` so a
+    // corrupt prior summary is replaced, never aborts the publication.
+    return null;
+  }
 }
 
 /** The exact XDG target path for one caller-resolved root pair. */

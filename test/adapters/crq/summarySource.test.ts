@@ -1,6 +1,6 @@
 // Real-filesystem tests for the A1 summary publish route: the exact XDG
 // target path, the atomic writer's byte contract, and failure isolation.
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, chmod, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -10,7 +10,9 @@ import {
   publishSummaryAtomically,
   readPreviousSummaryBytes,
   summaryPublishTarget,
+  summaryStateEffects,
 } from '../../../src/adapters/crq/summarySource.js';
+import { systemdActivity } from '../../../src/policy/crq/publishEffects.js';
 import { summarize, mergedCurrent } from '../../../src/policy/crq/statusSummary.js';
 import { JsonNumber } from '../../../src/policy/crq/jsonValue.js';
 import type { CrqRecord } from '../../../src/policy/crq/receiptIdentity.js';
@@ -205,6 +207,91 @@ describe('summary publish route over real files', () => {
     expect(summaryPublishTarget({ stateRoot: '/s', xdgStateHome: '', home })).toBe(
       join(home, '.local', 'state', 'crq', 'summary.json'),
     );
+  });
+
+  it('captures a real monotonic clock with the probe (nonzero, boot-relative)', async () => {
+    // Audit P2: the composer's monotonic fallback computes
+    // `realtime + timespan - monotonic`; with the adapter's old hardcoded
+    // `monotonic: 0` every timer ETA was shifted by the boot offset. The
+    // captured pair must match Python's
+    // `time.time()` / `clock_gettime(CLOCK_MONOTONIC)` basis.
+    const root = await tempRoot();
+    const out = [
+      'Id=crq-tick.timer',
+      'LoadState=loaded',
+      'ActiveState=active',
+      'LastTriggerUSec=0',
+      'NextElapseUSecRealtime=0',
+      'NextElapseUSecMonotonic=1h 30min',
+      '',
+    ].join('\n');
+    const now = 1_794_471_730;
+    const effects = await summaryStateEffects(
+      { stateRoot: root.state, xdgStateHome: root.xdg, home: root.root },
+      async () => out,
+      [],
+      () => now,
+    );
+    expect(effects.systemdClock.monotonic).toBeGreaterThan(0);
+    expect(effects.systemdClock.monotonic).toBeLessThanOrEqual(process.uptime() + 5);
+    expect(effects.systemdClock.realtime).toBeGreaterThan(now);
+    const activity = systemdActivity(effects.systemd, effects.systemdClock);
+    const tick = activity.timers['crq-tick.timer'];
+    expect(tick?.next_elapse).not.toBeNull();
+    // The ETA must equal realtime + 5400s - monotonic: within a few seconds
+    // of capture-time + 90min minus uptime, NOT capture-time + 90min (the
+    // shifted value). The adapter's clock is captured with Date.now(), so
+    // anchor on the captured realtime rather than the injected now(); the
+    // gap between the two is bounded by the test run itself.
+    const capturedRealtime = effects.systemdClock.realtime;
+    const expected = Math.floor(capturedRealtime + 5400 - process.uptime());
+    const text = tick?.next_elapse as string;
+    const actual = Math.floor(new Date(`${text.slice(0, 19)}Z`).getTime() / 1000);
+    expect(Math.abs(actual - expected)).toBeLessThanOrEqual(10);
+  });
+
+  it('an ff-byte prior summary voids the cache instead of aborting assembly', async () => {
+    // Audit P2: Python's publication wraps the prior-summary read in
+    // `except (OSError, ValueError, KeyError, TypeError): titles = {}`; a
+    // corrupt prior is an empty cache and gets REPLACED. The adapter's old
+    // strict read rejected undecodable bytes and aborted the whole route.
+    const root = await tempRoot();
+    await writeFile(join(root.xdg, 'crq', 'summary.json'), new Uint8Array([0xff, 0xfe, 0x01]));
+    const previous = await readPreviousSummaryBytes({
+      stateRoot: root.state,
+      xdgStateHome: root.xdg,
+      home: root.root,
+    });
+    expect(previous).toBeNull(); // cache voided; assembly proceeds
+    // And the full effects assembly succeeds with the corrupt prior present.
+    const effects = await summaryStateEffects(
+      { stateRoot: root.state, xdgStateHome: root.xdg, home: root.root },
+      async () => null,
+      [],
+      () => 1_700_000,
+    );
+    expect(effects.previousBytes).toBeNull();
+    expect(effects.systemd.error).toBeDefined();
+  });
+
+  it('an unreadable prior summary is a cache void, not an assembly abort', async () => {
+    // OSError arm of the same producer except-clause: EACCMS on the prior
+    // file must read as an empty cache too (required-input reads stay strict;
+    // this optional cache read alone is lenient).
+    const root = await tempRoot();
+    const target = join(root.xdg, 'crq', 'summary.json');
+    await writeFile(target, '{}\n');
+    await chmod(target, 0o000);
+    try {
+      const previous = await readPreviousSummaryBytes({
+        stateRoot: root.state,
+        xdgStateHome: root.xdg,
+        home: root.root,
+      });
+      expect(previous).toBeNull();
+    } finally {
+      await chmod(target, 0o644);
+    }
   });
 
   it('reads the previous summary bytes exactly, null when absent', async () => {
