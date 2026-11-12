@@ -751,13 +751,35 @@ def source_thread(c, job):
     return next(iter(matches), None)
 
 
+def rest_source_thread(c, job):
+    """REST presence of the source finding comment; GraphQL reviewThreads lag REST."""
+    source = job.get('source', {})
+    number = source.get('finding_number')
+    if not number or not job.get('pr'):
+        return False  # Same bounds as source_thread: no thread identity to verify.
+    pages = c.gh_json(['api', 'repos/' + c.REPO + '/pulls/' + str(job['pr']) + '/comments',
+                       '--paginate', '--slurp'])
+    for page in pages:
+        for comment in page:
+            if (comment.get('path') == job['finding'].get('path') and
+                    comment.get('body', '').startswith('**crq finding F' + str(number) + ' [') and
+                    '<sub>crq run `' + source.get('run', job['run']) + '`' in comment.get('body', '')):
+                return True
+    return False
+
+
 def publish_source_resolution(c, record, merge):
-    """Resume source comments/resolves in the existing publication journal."""
+    """Resume source comments/resolves in the existing publication journal.
+
+    Returns True while a source finding is still pending because REST shows its
+    thread but GraphQL reviewThreads lag the REST view; the caller must then
+    leave the record unmerged so a later tick retries the resolution."""
     publication = record.get('publication')
     if not publication:
-        return
+        return False
     journal = c.STATE / 'repair' / record['jobs'][0] / 'publication.json'
     completed = publication.setdefault('source_resolutions', [])
+    pending = False
     for result in record.get('verdicts', []):
         if result['verdict'] != 'FIXED' or result['job'] in completed:
             continue
@@ -780,8 +802,12 @@ def publish_source_resolution(c, record, merge):
             response = c.gh_json(['api', 'graphql', '--input', str(request)])
             if response.get('errors') or not response.get('data', {}).get('resolveReviewThread', {}).get('thread', {}).get('isResolved'):
                 raise ValueError('source thread resolution unconfirmed')
+        elif rest_source_thread(c, job):
+            pending = True
+            continue  # REST shows the source thread but GraphQL reviewThreads lag it; keep feedback pending for retry.
         completed.append(job['job'])
         atomic(journal, publication)
+    return pending
 
 
 def repair_test_path(path):
@@ -1030,11 +1056,13 @@ def reconcile_fix_prs(c, q):
                         fresh = c.pr_info(pr['number'])
                         fixed_publication_evidence(c, item, run, record, fresh, proof['fixed_revalidation'])
                         record['publication'] = latest
-                    publish_source_resolution(c, record, merge)
+                    pending = publish_source_resolution(c, record, merge)
                 except Exception as exc:
                     record['source_publication_error'] = str(exc)[:300]
                     continue  # Optional feedback must not abort the scheduler tick.
                 record.pop('source_publication_error', None)
+                if pending:
+                    continue  # REST-visible source thread still lagging in GraphQL; retry next tick.
                 record['fix_merged'] = c.iso()
 
 
