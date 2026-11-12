@@ -695,6 +695,54 @@ describe('publish-full oracle replay through publishSummary', () => {
     expect(result.text).not.toContain('"title":{}');
   });
 
+  it('a NaN-containing previous summary keeps the cache; gh never fires', () => {
+    // Round-6 P2 1: Python's json.loads DEFAULT parse_constant accepts
+    // NaN/Infinity/-Infinity as floats, so a previous summary carrying such
+    // a constant still parses and KEEPS its cached titles; the port refused
+    // it as ValueError and voided the cache, publishing a gh-fetched title
+    // where the producer reuses "Cached". The BOM refusal above is
+    // unchanged - only the constant lexemes gain acceptance.
+    const previous =
+      '{"last_tick":"x","extra":NaN,"pending_items":[{"repo":"r","pr":5,"title":"Cached seven"}]}';
+    const calls: string[] = [];
+    const core = {
+      last_tick: 'x',
+      pending_items: [{ repo: 'r', pr: 5, title: null }],
+      starts_cap: 8,
+      generated_at: 'g',
+    };
+    const queue = { items: [], starts: [], last_tick: 'x' } as unknown as CrqRecord;
+    const result = publishSummary(
+      core,
+      queue,
+      {},
+      {},
+      {
+        root: '/state',
+        xdgStateHome: '/xdg',
+        now: 0,
+        previousBytes: new TextEncoder().encode(previous),
+        inbox: {
+          entries: [],
+          readResult: () => null,
+          hasResult: () => false,
+          hasProgress: () => false,
+        },
+        triageRows: [],
+        systemd: { error: 'x' },
+        systemdClock: { realtime: 0, monotonic: 0 },
+        ghTitle: (repo, pr) => {
+          calls.push(`repos/${repo}/pulls/${pr}`);
+          return 'Fresh five';
+        },
+        readReceipt: () => null,
+      },
+    );
+    expect(calls).toEqual([]);
+    expect(result.text).toContain('"title":"Cached seven"');
+    expect(result.text).not.toContain('Fresh five');
+  });
+
   it('preserves integer-like context_error key order byte-exactly', () => {
     // Audit igxr (reproduced at c00f2109): Python dicts keep insertion order
     // for integer-like string keys (json.loads preserves the raw lexeme

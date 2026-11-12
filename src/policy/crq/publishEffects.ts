@@ -194,21 +194,37 @@ export function repairDigest(
         fixPrs.push(plainOf2(recordGet(record, 'fix_pr')));
       }
       const verdictsValue = recordGet(record, 'verdicts');
-      // Python `record.get('verdicts', [])`: only an absent key defaults; an
-      // explicit None reaches the for-loop and refuses as not iterable.
-      const verdicts = verdictsValue === undefined ? [] : verdictsValue;
-      if (!Array.isArray(verdicts)) {
-        // Python iterates the object: None refuses as not iterable, while a
-        // dict yields its keys and a str its characters. Every such str
-        // element then fails `value['job']` with the string-subscript error.
+      // Python iterates `record.get('verdicts', [])`: an EMPTY dict or empty
+      // string iterates ZERO elements and publishes zero counters; a
+      // non-empty dict iterates its keys and a non-empty string its
+      // characters (each element then failing the `value['job']` subscript
+      // like a scalar); None and iterable-refusing scalars raise exactly as
+      // before (round-6 P2: empty iterables must not abort).
+      let verdictElements: readonly unknown[];
+      if (verdictsValue === undefined) {
+        verdictElements = [];
+      } else if (Array.isArray(verdictsValue)) {
+        verdictElements = verdictsValue;
+      } else if (typeof verdictsValue === 'string') {
+        verdictElements = [...verdictsValue];
+      } else if (verdictsValue instanceof TriageMapping) {
+        verdictElements = verdictsValue.entriesOfSource().map(([key]) => key);
+      } else if (
+        isRecord(verdictsValue) &&
+        !(verdictsValue instanceof JsonNumber) &&
+        (Object.getPrototypeOf(verdictsValue) === Object.prototype ||
+          Object.getPrototypeOf(verdictsValue) === null)
+      ) {
+        verdictElements = Object.keys(verdictsValue);
+      } else {
         throw new PublishEffectsError(
-          verdicts === null
+          verdictsValue === null
             ? "'NoneType' object is not iterable"
-            : "string indices must be integers, not 'str'",
+            : `'${pythonTypeName(verdictsValue)}' object is not iterable`,
           'TypeError',
         );
       }
-      for (const verdictValue of verdicts) {
+      for (const verdictValue of verdictElements) {
         if (!isMapping(verdictValue)) {
           // Python iterates dicts/strings element-wise, so each element hits
           // the same subscript path as a scalar.
@@ -250,6 +266,18 @@ export function repairDigest(
           }
           counts[key] = (counts[key] ?? 0) + 1;
         } else {
+          // Python resolves the bucket through a STRING-KEYED mapping
+          // membership, so a dict/list verdict raises
+          // `TypeError: unhashable type: 'dict'` (resp. 'list') and the
+          // digest refuses; a JS Map lookup happily accepts object keys and
+          // counted failed=1 instead (round-6 P2). Every hashable verdict
+          // keeps the bucket semantics, unknown strings included.
+          if (isRecord(verdict)) {
+            throw new PublishEffectsError("unhashable type: 'dict'", 'TypeError');
+          }
+          if (Array.isArray(verdict)) {
+            throw new PublishEffectsError("unhashable type: 'list'", 'TypeError');
+          }
           const bucket = VERDICT_FAILURE_KEYS.get(verdict as string) ?? 'failed';
           counts[bucket] = (counts[bucket] ?? 0) + 1;
         }

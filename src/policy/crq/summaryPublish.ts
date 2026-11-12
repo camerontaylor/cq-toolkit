@@ -477,8 +477,19 @@ function parsePlainPrevious(bytes: Uint8Array): unknown {
     // to the document as json.loads would see it, and cached non-string
     // titles serialise byte-exactly. A JSON.parse hop would round every
     // lexeme and reorder integer-like keys before the TypeError/KeyError
-    // walk could even classify the row.
-    return parseJsonValue(text, { duplicates: 'last' });
+    // walk could even classify the row. Python's DEFAULT parse_constant
+    // accepts NaN/Infinity/-Infinity as floats, so such a document KEEPS its
+    // cache instead of voiding it (round-6 P2); the BOM refusal above is
+    // unchanged.
+    return parseJsonValue(text, {
+      duplicates: 'last',
+      parseConstant: (raw) =>
+        raw === 'NaN'
+          ? JsonNumber.float(Number.NaN)
+          : JsonNumber.float(
+              raw === 'Infinity' ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY,
+            ),
+    });
   } catch (error) {
     throw new SummaryPublishError(
       error instanceof Error ? error.message : String(error),

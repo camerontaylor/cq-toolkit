@@ -452,6 +452,125 @@ describe('repair digest oracle', () => {
     expect(() => repairDigest(queue, state, 2000)).toThrow(PublishEffectsError);
   });
 
+  test('empty iterable verdicts publish zero counters; a non-empty str hits the subscript path', () => {
+    // Round-6 P2 2: Python iterates `record.get('verdicts', [])`, and an
+    // empty iterable ({} or "") iterates ZERO elements - the digest succeeds
+    // with all-zero counters and the job stays pending. The port treated any
+    // non-array verdicts as a refusal, aborting publication where Python
+    // publishes. A non-empty string iterates its CHARACTERS, and each element
+    // fails the value['job'] subscript exactly like a scalar; a non-empty
+    // dict iterates its KEYS (strings that land in the default failed
+    // bucket). None and iterable-refusing scalars keep refusing.
+    const emptyState: RepairInboxState = {
+      entries: [{ stem: 'crq-empty-F1', jobBytes: new TextEncoder().encode('{}'), mtime: 1000 }],
+      readResult: () => null,
+      hasResult: () => false,
+      hasProgress: () => false,
+    };
+    const run = (verdicts: unknown) => ({
+      items: [
+        {
+          id: 'i',
+          kind: 'open',
+          state: 'pending',
+          repair_runs: {
+            r: { state: 'queued', jobs: ['crq-empty-F1'], verdicts },
+          },
+        },
+      ],
+    });
+    for (const verdicts of [{}, []]) {
+      const digest = repairDigest(run(verdicts), emptyState, 2000);
+      expect(digest['verdicts']).toEqual({
+        'fixed@A0': 0,
+        'fixed@A1': 0,
+        'fixed@A2': 0,
+        'not-fixed': 0,
+        stale: 0,
+        'judged-valid': 0,
+        'judged-invalid': 0,
+        failed: 0,
+      });
+      // The zero-verdict record consumes nothing: the job stays pending.
+      expect(digest['inbox']).toBe(1);
+    }
+    // An empty string iterates zero elements as well.
+    const digestStr = repairDigest(run(''), emptyState, 2000);
+    expect(digestStr['inbox']).toBe(1);
+    // A NON-empty string iterates characters; the first element refuses at
+    // the value['job'] subscript exactly like a scalar element.
+    try {
+      repairDigest(run('FIXED'), emptyState, 2000);
+      throw new Error('expected refusal');
+    } catch (error) {
+      expect(error).toBeInstanceOf(PublishEffectsError);
+      expect((error as PublishEffectsError).pythonError).toBe('TypeError');
+      expect((error as PublishEffectsError).message).toBe(
+        "string indices must be integers, not 'str'",
+      );
+    }
+  });
+
+  test('unhashable verdict values refuse with TypeError like Python mapping membership', () => {
+    // Round-6 P2 3: the producer resolves the verdict bucket through
+    // STRING-KEYED mapping membership, so a dict/list verdict raises
+    // `TypeError: unhashable type: 'dict'` (resp. 'list') and the digest
+    // refuses; the port's Map-based lookup accepted object keys and counted
+    // failed=1, publishing counters Python never reaches. Every HASHABLE
+    // non-matching verdict (numbers, booleans, unknown strings) misses the
+    // string keys and takes the default failed bucket; the pinned contract
+    // is refuse-on-unhashable, bucket-on-hashable.
+    const emptyState: RepairInboxState = {
+      entries: [],
+      readResult: () => null,
+      hasResult: () => false,
+      hasProgress: () => false,
+    };
+    const run = (verdict: unknown) => ({
+      items: [
+        {
+          id: 'i',
+          kind: 'open',
+          state: 'pending',
+          repair_runs: {
+            r: {
+              state: 'queued',
+              jobs: [],
+              verdicts: [{ job: 'j', verdict }],
+            },
+          },
+        },
+      ],
+    });
+    try {
+      repairDigest(run({ too: 'deep' }), emptyState, 2000);
+      throw new Error('expected refusal');
+    } catch (error) {
+      expect(error).toBeInstanceOf(PublishEffectsError);
+      expect((error as PublishEffectsError).pythonError).toBe('TypeError');
+      expect((error as PublishEffectsError).message).toBe("unhashable type: 'dict'");
+    }
+    try {
+      repairDigest(run(['list']), emptyState, 2000);
+      throw new Error('expected refusal');
+    } catch (error) {
+      expect((error as PublishEffectsError).pythonError).toBe('TypeError');
+      expect((error as PublishEffectsError).message).toBe("unhashable type: 'list'");
+    }
+    // Every hashable verdict keeps the bucket semantics: an unknown string
+    // counts failed, NOT-FIXED/STALE keep their buckets.
+    const weirdVerdicts = repairDigest(run('WEIRD'), emptyState, 2000)['verdicts'] as Record<
+      string,
+      number
+    >;
+    expect(weirdVerdicts['failed']).toBe(1);
+    const notFixedVerdicts = repairDigest(run('NOT-FIXED'), emptyState, 2000)['verdicts'] as Record<
+      string,
+      number
+    >;
+    expect(notFixedVerdicts['not-fixed']).toBe(1);
+  });
+
   test('an explicitly null jobs list refuses; an absent key defaults to none', () => {
     // Python iterates `record.get('jobs', [])`: only an ABSENT key defaults
     // to no jobs. An explicit `"jobs": null` is a None source and raises
