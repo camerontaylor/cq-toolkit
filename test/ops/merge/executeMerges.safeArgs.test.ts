@@ -642,3 +642,70 @@ describe('safeArgs round-1193-r3: the ancestry read shape (merge-base --is-ances
     expect((await no.isAncestor(parent, tip)).code).toBe(1);
   });
 });
+
+describe('safeArgs round-1193-r4: the message read and object-presence shapes (P2 ntJt/ntJj)', () => {
+  const resolved = sha('c');
+
+  test('the EXACT log shape passes — -1 --format=%B plus one full 40-hex sha', () => {
+    expect(safeArgs(['-C', '/repo', 'log', '-1', '--format=%B', resolved])).toEqual([
+      '-C',
+      '/repo',
+      'log',
+      '-1',
+      '--format=%B',
+      resolved,
+    ]);
+    // Message-shaping drift (patches, ranges, extra commits) is refused.
+    expect(() => safeArgs(['log', '-1', '--format=%b', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['log', '-p', '--format=%B', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['log', '-1', '--format=%B', 'abc123'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['log', '--format=%B', resolved])).toThrow(UnsafeMergeArgsError);
+  });
+
+  test('the EXACT cat-file shape passes — -e plus one full 40-hex sha', () => {
+    expect(safeArgs(['-C', '/repo', 'cat-file', '-e', resolved])).toEqual([
+      '-C',
+      '/repo',
+      'cat-file',
+      '-e',
+      resolved,
+    ]);
+    // Type/flag drift is refused.
+    expect(() => safeArgs(['cat-file', '-e', resolved, 'commit'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['cat-file', '-t', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['cat-file', '-e', 'abc123'])).toThrow(UnsafeMergeArgsError);
+  });
+
+  test('the gate base fetch rides the existing colon-less fetch shape (safeArgs admits it)', () => {
+    expect(safeArgs(['-C', '/repo', 'fetch', 'origin', 'main'])).toEqual([
+      '-C',
+      '/repo',
+      'fetch',
+      'origin',
+      'main',
+    ]);
+  });
+
+  test('realMergeEffects routes the new argv shapes (injected runners — zero processes)', async () => {
+    const gitCalls: string[][] = [];
+    const effects = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async (args: string[]) => {
+        gitCalls.push(args);
+        return { code: 0, stdout: 'resolve\n', stderr: '' };
+      },
+    });
+    expect(await effects.readCommitMessage(resolved)).toEqual({
+      code: 0,
+      stdout: 'resolve\n',
+      stderr: '',
+    });
+    await effects.objectExists(resolved);
+    await effects.fetchBaseBranch('main');
+    expect(gitCalls).toEqual([
+      ['-C', '/repo', 'log', '-1', '--format=%B', resolved],
+      ['-C', '/repo', 'cat-file', '-e', resolved],
+      ['-C', '/repo', 'fetch', 'origin', 'main'],
+    ]);
+  });
+});

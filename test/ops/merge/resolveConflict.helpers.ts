@@ -226,6 +226,38 @@ export class FakeMergeEffects implements MergeEffects {
     return { code: this.ancestorCode, stdout: '', stderr: '' };
   }
 
+  /** The resolution commit's message the gate scans (rung 5); null
+   * models an unreadable message (the gate must fail closed). */
+  commitMessage: string | null = 'fix: resolve conflict with main\n';
+  /** The gate's message scan bound test hook: when true, the fake
+   * answers an over-bound message (the gate must fail closed). */
+  overlongMessage = false;
+  /** Whether the forge base tip is locally present for the ancestry read
+   * (rung 3 shape B); true models a tip the repo has not fetched. */
+  objectMissing = false;
+  /** Nonzero exit for the gate's base fetch (rung 3 shape B). */
+  fetchBaseCode = 0;
+
+  async readCommitMessage(sha: string): Promise<GhResult> {
+    this.calls.push(`message:${sha}`);
+    if (this.commitMessage === null) return { code: 1, stdout: '', stderr: 'fatal: bad object' };
+    return {
+      code: 0,
+      stdout: this.overlongMessage ? 'x'.repeat(100_001) : this.commitMessage,
+      stderr: '',
+    };
+  }
+
+  async objectExists(sha: string): Promise<GhResult> {
+    this.calls.push(`objectExists:${sha}`);
+    return { code: this.objectMissing ? 128 : 0, stdout: '', stderr: '' };
+  }
+
+  async fetchBaseBranch(branch: string): Promise<GhResult> {
+    this.calls.push(`fetchBase:${branch}`);
+    return { code: this.fetchBaseCode, stdout: '', stderr: '' };
+  }
+
   async worktreePrepare(pr: number, ref: string): Promise<{ path: string }> {
     this.calls.push(`prepare:${String(pr)}@${ref}`);
     if (this.prepareThrows !== null) throw this.prepareThrows;

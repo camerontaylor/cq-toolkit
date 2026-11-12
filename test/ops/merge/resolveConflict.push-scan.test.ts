@@ -71,6 +71,7 @@ describe('the publication gate (issue #1193): scan BEFORE any push, fail closed'
       `validate:${mergeWorktreeBranchFor(44)}`,
       `parents:${String(effects.resolutionSha)}`,
       `diff:${String(effects.baselineSha)}..${String(effects.resolutionSha)}`,
+      `message:${String(effects.resolutionSha)}`,
       `push:${String(effects.resolutionSha)}:refs/heads/feat/topic@/wt/pr-44`,
       'remove:/wt/pr-44',
     ]);
@@ -146,7 +147,7 @@ describe('the publication gate (issue #1193): scan BEFORE any push, fail closed'
     expect(effects.calls.some((call) => call.startsWith('push:'))).toBe(false);
   });
 
-  test('the scan sees the patch ADDED LINES per path (the scan-input contract)', async () => {
+  test('the scan sees the patch ADDED LINES per path AND the commit message (the scan-input contract)', async () => {
     const effects = new FakeMergeEffects();
     effects.diffPatchText = [
       'diff --git a/src/keep.ts b/src/keep.ts',
@@ -175,6 +176,14 @@ describe('the publication gate (issue #1193): scan BEFORE any push, fail closed'
         path: 'src/keep.ts',
       },
       { component: 'docs/new.md', text: 'brand new file content', path: 'docs/new.md' },
+      {
+        // The resolution commit's MESSAGE rides the same scan verdict
+        // (review P2 ntJt) — one component, no path (path-scoped rules
+        // never fire on a message).
+        component: `commit message ${String(effects.resolutionSha).slice(0, 12)}`,
+        text: 'fix: resolve conflict with main\n',
+        path: '',
+      },
     ]);
   });
 

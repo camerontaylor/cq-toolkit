@@ -1414,6 +1414,9 @@ export function gateMergeEffects(
     diffPatch: (from, to) => effects.diffPatch(from, to),
     commitParents: (sha) => effects.commitParents(sha),
     isAncestor: (ancestor, descendant) => effects.isAncestor(ancestor, descendant),
+    readCommitMessage: (sha) => effects.readCommitMessage(sha),
+    objectExists: (sha) => effects.objectExists(sha),
+    fetchBaseBranch: (branch) => effects.fetchBaseBranch(branch),
     mergePr: async (pr, opts): Promise<GhResult> => {
       const base = pinnedBase.get(pr);
       pinnedBase.delete(pr);

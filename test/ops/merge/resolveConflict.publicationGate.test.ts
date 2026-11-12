@@ -23,6 +23,8 @@ import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/typ
 import type { MergeEffects } from '../../../src/adapters/forge-github/mergeEffects.js';
 import { realMergeEffects } from '../../../src/adapters/forge-github/mergeEffects.js';
 import { makeResolveConflictOp } from '../../../src/ops/merge/resolveConflict.js';
+import { scanComponents } from '../../../src/ops/dev/denylist.js';
+import type { DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
 import { MODEL_SPEC, fakeLoadPrompt, recordingScan, scanClean } from './resolveConflict.helpers.js';
 
 const git = promisify(execFile);
@@ -99,6 +101,10 @@ async function publicationFixture(): Promise<{
   await git('git', ['clone', '--quiet', origin, repoRoot]);
   await gitIn(repoRoot, 'config', 'user.email', 'fixture@localhost');
   await gitIn(repoRoot, 'config', 'user.name', 'fixture');
+  // The bare origin commits too (the base-advance scenarios build the
+  // newer tip with objects that exist ONLY here).
+  await gitIn(origin, 'config', 'user.email', 'fixture@localhost');
+  await gitIn(origin, 'config', 'user.name', 'fixture');
   // The COMMON ANCESTOR C on main.
   await writeFile(join(repoRoot, 'base.txt'), 'baseline\n');
   await gitIn(repoRoot, 'add', '-A');
@@ -153,6 +159,34 @@ async function publicationFixture(): Promise<{
   };
   return { root, repoRoot, origin, baseline, baseTip, pushes, diffCalls, effects };
 }
+
+/** A rules-based scanner over the SAME denylist engine: one unscoped
+ * github-token rule — the scanner the message-scan scenarios assert
+ * against (rule id is the evidence the gate must surface). */
+const tokenScanner: DiffSecretScanner = (components) =>
+  scanComponents(components, [
+    {
+      id: 'github-pat',
+      description: 'github personal access token',
+      regex: 'ghp_[A-Za-z0-9]{16,}',
+    },
+  ]);
+
+/** Advance the origin's main by one commit from a SECOND clone: the newer
+ * forge tip's objects exist on the forge and in the advancer — but NOT in
+ * repoRoot, which is what the scenario needs ("the base advanced and the
+ * gate's repo has not fetched it"). Returns the new tip. */
+const advanceOriginMain = async (origin: string, root: string): Promise<string> => {
+  const advancer = join(root, 'advancer');
+  await git('git', ['clone', '--quiet', origin, advancer]);
+  await gitIn(advancer, 'config', 'user.email', 'fixture@localhost');
+  await gitIn(advancer, 'config', 'user.name', 'fixture');
+  await writeFile(join(advancer, 'later.txt'), 'later base work\n');
+  await gitIn(advancer, 'add', '-A');
+  await gitIn(advancer, 'commit', '--quiet', '-m', 'later base-side work');
+  await gitIn(advancer, 'push', '--quiet', 'origin', 'HEAD:refs/heads/main');
+  return gitIn(origin, 'rev-parse', 'refs/heads/main');
+};
 
 const fixtureOp = (effects: MergeEffects, driver: Driver) =>
   makeResolveConflictOp({
@@ -378,6 +412,166 @@ describe('the publication gate topology proof (real git, review P1 rounds 2-3)',
       expect(result.status, JSON.stringify(result, null, 2)).toBe('ok');
       expect(f.pushes).toHaveLength(1);
       expect(f.pushes[0]).toContain(':refs/heads/feat/topic');
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+});
+describe('the publication gate message scan and locality fetch (review P2 ntJt/ntJj)', () => {
+  test('(f) a credential in the commit SUBJECT refuses — rule named, token never quoted, pushRef never called', async () => {
+    const f = await publicationFixture();
+    try {
+      const driver = new GitWorkerDriver(
+        { origin: f.origin, repoRoot: f.repoRoot },
+        async (worktree) => {
+          await writeFile(join(worktree, 'base.txt'), 'baseline\nresolved cleanly\n');
+          await gitIn(worktree, 'add', '-A');
+          await gitIn(
+            worktree,
+            'commit',
+            '--quiet',
+            '-m',
+            'resolve: set GITHUB_TOKEN=ghp_0123456789abcdef for deploy',
+          );
+        },
+      );
+      const { scanner, lastComponents } = recordingScan(tokenScanner);
+      const op = makeResolveConflictOp({
+        effects: f.effects,
+        drivers: {
+          resolve: (): ResolvedDriver => ({ driver, lane: 'ai-sdk', modelSpec: MODEL_SPEC }),
+        },
+        loadPrompt: fakeLoadPrompt,
+        scan: scanner,
+      });
+      const result = await run(f, op);
+      expect(result.status, JSON.stringify(result, null, 2)).toBe('needs-human');
+      if (result.status === 'needs-human') {
+        expect(result.reason).toContain('github-pat');
+        expect(result.reason).toContain('commit message');
+        expect(result.reason).not.toContain('ghp_0123456789abcdef');
+      }
+      expect(f.pushes).toEqual([]);
+      expect(lastComponents()).toBeDefined(); // the scan ran (and flagged)
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('(g) a credential in the commit BODY refuses the same way', async () => {
+    const f = await publicationFixture();
+    try {
+      const driver = new GitWorkerDriver(
+        { origin: f.origin, repoRoot: f.repoRoot },
+        async (worktree) => {
+          await writeFile(join(worktree, 'base.txt'), 'baseline\nresolved cleanly\n');
+          await gitIn(worktree, 'add', '-A');
+          await gitIn(
+            worktree,
+            'commit',
+            '--quiet',
+            '-m',
+            'resolve cleanly',
+            '-m',
+            'rotated key: GITHUB_TOKEN=ghp_0123456789abcdef',
+          );
+        },
+      );
+      const { scanner } = recordingScan(tokenScanner);
+      const op = makeResolveConflictOp({
+        effects: f.effects,
+        drivers: {
+          resolve: (): ResolvedDriver => ({ driver, lane: 'ai-sdk', modelSpec: MODEL_SPEC }),
+        },
+        loadPrompt: fakeLoadPrompt,
+        scan: scanner,
+      });
+      const result = await run(f, op);
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human') {
+        expect(result.reason).toContain('github-pat');
+        expect(result.reason).not.toContain('ghp_0123456789abcdef');
+      }
+      expect(f.pushes).toEqual([]);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('(h) an UNREADABLE commit message fails closed — failed, never pushed', async () => {
+    const f = await publicationFixture();
+    try {
+      const driver = new GitWorkerDriver(
+        { origin: f.origin, repoRoot: f.repoRoot },
+        async (worktree) => {
+          await writeFile(join(worktree, 'base.txt'), 'baseline\nresolved cleanly\n');
+          await commitAll(worktree, 'resolve');
+        },
+      );
+      const effects: MergeEffects = {
+        ...f.effects,
+        readCommitMessage: async () => ({ code: 1, stdout: '', stderr: 'fatal: bad object' }),
+      };
+      const op = fixtureOp(effects, driver);
+      const result = await run(f, op);
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') {
+        expect(result.error).toContain('unreadable');
+        expect(result.error).toContain('unscannable commit message');
+      }
+      expect(f.pushes).toEqual([]);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('(i) the base advances with the newer tip NOT local — the gate fetches the base branch and ACCEPTS', async () => {
+    const f = await publicationFixture();
+    try {
+      const driver = new GitWorkerDriver(
+        { origin: f.origin, repoRoot: f.repoRoot },
+        async (worktree) => {
+          await promptMerge(worktree);
+          // The base advances on the forge AFTER the worker's fetch, with
+          // the newer tip's objects existing everywhere but repoRoot.
+          await advanceOriginMain(f.origin, f.root);
+        },
+      );
+      const op = fixtureOp(f.effects, driver);
+      const result = await run(f, op);
+      // Fail-closed, not false-refusing: the gate fetched the base
+      // branch, verified the ancestry, and published.
+      expect(result.status, JSON.stringify(result, null, 2)).toBe('ok');
+      expect(f.pushes).toHaveLength(1);
+      expect(f.pushes[0]).toContain(':refs/heads/feat/topic');
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('(j) a base tip that stays unavailable locally refuses with the retryable reason — never a bare failed', async () => {
+    const f = await publicationFixture();
+    try {
+      const driver = new GitWorkerDriver(
+        { origin: f.origin, repoRoot: f.repoRoot },
+        async (worktree) => {
+          await promptMerge(worktree);
+          await advanceOriginMain(f.origin, f.root);
+        },
+      );
+      // The base fetch itself fails (forge unreachable).
+      const effects: MergeEffects = {
+        ...f.effects,
+        fetchBaseBranch: async () => ({ code: 1, stdout: '', stderr: 'connection lost' }),
+      };
+      const op = fixtureOp(effects, driver);
+      const result = await run(f, op);
+      expect(result.status, JSON.stringify(result, null, 2)).toBe('needs-human');
+      if (result.status === 'needs-human') {
+        expect(result.reason).toContain('base tip not available locally; refetch and retry');
+        expect(result.reason).toContain('NOTHING was pushed');
+      }
+      expect(f.pushes).toEqual([]);
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }

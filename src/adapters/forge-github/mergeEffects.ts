@@ -138,7 +138,7 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
   const unknown = (): UnsafeMergeArgsError =>
     new UnsafeMergeArgsError(
       args,
-      'refused: unknown argv shape — the merge family executes only its eleven documented shapes (rev-parse, rev-list, merge-base, fetch, worktree add/list/remove, push, gh pr merge, gh pr edit, gh pr view, diff)',
+      'refused: unknown argv shape — the merge family executes only its documented shapes (rev-parse, rev-list, merge-base, log, cat-file, fetch, worktree add/list/remove, push, gh pr merge, gh pr edit, gh pr view, diff)',
     );
   const sub = rest[0];
   switch (sub) {
@@ -271,6 +271,33 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
         !/^[0-9a-f]{40}$/i.test(tail[expected.length] ?? '') ||
         !/^[0-9a-f]{40}$/i.test(tail[expected.length + 1] ?? '')
       ) {
+        throw unknown();
+      }
+      return args;
+    }
+    case 'log': {
+      // The commit-message read (review P2 ntJt, PR #1628): the gate scans
+      // the resolution commit's subject/body before publishing. EXACT
+      // shape: `log -1 --format=%B <40hex>` — one commit, the raw message,
+      // one validateRef-derived sha.
+      const tail = rest.slice(1);
+      if (
+        tail.length !== 3 ||
+        tail[0] !== '-1' ||
+        tail[1] !== '--format=%B' ||
+        !/^[0-9a-f]{40}$/i.test(tail[2] ?? '')
+      ) {
+        throw unknown();
+      }
+      return args;
+    }
+    case 'cat-file': {
+      // The object-presence read (review P2 ntJj, PR #1628): before the
+      // ancestry read, the gate must know whether the forge's base tip is
+      // even LOCAL (the base may have advanced past what the repo has
+      // fetched). EXACT shape: `cat-file -e <40hex>`.
+      const tail = rest.slice(1);
+      if (tail.length !== 2 || tail[0] !== '-e' || !/^[0-9a-f]{40}$/i.test(tail[1] ?? '')) {
         throw unknown();
       }
       return args;
@@ -475,6 +502,34 @@ export interface MergeEffects {
    * is a fault the caller refuses on.
    */
   isAncestor(ancestor: string, descendant: string): Promise<GhResult>;
+  /**
+   * The RAW commit message (`git log -1 --format=%B <sha>`, review P2
+   * ntJt) of one full 40-hex sha behind the safeArgs-pinned shape — the
+   * publication gate scans the subject/body with the same denylist rules
+   * as the file patch, because a credential in the message rides the push
+   * while absent from it. Deliberately UNTRUNCATED: a cap would hide a
+   * secret placed past it; the caller bounds only what it quotes in
+   * errors.
+   */
+  readCommitMessage(sha: string): Promise<GhResult>;
+  /**
+   * Whether one full 40-hex object exists LOCALLY (`git cat-file -e
+   * <sha>`, review P2 ntJj): the ancestry read needs the forge's base tip
+   * in the local object store, and the base may have advanced past what
+   * the repo has fetched. Exit 0 = present; ANY nonzero exit is treated
+   * as absent-or-unreadable by the caller (which then fetches and
+   * re-checks, refusing if it still cannot read the object).
+   */
+  objectExists(sha: string): Promise<GhResult>;
+  /**
+   * Fetch one branch from origin (`git fetch origin <branch>`, a
+   * colon-less refspec that lands in FETCH_HEAD only — the existing
+   * safeArgs fetch shape already admits exactly this, and the branch name
+   * is the schema-gated conservative refname from the op input, never
+   * forge text). Used by the publication gate to bring a not-yet-local
+   * forge base tip into the object store before the ancestry read.
+   */
+  fetchBaseBranch(branch: string): Promise<GhResult>;
 }
 
 /**
@@ -605,6 +660,12 @@ export interface RealMergeEffectsOpts {
  *                   history — review P1 rounds 2-3)
  *   - isAncestor:    `git -C <repoRoot> merge-base --is-ancestor <sha>
  *                   <sha>` (is the merge parent public base history?)
+ *   - readCommitMessage: `git -C <repoRoot> log -1 --format=%B <sha>`
+ *                   (the gate's message scan input, review P2 ntJt)
+ *   - objectExists:  `git -C <repoRoot> cat-file -e <sha>` (is the forge
+ *                   base tip local yet? review P2 ntJj)
+ *   - fetchBaseBranch: `git -C <repoRoot> fetch origin <branch>` (bring a
+ *                   not-yet-local base tip in; colon-less, FETCH_HEAD only)
  */
 export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   // Absolute everywhere (prWorktree doctrine): mkdir resolves from the
@@ -695,6 +756,22 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   // ANSWERS (ancestor / not); any other exit is a fault.
   const isAncestor = (ancestor: string, descendant: string): Promise<GhResult> =>
     git(['-C', repoRoot, 'merge-base', '--is-ancestor', ancestor, descendant]);
+
+  // The message read (review P2 ntJt): unpadded %B, the raw subject and
+  // body — never truncated (a cap would hide a secret placed past it).
+  const readCommitMessage = (sha: string): Promise<GhResult> =>
+    git(['-C', repoRoot, 'log', '-1', '--format=%B', sha]);
+
+  // The object-presence read (review P2 ntJj): exit 0 = local, anything
+  // else = absent-or-unreadable (the caller fetches and re-checks).
+  const objectExists = (sha: string): Promise<GhResult> =>
+    git(['-C', repoRoot, 'cat-file', '-e', sha]);
+
+  // The base fetch (review P2 ntJj): the branch name is the op input's
+  // schema-gated conservative refname; the argv is a colon-less fetch
+  // refspec the existing safeArgs fetch shape already admits.
+  const fetchBaseBranch = (branch: string): Promise<GhResult> =>
+    git(['-C', repoRoot, 'fetch', 'origin', branch]);
 
   // The worktree root's base dir, derived LAZILY (first prepare, then
   // cached) from git's COMMON dir (round 2): a linked worktree's .git is a
@@ -796,5 +873,8 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     diffPatch,
     commitParents,
     isAncestor,
+    readCommitMessage,
+    objectExists,
+    fetchBaseBranch,
   };
 }

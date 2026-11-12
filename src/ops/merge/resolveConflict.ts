@@ -127,23 +127,30 @@
 //           >2 parents, zero parents, unreadable topology, a second
 //           parent that is not public, an unreadable forge base state —
 //           refuses ('refusing to publish unscanned history') BEFORE
-//           the diff read and any push; plumbing THROWS are 'failed'
-//           (totality);
+//           the diff read and any push; a forge tip that is not yet
+//           LOCAL is fetched (fetchBaseBranch, the schema-gated base
+//           branch) before the ancestry read, and a tip that stays
+//           unreadable refuses with a retryable 'refetch and retry'
+//           reason (review P2 ntJj — fail-closed without false
+//           refusal); plumbing THROWS are 'failed' (totality);
 //        4. effects.diffPatch reads the zero-context patch
 //           baseline..resolvedSha — EXACTLY the content the publication
 //           push adds beyond the head's current public state. Nonzero or
 //           throwing → 'failed' (the change is UNSCANNABLE — a partial
 //           patch is never scanned, and unscannable is never published);
-//        5. the patch's ADDED lines (what a push publishes; removed
-//           lines leave the forge) are scanned through the
-//           DiffSecretScanner seam (deps.scan; default
+//        5. the resolution commit's MESSAGE is read (review P2 ntJt —
+//           the subject/body are published history a credential can
+//           hide in): unreadable or beyond the scan bound → 'failed',
+//           never an unscannable publication;
+//        6. the patch's ADDED lines AND the message are scanned through
+//           the DiffSecretScanner seam (deps.scan; default
 //           makeRepoDiffScanner(repoRoot) — the repo's own
-//           policy/denylist/patterns.yml, lazily parsed, fail-closed).
-//           ANY hit → 'needs-human' naming the rule ids and files
-//           (matched content is never quoted); a scanner FAULT →
+//           policy/denylist/patterns.yml, lazily parsed, fail-closed) in
+//           ONE verdict. ANY hit → 'needs-human' naming the rule ids and
+//           files (matched content is never quoted); a scanner FAULT →
 //           'needs-human' (the human arranges the scanner). NOTHING is
 //           pushed on either path — refuse, not document;
-//        6. clean → the op publishes: effects.pushRef('<resolvedSha>:
+//        7. clean → the op publishes: effects.pushRef('<resolvedSha>:
 //           refs/heads/<headBranch>') from the worktree, through the
 //           I3-guarded seam (no force, no deletion, never the protected
 //           branch). Exit 0 IS the publication fact — git push exits 0
@@ -912,6 +919,52 @@ export function makeResolveConflictOp(
             if (secondParent !== base.baseTipSha) {
               // Not the current tip: public only if an ancestor of it
               // (the base advanced between the worker's fetch and now).
+              // The ancestry read needs the forge tip LOCALLY — the base
+              // may have advanced past what this repo has fetched (review
+              // P2 ntJj): check, fetch the schema-gated base branch,
+              // re-check. A tip that stays unreadable refuses with a
+              // retryable reason — never a bare failed, never a false
+              // refusal of a valid resolution.
+              let local: GhResult;
+              try {
+                local = await effects.objectExists(base.baseTipSha);
+              } catch (err) {
+                return {
+                  status: 'failed',
+                  error: `resolveConflict: checking the locality of the base tip ${base.baseTipSha} for pr ${input.pr} threw: ${errorMessage(err)}${sessionSuffix(result)}`,
+                };
+              }
+              if (local.code !== 0) {
+                let fetched: GhResult;
+                try {
+                  fetched = await effects.fetchBaseBranch(input.baseBranch);
+                } catch (err) {
+                  return {
+                    status: 'failed',
+                    error: `resolveConflict: fetching the base branch ${input.baseBranch} for pr ${input.pr} threw: ${errorMessage(err)}${sessionSuffix(result)}`,
+                  };
+                }
+                if (fetched.code !== 0) {
+                  return {
+                    status: 'needs-human',
+                    reason: `the base tip ${base.baseTipSha} is not available locally and fetching ${input.baseBranch} failed (exit ${fetched.code})${stderrSuffix(fetched.stderr)} — base tip not available locally; refetch and retry; NOTHING was pushed${sessionSuffix(result)}`,
+                  };
+                }
+                try {
+                  local = await effects.objectExists(base.baseTipSha);
+                } catch (err) {
+                  return {
+                    status: 'failed',
+                    error: `resolveConflict: re-checking the locality of the base tip ${base.baseTipSha} for pr ${input.pr} threw: ${errorMessage(err)}${sessionSuffix(result)}`,
+                  };
+                }
+                if (local.code !== 0) {
+                  return {
+                    status: 'needs-human',
+                    reason: `the base tip ${base.baseTipSha} is still not available locally after fetching ${input.baseBranch} — base tip not available locally; refetch and retry; NOTHING was pushed${sessionSuffix(result)}`,
+                  };
+                }
+              }
               let ancestry: GhResult;
               try {
                 ancestry = await effects.isAncestor(secondParent, base.baseTipSha);
@@ -956,17 +1009,51 @@ export function makeResolveConflictOp(
               error: `resolveConflict: the resolved change ${baselineSha}..${resolution.sha} for pr ${input.pr} is unreadable (exit ${patch.code})${stderrSuffix(patch.stderr)} — refusing to publish an unscannable change${sessionSuffix(result)}`,
             };
           }
-          // Gate rung 5: scan the patch's ADDED lines through the
-          // denylist seam. ANY hit refuses; so does a scanner FAULT (a
-          // gate that cannot run cannot clear — the human arranges the
+          // Gate rung 5: read the resolution commit's MESSAGE (review P2
+          // ntJt) — the subject/body are published history too, and a
+          // credential placed there is absent from the file patch the
+          // topology-checked diff carries. Unreadable → 'failed' (never
+          // publish an unscannable message); an implausibly huge message
+          // → 'failed' as well (a scan bound exists so no line is ever
+          // SKIPPED — truncation would hide a secret placed past it).
+          let message: GhResult;
+          try {
+            message = await effects.readCommitMessage(resolution.sha);
+          } catch (err) {
+            return {
+              status: 'failed',
+              error: `resolveConflict: reading the resolution commit's message ${resolution.sha} for pr ${input.pr} threw: ${errorMessage(err)}${sessionSuffix(result)}`,
+            };
+          }
+          if (message.code !== 0) {
+            return {
+              status: 'failed',
+              error: `resolveConflict: the resolution commit's message ${resolution.sha} for pr ${input.pr} is unreadable (exit ${message.code})${stderrSuffix(message.stderr)} — refusing to publish an unscannable commit message${sessionSuffix(result)}`,
+            };
+          }
+          const MESSAGE_SCAN_BOUND = 100_000;
+          if (message.stdout.length > MESSAGE_SCAN_BOUND) {
+            return {
+              status: 'failed',
+              error: `resolveConflict: the resolution commit's message for pr ${input.pr} exceeds the ${String(MESSAGE_SCAN_BOUND)}-character scan bound — refusing to publish an unscannable commit message${sessionSuffix(result)}`,
+            };
+          }
+          // Gate rung 6: scan the patch's ADDED lines AND the commit
+          // message through the SAME denylist seam (one call, one
+          // verdict). ANY hit refuses; so does a scanner FAULT (a gate
+          // that cannot run cannot clear — the human arranges the
           // scanner). Matched content is never quoted (the denylist
           // doctrine — inspect locally without printing secrets).
           const scan = deps.scan ?? makeRepoDiffScanner(input.repoRoot);
+          const scanInputs = addedLineComponents(patch.stdout, 'resolveConflict pre-push scan');
+          scanInputs.push({
+            component: `commit message ${resolution.sha.slice(0, 12)}`,
+            text: message.stdout,
+            path: '',
+          });
           let components: ComponentScan[];
           try {
-            components = await scan(
-              addedLineComponents(patch.stdout, 'resolveConflict pre-push scan'),
-            );
+            components = await scan(scanInputs);
           } catch (err) {
             return {
               status: 'needs-human',
@@ -984,7 +1071,7 @@ export function makeResolveConflictOp(
               reason: `the resolved change for pr ${input.pr} carries denylist hits (rules: ${ruleIds}; files: ${files}) — the branch was NOT pushed; scrub or review the findings before publishing${sessionSuffix(result)}`,
             };
           }
-          // Gate rung 6: the publication — the OP pushes the resolution
+          // Gate rung 7: the publication — the OP pushes the resolution
           // commit to the head branch through the I3-guarded seam (no
           // force, no deletion, never the protected branch — the guard
           // refuses all three shapes regardless of this call site). Exit

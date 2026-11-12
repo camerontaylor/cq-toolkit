@@ -360,6 +360,18 @@ export class RecordingMergeEffects implements MergeEffects {
   async isAncestor(): Promise<GhResult> {
     return { code: 0, stdout: '', stderr: '' };
   }
+
+  async readCommitMessage(): Promise<GhResult> {
+    return { code: 0, stdout: 'resolve\n', stderr: '' };
+  }
+
+  async objectExists(): Promise<GhResult> {
+    return { code: 0, stdout: '', stderr: '' };
+  }
+
+  async fetchBaseBranch(): Promise<GhResult> {
+    return { code: 0, stdout: '', stderr: '' };
+  }
 }
 
 /** A ledger with PR `pr`'s live tuple observed once at `atMs`. */
