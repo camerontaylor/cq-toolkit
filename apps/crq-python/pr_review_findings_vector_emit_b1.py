@@ -408,13 +408,22 @@ def clean_text_cases() -> List[Dict[str, Any]]:
     add("suggestion-fence-demoted", "```suggestion\nline\n```")
     add("indented-suggestion-demoted", "   ```suggestion\nline\n```")
     add("suggestion-suffix-word-kept", "```suggestions\nline\n```")
+    add("suggestion-dot-demoted", "```suggestion.\ny")
+    add("suggestion-hyphen-demoted", "```suggestion-\ny")
     add("fence-mention-kept", "```py\n@user\n```")
     add("open-fence-closed", "```py\n@user")
+    add("indented-close-lf", "```py\n@user\n   ```\n@after")
+    add("indented-close-crlf", "```py\n@user\n   ```\r\n@after")
+    add("indented-close-tab", "```py\n@user\n\t```\n@after")
     add("tilde-fence", "~~~\n@user\n~~~")
     add("tilde-fence-open-closed", "~~~md\n@user")
     add("mention-in-prose-neutralised", "ping @user and @types/node")
     add("mention-after-unicode-letter", "é@user")
     add("mention-after-digit", "x1@u")
+    add("mention-after-hyphen", "-@user")
+    add("mention-after-dot-kept", ".@user")
+    add("mention-after-underscore-kept", "_@user")
+    add("mention-after-slash-kept", "/@user")
     add("mention-in-code-span-kept", "`@user` stays")
     add("email-at-kept", "me@example.com")
     add("empty", "")
@@ -543,6 +552,12 @@ def build_review_cases() -> List[Dict[str, Any]]:
         severity="none", path=None, start=None, end=None, title="t", text="x")], hunks)
     add("hunks-file-missing", meta_full,
         [dict(severity="none", path="other.py", start=1, end=1, title="t", text="x")], hunks)
+    add("prototype-path-listed", meta_full,
+        [dict(severity="none", path="constructor", start=1, end=1, title="t", text="x")], hunks)
+    add("proto-path-listed", meta_full,
+        [dict(severity="none", path="__proto__", start=1, end=1, title="t", text="x")], hunks)
+    add("tostring-path-listed", meta_full,
+        [dict(severity="none", path="toString", start=1, end=1, title="t", text="x")], hunks)
     add("hunks-empty-dict", meta_full,
         [dict(severity="none", path=FILE_NAME, start=1, end=1, title="t", text="x")], {})
     add("mention-in-heading-neutralised", meta_full,
@@ -660,6 +675,10 @@ def deliver_cases() -> List[Dict[str, Any]]:
         gh=EndpointGh(compare=ok(json.dumps([
             {"filename": "img.bin", "status": "modified", "patch": None}]))))
     add("post-422-falls-back-body-only", REPO, 77, META, nd,
+        gh=EndpointGh(post=[ok("", "gh: HTTP 422: Validation Failed", 1),
+                            ok(json.dumps(POSTED))]))
+    add("post-422-with-summary-falls-back", REPO, 77,
+        dict(META, summary="Run summary"), nd,
         gh=EndpointGh(post=[ok("", "gh: HTTP 422: Validation Failed", 1),
                             ok(json.dumps(POSTED))]))
     add("post-exit-error", REPO, 77, META, nd,

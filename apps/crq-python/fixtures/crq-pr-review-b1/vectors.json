@@ -1234,6 +1234,28 @@
           }
         },
         {
+          "name": "suggestion-dot-demoted",
+          "source": "pr_review_findings.clean_text",
+          "input": {
+            "text": "```suggestion.\ny"
+          },
+          "expect": {
+            "ok": true,
+            "value": "```text.\ny\n```"
+          }
+        },
+        {
+          "name": "suggestion-hyphen-demoted",
+          "source": "pr_review_findings.clean_text",
+          "input": {
+            "text": "```suggestion-\ny"
+          },
+          "expect": {
+            "ok": true,
+            "value": "```text-\ny\n```"
+          }
+        },
+        {
           "name": "fence-mention-kept",
           "source": "pr_review_findings.clean_text",
           "input": {
@@ -1253,6 +1275,39 @@
           "expect": {
             "ok": true,
             "value": "```py\n@user\n```"
+          }
+        },
+        {
+          "name": "indented-close-lf",
+          "source": "pr_review_findings.clean_text",
+          "input": {
+            "text": "```py\n@user\n   ```\n@after"
+          },
+          "expect": {
+            "ok": true,
+            "value": "```py\n@user\n   ```\n@\u200dafter"
+          }
+        },
+        {
+          "name": "indented-close-crlf",
+          "source": "pr_review_findings.clean_text",
+          "input": {
+            "text": "```py\n@user\n   ```\r\n@after"
+          },
+          "expect": {
+            "ok": true,
+            "value": "```py\n@user\n   ```\r\n@\u200dafter"
+          }
+        },
+        {
+          "name": "indented-close-tab",
+          "source": "pr_review_findings.clean_text",
+          "input": {
+            "text": "```py\n@user\n\t```\n@after"
+          },
+          "expect": {
+            "ok": true,
+            "value": "```py\n@user\n\t```\n@\u200dafter"
           }
         },
         {
@@ -1308,6 +1363,50 @@
           "expect": {
             "ok": true,
             "value": "x1@u"
+          }
+        },
+        {
+          "name": "mention-after-hyphen",
+          "source": "pr_review_findings.clean_text",
+          "input": {
+            "text": "-@user"
+          },
+          "expect": {
+            "ok": true,
+            "value": "-@\u200duser"
+          }
+        },
+        {
+          "name": "mention-after-dot-kept",
+          "source": "pr_review_findings.clean_text",
+          "input": {
+            "text": ".@user"
+          },
+          "expect": {
+            "ok": true,
+            "value": ".@user"
+          }
+        },
+        {
+          "name": "mention-after-underscore-kept",
+          "source": "pr_review_findings.clean_text",
+          "input": {
+            "text": "_@user"
+          },
+          "expect": {
+            "ok": true,
+            "value": "_@user"
+          }
+        },
+        {
+          "name": "mention-after-slash-kept",
+          "source": "pr_review_findings.clean_text",
+          "input": {
+            "text": "/@user"
+          },
+          "expect": {
+            "ok": true,
+            "value": "/@user"
           }
         },
         {
@@ -4387,6 +4486,135 @@
           }
         },
         {
+          "name": "prototype-path-listed",
+          "source": "pr_review_findings.build_review",
+          "input": {
+            "meta": {
+              "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "base": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb"
+            },
+            "findings": [
+              {
+                "severity": "none",
+                "path": "constructor",
+                "start": 1,
+                "end": 1,
+                "title": "t",
+                "text": "x"
+              }
+            ],
+            "hunks": {
+              "src/a.py": [
+                [
+                  1,
+                  4
+                ],
+                [
+                  41,
+                  46
+                ]
+              ]
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "event": "COMMENT",
+              "body": "<!-- crq-findings run=r-20261103T120000Z-abcd -->\n\n### crq findings (CodeRabbit CLI, local run r-20261103T120000Z-abcd, bbbbbbbbbb..aaaaaaaaaa)\n\n1 finding(s) (1 none): 0 as inline threads, 1 listed below.\n\nQueue item `push-infra-aaaaaaaaaa-bbbbbbbbbb`, reviewed range `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`. Posted by crq, the local review queue that runs the CodeRabbit CLI on this host. This is not a CodeRabbit PR review. Reply on a thread or resolve it once addressed.\n\n#### Not anchored to the PR diff\n\n**crq finding F1 [none]** t (`constructor` line 1)\n\nx\n",
+              "comments": [],
+              "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        },
+        {
+          "name": "proto-path-listed",
+          "source": "pr_review_findings.build_review",
+          "input": {
+            "meta": {
+              "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "base": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb"
+            },
+            "findings": [
+              {
+                "severity": "none",
+                "path": "__proto__",
+                "start": 1,
+                "end": 1,
+                "title": "t",
+                "text": "x"
+              }
+            ],
+            "hunks": {
+              "src/a.py": [
+                [
+                  1,
+                  4
+                ],
+                [
+                  41,
+                  46
+                ]
+              ]
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "event": "COMMENT",
+              "body": "<!-- crq-findings run=r-20261103T120000Z-abcd -->\n\n### crq findings (CodeRabbit CLI, local run r-20261103T120000Z-abcd, bbbbbbbbbb..aaaaaaaaaa)\n\n1 finding(s) (1 none): 0 as inline threads, 1 listed below.\n\nQueue item `push-infra-aaaaaaaaaa-bbbbbbbbbb`, reviewed range `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`. Posted by crq, the local review queue that runs the CodeRabbit CLI on this host. This is not a CodeRabbit PR review. Reply on a thread or resolve it once addressed.\n\n#### Not anchored to the PR diff\n\n**crq finding F1 [none]** t (`__proto__` line 1)\n\nx\n",
+              "comments": [],
+              "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        },
+        {
+          "name": "tostring-path-listed",
+          "source": "pr_review_findings.build_review",
+          "input": {
+            "meta": {
+              "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "base": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb"
+            },
+            "findings": [
+              {
+                "severity": "none",
+                "path": "toString",
+                "start": 1,
+                "end": 1,
+                "title": "t",
+                "text": "x"
+              }
+            ],
+            "hunks": {
+              "src/a.py": [
+                [
+                  1,
+                  4
+                ],
+                [
+                  41,
+                  46
+                ]
+              ]
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "event": "COMMENT",
+              "body": "<!-- crq-findings run=r-20261103T120000Z-abcd -->\n\n### crq findings (CodeRabbit CLI, local run r-20261103T120000Z-abcd, bbbbbbbbbb..aaaaaaaaaa)\n\n1 finding(s) (1 none): 0 as inline threads, 1 listed below.\n\nQueue item `push-infra-aaaaaaaaaa-bbbbbbbbbb`, reviewed range `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`. Posted by crq, the local review queue that runs the CodeRabbit CLI on this host. This is not a CodeRabbit PR review. Reply on a thread or resolve it once addressed.\n\n#### Not anchored to the PR diff\n\n**crq finding F1 [none]** t (`toString` line 1)\n\nx\n",
+              "comments": [],
+              "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        },
+        {
           "name": "hunks-empty-dict",
           "source": "pr_review_findings.build_review",
           "input": {
@@ -6208,6 +6436,124 @@
                   "-"
                 ],
                 "input_text": "{\"event\": \"COMMENT\", \"body\": \"<!-- crq-findings run=r-20261103T120000Z-abcd -->\\n\\n### crq findings (CodeRabbit CLI, local run r-20261103T120000Z-abcd, bbbbbbbbbb..aaaaaaaaaa)\\n\\n1 finding(s) (1 major): 0 as inline threads, 1 listed below.\\n\\nQueue item `push-infra-aaaaaaaaaa-bbbbbbbbbb`, reviewed range `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`. Posted by crq, the local review queue that runs the CodeRabbit CLI on this host. This is not a CodeRabbit PR review. Reply on a thread or resolve it once addressed.\\n\\n#### Not anchored to the PR diff\\n\\n**crq finding F1 [major]** Check the bound (`src/a.py` lines 2-3)\\n\\nOff by one.\\n\\n<!-- crq-local-findings head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa set=f2e2531bd6c289f274b47da6543bf8f1cd8e821fccd4732c1b84b564458f884d -->\", \"comments\": []}"
+              }
+            ]
+          }
+        },
+        {
+          "name": "post-422-with-summary-falls-back",
+          "source": "pr_review_findings.deliver",
+          "input": {
+            "repo": "camerontaylor/infra",
+            "pr": 77,
+            "meta": {
+              "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "base": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "run_id": "r-20261103T120000Z-abcd",
+              "item_id": "push-infra-aaaaaaaaaa-bbbbbbbbbb",
+              "summary": "Run summary"
+            },
+            "events": "{\"type\": \"finding\", \"severity\": \"major\", \"fileName\": \"src/a.py\", \"startLine\": 2, \"endLine\": 3, \"title\": \"Check the bound\", \"comment\": \"**Check the bound**\\n\\nOff by one.<!-- foreign marker -->\", \"codegenInstructions\": \"prompt text\"}\n",
+            "gh": {
+              "state": "open",
+              "merged": false,
+              "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "base": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "reviews": "",
+              "compare": {
+                "returncode": 0,
+                "stdout": "[{\"filename\": \"src/a.py\", \"status\": \"modified\", \"patch\": \"@@ -1,3 +1,4 @@\\n a\\n+b\\n c\\n d\\n@@ -40,2 +41,6 @@\\n x\\n+y\\n\"}]",
+                "stderr": ""
+              },
+              "post": [
+                {
+                  "returncode": 1,
+                  "stdout": "",
+                  "stderr": "gh: HTTP 422: Validation Failed"
+                },
+                {
+                  "returncode": 0,
+                  "stdout": "{\"id\": 77, \"html_url\": \"https://github.com/x/r/pull/77\"}",
+                  "stderr": ""
+                }
+              ],
+              "script": []
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "state": "created",
+              "review_id": 77,
+              "review_url": "https://github.com/x/r/pull/77",
+              "inline": 0,
+              "body_only": 1
+            },
+            "calls": [
+              {
+                "argv": [
+                  "gh",
+                  "api",
+                  "repos/camerontaylor/infra/pulls/77",
+                  "--jq",
+                  "{state: .state, merged: .merged, base: .base.sha, head: .head.sha}"
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "api",
+                  "user",
+                  "--jq",
+                  ".login"
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "api",
+                  "--paginate",
+                  "repos/camerontaylor/infra/pulls/77/reviews?per_page=100",
+                  "--jq",
+                  ".[] | select(.user.login == \"crq-host\" and ((.body // \"\") | startswith(\"<!-- crq-findings run=r-20261103T120000Z-abcd -->\"))) | {id: .id, url: .html_url}"
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "api",
+                  "repos/camerontaylor/infra/compare/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb...aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "--jq",
+                  "[.files[]? | {filename, status, patch}]"
+                ],
+                "input_text": null
+              },
+              {
+                "argv": [
+                  "gh",
+                  "api",
+                  "--method",
+                  "POST",
+                  "repos/camerontaylor/infra/pulls/77/reviews",
+                  "--input",
+                  "-"
+                ],
+                "input_text": "{\"event\": \"COMMENT\", \"body\": \"<!-- crq-findings run=r-20261103T120000Z-abcd -->\\nRun summary\\n### crq findings (CodeRabbit CLI, local run r-20261103T120000Z-abcd, bbbbbbbbbb..aaaaaaaaaa)\\n\\n1 finding(s) (1 major): 1 as inline threads, 0 listed below.\\n\\nQueue item `push-infra-aaaaaaaaaa-bbbbbbbbbb`, reviewed range `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`. Posted by crq, the local review queue that runs the CodeRabbit CLI on this host. This is not a CodeRabbit PR review. Reply on a thread or resolve it once addressed.\\n\", \"comments\": [{\"path\": \"src/a.py\", \"line\": 3, \"side\": \"RIGHT\", \"start_line\": 2, \"start_side\": \"RIGHT\", \"body\": \"**crq finding F1 [major]** Check the bound\\n\\nOff by one.\\n\\n<sub>crq run `r-20261103T120000Z-abcd`, lines 2-3</sub>\"}], \"commit_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+              },
+              {
+                "argv": [
+                  "gh",
+                  "api",
+                  "--method",
+                  "POST",
+                  "repos/camerontaylor/infra/pulls/77/reviews",
+                  "--input",
+                  "-"
+                ],
+                "input_text": "{\"event\": \"COMMENT\", \"body\": \"<!-- crq-findings run=r-20261103T120000Z-abcd -->\\nRun summary\\n### crq findings (CodeRabbit CLI, local run r-20261103T120000Z-abcd, bbbbbbbbbb..aaaaaaaaaa)\\n\\n1 finding(s) (1 major): 0 as inline threads, 1 listed below.\\n\\nQueue item `push-infra-aaaaaaaaaa-bbbbbbbbbb`, reviewed range `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`. Posted by crq, the local review queue that runs the CodeRabbit CLI on this host. This is not a CodeRabbit PR review. Reply on a thread or resolve it once addressed.\\n\\n#### Not anchored to the PR diff\\n\\n**crq finding F1 [major]** Check the bound (`src/a.py` lines 2-3)\\n\\nOff by one.\\n\", \"comments\": []}"
               }
             ]
           }

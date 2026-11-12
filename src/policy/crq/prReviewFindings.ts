@@ -16,7 +16,7 @@
  */
 import { JsonObject, JsonNumber, parseJsonValue, type JsonValue } from './jsonValue.js';
 import { ledgerPythonTypeName } from './ledger.js';
-import { pythonJsonText, sha256Hex } from './pythonJson.js';
+import { pythonFloatRepr, pythonJsonText, sha256Hex } from './pythonJson.js';
 import { pythonLength, pythonStrip, pythonTruthy } from './repairBinding.js';
 
 /** `pr_review_findings.GH_TIMEOUT`; a delivery makes at most five gh calls. */
@@ -140,34 +140,31 @@ function isAsciiAlphanumeric(codePoint: number): boolean {
 }
 
 /**
- * `[\w.-]+/[\w.-]+` fullmatch. Python `\w` is Unicode: letters, decimal
- * digits, underscores (and the XID categories, approximated here by
- * `\p{L}`, `\p{Nd}` and `_`, which covers every fixture owner/repo).
+ * Python `\w` (regex word character): `str.isalnum()` or `_`, i.e. letters,
+ * decimal/letter/other numbers and connector punctuation, approximated by
+ * `\p{L}`, `\p{Nd}`, `\p{Nl}`, `\p{No}` and `\p{Pc}`. Repository names
+ * additionally allow `.` and `-`, which are NOT `\w` characters.
  */
-const WORD_CHARACTER = /[\p{L}\p{Nd}_]/u;
+const WORD_CHARACTER = /[\p{L}\p{Nd}\p{Nl}\p{No}\p{Pc}]/u;
 
+/** Repository-name character: Python `\w` plus `.` and `-`. */
 function isWordCodePoint(codePoint: number): boolean {
-  if (
-    isAsciiAlphanumeric(codePoint) ||
-    codePoint === 0x5f ||
-    codePoint === 0x2e ||
-    codePoint === 0x2d
-  ) {
-    return true;
-  }
+  if (codePoint === 0x2e || codePoint === 0x2d) return true;
+  return isRegexWordCodePoint(codePoint);
+}
+
+/** Python `\w`: used for regex classes, the mention lookbehind and `\b`. */
+function isRegexWordCodePoint(codePoint: number): boolean {
   return WORD_CHARACTER.test(String.fromCodePoint(codePoint));
 }
 
+/** Python `REPO.fullmatch`: `\w.-` on each side of exactly one slash. */
 export function isRepo(value: string): boolean {
   const characters = [...value];
-  const slash = characters.findIndex((character) => character === '/');
-  if (slash <= 0 || slash === characters.length - 1) return false;
-  return (
-    characters.every(
-      (character) => character === '/' || isWordCodePoint(character.codePointAt(0) as number),
-    ) &&
-    characters[0] !== '/' &&
-    characters[characters.length - 1] !== '/'
+  const slashes = characters.filter((character) => character === '/').length;
+  if (slashes !== 1) return false;
+  return characters.every(
+    (character) => character === '/' || isWordCodePoint(character.codePointAt(0) as number),
   );
 }
 
@@ -223,9 +220,16 @@ function neutraliseProse(segment: string): string {
     if (segment[index] === '@') {
       const previous = codePointBefore(segment, index);
       const next = segment.codePointAt(index + 1);
-      const previousBlocks = previous !== null && isWordCodePoint(previous);
-      const previousQuote = previous === 0x60 || previous === 0x40 || previous === 0x2f;
-      if (!previousBlocks && !previousQuote && next !== undefined && isAsciiAlphanumeric(next)) {
+      // Python's lookbehind is `(?<![\w`@/.])`: `\w` (not repo punctuation)
+      // plus backtick, `@`, `.` and `/` — `-` still allows a mention.
+      const previousBlocks =
+        previous !== null &&
+        (isRegexWordCodePoint(previous) ||
+          previous === 0x60 ||
+          previous === 0x40 ||
+          previous === 0x2f ||
+          previous === 0x2e);
+      if (!previousBlocks && next !== undefined && isAsciiAlphanumeric(next)) {
         out += `@${ZWJ}`;
         index += 1;
         continue;
@@ -306,17 +310,16 @@ export function neutraliseMentions(text: string): string {
   for (const line of text.split('\n')) {
     if (fence !== null) {
       out.push(line);
-      let end = line.length;
-      while (end > 0 && line[end - 1] === ' ') end -= 1;
-      const stripped = line.slice(0, end);
+      // Python `line.strip()` removes whitespace on BOTH sides (CR and tabs
+      // included); the indent count stays spaces-only, on the raw line.
+      const stripped = pythonStrip(line);
       let indent = 0;
       while (indent < line.length && line[indent] === ' ') indent += 1;
-      const rest = stripped.slice(indent);
       if (
         indent <= 3 &&
-        rest.length > 0 &&
-        [...rest].every((character) => character === fence?.[0]) &&
-        rest.length >= fence.length
+        stripped.length > 0 &&
+        [...stripped].every((character) => character === fence?.[0]) &&
+        stripped.length >= fence.length
       ) {
         fence = null;
       }
@@ -448,9 +451,9 @@ function pythonFloatStr(value: number): string {
   return pythonFloatNumberText(value);
 }
 
-/** The Python `repr(float)` text. */
+/** The Python `repr(float)` text (`.0` kept, Python exponent form). */
 function pythonFloatNumberText(value: number): string {
-  return Object.is(value, -0) ? '-0.0' : String(value);
+  return pythonFloatRepr(value);
 }
 
 /** Python `repr(str)`: quote choice, control escapes, CPython printable rule. */
@@ -524,7 +527,7 @@ export function cleanText(text: JsonValue, title: JsonValue = ''): string {
       `expected string or bytes-like object, got '${ledgerPythonTypeName(text)}'`,
     );
   }
-  let body = removeHtmlComments(text).trim();
+  let body = pythonStrip(removeHtmlComments(text));
   const titleText = pythonStr(title);
   if (titleText && body.startsWith(`**${titleText}**`)) {
     body = body.slice(titleText.length + 4);
@@ -570,7 +573,7 @@ function demoteSuggestions(text: string): string {
 function isWordBoundary(after: string): boolean {
   if (after.length === 0) return true;
   const codePoint = after.codePointAt(0) as number;
-  return !isWordCodePoint(codePoint);
+  return !isRegexWordCodePoint(codePoint);
 }
 
 // ---------------------------------------------------------------- anchoring
@@ -700,7 +703,9 @@ export function anchor(finding: Finding, hunks: HunkMap): Record<string, JsonVal
   if (!pythonTruthy(path) || !pythonTruthy(start) || typeof path !== 'string') {
     return undefined;
   }
-  const ranges = hunks[path];
+  // Python dict lookup never sees inherited keys; guard the prototype chain
+  // so a file named `constructor` or `toString` stays unanchored.
+  const ranges = Object.hasOwn(hunks, path) ? hunks[path] : undefined;
   if (ranges === undefined) return undefined;
   const end = finding.end;
   // Python compares start/end against hunk bounds directly; a None end raises
@@ -708,16 +713,18 @@ export function anchor(finding: Finding, hunks: HunkMap): Record<string, JsonVal
   const startNumber = requireComparisonInt(start, 'start');
   const endNumber = requireComparisonInt(end, 'end');
   for (const { lo, hi } of ranges) {
-    if (startNumber <= hi && endNumber >= lo) {
-      const first = Math.max(startNumber, lo);
-      const last = Math.min(endNumber, hi);
+    // Arbitrary-size ints stay exact via bigint so a 10^30 line still
+    // compares (and never overlaps, landing in the body like Python).
+    if (startNumber <= BigInt(hi) && endNumber >= BigInt(lo)) {
+      const first = startNumber > BigInt(lo) ? startNumber : BigInt(lo);
+      const last = endNumber < BigInt(hi) ? endNumber : BigInt(hi);
       const position: Record<string, JsonValue> = {
         path,
-        line: jsonInt(last),
+        line: JsonNumber.int(last),
         side: 'RIGHT',
       };
       if (first < last) {
-        position.start_line = jsonInt(first);
+        position.start_line = JsonNumber.int(first);
         position.start_side = 'RIGHT';
       }
       return position;
@@ -738,9 +745,12 @@ function jsonInt(value: number): JsonValue {
  * Python unboxes the JSON finding for `start <= hi and end >= lo`; a None or
  * non-int value raises TypeError against the int hunk bounds.
  */
-function requireComparisonInt(value: JsonValue, field: string): number {
+function requireComparisonInt(value: JsonValue, field: string): bigint {
   if (value === null) {
     throw new PrReviewTypeError(`'>=' not supported between instances of 'NoneType' and 'int'`);
+  }
+  if (value instanceof JsonNumber && value.kind === 'int') {
+    return value.integer as bigint;
   }
   const number = numberOrNone(value);
   if (number === null) {
@@ -748,7 +758,7 @@ function requireComparisonInt(value: JsonValue, field: string): number {
       `'${ledgerPythonTypeName(value)}' object cannot be interpreted as an integer (${field})`,
     );
   }
-  return number;
+  return BigInt(number);
 }
 
 function numberOrNone(value: JsonValue): number | null {
@@ -1127,9 +1137,12 @@ function diffHunks(gh: GhPort, repo: string, base: string, head: string): HunkMa
     '[.files[]? | {filename, status, patch}]',
   ];
   const data = parseGhJson(argv, callGh(gh, argv, null));
-  const hunks: Record<string, ReadonlyArray<HunkRange>> = {};
+  const hunks: Record<string, ReadonlyArray<HunkRange>> = Object.create(null) as Record<
+    string,
+    ReadonlyArray<HunkRange>
+  >;
   if (Array.isArray(data)) {
-    for (const row of data) {
+    for (const row of data as readonly JsonValue[]) {
       if (!(row instanceof JsonObject)) continue;
       const filename = row.get('filename');
       const status = row.get('status');
@@ -1426,12 +1439,19 @@ export function loadFindings(text: string): Finding[] {
       path: typeof fileName === 'string' ? fileName : null,
       start: lineValue(event.get('startLine')),
       end: lineValue(event.get('endLine')),
-      title: pythonStrip(pythonStr(event.has('title') ? (event.get('title') as JsonValue) : '')),
+      // Python `str(event.get("title") or "")`: falsy values fall through.
+      title: pythonStrip(
+        pythonStr(
+          event.has('title') && pythonTruthy(event.get('title'))
+            ? (event.get('title') as JsonValue)
+            : '',
+        ),
+      ),
       text: pythonStrip(
         pythonStr(
           event.has('comment') && pythonTruthy(event.get('comment'))
             ? (event.get('comment') as JsonValue)
-            : event.has('title')
+            : event.has('title') && pythonTruthy(event.get('title'))
               ? (event.get('title') as JsonValue)
               : '',
         ),
