@@ -248,21 +248,29 @@ describe('makeGitleaksDefaultsScanner', () => {
     { component: 'staged', text: 'single line\n', path: 'b.txt' },
   ];
 
-  function gitleaksEffects(exitCode: number, report: unknown, reportUnreadable = false) {
+  function gitleaksEffects(
+    exitCode: number | null,
+    report: unknown,
+    reportUnreadable = false,
+    opts: { writeReport?: boolean; timedOut?: boolean } = {},
+  ) {
     const dirs: string[] = [];
     const removed: string[] = [];
+    const { writeReport = true, timedOut = false } = opts;
     return {
       dirs,
       removed,
       runCommand: async (_command: string, args: readonly string[]) => {
-        const reportPath = args[args.indexOf('--report-path') + 1];
-        const { writeFile } = await import('node:fs/promises');
-        await writeFile(
-          String(reportPath),
-          reportUnreadable ? 'not json' : JSON.stringify(report),
-          'utf8',
-        );
-        return { exitCode, stdout: '', stderr: '', timedOut: false };
+        if (writeReport) {
+          const reportPath = args[args.indexOf('--report-path') + 1];
+          const { writeFile } = await import('node:fs/promises');
+          await writeFile(
+            String(reportPath),
+            reportUnreadable ? 'not json' : JSON.stringify(report),
+            'utf8',
+          );
+        }
+        return { exitCode, stdout: '', stderr: '', timedOut };
       },
       makeScratchDir: async (prefix: string) => {
         const { mkdtemp } = await import('node:fs/promises');
@@ -380,8 +388,40 @@ describe('makeGitleaksDefaultsScanner', () => {
   test('exit 1 with an unreadable report is a fault (a claim without evidence cannot gate)', async () => {
     const effects = gitleaksEffects(1, [], true);
     await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
-      /unreadable report/,
+      /no readable report/,
     );
+  });
+
+  test('exit 0 with a MISSING report is a fault — a clean verdict without evidence cannot gate (#1187)', async () => {
+    const effects = gitleaksEffects(0, [], false, { writeReport: false });
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
+      /no readable report.*exit 0/,
+    );
+  });
+
+  test('exit 0 with an UNPARSEABLE report is a fault, never clean (#1187)', async () => {
+    const effects = gitleaksEffects(0, [], true);
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
+      /no readable report/,
+    );
+  });
+
+  test('a TIMEOUT with exit 0 and a clean report is a fault — the scan did not complete (#1187)', async () => {
+    const effects = gitleaksEffects(0, [], false, { timedOut: true });
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(/timed out/);
+  });
+
+  test('a REAL timeout (exit null, killed) names the timeout, not the exit guard (#1562 P3)', async () => {
+    const effects = gitleaksEffects(null, [], false, { timedOut: true });
+    let message = '';
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(/./);
+    try {
+      await makeGitleaksDefaultsScanner(effects)(components);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/gitleaks timed out after/);
+    expect(message).not.toMatch(/failed to run/);
   });
 
   test('any other exit code is a run fault (never uploaded unscanned)', async () => {
@@ -413,7 +453,14 @@ describe('makeGitleaksDefaultsScanner', () => {
 
 describe('checkScannerFor', () => {
   const effects = {
-    runCommand: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+    // A real clean gitleaks run always writes its (empty) report: the stub
+    // does the same, so the fail-closed report check sees a legitimate clean.
+    runCommand: async (_command: string, args: readonly string[]) => {
+      const reportPath = args[args.indexOf('--report-path') + 1];
+      const { writeFile } = await import('node:fs/promises');
+      await writeFile(String(reportPath), '[]', 'utf8');
+      return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+    },
     makeScratchDir: async () => mkdtempSync(join(tmpdir(), 'fake-check-scanner-')),
     removeScratchDir: async () => undefined,
   };
