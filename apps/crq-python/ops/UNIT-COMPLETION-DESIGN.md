@@ -19,11 +19,11 @@ Evidence must bind:
   `node:<source-sha>`.
 * **Selected identity**: the installed service SHA-256 equals the expected
   rendered service digest, and the evidence carries the selected source commit
-  and template blob. Node also carries the whole-artifact content digest,
-  observed artifact content digest, artifact source SHA and `crq.js` digest.
-  The adapter is responsible for
-  re-rendering and verifying the artifact tree against the manifest; this
-  provider requires the selected values and rejects a bare current-file echo.
+  and template blob. Node also carries the verified observed whole-artifact
+  content digest, artifact source SHA and `crq.js` digest. The adapter is
+  responsible for re-rendering and verifying the artifact tree against the
+  manifest; this provider requires the selected values and rejects a bare
+  current-file echo.
 * **Invocation**: `systemctl show` `InvocationID` is 32 lowercase hex, is not
   the baseline invocation, and is not already returned.
 * **Sequence**: `ExecMainExitTimestampMonotonic` is a `CLOCK_MONOTONIC`
