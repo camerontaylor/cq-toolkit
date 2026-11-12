@@ -249,7 +249,7 @@ describe('makeGitleaksDefaultsScanner', () => {
   ];
 
   function gitleaksEffects(
-    exitCode: number,
+    exitCode: number | null,
     report: unknown,
     reportUnreadable = false,
     opts: { writeReport?: boolean; timedOut?: boolean } = {},
@@ -409,6 +409,19 @@ describe('makeGitleaksDefaultsScanner', () => {
   test('a TIMEOUT with exit 0 and a clean report is a fault — the scan did not complete (#1187)', async () => {
     const effects = gitleaksEffects(0, [], false, { timedOut: true });
     await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(/timed out/);
+  });
+
+  test('a REAL timeout (exit null, killed) names the timeout, not the exit guard (#1562 P3)', async () => {
+    const effects = gitleaksEffects(null, [], false, { timedOut: true });
+    let message = '';
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(/./);
+    try {
+      await makeGitleaksDefaultsScanner(effects)(components);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/gitleaks timed out after/);
+    expect(message).not.toMatch(/failed to run/);
   });
 
   test('any other exit code is a run fault (never uploaded unscanned)', async () => {
