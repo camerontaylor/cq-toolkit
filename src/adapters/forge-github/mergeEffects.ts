@@ -28,6 +28,7 @@
 // the bin configurable per opts. No new dependencies.
 import { mkdir } from 'node:fs/promises';
 import { dirname, join, resolve as pathResolve } from 'node:path';
+import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 import type { GhFn, GhResult } from './gh.js';
 import { makeGhRunner } from './gh.js';
 
@@ -112,13 +113,19 @@ const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
  *   gh pr edit <n> --base <base>              — the retarget
  *   gh pr view <n> --json baseRefName         — the base-ref read
  *       (review-debt #193; the read-only forge-metadata probe)
- *   diff --no-color --unified=0 <sha> <sha>   — the READ-ONLY patch read
+ *   diff <HARDENED_DIFF_FLAGS> --unified=0 <sha> <sha>
+ *                                             — the READ-ONLY patch read
  *       (issue #1193: the conflict resolver's pre-push denylist scan).
- *       EXACT arity: the two fixed flags, then both endpoints as FULL
- *       40-hex commit shas — the gate derives them from validateRef
- *       answers, never from plan or agent input, so no refname or
- *       revision expression can ride this shape (a short sha, a range,
- *       or any flag is refused as an unknown shape).
+ *       The hardened flags (shared/gitHarden.ts) disable the
+ *       repository-configured diff drivers/textconv a hostile
+ *       .gitattributes could select to hide content (review P1, PR
+ *       #1628), force binary content to be diffed as text, and pin the
+ *       a/ b/ header prefixes. EXACT arity: the pinned flag list, then
+ *       both endpoints as FULL 40-hex commit shas — the gate derives
+ *       them from validateRef answers, never from plan or agent input,
+ *       so no refname or revision expression can ride this shape (a
+ *       short sha, a range, or any other flag is refused as an unknown
+ *       shape).
  * opts.protectedBranch (default 'main') names the branch pushes may never
  * land on, under either spelling.
  */
@@ -227,18 +234,24 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
       return args;
     }
     case 'diff': {
-      // The read-only patch read (issue #1193): EXACT shape — two fixed
-      // flags, then two full 40-hex shas, nothing else. Both endpoints are
-      // validateRef-derived shas, so this shape admits no refname, no
-      // range expression, and no flag injection; anything else is an
-      // undocumented shape like any other.
+      // The read-only patch read (issue #1193; review P1 on PR #1628): the
+      // EXACT shape is HARDENED_DIFF_FLAGS + --unified=0, then two full
+      // 40-hex shas, nothing else. The hardened flags are load-bearing for
+      // the gate: --no-ext-diff and --no-textconv disable the
+      // repository-configured diff PROGRAMS a hostile .gitattributes could
+      // select to substitute harmless text (or empty output) for the real
+      // bytes, --text forces binary content to be diffed as text, and the
+      // pinned a/ b/ prefixes pin the header shape the scanner's parser
+      // keys on. Both endpoints are validateRef-derived shas, so this
+      // shape admits no refname, no range expression, and no flag
+      // injection; anything else is an undocumented shape like any other.
+      const expected = [...HARDENED_DIFF_FLAGS, '--unified=0'];
       const tail = rest.slice(1);
       if (
-        tail.length !== 4 ||
-        tail[0] !== '--no-color' ||
-        tail[1] !== '--unified=0' ||
-        !/^[0-9a-f]{40}$/i.test(tail[2] ?? '') ||
-        !/^[0-9a-f]{40}$/i.test(tail[3] ?? '')
+        tail.length !== expected.length + 2 ||
+        expected.some((flag, index) => tail[index] !== flag) ||
+        !/^[0-9a-f]{40}$/i.test(tail[expected.length] ?? '') ||
+        !/^[0-9a-f]{40}$/i.test(tail[expected.length + 1] ?? '')
       ) {
         throw unknown();
       }
@@ -388,7 +401,10 @@ export interface MergeEffects {
   /**
    * The READ-ONLY zero-context unified patch between two FULL commit shas
    * (issue #1193 — the resolver's pre-push scan input): `git -C <repoRoot>
-   * diff --no-color --unified=0 <from> <to>`, the patch on stdout.
+   * diff <HARDENED_DIFF_FLAGS> --unified=0 <from> <to>` (no external diff
+   * driver, no textconv — repository-configured diff programs cannot hide
+   * or substitute the bytes the gate must scan; review P1, PR #1628), the
+   * patch on stdout.
    * Resolves with the exit code (GhResult shape); nonzero means the patch
    * is UNAVAILABLE and the caller must treat the change as unscannable —
    * never scan a partial patch, never push unscanned. Both endpoints are
@@ -515,9 +531,10 @@ export interface RealMergeEffectsOpts {
  *                   base-ref read — review-debt #193)
  *   - pushRef:      `git -C <fromPath> push origin <src:dst>` (an explicit
  *                   refspec — round 2: bare/symbolic forms are refused)
- *   - diffPatch:    `git -C <repoRoot> diff --no-color --unified=0 <from>
- *                   <to>` (both full 40-hex shas — the read-only patch
- *                   read behind the resolver's pre-push scan, #1193)
+ *   - diffPatch:    `git -C <repoRoot> diff <HARDENED_DIFF_FLAGS>
+ *                   --unified=0 <from> <to>` (both full 40-hex shas — the
+ *                   hardened read-only patch read behind the resolver's
+ *                   pre-push scan, #1193)
  */
 export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   // Absolute everywhere (prWorktree doctrine): mkdir resolves from the
@@ -661,11 +678,13 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     git(['-C', fromPath, 'push', 'origin', ref]);
 
   // The read-only patch read (issue #1193): the argv shape is pinned by
-  // safeArgs to the two fixed flags plus two 40-hex shas — the guard is
-  // the only reason this call is safe for endpoint arguments the op
-  // computed itself.
+  // safeArgs to HARDENED_DIFF_FLAGS + --unified=0 plus two 40-hex shas —
+  // the guard is the only reason this call is safe for endpoint arguments
+  // the op computed itself. The hardened flags keep a repo-controlled
+  // .gitattributes diff driver or textconv from substituting (or
+  // emptying) the patch text the gate scans (review P1, PR #1628).
   const diffPatch = (from: string, to: string): Promise<GhResult> =>
-    git(['-C', repoRoot, 'diff', '--no-color', '--unified=0', from, to]);
+    git(['-C', repoRoot, 'diff', ...HARDENED_DIFF_FLAGS, '--unified=0', from, to]);
 
   return {
     validateRef,

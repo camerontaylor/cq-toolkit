@@ -398,6 +398,7 @@
   "test/ops/merge/classifyPrs.objections.test.ts": "pure",
   "test/ops/merge/classifyPrs.rows.test.ts": "pure",
   "test/ops/merge/classifyPrs.temporal.test.ts": "pure",
+  "test/ops/merge/diffPatch.hardened.test.ts": "process",
   "test/ops/merge/executeMerges.cascade.test.ts": "process",
   "test/ops/merge/executeMerges.diagnose.test.ts": "process",
   "test/ops/merge/executeMerges.happy-path.test.ts": "process",

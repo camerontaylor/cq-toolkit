@@ -9,6 +9,7 @@ import {
   safeArgs,
   safeRunner,
 } from '../../../src/adapters/forge-github/mergeEffects.js';
+import { HARDENED_DIFF_FLAGS } from '../../../src/shared/gitHarden.js';
 import { OK, sha } from './executeMerges.helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -463,51 +464,44 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
 describe('safeArgs round-1193: the read-only diff shape (the resolver pre-push scan)', () => {
   const from = sha('a');
   const to = sha('b');
+  // The hardened flag list is load-bearing (review P1, PR #1628): the
+  // pinned set is the shape, asserted verbatim so the gate cannot drift
+  // off it.
+  const FLAGS = [...HARDENED_DIFF_FLAGS, '--unified=0'];
+  const legal = (): string[] => ['-C', '/repo', 'diff', ...FLAGS, from, to];
 
-  test('the EXACT shape passes — the two fixed flags, then two full 40-hex shas', () => {
-    expect(safeArgs(['-C', '/repo', 'diff', '--no-color', '--unified=0', from, to])).toEqual([
-      '-C',
-      '/repo',
-      'diff',
-      '--no-color',
-      '--unified=0',
-      from,
-      to,
-    ]);
+  test('the EXACT shape passes — the hardened flags verbatim, then two full 40-hex shas', () => {
+    expect(safeArgs(legal())).toEqual(['-C', '/repo', 'diff', ...FLAGS, from, to]);
+    // The hardening is present, by name (review P1, PR #1628).
+    expect(legal()).toContain('--no-ext-diff');
+    expect(legal()).toContain('--no-textconv');
   });
 
   test('every deviation is an unknown shape — shas must be FULL hex, flags fixed, arity exact', () => {
+    const base = ['diff', ...FLAGS] as string[];
     // A short sha or a revision expression can never ride the shape.
-    expect(() => safeArgs(['diff', '--no-color', '--unified=0', 'abc123', to])).toThrow(
-      UnsafeMergeArgsError,
-    );
-    expect(() => safeArgs(['diff', '--no-color', '--unified=0', `${from}..${to}`, to])).toThrow(
-      UnsafeMergeArgsError,
-    );
-    expect(() => safeArgs(['diff', '--no-color', '--unified=0', from, 'refs/heads/feat'])).toThrow(
-      UnsafeMergeArgsError,
-    );
-    // Flag drift, in either order or either count.
-    expect(() => safeArgs(['diff', '--unified=0', '--no-color', from, to])).toThrow(
-      UnsafeMergeArgsError,
-    );
-    expect(() => safeArgs(['diff', '--no-color', from, to])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['diff', '--no-color', '--unified=0', '--stat', from, to])).toThrow(
+    expect(() => safeArgs([...base, 'abc123', to])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs([...base, `${from}..${to}`, to])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs([...base, from, 'refs/heads/feat'])).toThrow(UnsafeMergeArgsError);
+    // Flag drift: reordered, dropped, or extra.
+    const reordered = ['diff', FLAGS[1] as string, FLAGS[0] as string, ...FLAGS.slice(2), from, to];
+    expect(() => safeArgs(reordered)).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['diff', ...FLAGS.slice(1), from, to])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs([...base, '--stat', from, to])).toThrow(UnsafeMergeArgsError);
+    // The historical pre-hardening argv (--no-color + --unified=0 only) is
+    // refused — the old shape must not keep passing beside the new one.
+    expect(() => safeArgs(['diff', '--no-color', '--unified=0', from, to])).toThrow(
       UnsafeMergeArgsError,
     );
     // Arity drift.
-    expect(() => safeArgs(['diff', '--no-color', '--unified=0', from])).toThrow(
-      UnsafeMergeArgsError,
-    );
+    expect(() => safeArgs(['diff', ...FLAGS, from])).toThrow(UnsafeMergeArgsError);
     expect(() => safeArgs(['diff'])).toThrow(UnsafeMergeArgsError);
     // A mutation vocabulary is still refused: diff is READ-ONLY by shape,
     // and no flag can turn it otherwise.
-    expect(() =>
-      safeArgs(['diff', '--no-color', '--unified=0', '--output=/tmp/x', from, to]),
-    ).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs([...base, '--output=/tmp/x', from, to])).toThrow(UnsafeMergeArgsError);
   });
 
-  test('realMergeEffects.diffPatch routes the exact argv at the repo root (injected runner — zero processes, no fs)', async () => {
+  test('realMergeEffects.diffPatch routes the exact hardened argv at the repo root (injected runner — zero processes, no fs)', async () => {
     const gitCalls: string[][] = [];
     const effects = realMergeEffects({
       repoRoot: '/repo',
@@ -518,6 +512,6 @@ describe('safeArgs round-1193: the read-only diff shape (the resolver pre-push s
     });
     const result = await effects.diffPatch(from, to);
     expect(result).toEqual({ code: 0, stdout: 'diff --git a/x b/x\n', stderr: '' });
-    expect(gitCalls).toEqual([['-C', '/repo', 'diff', '--no-color', '--unified=0', from, to]]);
+    expect(gitCalls).toEqual([['-C', '/repo', 'diff', ...FLAGS, from, to]]);
   });
 });

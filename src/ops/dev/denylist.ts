@@ -343,15 +343,97 @@ export function scanComponents(
  * terminator, any other byte stays in the payload); paths come from the
  * `---`/`+++` header lines, a trailing TAB stripped (git appends one when
  * a path contains spaces), `/dev/null` marking the absent side of an
- * add/delete. FAULT-CLOSED: a body '+' line before any path is attributed
- * throws naming `source` — a line the parser cannot attribute is
- * UNSCANNABLE content, and unscannable content must fault, never pass
- * silently. Lines the parser reads but carries no '+' (headers, context,
- * removed lines, hunk prologue) are skipped by construction, not ignored
- * evidence. Binary files carry no '+' lines and yield no component — a
- * recorded residual risk of patch-based scanning, shared with the dev
- * lane.
+ * add/delete. Git's C-quoted pathname form (core.quotePath —
+ * `"b/config/s\303\251cret.txt"`) is DECODED before the a/ b/ side prefix
+ * is stripped, so path-scoped rules see the real path; an undecodable
+ * pathname throws (review P2, PR #1628). FAULT-CLOSED: a body '+' line
+ * before any path is attributed throws naming `source` — a line the
+ * parser cannot attribute is UNSCANNABLE content, and unscannable content
+ * must fault, never pass silently. Lines the parser reads but carries no
+ * '+' (headers, context, removed lines, hunk prologue) are skipped by
+ * construction, not ignored evidence. A patch produced WITHOUT the
+ * hardened diff flags leaves binary files with no '+' lines and no
+ * component — the publication gate's caller therefore feeds this parser a
+ * HARDENED patch (`--text`, shared/gitHarden.ts), which diffs binary
+ * content as text and lets the scan see the bytes.
  */
+/**
+ * Git's C-quote letter escapes (`quote.c`'s cq_lookup): `\\`, `\"`, and
+ * the C control-letter forms; every other non-printable or non-ASCII byte
+ * is `\NNN` octal.
+ */
+const GIT_C_ESCAPES: Record<string, number> = {
+  a: 0x07,
+  b: 0x08,
+  f: 0x0c,
+  n: 0x0a,
+  r: 0x0d,
+  t: 0x09,
+  v: 0x0b,
+  '\\': 0x5c,
+  '"': 0x22,
+};
+
+/**
+ * Decode Git's C-quoted pathname form (`core.quotePath`, review P2 on PR
+ * #1628): git wraps unusual pathnames in double quotes and escapes
+ * non-ASCII and control bytes as `\NNN` octal (plus the C letter
+ * escapes) — the raw quoted string is NOT the path, and feeding it to the
+ * scan verbatim would let a path-scoped rule (`^config/`) miss content
+ * under an unusual-but-scoped name. Unquoted lines pass through as-is
+ * (quotePath=false repos emit raw UTF-8, which the patch already carries
+ * as text). A quoted form that does not decode cleanly — an unknown
+ * escape, a stray high byte, bytes that are not valid UTF-8 — THROWS
+ * naming `source`: a path the parser cannot name is a component the gate
+ * cannot attribute, and unattributable content must fault, never pass
+ * under a mangled name.
+ */
+function decodeGitQuotedPath(raw: string, source: string): string {
+  if (!raw.startsWith('"') || !raw.endsWith('"')) return raw;
+  const inner = raw.slice(1, -1);
+  const bytes: number[] = [];
+  let index = 0;
+  while (index < inner.length) {
+    const ch = inner[index] as string;
+    if (ch !== '\\') {
+      const code = inner.codePointAt(index) as number;
+      // A literal high codepoint inside the quotes is not a form git
+      // produces — refuse it rather than guess a truncation.
+      if (code > 0x7f) {
+        throw new Error(
+          `${source}: undecodable git pathname escape in ${JSON.stringify(raw)} — refusing the unattributable component`,
+        );
+      }
+      bytes.push(code);
+      index += 1;
+      continue;
+    }
+    const next = inner[index + 1] as string | undefined;
+    const letter = next !== undefined ? GIT_C_ESCAPES[next] : undefined;
+    if (letter !== undefined) {
+      bytes.push(letter);
+      index += 2;
+      continue;
+    }
+    const octal = /^\\([0-7]{3})/.exec(inner.slice(index));
+    if (octal !== null) {
+      bytes.push(parseInt(octal[1] as string, 8));
+      index += 4;
+      continue;
+    }
+    throw new Error(
+      `${source}: undecodable git pathname escape in ${JSON.stringify(raw)} — refusing the unattributable component`,
+    );
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(bytes));
+  } catch {
+    throw new Error(
+      `${source}: git pathname ${JSON.stringify(raw)} is not valid UTF-8 — refusing the unattributable component`,
+    );
+  }
+}
+
 export function addedLineComponents(patch: string, source: string): ScanComponentInput[] {
   let path: string | undefined;
   let inHeader = false;
@@ -369,7 +451,7 @@ export function addedLineComponents(patch: string, source: string): ScanComponen
     }
     if (inHeader) {
       if (line.startsWith('+++ ') || line.startsWith('--- ')) {
-        const candidate = line.slice(4).replace(/\t.*$/, '');
+        const candidate = decodeGitQuotedPath(line.slice(4).replace(/\t.*$/, ''), source);
         path = candidate === '/dev/null' ? undefined : candidate.replace(/^[ab]\//, '');
       }
       continue;

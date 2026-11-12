@@ -885,7 +885,13 @@ export function makeResolveConflictOp(
           // sha-moved check (that check's attribution limit — a moved
           // sha never proved the AGENT moved it — is gone with the
           // self-reported push).
-          const refspec = `${resolution.sha}:refs/heads/${input.headBranch}`;
+          // The destination is the head branch's BARE form: the input
+          // schema admits the refs/heads/<name> spelling (a conservative
+          // refname), and a prefix-blind concatenation would publish
+          // refs/heads/refs/heads/<name> — a different branch — while
+          // reporting ok (review P2, PR #1628). Exactly one leading
+          // refs/heads/ is stripped, per stripRefsHeads's contract.
+          const refspec = `${resolution.sha}:refs/heads/${stripRefsHeads(input.headBranch)}`;
           let pushed: GhResult;
           try {
             pushed = await effects.pushRef(refspec, worktree);

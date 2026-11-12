@@ -75,6 +75,23 @@ describe('the publication gate (issue #1193): scan BEFORE any push, fail closed'
     ]);
   });
 
+  test('a PREFIXED headBranch (refs/heads/feature) publishes the bare branch — never refs/heads/refs/heads/…', async () => {
+    // Review P2 (PR #1628): the input schema admits the refs/heads/<name>
+    // spelling, and a prefix-blind refspec would publish a DIFFERENT
+    // branch while returning ok. Exactly one leading refs/heads/ is
+    // stripped before the destination is constructed.
+    const effects = new FakeMergeEffects();
+    const driver = new FakeDriver(completed({ decision: 'acted', summary: 'ok' }));
+    const op = actedOp(driver, effects, scanClean);
+
+    const result = await op({ ...baseInput(), headBranch: 'refs/heads/feature' });
+    expect(result.status).toBe('ok');
+    expect(effects.calls).toContain(
+      `push:${String(effects.resolutionSha)}:refs/heads/feature@/wt/pr-44`,
+    );
+    expect(effects.calls.some((call) => call.includes('refs/heads/refs/heads/'))).toBe(false);
+  });
+
   test('NO PUSH BEFORE A SUCCESSFUL SCAN: the scan runs before the push, every time', async () => {
     const effects = new FakeMergeEffects();
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'ok' }));

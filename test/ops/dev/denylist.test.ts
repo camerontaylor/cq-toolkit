@@ -667,3 +667,71 @@ describe('addedLineComponents — one component per changed path of ADDED lines'
     expect(() => addedLineComponents('+early line', 'gate')).toThrow(/no attributed path/);
   });
 });
+
+describe('addedLineComponents — git C-quoted pathnames (core.quotePath, review P2 PR #1628)', () => {
+  // A non-ASCII path as git renders it under the default core.quotePath:
+  // the WHOLE b/-prefixed path is wrapped in quotes and the é is \303\251.
+  const QUOTED_PATCH = [
+    'diff --git "a/config/s\\303\\251cret.txt" "b/config/s\\303\\251cret.txt"',
+    '--- "a/config/s\\303\\251cret.txt"',
+    '+++ "b/config/s\\303\\251cret.txt"',
+    '@@ -0,0 +1,1 @@',
+    '+const token = "sk-live-quoted";',
+  ].join('\n');
+
+  test('a quoted non-ASCII path DECODES, so a ^config/ path-scoped rule hits it', () => {
+    const components = addedLineComponents(QUOTED_PATCH, 'gate');
+    expect(components).toEqual([
+      {
+        component: 'config/sécret.txt',
+        text: 'const token = "sk-live-quoted";',
+        path: 'config/sécret.txt',
+      },
+    ]);
+    // The end-to-end point of the decode: a rule scoped to ^config/ —
+    // which MISSES the raw quoted string — fires on the decoded path.
+    const rules = [{ id: 'config-token', description: 'd', regex: 'sk-live-', path: '^config/' }];
+    expect(scanComponents(components, rules)).toEqual([
+      {
+        component: 'config/sécret.txt',
+        hits: [{ ruleId: 'config-token', lines: [1] }],
+      },
+    ]);
+  });
+
+  test('git letter escapes decode (\\t as \\09 in octal form and the C letters)', () => {
+    // git escapes tab as \011 octal in quoted paths, backslash as \\.
+    const patch = [
+      'diff --git "a/config/we\\151rd\\\\name.md" "b/config/we\\151rd\\\\name.md"',
+      '--- "a/config/we\\151rd\\\\name.md"',
+      '+++ "b/config/we\\151rd\\\\name.md"',
+      '@@ -0,0 +1,1 @@',
+      '+body',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([
+      { component: 'config/weird\\name.md', text: 'body', path: 'config/weird\\name.md' },
+    ]);
+  });
+
+  test('FAULT-CLOSED: an unknown escape sequence throws — the component is refused, never mangled', () => {
+    const patch = [
+      'diff --git a/config/x b/config/x',
+      '--- a/config/x',
+      '+++ "b/config/\\qbad.txt"',
+      '@@ -0,0 +1,1 @@',
+      '+body',
+    ].join('\n');
+    expect(() => addedLineComponents(patch, 'gate')).toThrow(/undecodable git pathname escape/);
+  });
+
+  test('FAULT-CLOSED: octal bytes that are not valid UTF-8 throw', () => {
+    const patch = [
+      'diff --git a/config/x "b/config/bad\\377\\376.txt"',
+      '--- a/config/x',
+      '+++ "b/config/bad\\377\\376.txt"',
+      '@@ -0,0 +1,1 @@',
+      '+body',
+    ].join('\n');
+    expect(() => addedLineComponents(patch, 'gate')).toThrow(/not valid UTF-8/);
+  });
+});
