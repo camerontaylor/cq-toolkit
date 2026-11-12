@@ -1923,8 +1923,17 @@ def _error_artifact(kind: str, subcommand: str, message: str, exit_code: int) ->
                       "message": message, "exitCode": exit_code}}
 
 
+class _UsageError(Exception):
+    """Argument error raised instead of argparse's stderr-and-exit path."""
+
+
+class _JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise _UsageError(message)
+
+
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _JsonArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True, type=Path,
                         help="deployment checkout root (full monorepo)")
     parser.add_argument("--overlay", required=True, type=Path,
@@ -1954,9 +1963,15 @@ def main(argv=None) -> int:
                              "polls --first-tick-timeout-seconds instead)")
     health.add_argument("--first-tick-timeout-seconds", type=int, default=1500,
                         help="first completed-tick wait (default: 20-minute cadence plus 5-minute slack)")
-    args = parser.parse_args(argv)
-    if args.operation == "health" and (args.first_tick_timeout_seconds < 0 or args.interval_seconds < 0):
-        parser.error("health wait intervals must be nonnegative")
+    try:
+        args = parser.parse_args(argv)
+        if args.operation == "health" and (args.first_tick_timeout_seconds < 0 or args.interval_seconds < 0):
+            raise _UsageError("health wait intervals must be nonnegative")
+    except _UsageError as exc:
+        print(json.dumps(_error_artifact("usage", "", str(exc), 2),
+                         indent=2, sort_keys=True))
+        print("usage: " + str(exc), file=sys.stderr)
+        return 2
 
     root = args.root.resolve()
     helper_path = args.helper or (root / "apps/crq-python/ops/prepare-host.py")
