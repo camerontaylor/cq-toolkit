@@ -529,6 +529,32 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     ]);
   });
 
+  test('round-4: the fetch shape is FLAG-FREE and GLOB-FREE — the remote slot included', () => {
+    // A flag with no ':' is not a refspec, so the destination loop below
+    // never saw it: unconditional refusal on sight.
+    expect(() => safeArgs(['fetch', 'origin', '--upload-pack=<cmd>'])).toThrow(
+      /flags and globs are not part of the documented fetch shape/,
+    );
+    // The flag lands in the remote slot — still refused.
+    expect(() => safeArgs(['fetch', '--upload-pack=<cmd>', 'origin', 'x'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['-C', '/repo', 'fetch', '-q', 'origin', 'main'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    // A glob names no single destination, so the protected-branch check
+    // cannot see the forced update of main it authorizes.
+    expect(() => safeArgs(['fetch', 'origin', '+refs/heads/*:refs/heads/*'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['fetch', 'origin', 'refs/heads/main?'])).toThrow(UnsafeMergeArgsError);
+    // The executor's own fetch (and the flag-free plain forms) stay legal.
+    expect(
+      safeArgs(['-C', '/repo', 'fetch', 'origin', '+refs/pull/7/head:refs/pull/7/head']),
+    ).toEqual(['-C', '/repo', 'fetch', 'origin', '+refs/pull/7/head:refs/pull/7/head']);
+    expect(safeArgs(['fetch', 'origin', 'main'])).toEqual(['fetch', 'origin', 'main']);
+  });
+
   test('round-3: worktree list/remove are flag-free — --force is refused', () => {
     expect(() => safeArgs(['worktree', 'remove', '--force', '/wt/pr-7'])).toThrow(
       /flags are not part of the documented worktree remove shape/,

@@ -173,7 +173,10 @@ class SubprocessSystemd:
         return number
 
     def _unit(self, unit):
-        if not isinstance(unit, str) or completion.UNIT_RE.fullmatch(unit) is None:
+        # ``show`` is the adapter's read port: it observes the unit under test
+        # and its timer/path activators, so it uses the read grammar.
+        if not isinstance(unit, str) \
+                or completion.READ_UNIT_RE.fullmatch(unit) is None:
             raise LiveBindingRefused("invalid unit name")
 
     def _execute(self, command, *, timeout):
@@ -462,7 +465,14 @@ class SubprocessSystemd:
                             if match is None:
                                 continue
                             for name in CRQ_NAME_RE.findall(match.group("value")):
-                                if name not in expected or not source_declared:
+                                # An undeclared source is foreign only when it
+                                # names an expected unit; a declared source is
+                                # foreign when it names a unit outside the set.
+                                if source_declared:
+                                    outside = name not in expected
+                                else:
+                                    outside = name in expected
+                                if outside:
                                     foreign.append(
                                         "%s:%d: %s names %s"
                                         % (path, number,

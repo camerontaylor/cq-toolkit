@@ -15,8 +15,9 @@ renderer, switcher or scheduler. The controller's additions:
     ``alive``/``ambiguous`` items block the controller and require the owner
     to drain them through the documented author-recovery path;
   * preservation invariants verified before and after the helper runs:
-    queue.json, receipts/claims, author quota history and the heartbeat are
-    byte-identical (never restored, rewritten or migrated by the controller);
+    queue.json (items, starts, author_requests, author quota history) and
+    the runner's completion heartbeat are byte-identical (never restored,
+    rewritten or migrated by the controller);
   * operator-approved activation: the controller renders/installs nothing and
     starts nothing; the runbook's owner steps start units;
   * two advancing completed-tick health observations AFTER owner activation,
@@ -134,8 +135,11 @@ RUN_ID_RE = re.compile(
 
 # Queue surfaces the controller must observe and preserve (never rewrite).
 # The queue file is the single ledger: items, starts, author_requests and
-# author_observations all persist inside queue.json; the heartbeat mirrors the
-# completed-tick timestamp for the watchdog. Keys are state-relative names.
+# author_observations all persist inside queue.json; the completion heartbeat
+# mirrors the completed-tick timestamp for the watchdog. queue.json resolves
+# under the state directory; the heartbeat is hashed at the runner's actual
+# WATCHDOG_HOME path (Effects.completion_heartbeat_path) — the same file
+# read_completion_heartbeat reads, never a state-directory copy nothing writes.
 PRESERVED = {
     "queue.json": "queue, reservations, author quota history",
     "heartbeat.json": "completed-tick heartbeat",
@@ -210,18 +214,27 @@ class Effects:
     def exists(self, rel: str) -> bool:
         return (self.state_dir() / rel).exists()
 
+    def completion_heartbeat_path(self) -> Path:
+        """The runner's completion heartbeat's exact path:
+        WATCHDOG_HOME/heartbeat.json ($XDG_STATE_HOME/crq or
+        ~/.local/state/crq) — where crq.py write_heartbeat atomically
+        replaces the completed-tick marker. On the seam so injected Effects
+        keep control of the location; preservation digests hash this same
+        file read_completion_heartbeat reads."""
+        home = Path(os.environ.get("XDG_STATE_HOME",
+                                   str(Path.home() / ".local/state"))) / "crq"
+        return home / "heartbeat.json"
+
     def read_completion_heartbeat(self):
         """The runner's completion heartbeat (crq.py write_heartbeat), read
-        from its actual WATCHDOG_HOME — $XDG_STATE_HOME/crq or
-        ~/.local/state/crq — never from the checkout's queue/state saves.
+        from its actual WATCHDOG_HOME — completion_heartbeat_path, never the
+        checkout's queue/state saves.
 
         Returns None only when no heartbeat exists yet; one that is present
         but unreadable or not a JSON object refuses assessment.
         """
-        home = Path(os.environ.get("XDG_STATE_HOME",
-                                   str(Path.home() / ".local/state"))) / "crq"
         try:
-            raw = (home / "heartbeat.json").read_text()
+            raw = self.completion_heartbeat_path().read_text()
         except FileNotFoundError:
             return None
         except OSError as exc:
@@ -269,12 +282,19 @@ class Effects:
 
         self.state_dir().mkdir(parents=True, exist_ok=True)
         path = self.state_dir() / LOCK_NAME
-        with path.open("a") as handle:
+        # An explicit mode, never the ambient umask: the live binding refuses
+        # a group- or world-writable lock, so a writer that trusts a 002 umask
+        # can create a lock its own reader rejects.
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(descriptor, "a") as handle:
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as exc:
                 raise Refused("controller lock busy: another controller run holds "
                               + LOCK_NAME + " (" + str(exc) + ")") from None
+            # O_CREAT never narrows an existing file: normalise a lock this
+            # controller owns (a former 0664 umask artefact) to 0600.
+            os.chmod(path, 0o600)
             yield
 
     # -- journal ----------------------------------------------------------
@@ -328,9 +348,7 @@ def captured_state(effects: Effects) -> dict:
         state["prior_config_sha256"] = _sha256(effects.config_path)
     except OSError:
         state["prior_config_sha256"] = None
-    for rel in PRESERVED:
-        state["preserved/" + rel] = (_sha256(effects.state_dir() / rel)
-                                     if effects.exists(rel) else None)
+    state.update(preserved_digests(effects))
     state["checkout_status"] = effects.git("status", "--porcelain",
                                            "--untracked-files=all")
     state["units"] = effects.unit_digests()
@@ -354,9 +372,7 @@ def no_change_observation(effects: Effects, before: dict) -> dict:
                 "checkout_status": effects.git("status", "--porcelain",
                                                "--untracked-files=all"),
                 "units": effects.unit_digests()}
-    for rel in PRESERVED:
-        observed["preserved/" + rel] = (_sha256(effects.state_dir() / rel)
-                                        if effects.exists(rel) else None)
+    observed.update(preserved_digests(effects))
     expected = {"head": before.get("prior_head"),
                 "config_sha256": before.get("prior_config_sha256"),
                 "checkout_status": before.get("checkout_status"),
@@ -389,6 +405,25 @@ def helper_precheck(helper_module, root: Path, overlay: dict, target: str,
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def preserved_digests(effects: Effects) -> dict:
+    """sha256 of every PRESERVED surface, keyed "preserved/<name>", None when
+    that surface does not exist yet. queue.json is read state-relative; the
+    completion heartbeat is read from effects.completion_heartbeat_path() —
+    the exact file read_completion_heartbeat reads and crq.py replaces — so
+    the digests cover what the runner actually writes. A surface that exists
+    but cannot be read raises, never quietly digests as None.
+    """
+    digests: dict = {}
+    for rel in PRESERVED:
+        path = (effects.completion_heartbeat_path()
+                if rel == "heartbeat.json" else effects.state_dir() / rel)
+        try:
+            digests["preserved/" + rel] = _sha256(path)
+        except FileNotFoundError:
+            digests["preserved/" + rel] = None
+    return digests
 
 
 def read_queue(effects: Effects) -> dict:
@@ -557,9 +592,9 @@ def preservation_check(effects: Effects, before: dict) -> dict:
     the helper invocation. Any difference is a refused deployment (fail
     stopped, reason recorded)."""
     diffs = []
+    after = preserved_digests(effects)
     for rel in PRESERVED:
-        after = _sha256(effects.state_dir() / rel) if effects.exists(rel) else None
-        if after != before.get("preserved/" + rel):
+        if after["preserved/" + rel] != before.get("preserved/" + rel):
             diffs.append(rel)
     if diffs:
         raise Refused("preserved surfaces changed during deployment: "
@@ -1768,9 +1803,10 @@ def switch_unit(effects, adapter, unit, runtime):
 
 
 def prior_tag_for(effects: Effects, sha: str) -> str | None:
-    """The annotated crq-runner/ tag that peels to ``sha`` in this checkout,
-    or None when no such tag exists. Read-only; used to record the prior
-    target's own approval tag in the deploy journal."""
+    """The annotated crq-runner/ tag matching ``TAG_RE`` that peels to
+    ``sha`` in this checkout, or None when no such tag exists. Read-only;
+    used to record the prior target's own approval tag in the deploy
+    journal."""
     listing = effects.git("tag", "--list", "crq-runner/*",
                           "--format=%(refname:short) %(objecttype)")
     candidates = []
@@ -1779,6 +1815,8 @@ def prior_tag_for(effects: Effects, sha: str) -> str | None:
         if len(parts) != 2 or parts[1] != "tag":
             continue  # lightweight tags are not owner-approval artifacts
         tag = parts[0]
+        if not TAG_RE.fullmatch(tag):
+            continue  # off-shape names are not recordable prior_tag values
         if effects.git("rev-parse", "refs/tags/" + tag + "^{commit}") == sha:
             candidates.append(tag)
     if len(candidates) == 1:
@@ -1895,19 +1933,22 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
                           "provably read (explicit schema marker or author_* state "
                           "keys); operator recovery required (never restore old queue "
                           "snapshots or start incompatible binaries)")
+        runner_units_stopped(helper_module, effects.root)
+        drain = drain_check(effects, _runner_liveness(effects))
+        if not drain["drained"]:
+            raise Refused("cannot roll back with live/ambiguous reviews: "
+                          + json.dumps(drain["blocked"])[:400])
         # The journal predates any state written by the newly deployed runner.
-        # Recheck the live queue for the recorded prior reader under this lock.
+        # Recheck the live queue for the recorded prior reader under this lock,
+        # only after the units are stopped and drained: a tick still finishing
+        # before the fence could otherwise add author_* keys between this check
+        # and captured_state below.
         live_compatibility = compatibility_record(effects, record["prior_head"])
         if not rollback_compatible(live_compatibility):
             raise Refused("rollback disabled: current queue state the prior target "
                           "cannot provably read; operator recovery required "
                           "(never restore old queue snapshots or start "
                           "incompatible binaries)")
-        runner_units_stopped(helper_module, effects.root)
-        drain = drain_check(effects, _runner_liveness(effects))
-        if not drain["drained"]:
-            raise Refused("cannot roll back with live/ambiguous reviews: "
-                          + json.dumps(drain["blocked"])[:400])
         state = captured_state(effects)
         prior_tag = prior_tag_for(effects, state["prior_head"])
         overlay, raw = helper_module.load_overlay(overlay_path)

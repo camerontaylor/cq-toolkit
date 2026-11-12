@@ -392,7 +392,7 @@ def _prepare_case(spec):
             )
             job_bytes = bounded.job_path(root, job_id).read_bytes().decode()
             run = job_id[len("crq-"):-len("-F1")]
-            record = queue["items"][0]["repair_runs"][run]
+            record = copy.deepcopy(queue["items"][0]["repair_runs"][run])
             record_bytes = _dump(record)
             job = json.loads(job_bytes)
             first_calls = copy.deepcopy(calls)
@@ -423,7 +423,7 @@ def _prepare_case(spec):
                 "idempotent_git_calls": idempotent_calls,
                 "second_job_id": second,
                 "idempotent_job_bytes_unchanged": idempotent_bytes == job_bytes,
-                "idempotent_record_unchanged": record_after == record,
+                "idempotent_record_unchanged": _dump(record_after) == record_bytes,
                 "recovery_worktree": job.get("recovery_worktree", False),
                 "old_record_state": queue["items"][0]["repair_runs"][OLD_RUN]["state"],
                 "run_count": len(queue["items"][0]["repair_runs"]),

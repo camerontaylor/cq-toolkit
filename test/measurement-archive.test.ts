@@ -507,6 +507,36 @@ describe('M8a failure evidence', () => {
     expect(restored.files[0]?.reason).toContain('checksum');
   });
 
+  test('a hand-edited manifest entry without a pointer stays non-passing', async () => {
+    const base = await workspace();
+    const journal = join(base, 'journal');
+    await mkdir(journal, { recursive: true });
+    await writeFile(join(journal, 'evidence.ndjson'), '{"ok":true}\n');
+    const sessionIndexPath = join(base, 'session-index.json');
+    await writeFile(sessionIndexPath, '{"sessions":[]}\n');
+    const built = (await buildMeasurementBundle({
+      runId: 'run-m8a-no-pointer',
+      bundleRoot: join(base, 'bundles'),
+      roots: [{ name: 'fix', path: journal, files: ['evidence.ndjson'] }],
+      sessionIndexPath,
+    })) as { bundleDir: string; manifest: Manifest };
+    const manifestPath = join(built.bundleDir, 'manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Manifest;
+    // Hand-edited: the state still says present but the pointer is gone.
+    delete entryOf(manifest, 'fix', 'evidence.ndjson').pointer;
+    delete entryOf(manifest, 'session-index', 'session-index.json').pointer;
+    delete manifest.sessionIndex.pointer;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+
+    const restored = (await restoreMeasurementBundle(built.bundleDir)) as Restored;
+    expect(restored.pointers).toEqual({});
+    expect(restored.files.map((file) => [file.path, file.state, file.reason])).toEqual([
+      ['evidence.ndjson', 'unavailable', 'manifest entry lacks a bundle pointer'],
+      ['session-index.json', 'unavailable', 'manifest entry lacks a bundle pointer'],
+    ]);
+    expect(restored.sessionIndex.state).toBe('unknown');
+  });
+
   test('a stored pointer that symlinks outside the bundle is not resolved', async () => {
     const base = await workspace();
     const journal = join(base, 'journal');

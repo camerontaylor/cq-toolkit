@@ -24,13 +24,15 @@ from crq_repair import command
 # short-option bundle) runs a pager command, `--no-index` searches outside
 # the repo, `--help` (any `--h` prefix, plain or abbreviated) opens the
 # manual through an external viewer, `--textconv` and `--ext-*` run
-# configured filters. `git show`
-# is not granted (diff output runs textconv/external diff by default).
+# configured filters, and the file-input options `-f`/`--file` (grep) and
+# `-X`/`--exclude-from` or `--exclude-per-directory` (ls-files) read pattern
+# files from anywhere. `git show` is not granted (diff output runs
+# textconv/external diff by default).
 # Git config cannot add an execution path: the harness refuses read/edit of
 # `.git`, so config stays operator-owned. Plain grep/rg/find stay denied:
 # they read outside the worktree (rg --pre and find -exec also run programs).
 _TOKEN = r'[A-Za-z0-9_./:=@%+,^-]+'
-_NO_EXEC = (r'(?!.* (?:-[A-Za-z0-9_./:=@%+,^]*O|--op|--no-i|--tex|--ext|--h|--ou))')
+_NO_EXEC = (r'(?!.* (?:-[A-Za-z0-9_./:=@%+,^]*[OfX]|--op|--no-i|--tex|--ex|--h|--ou|--file))')
 SEARCH_PATTERNS = [
     're:^git (?:grep|ls-files|ls-tree)' + _NO_EXEC + '(?: ' + _TOKEN + ')*$',
 ]

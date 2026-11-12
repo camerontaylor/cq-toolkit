@@ -109,8 +109,14 @@ class ControllerFixture(unittest.TestCase):
         (self.units_home / "timers.target.wants").mkdir()
         (self.units_home / "timers.target.wants/crq-tick.timer").symlink_to(
             self.units_home / "crq-tick.timer")
-        isolated = mock.patch.dict(os.environ,
-                                   {"XDG_CONFIG_HOME": str(self.base / "xdg-config")})
+        isolated = mock.patch.dict(
+            os.environ,
+            {"XDG_CONFIG_HOME": str(self.base / "xdg-config"),
+             # Preservation hashing reads the completion heartbeat through the
+             # same WATCHDOG_HOME resolution the health checks use; isolate it
+             # so the actual user's heartbeat is never consulted (the CLI
+             # subprocess inherits the same environment).
+             "XDG_STATE_HOME": str(self.base / "xdg-state")})
         isolated.start()
         self.addCleanup(isolated.stop)
 

@@ -17,6 +17,7 @@ import plistlib
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import uuid
 
@@ -696,8 +697,10 @@ def prepare(root, overlay, raw, output):
             output.mkdir(parents=True, exist_ok=True)
             for path in paths:
                 atomic_bytes(output / Path(path).name, Path(path).read_bytes())
-        atomic_bytes(root / CONFIG, data)
+        # Marker first: a crash before the config write leaves the host inert
+        # on its previous configuration instead of live without the marker.
         atomic_bytes(root / 'apps/crq-python/state/runner-disabled', b'Prepared inert; owner approval required to start.\n')
+        atomic_bytes(root / CONFIG, data)
     run(['systemctl', '--user', 'daemon-reload'])
     # Deliberately no start or enable here.
 
@@ -747,13 +750,17 @@ def switch(root, overlay, raw, target, tag):
         previous = git(root, 'rev-parse', 'HEAD')
         record(root, overlay, raw, current, 'switch-before', target=target, tag=tag)
         git(root, 'restore', '--', CONFIG)
-        if git(root, 'status', '--porcelain', '--untracked-files=all'):
-            raise ValueError('checkout not clean after config restore')
-        git(root, 'checkout', '--detach', target)
+        try:
+            if git(root, 'status', '--porcelain', '--untracked-files=all'):
+                raise ValueError('checkout not clean after config restore')
+            git(root, 'checkout', '--detach', target)
+        except BaseException:
+            atomic_bytes(root / CONFIG, current)
+            raise
         # Same tick lock spans drift check, checkout, render and audit.
         record(root, overlay, raw, destination, 'switch-render', previous_sha=previous, tag=tag)
         atomic_bytes(root / CONFIG, destination)
-        if git(root, 'status', '--porcelain', '--untracked-files=all') != ' M ' + CONFIG:
+        if git(root, 'status', '--porcelain', '--untracked-files=all') not in ('', ' M ' + CONFIG):
             raise ValueError('post-switch status must contain only rendered config')
     return target
 
@@ -791,7 +798,6 @@ def main(argv=None):
     legacy = sub.add_parser('legacy-check')
     legacy.add_argument('--legacy-root', required=True, type=Path)
     if argv is None:
-        import sys
         argv = sys.argv[1:]
     args = parser.parse_args(['live-config' if arg == '--live-config' else arg for arg in argv])
     overlay, raw = load_overlay(args.overlay)
@@ -811,14 +817,16 @@ def main(argv=None):
         require_outside_git(args.output)
         if not outside(args.output, root):
             raise ValueError('preview output must be outside checkout')
-        data = render(root, overlay)
-        record(root, overlay, raw, data, 'preview')
-        atomic_bytes(args.output / 'config.json', data)
-        render_units(root, args.output / 'systemd')
-        render_plists(root, args.output / 'launchd', args.overlay)
+        with tick_lock(root):
+            data = render(root, overlay)
+            record(root, overlay, raw, data, 'preview')
+            atomic_bytes(args.output / 'config.json', data)
+            render_units(root, args.output / 'systemd')
+            render_plists(root, args.output / 'launchd', args.overlay)
     else:
         live_render(root, overlay, raw)
-    print('completed ' + args.operation + '; no units started')
+    print(json.dumps({'operation': args.operation, 'status': 'ok'}, indent=2, sort_keys=True))
+    print('completed ' + args.operation + '; no units started', file=sys.stderr)
 
 
 if __name__ == '__main__':

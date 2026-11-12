@@ -80,6 +80,7 @@ export async function captureSnapshot(
     .toString()
     .trim()
     .split(/\s+/)
+    .filter(Boolean)
     .sort();
   if (ids.length > MAX_OBJECTS) throw new Error('too many snapshot objects');
   const objects: { oid: string; type: string; data: string }[] = [];
