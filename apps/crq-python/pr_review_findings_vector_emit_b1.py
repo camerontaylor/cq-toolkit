@@ -225,15 +225,14 @@ def _apply_reviews_jq(argv, raw):
 
     Real `gh --paginate` feeds jq ONE STREAM of concatenated pages, each a
     JSON array on its own line (`[page1]\n[page2]`); jq processes documents
-    in sequence and reports the 1-based document line where an error hit.
-    Modelled here:
+    in sequence and reports where an error hit. Modelled here:
 
     - each line of the input is one JSON document (a page); unparsable
       input -> jq parse failure naming the failing line (returncode 2),
     - a non-array page -> `Cannot iterate over null` naming its line (rc 2),
     - a non-object row -> jq's runtime error (returncode 5) after emitting
       any earlier matches to stdout (real jq streams results as it goes;
-      the message names the row's actual JSON type and the document line),
+      the message names the row's actual JSON type and the input line),
     - rows are filtered by the selector's `user.login` and marker predicate
       (`startswith`/`contains`) and projected to `{id, url: .html_url}`.
 
@@ -258,7 +257,15 @@ def _apply_reviews_jq(argv, raw):
     row_type = {list: "array", str: "string", bool: "boolean", int: "number",
                 float: "number", type(None): "null"}
     out_lines = []
-    for line_index, line in enumerate(raw.splitlines(), start=1):
+    segments = raw.split("\n")
+    for line_index, line in enumerate(segments, start=0):
+        terminated = line_index + 1 < len(segments)
+        # Real jq 1.8.2 numbers runtime errors by newlines consumed through
+        # the failing document's own terminator: an unterminated final segment
+        # reports one less than its 1-based index (single page without a
+        # trailing "\n" reports <stdin>:0, the same page with it :1; a page-2
+        # error without a trailing "\n" reports :1, with it :2).
+        error_line = line_index + (1 if terminated else 0)
         if not line.strip():
             continue
         try:
@@ -266,18 +273,18 @@ def _apply_reviews_jq(argv, raw):
         except ValueError:
             # Real jq 1.8.2: parse errors exit 5 and report the 1-based input
             # line (which equals the document line for line-per-page input).
-            return _fail(5, f"jq: parse error: Invalid literal at line {line_index}",
+            return _fail(5, f"jq: parse error: Invalid literal at line {line_index + 1}",
                          keep="".join(l + "\n" for l in out_lines))
         if not isinstance(page, list):
             return _fail(5,
-                         f"jq: error (at <stdin>:{line_index}): Cannot iterate over null",
+                         f"jq: error (at <stdin>:{error_line}): Cannot iterate over null",
                          keep="".join(l + "\n" for l in out_lines))
         for row in page:
             if not isinstance(row, dict):
                 noun = row_type[type(row)]
                 return _fail(5,
                              'jq: error (at <stdin>:%d): Cannot index %s with string ("user")'
-                             % (line_index, noun),
+                             % (error_line, noun),
                              keep="".join(l + "\n" for l in out_lines))
             if (row.get("user") or {}).get("login") != login:
                 continue
@@ -877,6 +884,15 @@ def deliver_cases() -> List[Dict[str, Any]]:
             json.dumps([{"id": 1, "user": {"login": "crq-host"}, "body": marker_body}]) + "\n"
             + json.dumps([{"id": 2, "user": {"login": "crq-host"}, "body": marker_body}]) + "\n"
             + json.dumps([["row"]]) + "\n"))
+    add("reviews-page-two-row-error-no-newline", REPO, 77, META, nd,
+        gh=EndpointGh(reviews=
+            json.dumps([{"id": 1, "user": {"login": "crq-host"}, "body": marker_body}]) + "\n"
+            + json.dumps([["row"]])))
+    add("reviews-page-three-row-error-no-newline", REPO, 77, META, nd,
+        gh=EndpointGh(reviews=
+            json.dumps([{"id": 1, "user": {"login": "crq-host"}, "body": marker_body}]) + "\n"
+            + json.dumps([{"id": 2, "user": {"login": "crq-host"}, "body": marker_body}]) + "\n"
+            + json.dumps([["row"]])))
     add("reviews-row-id-float", REPO, 77, META, nd,
         gh=EndpointGh(reviews=reviews_page(
             {"id": 7.5, "user": {"login": "crq-host"}, "body": marker_body})))

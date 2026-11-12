@@ -259,6 +259,8 @@ REQUIRED = {
         "reviews-two-page-stream",
         "reviews-page-two-row-error",
         "reviews-page-three-row-error",
+        "reviews-page-two-row-error-no-newline",
+        "reviews-page-three-row-error-no-newline",
         "reviews-row-id-float",
         "reviews-row-id-bool",
         "reviews-paginated",

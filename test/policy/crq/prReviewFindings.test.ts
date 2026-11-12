@@ -167,9 +167,16 @@ function applyReviewsJq(argv: readonly string[], raw: string): GhResult | string
   const keep = () => outLines.map((line) => `${line}\n`).join('');
   // Real `gh --paginate` feeds jq one stream of concatenated pages, each a
   // JSON array on its own line; jq processes documents in sequence and
-  // reports the 0-based document line where an error hit.
+  // reports where an error hit. Runtime errors are numbered by the newlines
+  // consumed through the failing document's own terminator, so an
+  // unterminated final segment reports one less than its 1-based index
+  // (single page without a trailing "\n" reports <stdin>:0, the same page
+  // with it :1; a page-2 error without a trailing "\n" reports :1, with
+  // it :2). Parse errors instead always report the 1-based input line.
+  const segments = raw.split('\n');
   const outLines: string[] = [];
-  for (const [pageIndex, pageLine] of raw.split('\n').entries()) {
+  for (const [pageIndex, pageLine] of segments.entries()) {
+    const errorLine = pageIndex + (pageIndex + 1 < segments.length ? 1 : 0);
     if (pageLine.trim() === '') continue;
     let page: unknown;
     try {
@@ -187,7 +194,7 @@ function applyReviewsJq(argv: readonly string[], raw: string): GhResult | string
       return {
         returncode: processCode(5),
         stdout: keep(),
-        stderr: `jq: error (at <stdin>:${pageIndex + 1}): Cannot iterate over null`,
+        stderr: `jq: error (at <stdin>:${errorLine}): Cannot iterate over null`,
       };
     }
     for (const row of page) {
@@ -197,7 +204,7 @@ function applyReviewsJq(argv: readonly string[], raw: string): GhResult | string
         return {
           returncode: processCode(5),
           stdout: keep(),
-          stderr: `jq: error (at <stdin>:${pageIndex + 1}): Cannot index ${nounOf(row)} with string ("user")`,
+          stderr: `jq: error (at <stdin>:${errorLine}): Cannot index ${nounOf(row)} with string ("user")`,
         };
       }
       const record = row as unknown as Record<string, JsonValue>;
