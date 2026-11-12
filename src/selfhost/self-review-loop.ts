@@ -81,6 +81,7 @@
 // (`SelfhostDefaults.maxTokens`) exists to be tuned from this evidence.
 import { enterWithCqEnv } from '../config/entry.js';
 import type { CqEnv } from '../config/env.js';
+import { readCqEnv } from '../config/env.js';
 import { stripRefsHeads } from '../config/values.js';
 import { checkedProtectedBranch } from '../ops/merge/trustMirrors.js';
 import { appendFileSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -279,7 +280,7 @@ export interface SelfReviewLoopCfg {
    * callers get).
    */
   startedAtMs?: number;
-  /** The entry point's CQ_* snapshot; the driver falls back to the process env when absent. */
+  /** The entry point's CQ_* snapshot; direct callers without one are snapshotted from the process env at the resolve site. */
   cqEnv?: CqEnv;
   /** Journal root override; default `<repoRoot>/.selfhost/journal`. */
   journalRoot?: string;
@@ -570,7 +571,13 @@ export async function runSelfReviewLoop(
   // — a delayed fire or a manual dispatch resolves at ITS OWN start, never
   // at the slot's nominal time, and a sweep that straddles the window edge
   // does not switch models mid-run.
-  const driver = resolveSelfhostDriver(stamp, cfg.cqEnv);
+  /**
+   * The entry point's CQ_* snapshot; direct callers without one fall back to
+   * a process-env snapshot read HERE (one explicit entry-level read — the
+   * resolvers themselves never touch ambient). Foreign-env behaviour is
+   * untouched: GH_REPOSITORY/GITHUB_* still read at their own seams.
+   */
+  const driver = resolveSelfhostDriver(stamp, cfg.cqEnv ?? readCqEnv());
   // FIRST-RUN JOURNAL ROOT (CodeRabbit round 2, KyA): on a first run / cache
   // miss `<journalRoot>` does not exist, and the registry's first `withLock`
   // needs `<journalRoot>/worktree-registry.json.lock` — the lockfile layer

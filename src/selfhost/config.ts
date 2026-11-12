@@ -23,7 +23,6 @@ import { parseModelSpec } from '../config/parsers.js';
 import { assertCqEnvName } from '../config/entry.js';
 import type { CqEnv } from '../config/env.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
-import { processEnv } from '../config/process-env.js';
 
 /**
  * The shape of the frozen self-hosting defaults. Plain data only — the
@@ -272,10 +271,18 @@ export interface SelfhostDrivers {
  * in source (owner ruling 2026-10-16): `CQ_SELFHOST_DRIVER` and
  * `CQ_SELFHOST_PEAK_DRIVER` name the drivers; an unset or blank key means the
  * frozen default for that window. Read once per run at the composition root
- * (the entry modules), never inside an op.
+ * (the entry modules) into the run's CqEnv snapshot, which the callers pass
+ * here — the env is ALWAYS explicit (a snapshot or an explicit raw record
+ * for tests and library callers), never read from the ambient process env at
+ * call time, so a later ambient mutation cannot re-point a live run's model.
+ *
+ * Raw-record injection stays a first-class seam (tests, library callers): it
+ * is validated by name exactly like the snapshot path. The snapshot branch
+ * additionally asserts the registry names before reading (the entry-validated
+ * contract).
  */
 export function resolveSelfhostDrivers(
-  env: CqEnv | Readonly<Record<string, string | undefined>> = processEnv(),
+  env: CqEnv | Readonly<Record<string, string | undefined>>,
 ): SelfhostDrivers {
   if (isCqEnv(env)) {
     // The snapshot already parsed (and, at the entry, validated) both specs.
@@ -306,7 +313,7 @@ function isCqEnv(env: CqEnv | Readonly<Record<string, string | undefined>>): env
 
 export function resolveSelfhostDriver(
   nowMs: number,
-  env: CqEnv | Readonly<Record<string, string | undefined>> = processEnv(),
+  env: CqEnv | Readonly<Record<string, string | undefined>>,
 ): ModelSpec {
   const drivers = resolveSelfhostDrivers(env);
   return isSelfhostPeak(nowMs) || isSelfhostPeakHeadroom(nowMs) ? drivers.peak : drivers.offPeak;
