@@ -284,6 +284,61 @@ describe('dev.review author-env snapshot (#1185)', () => {
     });
   });
 
+  it('a factory built outside a run resolves the env per invocation, not per construction', async () => {
+    const wire = echoRecorder();
+    const previousScanner = process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'];
+    process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'] = '/bin/false';
+    let factory: ReturnType<typeof makeAuthorAdmission>;
+    try {
+      // Built OUTSIDE any run scope while the ambient scanner is absolute:
+      // a construction-time default would freeze that value into the factory.
+      factory = makeAuthorAdmission(wire.transport);
+    } finally {
+      if (previousScanner === undefined) delete process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'];
+      else process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'] = previousScanner;
+    }
+    // Invoked inside an EMPTY run scope: the per-invocation default reaches
+    // the enclosing snapshot, whose (unset) scanner reports the
+    // configuration gap. A frozen construction-time snapshot would have
+    // carried /bin/false past the gate and failed differently.
+    await runWithCqEnv(readCqEnv({}), async () => {
+      const result = await factory(treeInput(treeOid));
+      expect(result).toMatchObject({
+        status: 'needs-human',
+        reason: 'Configure CQ_AUTHOR_SNAPSHOT_SCANNER as an absolute operator scanner path.',
+      });
+    });
+    expect(wire.sent).toEqual([]);
+  });
+
+  it('the standalone default is re-read on every invocation of the same factory', async () => {
+    const wire = echoRecorder();
+    const previousScanner = process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'];
+    delete process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'];
+    try {
+      // Built once with the ambient scanner unset; every invocation takes a
+      // fresh validated read of the ambient environment (the old live-read
+      // behaviour, now through the snapshot path).
+      const factory = makeAuthorAdmission(wire.transport);
+      const first = await factory(treeInput(treeOid));
+      expect(first).toMatchObject({
+        status: 'needs-human',
+        reason: 'Configure CQ_AUTHOR_SNAPSHOT_SCANNER as an absolute operator scanner path.',
+      });
+      // With the ambient scanner now absolute, the SAME factory proceeds
+      // past the gate: capture runs (and fails differently — /bin/false on
+      // snapshot objects absent from the default repo) instead of
+      // reporting the configuration gap again.
+      process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'] = '/bin/false';
+      const second = await factory(treeInput(treeOid));
+      expect(second.status).not.toBe('needs-human');
+      expect(second).toMatchObject({ status: 'failed' });
+    } finally {
+      if (previousScanner === undefined) delete process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'];
+      else process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'] = previousScanner;
+    }
+  });
+
   it('ignores foreign vendor env when resolving the author side', () => {
     const resolved = resolveAuthorEnv({
       CQ_AUTHOR_REPO: '/author/repo',

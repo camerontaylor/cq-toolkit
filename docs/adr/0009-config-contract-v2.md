@@ -211,8 +211,9 @@ move a mid-run gate (issue #1185). An explicit `env` argument remains the
 deliberate foreign-environment injection path and still overrides the
 snapshot; launcher PATH and child env are untouched.
 `src/ops/dev/review-transport.ts`'s `makeAuthorAdmission`/`envAuthorAdmission`
-`env` default is now `currentCqEnv()` — the dispatch wiring's snapshot inside
-a run, one fresh validated read per standalone call — while an explicitly
-injected raw record stays a first-class seam keeping its historical
-`''`-only blank rule (the snapshot path treats a whitespace-only value as
-unset via the registry).
+`env` default is now `currentCqEnv()`, resolved per invocation — the dispatch
+wiring's snapshot inside a run, one fresh validated read per standalone
+invocation (a factory built once never freezes a construction-time read) —
+while an explicitly injected raw record stays a first-class seam keeping its
+historical `''`-only blank rule (the snapshot path treats a whitespace-only
+value as unset via the registry).
