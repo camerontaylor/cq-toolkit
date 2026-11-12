@@ -1964,6 +1964,32 @@
           "by": "self-merge-prs:observe"
         }
       ]
+    },
+    "1588": {
+      "tuple": {
+        "head": "08a4ebe7cc9ba13753399ffa055e798cce2a20d9",
+        "base": "c49073e2252dfc5ea623e7c23b6ec4d5c05d1831",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-12T05:33:14.119Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "1589": {
+      "tuple": {
+        "head": "2785d4024469c33fc36a4d6505b72b1ce54502c7",
+        "base": "c49073e2252dfc5ea623e7c23b6ec4d5c05d1831",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-12T05:33:14.119Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
     }
   }
 }
