@@ -196,6 +196,10 @@ class EndpointGh:
         target = next(a for a in argv[2:] if a.startswith("repos/"))
         if target.endswith("/reviews?per_page=100"):
             raw = self.reviews["stdout"] if isinstance(self.reviews, dict) else self.reviews
+            if "--paginate" not in argv:
+                # Real `gh api` without --paginate returns only page 1; the
+                # recorded stream holds every page, so drop the later ones.
+                raw = raw[: raw.find("\n") + 1] if "\n" in raw else raw
             modelled = _apply_reviews_jq(argv, raw)
             if isinstance(modelled, SimpleNamespace):
                 return modelled
