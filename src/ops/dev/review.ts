@@ -31,10 +31,9 @@
 // default) or `agent:<role>`, resolved from cq.json and run with the configured
 // reviewer role.
 //
-// ONE OP, TWO ACTIONS: no action (or `cycle`) runs this module's review
-// cycle; `enroll | status | fallback` runs the author-admission transport
-// (review-transport.ts, unchanged from #332 — same wire shapes, same crq
-// invocation `cq dev.review --action=enroll …`).
+// ONE OP, ONE ACTION: no action (or `cycle`) runs this module's review
+// cycle. S2b-ii retired the `enroll | status | fallback` author-admission
+// branch; the managed CodeRabbit leg now rides the queue's review-v1 route.
 import type { Op, OpResult } from '../../kernel/types.js';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { AgentReviewReport, AgentReviewResult } from '../review/agentReviewer.js';
@@ -62,14 +61,7 @@ import {
   type DevReuseRecord,
   type DevReviewCompletion,
 } from './record.js';
-import { DevCycleInputSchema, type DevTransportInput } from './registry.js';
-import {
-  AUTHOR_TRANSPORT_HINT,
-  makeAuthorAdmission,
-  type AuthorDecision,
-  type AuthorEnv,
-  type AuthorTransport,
-} from './review-transport.js';
+import { DevCycleInputSchema } from './registry.js';
 import {
   driftSince,
   git,
@@ -216,11 +208,10 @@ export interface DevCycleInput {
 }
 
 /**
- * Input of the ONE `dev.review` op: the review cycle above, or the
- * author-admission transport (`enroll | status | fallback`, pinned by
- * `DevTransportInputSchema`, unchanged from #332).
+ * Input of the `dev.review` op: the review cycle above. S2b-ii retired the
+ * author-admission branch (`enroll | status | fallback`).
  */
-export type DevReviewInput = DevCycleInput | DevTransportInput;
+export type DevReviewInput = DevCycleInput;
 
 /** The injected surface of the `dev.review` op. */
 export interface DevReviewDeps {
@@ -261,17 +252,6 @@ export interface DevReviewDeps {
    * silent CLI fallback.
    */
   managedSubmit?: ManagedReviewSubmit;
-  /**
-   * The author-admission transport (admission actions). When omitted, the
-   * admission actions report the configuration gap.
-   */
-  transport?: AuthorTransport;
-  /**
-   * The entry CqEnv snapshot (or an explicit raw record) for the admission
-   * branch's author-side repo and scanner reads. Absent, the admission
-   * branch reads the ambient environment at call time (library default).
-   */
-  authorEnv?: AuthorEnv;
 }
 
 /** The dev.review report — the ok value of a TERMINAL cycle. */
@@ -318,14 +298,8 @@ export interface DevReviewReport {
   };
 }
 
-/**
- * Build the ONE `dev.review` op. An admission action routes to the
- * author-admission transport and never touches the repo; anything else is
- * the review cycle (whose schema refuses an unknown action).
- */
-export function makeDevReview(
-  deps: DevReviewDeps,
-): Op<DevReviewInput, DevReviewReport | AuthorDecision> {
+/** Build the `dev.review` op over the review cycle. */
+export function makeDevReview(deps: DevReviewDeps): Op<DevReviewInput, DevReviewReport> {
   const cycle = makeReviewCycle(
     deps.effects,
     deps.scanSecrets,
@@ -336,26 +310,7 @@ export function makeDevReview(
     deps.configuredReviewers,
     deps.managedSubmit,
   );
-  return async (input) => {
-    if (isAdmissionInput(input)) {
-      if (deps.transport === undefined) {
-        return { status: 'needs-human', reason: AUTHOR_TRANSPORT_HINT };
-      }
-      return makeAuthorAdmission(
-        deps.transport,
-        undefined,
-        ...(deps.authorEnv !== undefined ? [deps.authorEnv] : []),
-      )(input);
-    }
-    return cycle(input as DevCycleInput);
-  };
-}
-
-/** The admission branch of the union (the registry dispatch uses the same test). */
-export function isAdmissionInput(input: unknown): input is DevTransportInput {
-  if (typeof input !== 'object' || input === null) return false;
-  const action = (input as { action?: unknown }).action;
-  return action === 'enroll' || action === 'status' || action === 'fallback';
+  return cycle;
 }
 
 function needsHuman(reason: string): OpResult<never> {

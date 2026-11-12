@@ -11,7 +11,6 @@ import * as queueClient from '../../../src/ops/review/internal/queueClient.js';
 import { makeConfiguredQueueClient } from '../../../src/ops/review/internal/queueClient.js';
 import { QueueConfigurationError } from '../../../src/ops/review/queue.js';
 import { makeQueueOps } from '../../../src/ops/review/queue.js';
-import { registry } from '../../../src/ops/review/registry.js';
 import { pendingStatus, ref } from './queue.helpers.js';
 
 afterEach(() => {
@@ -88,22 +87,25 @@ describe('queue alias reads the CqEnv snapshot, not the ambient env', () => {
     expect(client.status).toBeTypeOf('function');
   });
 
-  test('registry importer binds the wiring snapshot; ambient drift is inert', async () => {
+  test('a supplied snapshot wins; ambient drift is inert', async () => {
     const snapshot = readCqEnv({ CQ_QUEUE_SSH_ALIAS: 'hostid' });
-    const op = await registry
-      .find((entry) => entry.name === 'review.queueStatus')!
-      .importer({ cqEnv: snapshot });
+    const ops = makeQueueOps(undefined, snapshot);
     const aliases = captureTransportAliases();
     vi.stubEnv('CQ_QUEUE_SSH_ALIAS', 'host;id');
-    await expect(op(ref)).resolves.toMatchObject({ status: 'ok', value: pendingStatus });
+    await expect(ops.queueStatus(ref)).resolves.toMatchObject({
+      status: 'ok',
+      value: pendingStatus,
+    });
     expect(aliases).toEqual(['hostid']);
   });
 
-  test('registry importer without wiring keeps library behavior (fresh snapshot)', async () => {
+  test('no supplied snapshot keeps library behavior (fresh snapshot)', async () => {
     vi.stubEnv('CQ_QUEUE_SSH_ALIAS', 'fixture');
     const aliases = captureTransportAliases();
-    const op = await registry.find((entry) => entry.name === 'review.queueStatus')!.importer();
-    await expect(op(ref)).resolves.toMatchObject({ status: 'ok', value: pendingStatus });
+    await expect(makeQueueOps().queueStatus(ref)).resolves.toMatchObject({
+      status: 'ok',
+      value: pendingStatus,
+    });
     expect(aliases).toEqual(['fixture']);
   });
 

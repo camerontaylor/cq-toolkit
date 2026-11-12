@@ -16,12 +16,10 @@ import {
   type DevCycleInput,
   type DevReviewReport,
 } from '../../../src/ops/dev/review.js';
-import type { AuthorTransport } from '../../../src/ops/dev/review-transport.js';
 import {
   ReviewCoverageV2Schema,
   type ReviewCoverageV2,
 } from '../../../src/ops/review/internal/reviewCoverageV2.js';
-import { makeFakeEffects, stubScanner } from './fakes.js';
 import type { CommandHandler } from './repo.js';
 
 /** The cycle branch of the composed op. */
@@ -71,10 +69,6 @@ export const managedRefused = (reason: string, transient?: true): ManagedReviewS
     transient === true
       ? { status: 'refused', reason, transient: true as const }
       : { status: 'refused', reason }) as ManagedReviewSubmit;
-
-/** The admission branch: the composed op with the given transport (effects never touched). */
-export const admissionReview = (transport: AuthorTransport) =>
-  makeDevReview({ transport, effects: makeFakeEffects(), scanSecrets: stubScanner() });
 
 const NDJSON_OK = [
   JSON.stringify({ type: 'status', status: 'scanning' }),
@@ -163,29 +157,3 @@ export function capturingScanner(): DiffSecretScanner & { seen: ScanComponentInp
 
 export const reviewerCalls = (effects: { calls: { command: string; args: readonly string[] }[] }) =>
   effects.calls.filter((call) => call.command === 'coderabbit');
-
-export const admissionInput = {
-  action: 'enroll',
-  requestId: 'worker-1',
-  base: 'a'.repeat(40),
-  head: 'b'.repeat(40),
-  target: 'origin/merge-queue',
-  cycle: 1,
-} as const;
-export const admissionBinding = {
-  request_id: admissionInput.requestId,
-  base: admissionInput.base,
-  head: admissionInput.head,
-  target: admissionInput.target,
-  cycle: admissionInput.cycle,
-};
-export const waitingDecision = {
-  v: 1,
-  request_id: admissionInput.requestId,
-  binding: admissionBinding,
-  issuer: 'waiting',
-  reviewer: null,
-  deadline_at: '2026-10-17T00:25:00Z',
-  decided_at: null,
-  dispatch: false,
-};

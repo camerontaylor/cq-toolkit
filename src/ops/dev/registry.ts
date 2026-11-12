@@ -127,50 +127,11 @@ export const DevCycleInputSchema: z.ZodType<DevCycleInput> = z
   .strict();
 
 /**
- * The author-admission branch of the `dev.review` union (the worker
- * transport's wire shape from the merged worker-transport PR — the crq-side
- * invocation `cq dev.review --action=enroll --head=…` keeps working
- * byte-for-byte). P5 adds `tree` as the alternative to `head`: exactly one.
+ * The `dev.review` op's input: the CodeRabbit review cycle (no action, or
+ * `action: 'cycle'`). S2b-ii retired the author-admission branch and its
+ * `enroll | status | fallback` actions; unknown actions still refuse.
  */
-export const DevTransportInputSchema = z
-  .object({
-    action: z.enum(['enroll', 'status', 'fallback']),
-    requestId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/),
-    base: z.string().regex(/^[0-9a-f]{40}$/),
-    head: z
-      .string()
-      .regex(/^[0-9a-f]{40}$/)
-      .optional(),
-    tree: z
-      .string()
-      .regex(/^[0-9a-f]{40}$/)
-      .optional(),
-    target: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/),
-    cycle: z.number().int().min(1).max(2),
-  })
-  .strict()
-  .refine(
-    (i) => [i.requestId, i.base, i.head ?? i.tree ?? '', i.target].every((v) => v.trim() === v),
-    'binding must not contain whitespace or controls',
-  )
-  .refine((i) => Boolean(i.head) !== Boolean(i.tree), 'provide exactly one of head or tree')
-  .refine((i) => i.base !== i.head, 'base and head must differ')
-  // Published as JSON Schema too: a refinement alone is invisible to schema consumers.
-  .meta({ oneOf: [{ required: ['head'] }, { required: ['tree'] }] });
-
-export type DevTransportInput = z.infer<typeof DevTransportInputSchema>;
-
-/**
- * The ONE `dev.review` op's input: the CodeRabbit review cycle (no action,
- * or `action: 'cycle'`) or the author-admission transport
- * (`enroll | status | fallback`). Both branches are strict objects, so the
- * union is unambiguous — an unknown key or an unknown action spelling fails
- * every branch and the schema refuses.
- */
-export const DevReviewInputSchema: z.ZodType<DevReviewInput> = z.union([
-  DevCycleInputSchema,
-  DevTransportInputSchema,
-]);
+export const DevReviewInputSchema: z.ZodType<DevReviewInput> = DevCycleInputSchema;
 
 // Defaults are applied by the OPS (`target ?? DEFAULT_DEV_TARGET`), not the
 // schemas — the drift pins mirror the hand-written optional input types, so
@@ -275,7 +236,6 @@ export const registry: OpRegistryEntry[] = [
     importer: (wiring) =>
       Promise.all([
         import('./review.js'),
-        import('./review-transport.js'),
         import('./effects.js'),
         import('./denylist.js'),
         import('../../driver/factory.js'),
@@ -289,7 +249,6 @@ export const registry: OpRegistryEntry[] = [
       ]).then(
         ([
           m,
-          admission,
           effects,
           denylist,
           driverFactory,
@@ -302,12 +261,7 @@ export const registry: OpRegistryEntry[] = [
           queueClient,
         ]) =>
           (async (input: DevReviewInput) => {
-            if (m.isAdmissionInput(input))
-              return admission.envAuthorAdmission(
-                input,
-                ...(wiring?.cqEnv !== undefined ? [wiring.cqEnv] : []),
-              );
-            const { repoRoot } = input as DevCycleInput;
+            const { repoRoot } = input;
             const dev = effects.makeSubprocessDevEffects(repoRoot);
             // Portable default: gitleaks' built-in rules apply everywhere.
             // A repo-specific scanner is added only when cq.json configures

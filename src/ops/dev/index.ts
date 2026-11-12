@@ -77,7 +77,7 @@ export {
   parseReviewerStream,
 } from './coderabbit.js';
 export { knipTrigger, makeDevCheck, rangeFault } from './check.js';
-export { isAdmissionInput, makeDevReview } from './review.js';
+export { makeDevReview } from './review.js';
 export { makeDevDisposition } from './disposition.js';
 export { makeDevReady, readReadiness, readReadinessWithGaps } from './ready.js';
 export {
@@ -94,8 +94,4 @@ export {
   DevReadyInputSchema,
   DevCycleCompositionInputSchema,
   DevReviewInputSchema,
-  DevTransportInputSchema,
 } from './registry.js';
-export type { DevTransportInput } from './registry.js';
-export type { AuthorDecision, AuthorEnv, AuthorTransport } from './review-transport.js';
-export { makeAuthorAdmission, resolveAuthorEnv, sshAuthorTransport } from './review-transport.js';

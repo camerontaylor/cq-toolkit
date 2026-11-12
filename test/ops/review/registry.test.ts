@@ -55,11 +55,7 @@ const ENTRY_NAMES = [
   'review.result',
   'review.cancel',
   'review.retry',
-  'review.drain',
-  'review.enqueue',
-  'review.queueStatus',
   'review.queueHealth',
-  'review.report',
   'review.address',
   'review.run',
   'review.fixItem',
@@ -115,6 +111,17 @@ const snapshot = (): Record<string, unknown> => ({
 });
 
 /** One minimal valid input per entry (kept loose — mutation tests widen it). */
+const queuedRef = {
+  requestId: 'request-1',
+  binding: {
+    kind: 'merged-current',
+    repo: 'owner/repo',
+    pr: 1,
+    mergeSha: 'a'.repeat(40),
+    targetSelector: 'promoted-main',
+  },
+};
+
 const minimalInputs: Record<string, () => Record<string, unknown>> = {
   'review.addressMany': () => ({
     repoRoot: '/repo',
@@ -129,26 +136,10 @@ const minimalInputs: Record<string, () => Record<string, unknown>> = {
   'review.wait': () => ({ requestId: 'request-1' }),
   'review.result': () => ({ requestId: 'request-1' }),
   'review.cancel': () => ({ requestId: 'request-1' }),
-  'review.enqueue': () => ({
-    requestId: 'request-1',
-    binding: {
-      kind: 'merged-current',
-      repo: 'owner/repo',
-      pr: 1,
-      mergeSha: 'a'.repeat(40),
-      targetSelector: 'promoted-main',
-    },
-  }),
-  'review.retry': () => minimalInputs['review.enqueue']!(),
-  'review.drain': () => ({ requests: [minimalInputs['review.enqueue']!()], waitMs: 0 }),
-  'review.queueStatus': () => minimalInputs['review.enqueue']!(),
+  'review.retry': () => queuedRef,
   'review.queueHealth': () => ({
     requestId: 'health-client',
     binding: { repo: 'owner/repo', targetSelector: 'promoted-main' },
-  }),
-  'review.report': () => ({
-    ...minimalInputs['review.enqueue']!(),
-    evidenceDir: '/tmp/queue-evidence',
   }),
   'review.address': () => ({ repoRoot: '/tmp/cq-review-fixture', source: 'local' }),
   'review.run': () => ({ repoRoot: '/tmp/cq-review-fixture' }),
@@ -302,7 +293,7 @@ describe('review family registry entries', () => {
   test('review.addressMany rejects an unknown key inside an enrollment row', () => {
     const entry = entryByName('review.addressMany');
     const input = minimalInput('review.addressMany');
-    const row = { number: 1, request: minimalInputs['review.enqueue']!() };
+    const row = { number: 1, request: queuedRef };
     input.enrollments = [row];
     expect(entry.inputSchema.safeParse(input).success).toBe(true);
     input.enrollments = [{ ...row, surprise: true }];

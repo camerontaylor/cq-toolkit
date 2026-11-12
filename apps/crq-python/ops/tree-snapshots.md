@@ -1,5 +1,10 @@
 # Tree snapshots (P5)
 
+> **S2b-ii retirement (2026-11-12).** The `cq dev.review --action=enroll --tree`
+> client route is retired with the author-admission branch. Snapshot capture and
+> `CQ_AUTHOR_SNAPSHOT_SCANNER` remain live for unpublished `review.submit` and
+> managed `dev.review`/`review.run` commits.
+
 P4's commit request and P3's lease/state bytes stay unchanged. The worker may
 instead supply `--tree=<40hex>` to `cq dev.review`; exactly one of `--head` and
 `--tree` is required. The base is an immutable commit already available in the

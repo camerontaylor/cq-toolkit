@@ -1,5 +1,12 @@
 # Worker author transport (P4)
 
+> **S2b-ii retirement (2026-11-12).** The SDK client described below
+> (`cq dev.review --action=…`, `CQ_AUTHOR_SSH_ALIAS`, the `author-v1` client
+> command) is retired. The Python endpoint and its `author-v1` route remain
+> source-only for deployed compatibility; no installed author identity and no
+> nonterminal author queue item exists. Do not provision new author identities
+> or create new v1 author requests.
+
 This is a separate, versioned SSH forced-command endpoint. It does not use the
 promotion spool, modify signer files, install a service or start a reviewer.
 Python's natural tick remains the only CLI issuer. P3 lease support must be

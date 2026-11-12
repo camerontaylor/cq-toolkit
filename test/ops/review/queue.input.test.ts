@@ -7,7 +7,6 @@ import type {
   QueueTransport,
 } from '../../../src/ops/review/internal/queueProtocol.js';
 import { makeQueueOps } from '../../../src/ops/review/queue.js';
-import { registry } from '../../../src/ops/review/registry.js';
 import { pendingStatus, ref } from './queue.helpers.js';
 
 afterEach(async () => {
@@ -44,11 +43,6 @@ describe('public queue local input classification', () => {
       status: 'failed',
     });
     expect(await makeQueueOps().queueStatus(ref)).toMatchObject({ status: 'needs-human' });
-  });
-  test('action-dependent reject stays reachable through the review registry', async () => {
-    vi.stubEnv('CQ_QUEUE_SSH_ALIAS', '');
-    const enqueue = await registry.find((entry) => entry.name === 'review.enqueue')!.importer();
-    expect(await enqueue({ ...ref, action: 'bind' })).toMatchObject({ status: 'failed' });
   });
   test('valid commands still dispatch the intended wire payload', async () => {
     type WireRequest = { op: string; pr?: number; mergeSha?: string };

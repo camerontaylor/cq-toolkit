@@ -80,8 +80,11 @@ is at least once; messages include the stable terminal event ID for deduplicatio
 A replacement can race an in-flight message. The publisher service loads the
 optional Paseo environment file and runs independently of ledger rollout.
 
-The earlier `review.enqueue`, `review.queueStatus`, `review.drain` and
-`review.report` operations remain available. See the
+S2b-ii retired the public `review.enqueue`, `review.queueStatus`, `review.drain`
+and `review.report` operations. The queue-v1 SDK (`makeQueueOps`,
+`makeConfiguredQueueClient`, `makeQueueClient`) and the internal bulk-address
+enqueue path remain; `review.submit`/`status`/`wait`/`result`/`cancel`/`retry`
+and `review.queueHealth` ride the same client. See the
 [queue client protocol](../../../docs/queue-client.md) for queue-v1 and deferred
 pre-PR bindings.
 
