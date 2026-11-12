@@ -604,6 +604,52 @@ describe('publish-full oracle replay through publishSummary', () => {
     expect(result.text).toContain('"title":{}');
   });
 
+  it('a BOM-prefixed previous summary voids the cache; gh still fires', () => {
+    // Round-5 P2 1: Python read_text() keeps the U+FEFF and json.loads
+    // refuses it (ValueError subclass) so the cache VOIDS - gh serves the
+    // title. Node's TextDecoder silently stripped the BOM, the cache walk
+    // succeeded and the cached title was reused where Python fetches it.
+    const previous =
+      '\uFEFF{"last_tick":"x","pending_items":[{"repo":"r","pr":5,"title":"Cached seven"}]}';
+    const calls: string[] = [];
+    const core = {
+      last_tick: 'x',
+      pending_items: [{ repo: 'r', pr: 5, title: null }],
+      starts_cap: 8,
+      generated_at: 'g',
+    };
+    const queue = { items: [], starts: [], last_tick: 'x' } as unknown as CrqRecord;
+    const result = publishSummary(
+      core,
+      queue,
+      {},
+      {},
+      {
+        root: '/state',
+        xdgStateHome: '/xdg',
+        now: 0,
+        previousBytes: new TextEncoder().encode(previous),
+        inbox: {
+          entries: [],
+          readResult: () => null,
+          hasResult: () => false,
+          hasProgress: () => false,
+        },
+        triageRows: [],
+        systemd: { error: 'x' },
+        systemdClock: { realtime: 0, monotonic: 0 },
+        ghTitle: (repo, pr) => {
+          calls.push(`repos/${repo}/pulls/${pr}`);
+          return 'Fresh five';
+        },
+        readReceipt: () => null,
+      },
+    );
+    expect(calls).toEqual(['repos/r/pulls/5']);
+    expect(result.text).toContain('"title":"Fresh five"');
+    expect(result.text).not.toContain('Cached seven');
+  });
+
   it('a successful blank gh output normalizes the cached falsy title to null', () => {
     // Round-3 P2 (corroborated by external Codex thread at the gh seam): on
     // SUCCESS the producer always assigns

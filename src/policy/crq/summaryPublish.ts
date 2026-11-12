@@ -457,7 +457,12 @@ function wrapPublish(error: unknown): SummaryPublishError {
 function parsePlainPrevious(bytes: Uint8Array): unknown {
   let text: string;
   try {
-    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
+    // BOM-preserving strict UTF-8: Python's Path.read_text() decodes the
+    // U+FEFF into the text and json.loads refuses it (UnicodeDecodeError is
+    // a ValueError subclass, caught and cache-voided exactly like an
+    // invalid-UTF-8 read). Node's TextDecoder silently STRIPS a leading BOM
+    // by default, which retained a cache where Python voids it.
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
   } catch (error) {
     // Python `Path.read_text()` on invalid UTF-8 raises UnicodeDecodeError,
     // a ValueError subclass: caught, cache voided.

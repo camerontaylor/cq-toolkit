@@ -358,6 +358,77 @@ describe('repair digest oracle', () => {
     expect(serialized).toContain('"context":[[{"2":"first","1":"second"}]]');
   });
 
+  test('repair JSON accepts NaN and Infinity constants like plain json.loads', () => {
+    // Round-5 P2 2: Python's json.loads DEFAULT parse_constant accepts
+    // NaN/Infinity/-Infinity as floats; the repair digest reads job/result
+    // with plain loads, so a NaN retry_after defers the job (deferred:1) and
+    // -Infinity retry_after is falsy (counts pending). The port refused both
+    // as JSONDecodeError. BOM and invalid-UTF-8 refusals stay intact.
+    const emptyState = (job: Uint8Array, result: Uint8Array | null): RepairInboxState => ({
+      entries: [{ stem: 'crq-nan-F1', jobBytes: job, mtime: 1000 }],
+      readResult: () => result,
+      hasResult: () => result !== null,
+      hasProgress: () => false,
+    });
+    const queue = {
+      items: [
+        {
+          id: 'i',
+          kind: 'open',
+          state: 'pending',
+          repair_runs: { r: { state: 'queued', jobs: ['crq-nan-F1'] } },
+        },
+      ],
+    };
+    const job = new TextEncoder().encode('{}');
+    const nanResult = new TextEncoder().encode('{"retry_after": NaN}');
+    const digest = repairDigest(queue, emptyState(job, nanResult), 2000);
+    expect(digest['rate_limit_deferred']).toBe(1);
+    // -Infinity is a NONZERO float: truthy in Python exactly like NaN, so it
+    // defers too. The block pins the -Infinity lexeme path (a distinct token
+    // in the parser) still parses and publishes instead of refusing.
+    const negInf = new TextEncoder().encode('{"retry_after": -Infinity}');
+    const digest2 = repairDigest(queue, emptyState(job, negInf), 2000);
+    expect(digest2['rate_limit_deferred']).toBe(1);
+    expect(digest2['inbox']).toBe(1);
+  });
+
+  test('a literal constructor row member stays data through the digest', () => {
+    // Round-5 P2 3: jsonValueOf read value.constructor to recognise a plain
+    // object, so a schema-valid member literally named "constructor" made
+    // that read return the member's own value ('data', not Object) and
+    // publication aborted with 'unsupported JSON value'; Python treats the
+    // key as ordinary dict data. The defect fires on the PLAIN-record route
+    // (asMapping rebuilds via jsonValueOf); a parsed JsonObject never
+    // reaches it, so the fixture carries a plain JS object. The key now
+    // round-trips losslessly.
+    const queue = {
+      items: [
+        {
+          id: 'i',
+          constructor: 'data',
+          repair_runs: {
+            r: { source_publication_error: { context: { '2': 'a', '1': 'b' } } },
+          },
+        },
+      ],
+    };
+    const emptyState: RepairInboxState = {
+      entries: [],
+      readResult: () => null,
+      hasResult: () => false,
+      hasProgress: () => false,
+    };
+    const digest = repairDigest(queue, emptyState, 2000);
+    const errors = digest['source_publication_errors'] as Record<string, unknown>[];
+    expect(errors.length).toBe(1);
+    const serialized = pythonJsonText(errors[0] as unknown as JsonValue, COMPACT);
+    // A plain-object source enumerates its own integer-like keys 1,2 before
+    // the digest ever runs (order fidelity belongs to lossless-parsed input);
+    // this block pins the CONSTRUCTOR-KEY survival, not ordering.
+    expect(serialized).toBe('{"item":"i","run":"r","error":{"context":{"1":"b","2":"a"}}}');
+  });
+
   test('a result file that exists but is unreadable is refused, not orphaned', () => {
     // `readResult` returns null only for an absent file here; Python reads
     // `result.json` when it exists and refuses corrupt bytes. The TS seam

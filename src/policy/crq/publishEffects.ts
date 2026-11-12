@@ -834,7 +834,18 @@ function parsePlainJson(bytes: Uint8Array): JsonValue {
     );
   }
   try {
-    return parseJsonValue(text);
+    // Python json.loads' DEFAULT parse_constant accepts NaN/Infinity/-Infinity
+    // as float values; the repair digest reads job/result with plain loads,
+    // so a NaN retry_after defers instead of refusing (round-5 P2). BOM and
+    // invalid-UTF-8 refusals above are unchanged.
+    return parseJsonValue(text, {
+      parseConstant: (raw) =>
+        raw === 'NaN'
+          ? JsonNumber.float(Number.NaN)
+          : JsonNumber.float(
+              raw === 'Infinity' ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY,
+            ),
+    });
   } catch (error) {
     throw new PublishEffectsError(
       error instanceof Error ? error.message : String(error),
@@ -1028,7 +1039,17 @@ function jsonValueOf(value: unknown): JsonValue {
     return Number.isInteger(value) ? JsonNumber.int(BigInt(value)) : JsonNumber.float(value);
   }
   if (Array.isArray(value)) return value.map(jsonValueOf);
-  if (isRecord(value) && !(value instanceof JsonNumber) && value.constructor === Object) {
+  // Plain-object probe WITHOUT reading `value.constructor`: a schema-valid
+  // member literally named "constructor" makes that read return the member's
+  // own value (not Object), aborting publication where Python treats the key
+  // as ordinary dict data. Prototype identity is own-shape-safe: plain dict
+  // carriers are Object.prototype or prototype-null (Object.create(null));
+  // anything else (class instances) still refuses as before.
+  if (
+    isRecord(value) &&
+    !(value instanceof JsonNumber) &&
+    (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
+  ) {
     return new JsonObject(
       Object.entries(value).map(([key, entry]) => [key, jsonValueOf(entry)] as const),
     );
