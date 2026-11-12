@@ -67,9 +67,11 @@ function fakeGitleaks(options: {
     async runCommand(_command, args) {
       if (options.throwOnRun === true) throw new Error('spawn failed');
       const reportAt = args.indexOf('--report-path');
-      if (reportAt >= 0 && options.report !== undefined) {
+      if (reportAt >= 0) {
         const path = args[reportAt + 1];
-        if (path !== undefined) writeFileSync(path, JSON.stringify(options.report));
+        // A real gitleaks run always writes its report, even when empty:
+        // an omitted report fixture means a clean [], never a missing file.
+        if (path !== undefined) writeFileSync(path, JSON.stringify(options.report ?? []));
       }
       return {
         exitCode: options.exitCode ?? 0,

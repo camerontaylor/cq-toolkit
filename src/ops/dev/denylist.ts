@@ -415,17 +415,20 @@ export function makeGitleaksDefaultsScanner(effects: GitleaksEffects): DiffSecre
         ],
         { timeoutMs },
       );
-      if (result.exitCode !== 0 && result.exitCode !== 1) {
-        throw new Error(
-          `gitleaks failed to run (exit ${result.exitCode === null ? 'none (killed)' : String(result.exitCode)}) — ${result.stderr.trim().slice(0, 300)}`,
-        );
-      }
       // A TIMEOUT means the scan did not complete: a verdict from an
       // incomplete run cannot gate, even when the exit code looks clean.
+      // Checked before the exit-code guard because a real timeout resolves
+      // as exitCode null — the run still fails closed, but the diagnostic
+      // should name the timeout.
       const exitLabel = result.exitCode === null ? 'none (killed)' : String(result.exitCode);
       if (result.timedOut) {
         throw new Error(
           `gitleaks timed out after ${String(timeoutMs)}ms (exit ${exitLabel}) — the upload is refused`,
+        );
+      }
+      if (result.exitCode !== 0 && result.exitCode !== 1) {
+        throw new Error(
+          `gitleaks failed to run (exit ${exitLabel}) — ${result.stderr.trim().slice(0, 300)}`,
         );
       }
       let report: unknown;
