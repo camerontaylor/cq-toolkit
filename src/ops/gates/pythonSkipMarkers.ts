@@ -94,6 +94,16 @@ const FROM_IMPORT_RE = new RegExp(`^\\s*from\\s+(${DOTTED})\\s+import\\s+\\(?([^
 const HUNK_START_RE = /^@@ -\d+(?:,\d+)? \+(\d+)/;
 const ALL_STATES: readonly StringState[] = [null, '"""', "'''"];
 
+/** Net open brackets on a lexed line (string contents and comments blanked). */
+function bracketBalance(code: string): number {
+  let depth = 0;
+  for (const ch of code) {
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth = Math.max(0, depth - 1);
+  }
+  return depth;
+}
+
 /** Shipped syntactic forms that need no visible import (see the module comment). */
 const FALLBACKS: readonly { re: RegExp; marker: (m: RegExpExecArray) => string }[] = [
   {
@@ -136,6 +146,8 @@ export class PythonSectionScanner {
   /** Module of an open parenthesized `from M import (` spanning lines. */
   private pendingFrom: string | null = null;
   private defs: { name: string; indent: number }[] = [];
+  /** Open brackets of a multi-line `def`/`class` signature still awaiting their closer. */
+  private signatureParens = 0;
 
   /**
    * A hunk header. Unless the hunk starts at line 1, the string state is
@@ -244,10 +256,15 @@ export class PythonSectionScanner {
   }
 
   private trackDefs(code: string): void {
-    // A line that starts with a closing bracket (`):`, `) -> None:`, `]`, `}`)
-    // closes a multi-line signature or call, so it continues the enclosing def
-    // rather than ending it: its own indent must not pop the def stack.
-    if (/^\s*[)\]}]/.test(code)) return;
+    // A `def`/`class` signature can span lines on any indentation (an
+    // unindented parameter, `):`, `) -> None:`): every line until its
+    // brackets balance continues the def, so its indent must not pop the
+    // def stack. The signature opens only on a `def`/`class` line, so a
+    // hunk that starts inside one still falls back to plain indentation.
+    if (this.signatureParens > 0) {
+      this.signatureParens = Math.max(0, this.signatureParens + bracketBalance(code));
+      return;
+    }
     const indent = /^\s*/.exec(code)![0].length;
     while (this.defs.length > 0 && this.defs.at(-1)!.indent >= indent) {
       this.defs.pop();
@@ -258,7 +275,10 @@ export class PythonSectionScanner {
     } else if (CLASS_RE.test(code)) {
       // A class body is not a function body: it hides any enclosing test def.
       this.defs.push({ name: '<class>', indent });
+    } else {
+      return;
     }
+    this.signatureParens = Math.max(0, bracketBalance(code));
   }
 
   private trackImports(code: string): void {

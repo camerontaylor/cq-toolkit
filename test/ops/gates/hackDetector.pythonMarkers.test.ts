@@ -149,12 +149,14 @@ describe('hackDetector: Python skip/xfail markers (#774)', () => {
   test('a multi-line def signature keeps the test body visible to importorskip', async () => {
     expect(
       await markersOf(
-        pyDiff([
-          'def test_x(',
-          '    fixture_a,',
-          '):',
-          '    pytest.importorskip("numpy")',
-        ]),
+        pyDiff(['def test_x(', '    fixture_a,', '):', '    pytest.importorskip("numpy")']),
+      ),
+    ).toEqual(['pytest.importorskip']);
+    // A signature may continue at any indentation: parameters may sit at
+    // column 0 (the F1 case), so continuation cannot be inferred from indent.
+    expect(
+      await markersOf(
+        pyDiff(['def test_x(', 'fixture_a,', '):', '    pytest.importorskip("numpy")']),
       ),
     ).toEqual(['pytest.importorskip']);
     // The same for a return-annotated signature and for a method in a class.
