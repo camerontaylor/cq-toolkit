@@ -12,10 +12,12 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DevEffects } from './effects.js';
 import { faultText } from './effects.js';
+import { captureWorkingTree } from './internal/snapshot.js';
 import { CLEAN_TREE, type WorkState } from './internal/workState.js';
 import type { DevCycleRecord, DevFinding } from './record.js';
 import { evidenceRoot, git } from '../review/internal/localReview.js';
 import type { QueueTransport } from '../review/internal/queueProtocol.js';
+import { ReceiptSchema } from '../review/internal/reviewOperation.js';
 import { makeSubmit } from '../review/submit.js';
 import { makeStatus } from '../review/status.js';
 import { makeResult } from '../review/result.js';
@@ -43,6 +45,10 @@ export interface ManagedReviewSubmit {
     target: string;
     base: string;
     head: string;
+    /** Final disk capture; base is the review comparison, head remains the author's HEAD. */
+    workingTree?: 'full' | 'uncommitted';
+    /** Recheck the scanned workstate immediately before queue admission. */
+    beforeSubmit?: () => Promise<void>;
     signal?: AbortSignal;
     remainingWallMs?: () => number;
     /**
@@ -181,7 +187,13 @@ export function makeManagedReviewSubmit(
       return { status: 'refused', reason: 'the review wall budget expired before submission' };
     let transport: QueueTransport;
     try {
-      transport = getTransport();
+      const send = getTransport();
+      let capabilities: Promise<string> | undefined;
+      transport = (request, options) => {
+        const wire = JSON.parse(request) as { op?: string };
+        if (wire.op === 'capabilities') return (capabilities ??= send(request, options));
+        return send(request, options);
+      };
     } catch (error) {
       return { status: 'unsupported', reason: faultText(error) };
     }
@@ -194,12 +206,46 @@ export function makeManagedReviewSubmit(
         reason: `cannot resolve the forge repository identity — ${error instanceof Error ? error.message : String(error)}`,
       };
     }
+    let reviewedHead = input.head;
+    let capturedIndexTree: string | undefined;
+    const projection =
+      input.workingTree === undefined
+        ? 'full-diff'
+        : input.workingTree === 'full'
+          ? 'working-tree-full-v1'
+          : 'working-tree-uncommitted-v1';
+    if (input.workingTree !== undefined) {
+      try {
+        const captured = await captureWorkingTree(input.cwd, input.head);
+        // A staged reversal can be dirty while its final disk tree has no diff.
+        // It has been scanned by the caller, but earns no vendor coverage.
+        if (captured.tree === (await git(input.cwd, 'rev-parse', input.base + '^{tree}')))
+          return {
+            status: 'refused',
+            reason:
+              'no reviewable final working-tree diff — no vendor review or coverage was produced',
+          };
+        reviewedHead = captured.head;
+        capturedIndexTree = captured.stagedTree;
+      } catch (error) {
+        return {
+          status: 'refused',
+          reason: `working-tree snapshot capture refused — ${faultText(error)}`,
+        };
+      }
+    }
     const requestId = `dev-${createHash('sha256')
-      .update(JSON.stringify([repo, input.target, input.base, input.head]))
+      .update(
+        JSON.stringify(
+          input.workingTree === undefined
+            ? [repo, input.target, input.base, input.head]
+            : [repo, input.target, input.base, reviewedHead, projection],
+        ),
+      )
       .digest('hex')}`;
     // Check the actual forge remote rather than trusting stale tracking refs.
     // The server still resolves and verifies every claimed object.
-    let reachable = input.reachable;
+    let reachable = input.workingTree === undefined ? input.reachable : false;
     if (reachable === undefined && input.scanner === undefined) {
       try {
         const advertised = await git(input.cwd, 'ls-remote', '--heads', 'origin');
@@ -219,11 +265,29 @@ export function makeManagedReviewSubmit(
         /* Offline or unpublished work uses the scanned snapshot route. */
       }
     }
-    const submitted = await makeSubmit(transport)({
+    const submitted = await makeSubmit(transport, async () => {
+      input.signal?.throwIfAborted();
+      if ((input.remainingWallMs?.() ?? Infinity) <= 0)
+        throw new Error('review wall budget exhausted before admission');
+      await input.beforeSubmit?.();
+      if (input.workingTree !== undefined) {
+        const current = await captureWorkingTree(input.cwd, input.head);
+        if (current.head !== reviewedHead || current.stagedTree !== capturedIndexTree)
+          throw new Error(
+            'working-tree contents changed during snapshot capture or scan — re-run on a stable tree',
+          );
+      }
+      if ((await git(input.cwd, 'rev-parse', 'HEAD')) !== input.head)
+        throw new Error('HEAD changed during snapshot capture or scan');
+      if (input.signal?.aborted || (input.remainingWallMs?.() ?? Infinity) <= 0)
+        throw new Error('review cancelled or wall budget exhausted before admission');
+    })({
       cwd: input.cwd,
       repo,
       target: input.target,
       base: input.base,
+      head: reviewedHead,
+      projection,
       requestId,
       // Advertised remote ancestry selects reachable proof; unpublished work
       // requires the original-commit snapshot scanner. Server facts are authoritative.
@@ -248,11 +312,11 @@ export function makeManagedReviewSubmit(
     if (
       'reviewedHead' in admission &&
       admission['reviewedHead'] !== undefined &&
-      admission['reviewedHead'] !== input.head
+      admission['reviewedHead'] !== reviewedHead
     )
       return {
         status: 'refused',
-        reason: `the queue admitted a different head than pinned (admitted ${String(admission['reviewedHead'])}, pinned ${input.head}) — re-run on a stable tree`,
+        reason: `the queue admitted a different head than pinned (admitted ${String(admission['reviewedHead'])}, pinned ${reviewedHead}) — re-run on a stable tree`,
       };
     // D11 wait: 15 s polls plus or minus 20 % jitter, abortable, against the
     // caller's remaining wall budget (never a second budget).
@@ -278,7 +342,7 @@ export function makeManagedReviewSubmit(
         reason: `the queued review ended '${finalState}'${(() => {
           const reason = queueReason(terminal.value);
           return reason === undefined ? '' : ` — ${reason}`;
-        })()} — retry explicitly with cq review.submit --repo=${repo} --target=${input.target} --base=${input.base} --repeat --requestId=${randomUUID()}`,
+        })()} — retry explicitly with cq review.submit --repo=${repo} --target=${input.target} --base=${input.base}${input.workingTree === undefined ? '' : ` --head=${reviewedHead} --projection=${projection}`} --repeat --requestId=${randomUUID()}`,
       };
     const fetched = await makeResult(transport)({ requestId, cwd: input.cwd });
     if (fetched.status !== 'ok') return opRefused('result', fetched);
@@ -291,23 +355,25 @@ export function makeManagedReviewSubmit(
         status: 'refused',
         reason: `the queued review has no fetchable receipt (state '${fetchState ?? 'unknown'}')`,
       };
-    if (typeof value['reviewedHead'] !== 'string' || value['reviewedHead'] !== input.head)
+    if (typeof value['reviewedHead'] !== 'string' || value['reviewedHead'] !== reviewedHead)
       return {
         status: 'refused',
-        reason: `the queued receipt covers a different head than pinned (receipt ${String(value['reviewedHead'])}, pinned ${input.head})`,
+        reason: `the queued receipt covers a different head than pinned (receipt ${String(value['reviewedHead'])}, pinned ${reviewedHead})`,
       };
     if (value['scopeAdequate'] === false)
       return {
         status: 'refused',
         reason: `the queued review completed with inadequate scope (receipt ${value['receipt_id'] as string})`,
       };
-    let document: unknown;
+    let document: ReturnType<typeof ReceiptSchema.parse>;
     try {
       const root = await evidenceRoot(input.cwd);
-      document = JSON.parse(
-        await readFile(
-          join(root, '.cq/queue-evidence/results', value['receipt_id'] as string, 'receipt.json'),
-          'utf8',
+      document = ReceiptSchema.parse(
+        JSON.parse(
+          await readFile(
+            join(root, '.cq/queue-evidence/results', value['receipt_id'] as string, 'receipt.json'),
+            'utf8',
+          ),
         ),
       );
     } catch (error) {
@@ -316,6 +382,16 @@ export function makeManagedReviewSubmit(
         reason: `the queued receipt could not be read back — ${error instanceof Error ? error.message : String(error)}`,
       };
     }
+    if (
+      document.identity_inputs.repo !== repo ||
+      document.identity_inputs.base_commit !== input.base ||
+      document.identity_inputs.head_commit !== reviewedHead ||
+      document.identity_inputs.projection !== projection
+    )
+      return {
+        status: 'refused',
+        reason: 'the queued receipt covers different review inputs than submitted',
+      };
     const { findings } = mapReceiptFindings(document);
     return {
       status: 'completed',
@@ -323,11 +399,26 @@ export function makeManagedReviewSubmit(
         receiptId: value['receipt_id'] as string,
         completion: mapReceiptOutcome(value['reviewOutcome']),
         findings,
-        advisories: [admission, terminal.value, value].flatMap((row) =>
-          Array.isArray(row['advisories'])
-            ? row['advisories'].filter((notice): notice is string => typeof notice === 'string')
-            : [],
-        ),
+        advisories: [
+          ...new Set(
+            [admission, terminal.value, value].flatMap((row) => {
+              const notices = Array.isArray(row['advisories'])
+                ? row['advisories'].filter((notice): notice is string => typeof notice === 'string')
+                : [];
+              const notify = row['notify'];
+              if (
+                typeof notify === 'object' &&
+                notify !== null &&
+                'state' in notify &&
+                notify.state === 'error'
+              )
+                notices.push(
+                  `queue completion notification failed${'reason' in notify && typeof notify.reason === 'string' ? ` — ${notify.reason}` : ''}`,
+                );
+              return notices;
+            }),
+          ),
+        ],
       },
     };
   };
@@ -469,15 +560,6 @@ export async function runManagedReviewSpan(options: {
     reachable,
     refuseDrift,
   } = options;
-  // The queue review attests committed objects only (base..head trees). The
-  // CLI path reviewed the same committed range; a dirty tree at submit is a
-  // refusal, never an over-claim, so the recorded identity stays clean.
-  if (state.dirtySha256 !== CLEAN_TREE)
-    return {
-      ok: false,
-      reason:
-        'the working tree has uncommitted changes — commit or stash them before the managed review (the queue attests committed objects only)',
-    };
   let outcome: ManagedReviewOutcome;
   try {
     signal?.throwIfAborted();
@@ -485,8 +567,12 @@ export async function runManagedReviewSpan(options: {
     outcome = await submit({
       cwd,
       target,
-      base: state.base,
+      base: scope === 'uncommitted' ? state.head : state.base,
       head: state.head,
+      beforeSubmit: () => refuseDrift('during working-tree snapshot capture'),
+      ...(state.dirtySha256 !== CLEAN_TREE || scope === 'uncommitted'
+        ? { workingTree: scope }
+        : {}),
       ...(signal ? { signal } : {}),
       ...(remainingWallMs ? { remainingWallMs } : {}),
       // Snapshot proof for unpublished work rides through; both absent

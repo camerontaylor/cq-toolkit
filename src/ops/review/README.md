@@ -8,11 +8,31 @@ all outgoing objects. For commits already reachable on the authorized remote,
 `reachable=true` omits the snapshot; the server still verifies the Git objects.
 Staged, unstaged and untracked exclusions are reported without prompting.
 
+Managed `dev.review` and `review.run` also review dirty content through one
+queued snapshot of the final working tree, including staged-only and untracked
+files. They scan staged, unstaged and untracked content separately before capture.
+A private index produces a deterministic synthetic commit without changing the
+author's index, HEAD or refs. Full scope compares the pinned base to that commit;
+uncommitted scope compares the author's HEAD to it. Receipts use distinct
+`working-tree-full-v1` or `working-tree-uncommitted-v1` projections. The local
+cycle retains the real HEAD and dirty hash; a same-tree real PR commit does not
+inherit synthetic receipt coverage. If the final tree equals the scope base
+(including an uncommitted staged change fully reversed on disk), no reviewable
+final diff remains: no queue review starts and no vendor coverage is granted.
+The staged and unstaged scans still run.
+
+`review.submit` accepts an explicit immutable `head` and `projection` for these
+snapshots; retries must preserve those selectors. Unpublished and synthetic
+snapshots require `CQ_AUTHOR_SNAPSHOT_SCANNER` on the author host (or an explicit
+absolute scanner). It must scan outgoing objects and commit metadata.
+
 Submission persists its request under `.cq/queue-evidence/requests/` before
 network discovery. If delivery is unknown, retry with the reported `requestId`:
 the saved inputs and original head are reused even if the checkout has moved.
 Use a fresh request ID for a new submission. The server assigns identity and
-generation; `repeat=true` requests another generation explicitly.
+generation; `repeat=true` requests another generation explicitly. Managed cycles
+hash the current repository, target, base and reviewed head into their request
+ID; changed working content starts a distinct request.
 
 `review.status` observes, `review.wait` polls at 15 seconds with jitter for ten
 minutes by default, and `review.cancel` withdraws request interest. Wait expiry

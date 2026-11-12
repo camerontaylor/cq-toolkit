@@ -74,7 +74,7 @@ async function targetFreshness(cwd: string, target: string): Promise<TargetFresh
   }
 }
 
-export const makeSubmit = (transport?: QueueTransport) =>
+export const makeSubmit = (transport?: QueueTransport, beforeDispatch?: () => Promise<void>) =>
   reviewOp(
     SubmitInputSchema,
     async (i, getClient) => {
@@ -118,6 +118,8 @@ export const makeSubmit = (transport?: QueueTransport) =>
           wire.request_id !== requestId ||
           wire.inputs.repo !== i.repo ||
           wire.inputs.target !== i.target ||
+          (i.head !== undefined && wire.inputs.head_commit !== i.head) ||
+          wire.inputs.projection !== i.projection ||
           (i.base !== undefined &&
             (await resolveCommit(i.cwd, i.base)) !== wire.inputs.base_commit) ||
           (i.repeat !== undefined && (wire.repeat ?? false) !== i.repeat) ||
@@ -125,7 +127,7 @@ export const makeSubmit = (transport?: QueueTransport) =>
         )
           throw new Error('requestId is already bound to different inputs');
       } else {
-        const head = await git(i.cwd, 'rev-parse', '--verify', 'HEAD^{commit}');
+        const head = i.head ?? (await git(i.cwd, 'rev-parse', '--verify', 'HEAD^{commit}'));
         const target = await resolveTarget(i.cwd, i.target);
         const base =
           i.base === undefined
@@ -141,7 +143,7 @@ export const makeSubmit = (transport?: QueueTransport) =>
           head_commit: head,
           base_tree: await git(i.cwd, 'rev-parse', base + '^{tree}'),
           head_tree: await git(i.cwd, 'rev-parse', head + '^{tree}'),
-          projection: 'full-diff',
+          projection: i.projection,
         };
         if (inputs.base_tree === inputs.head_tree)
           return {
@@ -217,6 +219,7 @@ export const makeSubmit = (transport?: QueueTransport) =>
           )
             throw new ReviewInputError('snapshot wire exceeds bound');
         }
+        await beforeDispatch?.();
         mutationSent = true;
         const response = await client.request(wire);
         if (!('state' in response)) throw new Error('expected admission response');

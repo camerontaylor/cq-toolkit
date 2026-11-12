@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, test } from 'vitest';
+import { captureWorkingTree } from '../../../src/ops/dev/internal/snapshot.js';
 import { makeManagedReviewSubmit } from '../../../src/ops/dev/managedReview.js';
 import {
   canonicalReview,
@@ -48,202 +49,239 @@ const caps = {
   },
 };
 
-test('S2b-i e2e: fake-transport submit completes and rejoins without a second review', async () => {
-  const root = repo.root;
-  const base = repo.git('rev-parse', 'origin/merge-queue').trim();
-  const head = repo.git('rev-parse', 'HEAD').trim();
-  const baseTree = repo.git('rev-parse', `${base}^{tree}`).trim();
-  const headTree = repo.git('rev-parse', 'HEAD^{tree}').trim();
-  const requestId = `dev-${createHash('sha256')
-    .update(JSON.stringify(['owner/repo', 'merge-queue', base, head]))
-    .digest('hex')}`;
+test.each(['committed', 'full', 'uncommitted'] as const)(
+  'S2b-i e2e: %s submit completes, rejoins, and checks real PR association',
+  async (scope) => {
+    const root = repo.root;
+    if (scope === 'full') repo.git('commit', '--allow-empty', '-qm', 'outgoing-metadata-marker');
+    const actualHead = repo.git('rev-parse', 'HEAD').trim();
+    const working = scope === 'committed' ? undefined : scope;
+    if (working) {
+      await repo.write('src/staged.ts', 'export const staged = 1;\n');
+      repo.git('add', 'src/staged.ts');
+      await repo.write('README.md', '# final disk\n');
+      await repo.write('untracked.txt', 'untracked body\n');
+    }
+    const base =
+      scope === 'uncommitted' ? actualHead : repo.git('rev-parse', 'origin/merge-queue').trim();
+    const captured = working ? await captureWorkingTree(root, actualHead) : undefined;
+    const head = captured?.head ?? actualHead;
+    const baseTree = repo.git('rev-parse', `${base}^{tree}`).trim();
+    const headTree = repo.git('rev-parse', `${head}^{tree}`).trim();
+    const projection = working ? `working-tree-${working}-v1` : 'full-diff';
+    const requestId = `dev-${createHash('sha256')
+      .update(
+        JSON.stringify(
+          working
+            ? ['owner/repo', 'merge-queue', base, head, projection]
+            : ['owner/repo', 'merge-queue', base, head],
+        ),
+      )
+      .digest('hex')}`;
 
-  // The fake review-v1 server: one review per request id. Submit CREATES on
-  // first sight and JOINS after; status reports running until the review is
-  // marked done; result serves the receipt in 3072-byte chunks.
-  let reviewsStarted = 0;
-  let done = false;
-  const receipt = ReceiptSchema.parse({
-    v: 1,
-    kind: 'local-review-full-diff',
-    identity: '0'.repeat(64),
-    identity_inputs: {
+    // The fake review-v1 server: one review per request id. Submit CREATES on
+    // first sight and JOINS after; status reports running until the review is
+    // marked done; result serves the receipt in 3072-byte chunks.
+    let reviewsStarted = 0;
+    let done = false;
+    const receipt = ReceiptSchema.parse({
       v: 1,
-      repo: 'owner/repo',
-      base_commit: base,
-      base_tree: baseTree,
-      head_commit: head,
-      head_tree: headTree,
-      scope: 'full-diff',
-      projection: 'full-diff',
-      config_digest: '0'.repeat(64),
-      profile: { adapter: 'coderabbit-cli', revision: 'fake' },
-    },
-    profile: { adapter: 'coderabbit-cli', revision: 'fake', flags: [] },
-    run_id: 'fake-run-1',
-    outcome: 'findings',
-    scope_adequate: true,
-    findings: [
-      {
-        type: 'finding',
-        severity: 'major',
-        fileName: 'src/a.ts',
-        comment: 'fake finding',
-        startLine: 1,
-        rule: 'fake-rule',
+      kind: 'local-review-full-diff',
+      identity: '0'.repeat(64),
+      identity_inputs: {
+        v: 1,
+        repo: 'owner/repo',
+        base_commit: base,
+        base_tree: baseTree,
+        head_commit: head,
+        head_tree: headTree,
+        scope: 'full-diff',
+        projection,
+        config_digest: '0'.repeat(64),
+        profile: { adapter: 'coderabbit-cli', revision: 'fake' },
       },
-    ],
-    report: '# fake report\n',
-    observed: {},
-    independent_acceptance: false,
-  });
-  receipt.identity = reviewDigest(receipt.identity_inputs);
-  const bytes = Buffer.from(canonicalReview(receipt));
-  // chunk.sha256 === chunk.receipt_id is a result-op integrity rule, so
-  // the fake server carries the BYTES digest in both wire fields; the seam
-  // binds findings to that transport receipt id, which also names the
-  // persisted receipt file.
-  const receiptId = sha256(bytes);
-  const chunks = Math.max(1, Math.ceil(bytes.length / 3072));
-  const submitWires: unknown[] = [];
-  const seen = new Set<string>();
-  const transport = async (raw: string): Promise<string> => {
-    const wire = JSON.parse(raw) as { op: string; request_id?: string; index?: number };
-    if (wire.op === 'capabilities') return JSON.stringify(caps);
-    if (wire.op === 'submit') {
-      submitWires.push(wire);
-      if (!seen.has(wire.request_id!)) {
-        seen.add(wire.request_id!);
-        reviewsStarted += 1;
+      profile: { adapter: 'coderabbit-cli', revision: 'fake', flags: [] },
+      run_id: 'fake-run-1',
+      outcome: 'findings',
+      scope_adequate: true,
+      findings: [
+        {
+          type: 'finding',
+          severity: 'major',
+          fileName: 'src/a.ts',
+          comment: 'fake finding',
+          startLine: 1,
+          rule: 'fake-rule',
+        },
+      ],
+      report: '# fake report\n',
+      observed: {},
+      independent_acceptance: false,
+    });
+    receipt.identity = reviewDigest(receipt.identity_inputs);
+    const bytes = Buffer.from(canonicalReview(receipt));
+    // chunk.sha256 === chunk.receipt_id is a result-op integrity rule, so
+    // the fake server carries the BYTES digest in both wire fields; the seam
+    // binds findings to that transport receipt id, which also names the
+    // persisted receipt file.
+    const receiptId = sha256(bytes);
+    const chunks = Math.max(1, Math.ceil(bytes.length / 3072));
+    const submitWires: unknown[] = [];
+    const seen = new Set<string>();
+    let capabilityCalls = 0;
+    const transport = async (raw: string): Promise<string> => {
+      const wire = JSON.parse(raw) as { op: string; request_id?: string; index?: number };
+      if (wire.op === 'capabilities') {
+        capabilityCalls++;
+        return JSON.stringify(caps);
+      }
+      if (wire.op === 'submit') {
+        submitWires.push(wire);
+        if (!seen.has(wire.request_id!)) {
+          seen.add(wire.request_id!);
+          reviewsStarted += 1;
+          return JSON.stringify({
+            v: 1,
+            action: 'created',
+            notify: { state: 'error', reason: 'unsupported-destination' },
+            state: 'queued',
+            request_id: wire.request_id,
+          });
+        }
+        // A rejoin of the same request: no second review starts.
         return JSON.stringify({
           v: 1,
-          action: 'created',
-          state: 'queued',
+          action: 'joined',
+          state: done ? 'completed' : 'running',
           request_id: wire.request_id,
         });
       }
-      // A rejoin of the same request: no second review starts.
-      return JSON.stringify({
-        v: 1,
-        action: 'joined',
-        state: done ? 'completed' : 'running',
-        request_id: wire.request_id,
-      });
-    }
-    if (wire.op === 'status')
-      return JSON.stringify({
-        v: 1,
-        action: 'observed',
-        state: done ? 'completed' : 'running',
-        request_id: wire.request_id,
-      });
-    if (wire.op === 'result') {
-      if (!done) return JSON.stringify({ v: 1, action: 'observed', state: 'running' });
-      const index = wire.index ?? 0;
-      const data = bytes.subarray(index * 3072, (index + 1) * 3072);
-      return JSON.stringify({
-        v: 1,
-        receipt_id: receiptId,
-        index,
-        chunks,
-        bytes: bytes.length,
-        sha256: receiptId,
-        encoding: 'base64-utf8-json',
-        data: data.toString('base64'),
-        chunk_sha256: sha256(data),
-        next_index: index + 1 === chunks ? null : index + 1,
-      });
-    }
-    throw new Error(`unexpected op ${wire.op}`);
-  };
+      if (wire.op === 'status')
+        return JSON.stringify({
+          v: 1,
+          action: 'observed',
+          state: done ? 'completed' : 'running',
+          request_id: wire.request_id,
+        });
+      if (wire.op === 'result') {
+        if (!done) return JSON.stringify({ v: 1, action: 'observed', state: 'running' });
+        const index = wire.index ?? 0;
+        const data = bytes.subarray(index * 3072, (index + 1) * 3072);
+        return JSON.stringify({
+          v: 1,
+          receipt_id: receiptId,
+          index,
+          chunks,
+          bytes: bytes.length,
+          sha256: receiptId,
+          encoding: 'base64-utf8-json',
+          data: data.toString('base64'),
+          chunk_sha256: sha256(data),
+          next_index: index + 1 === chunks ? null : index + 1,
+        });
+      }
+      throw new Error(`unexpected op ${wire.op}`);
+    };
 
-  const submit = makeManagedReviewSubmit(
-    () => transport,
-    async () => 'owner/repo',
-  );
+    const submit = makeManagedReviewSubmit(
+      () => transport,
+      async () => 'owner/repo',
+    );
 
-  // The D11 wait polls every ~15 s; complete the review as soon as the first
-  // status poll lands so the test never sleeps the real interval.
-  const completing = (async () => {
-    for (let i = 0; i < 200 && !done; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-      if (submitWires.length > 0) done = true;
-    }
-  })();
+    // The D11 wait polls every ~15 s; complete the review as soon as the first
+    // status poll lands so the test never sleeps the real interval.
+    const completing = (async () => {
+      for (let i = 0; i < 200 && !done; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        if (submitWires.length > 0) done = true;
+      }
+    })();
 
-  const first = await submit({
-    cwd: root,
-    target: 'merge-queue',
-    base,
-    head,
-    remainingWallMs: () => 60_000,
-    // Caller-attested: this fake server resolves the commits by
-    // construction (same repo), so no snapshot proof is needed. Absent
-    // any attestation the seam forwards nothing and the submit leg
-    // takes its honest snapshot default.
-    reachable: true,
-  });
-  await completing;
-  expect(first).toMatchObject({
-    status: 'completed',
-    value: {
-      // value.receiptId is the transport receipt id (the bytes digest the
-      // result op verified); the findings' evidence binding is the receipt
-      // document's own identity field, pinned for provenance.
-      receiptId,
-      completion: { kind: 'terminal' },
-      findings: [
-        {
-          severity: 'major',
-          fileName: 'src/a.ts',
-          excerpt: 'fake finding',
-          line: 1,
-          rule: 'fake-rule',
-          evidence: receipt.identity,
-        },
-      ],
-    },
-  });
-  // The read-back document the seam mapped is exactly the verified bytes.
-  expect(
-    await readFile(join(root, '.cq/queue-evidence/results', receiptId, 'receipt.json'), 'utf8'),
-  ).toBe(bytes.toString());
-  // The receipt id IS the sha256 of the canonical receipt the result op
-  // verified — the transport id arrives on the wire and names the file.
-  expect(reviewsStarted).toBe(1);
-  expect(submitWires[0]).toMatchObject({
-    op: 'submit',
-    request_id: requestId,
-    inputs: { repo: 'owner/repo', target: 'merge-queue', base_commit: base, head_commit: head },
-  });
-  // No silent reachability inference: absent proof forwards neither, so
-  // the submit leg takes its honest snapshot default (explicit scanner,
-  // else CQ_AUTHOR_SNAPSHOT_SCANNER, else a configuration refusal). The
-  // first submit below attests reachable explicitly - the caller knows
-  // this fake server resolves the commits (same repo). Proof the
-  // attestation reached the submit leg: the submit succeeds with no
-  // scanner configured (without it, the leg would fail closed demanding
-  // one). The snapshot path is covered by the test below.
-  expect(submitWires[0]).not.toHaveProperty('snapshot');
+    const first = await submit({
+      cwd: root,
+      target: 'merge-queue',
+      base,
+      head: actualHead,
+      ...(working ? { workingTree: working, scanner: '/bin/true' } : {}),
+      remainingWallMs: () => 60_000,
+      // Caller-attested: this fake server resolves the commits by
+      // construction (same repo), so no snapshot proof is needed. Absent
+      // any attestation the seam forwards nothing and the submit leg
+      // takes its honest snapshot default.
+      reachable: true,
+    });
+    await completing;
+    expect(first).toMatchObject({
+      status: 'completed',
+      value: {
+        // value.receiptId is the transport receipt id (the bytes digest the
+        // result op verified); the findings' evidence binding is the receipt
+        // document's own identity field, pinned for provenance.
+        receiptId,
+        completion: { kind: 'terminal' },
+        findings: [
+          {
+            severity: 'major',
+            fileName: 'src/a.ts',
+            excerpt: 'fake finding',
+            line: 1,
+            rule: 'fake-rule',
+            evidence: receipt.identity,
+          },
+        ],
+      },
+    });
+    expect(first).toMatchObject({
+      value: { advisories: ['queue completion notification failed — unsupported-destination'] },
+    });
+    expect(capabilityCalls).toBe(1);
+    // The read-back document the seam mapped is exactly the verified bytes.
+    expect(
+      await readFile(join(root, '.cq/queue-evidence/results', receiptId, 'receipt.json'), 'utf8'),
+    ).toBe(bytes.toString());
+    // The receipt id IS the sha256 of the canonical receipt the result op
+    // verified — the transport id arrives on the wire and names the file.
+    expect(reviewsStarted).toBe(1);
+    expect(submitWires[0]).toMatchObject({
+      op: 'submit',
+      request_id: requestId,
+      inputs: { repo: 'owner/repo', target: 'merge-queue', base_commit: base, head_commit: head },
+    });
+    // No silent reachability inference: absent proof forwards neither, so
+    // the submit leg takes its honest snapshot default (explicit scanner,
+    // else CQ_AUTHOR_SNAPSHOT_SCANNER, else a configuration refusal). The
+    // first submit below attests reachable explicitly - the caller knows
+    // this fake server resolves the commits (same repo). Proof the
+    // attestation reached the submit leg: the submit succeeds with no
+    // scanner configured (without it, the leg would fail closed demanding
+    // one). The snapshot path is covered by the test below.
+    if (working) expect(submitWires[0]).toHaveProperty('snapshot');
+    else expect(submitWires[0]).not.toHaveProperty('snapshot');
 
-  // The second submit rejoins the same queue item: the server starts no
-  // second review and the same completed receipt resolves again. The
-  // durable request file persists, so the rejoin spends no new mutation.
-  // The persisted request replays the first submit's replay wire,
-  // including its reachable attestation.
-  const second = await submit({ cwd: root, target: 'merge-queue', base, head });
-  expect(second).toMatchObject({ status: 'completed', value: { receiptId } });
-  expect(reviewsStarted).toBe(1);
-  expect(submitWires).toHaveLength(2);
-  expect(submitWires[1]).toMatchObject({ op: 'submit', request_id: requestId });
-  // Feed the actual TS submit wire into Python admission, retain its completed
-  // receipt, then open the PR through real enrollment. No handcrafted facts
-  // bypass the client/server identity boundary.
-  const associated = execFileSync(
-    'python3',
-    [
-      '-c',
-      `
+    // The second submit rejoins the same queue item: the server starts no
+    // second review and the same completed receipt resolves again. The
+    // durable request file persists, so the rejoin spends no new mutation.
+    // The persisted request replays the first submit's replay wire,
+    // including its reachable attestation.
+    const second = await submit({
+      cwd: root,
+      target: 'merge-queue',
+      base,
+      head: actualHead,
+      ...(working ? { workingTree: working, scanner: '/bin/true' } : {}),
+    });
+    expect(second).toMatchObject({ status: 'completed', value: { receiptId } });
+    expect(reviewsStarted).toBe(1);
+    expect(submitWires).toHaveLength(2);
+    expect(submitWires[1]).toMatchObject({ op: 'submit', request_id: requestId });
+    // Feed the actual TS submit wire into Python admission, retain its completed
+    // receipt, then open the PR through real enrollment. No handcrafted facts
+    // bypass the client/server identity boundary.
+    const associated = execFileSync(
+      'python3',
+      [
+        '-c',
+        `
 import copy, json, sys, tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -257,10 +295,19 @@ with tempfile.TemporaryDirectory() as directory:
     state = Path(directory)
     def git(*args, **kw):
         return author_snapshot.git(root, *args).decode().strip()
-    runner = SimpleNamespace(CLONE=root, STATE=state, REPO='owner/repo', CONFIG={},
+    runner = SimpleNamespace(CLONE=root, STATE=state, WT_ROOT=state / 'worktrees', REPO='owner/repo', CONFIG={}, ALLOWLIST_PATHS=[], denylist_rules=lambda: [{'regex': '(?!)'}], secret_scan_diff=lambda *a, **kw: (True, {}),
         load_queue=lambda: q, save_queue=lambda value: None,
         iso=lambda: '2026-11-08T00:00:00Z')
     policy = dict(repo='owner/repo', enabled=True, write=['test'], branches=['merge-queue'])
+    if payload['working'] and wire['inputs']['projection'] == 'working-tree-full-v1':
+        runner.denylist_rules = lambda: [{'regex': 'outgoing-metadata-marker'}]
+        try:
+            review_transport.handle(json.dumps(wire).encode(), runner, principal='test', policy=policy)
+            raise AssertionError('metadata scan must refuse')
+        except author_snapshot.AuthorRefused as error:
+            assert 'metadata secret scan' in str(error), error
+        assert not q['items'], q
+        runner.denylist_rules = lambda: [{'regex': '(?!)'}]
     admitted = json.loads(review_transport.handle(json.dumps(wire).encode(), runner, principal='test', policy=policy))
     assert admitted['action'] == 'created', admitted
     item = q['items'][0]
@@ -268,23 +315,43 @@ with tempfile.TemporaryDirectory() as directory:
     item.update(state='done', scope_adequate=True, receipt_id=review_receipt.write_receipt(state / 'receipts', doc))
     assert review_transport.retained(runner, item)
     author_snapshot.git(root, 'update-ref', 'refs/remotes/origin/main', wire['inputs']['base_commit'])
-    opened = [dict(number=7, isDraft=False, baseRefName='main', headRefName='feature', headRefOid=wire['inputs']['head_commit'])]
+    real_head = payload['actualHead']
+    if payload['working']:
+        body = ('tree ' + payload['headTree'] + '\\nparent ' + real_head + '\\nauthor Author <author@example.invalid> 1 +0000\\ncommitter Author <author@example.invalid> 1 +0000\\n\\nreal published commit\\n').encode()
+        real_head = author_snapshot.git(root, 'hash-object', '-w', '-t', 'commit', '--stdin', data=body).decode().strip()
+        assert real_head != wire['inputs']['head_commit']
+        assert git('rev-parse', real_head + '^{tree}') == payload['headTree']
+    opened = [dict(number=7, isDraft=False, baseRefName='main', headRefName='feature', headRefOid=real_head)]
     with mock.patch.multiple(crq, CLONE=root, STATE=state, REPO='owner/repo', CONFIG={}), mock.patch.object(crq, 'gh_json', return_value=opened), mock.patch.object(crq, 'ensure_commit', return_value=True), mock.patch.object(crq, 'event'):
         crq.enroll(q, False)
-    assert [i['kind'] for i in q['items']] == ['local-review'], q
-    assert q['review_pr_links']['owner/repo#7']['item'] == item['id'], q
+    if payload['working']:
+        assert [i['kind'] for i in q['items']] == ['local-review', 'open'], q
+        assert not q.get('review_pr_links'), q
+        # Equal final trees still cannot substitute a real commit for the synthetic identity.
+        assert git('rev-parse', wire['inputs']['head_commit'] + '^{tree}') == payload['headTree']
+    else:
+        assert [i['kind'] for i in q['items']] == ['local-review'], q
+        assert q['review_pr_links']['owner/repo#7']['item'] == item['id'], q
     print('associated-without-second-start')
 `,
-    ],
-    {
-      input: JSON.stringify({ wire: submitWires[0], receipt, root }),
-      env: { ...process.env, PYTHONPATH: join(process.cwd(), 'apps/crq-python') },
-      encoding: 'utf8',
-      timeout: 30_000,
-    },
-  );
-  expect(associated.trim()).toBe('associated-without-second-start');
-});
+      ],
+      {
+        input: JSON.stringify({
+          wire: submitWires[0],
+          receipt,
+          root,
+          actualHead,
+          working: !!working,
+          headTree,
+        }),
+        env: { ...process.env, PYTHONPATH: join(process.cwd(), 'apps/crq-python') },
+        encoding: 'utf8',
+        timeout: 30_000,
+      },
+    );
+    expect(associated.trim()).toBe('associated-without-second-start');
+  },
+);
 
 test('S2b-i e2e: explicit scanner rides snapshot transport for unpublished work', async () => {
   // Unpublished commits (the runner cannot resolve them) ride the snapshot

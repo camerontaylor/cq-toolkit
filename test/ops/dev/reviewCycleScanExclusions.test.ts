@@ -90,11 +90,7 @@ describe('dev.review cycle', () => {
     await repo.write('README.md', '# edited\n');
     await repo.write('notes/new.env', 'KEY=1\n');
     const scanner = capturingScanner();
-    // S2b-i: the scan gates the managed queue submit — the scripted leg
-    // never runs for this dirty tree, so the components are asserted alone.
-    const submit = (() => {
-      throw new Error('fixture: the managed leg must not run for a dirty tree');
-    }) as unknown as ReturnType<typeof managedTerminal>;
+    const submit = vi.fn(managedTerminal());
     const result = await cycleReview(
       repoEffects(repo),
       scanner,
@@ -103,7 +99,8 @@ describe('dev.review cycle', () => {
     )({
       repoRoot: repo.root,
     });
-    expect(result.status).toBe('needs-human');
+    expect(result.status).toBe('ok');
+    expect(submit).toHaveBeenCalledWith(expect.objectContaining({ workingTree: 'full' }));
     expect(scanner.seen.map((c) => [c.component, c.path])).toEqual([
       ['committed:bin/blob.dat', 'bin/blob.dat'],
       ['committed:src/a.ts', 'src/a.ts'],

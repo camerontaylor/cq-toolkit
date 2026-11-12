@@ -163,9 +163,7 @@ describe('dev.review cycle', () => {
     expect(effects.openLedger('feature/x').load().records).toEqual([]);
   });
 
-  test('a dirty tree refuses the managed submit before any queue work', async () => {
-    // S2b-i: the queue attests committed objects only, so the uncommitted
-    // scope (a dirty tree by definition) is refused — never over-claimed.
+  test('a dirty uncommitted scope submits a final-tree snapshot', async () => {
     await repo.write('README.md', '# edited\n');
     const scanner = capturingScanner();
     const effects = repoEffects(repo, reviewer(ran(0)));
@@ -178,8 +176,7 @@ describe('dev.review cycle', () => {
       repoRoot: repo.root,
       uncommitted: true,
     });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).toContain('uncommitted changes');
+    expect(result.status).toBe('ok');
     // The secret scan still ran first and saw only the unstaged component.
     expect(scanner.seen.map((c) => c.component)).toEqual(['unstaged:README.md']);
     expect(reviewerCalls(effects)).toEqual([]);
