@@ -258,6 +258,11 @@ def dispatch(config, role, job, wt, directory, judge=False):
                 retain(wt, baseline, previous_directory)
                 git(wt, 'reset', '--hard', baseline)
                 git(wt, 'clean', '-fd')
+                # Retention and reset consume the shared budget; remeasure so
+                # the next provider never starts past the deadline.
+                remaining = deadline - time.monotonic()
+                if remaining < 0.001:
+                    return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
             attempted = True
             bounded_config = copy.deepcopy(config)
             bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
