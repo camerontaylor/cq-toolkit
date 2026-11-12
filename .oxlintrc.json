@@ -137,12 +137,9 @@
         "src/driver/acp/binaries.ts",
         "src/driver/claude-code/routing.ts",
         "src/driver/sessions-dir.ts",
-        "src/ops/config/show.ts",
         "src/ops/dev/review-transport.ts",
         "src/ops/fix/runFix.ts",
         "src/ops/review/internal/addressEvidence.ts",
-        "src/ops/review/internal/queueClient.ts",
-        "src/ops/review/queue.ts",
         "src/sandbox/launcher.ts",
         "src/selfhost/observe-prs.ts",
         "src/selfhost/self-review-loop.ts"
