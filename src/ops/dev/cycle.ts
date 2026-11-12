@@ -88,6 +88,7 @@ import { DevCycleCompositionInputSchema } from './registry.js';
 import {
   createKnownUsageLedger,
   normalizeUsageObservation,
+  validTokens,
   type KnownUsageSummary,
   type UsageObservation,
 } from '../../shared/knownUsage.js';
@@ -1584,10 +1585,12 @@ export function meterDrivers(
  * taught to settle a mid-run failure as a result (stopReason 'error' with the
  * completed steps' usage folded), so a reject is the exceptional path — but a
  * lane that does reject WITH the partial usage it completed must still reach
- * the meter. Structurally checked against the frozen Usage shape (numeric
- * input/output/cacheRead/cacheWrite, optional numeric reasoning); anything
- * else — including a `usage` field of a different shape — contributes zero,
- * never a guess.
+ * the meter. Every field must satisfy the success path's non-negative
+ * safe-integer rule (`validTokens`): a negative, fractional, unsafe or
+ * missing field voids the whole attachment — it contributes nothing and the
+ * attempt records usage unknown, exactly like the success path's
+ * `normalizeUsageObservation`. A corrupt report is never trusted in part,
+ * so malformed usage can neither shrink nor enlarge the token budget.
  */
 function usageOf(err: unknown): Usage | undefined {
   if (typeof err !== 'object' || err === null || !('usage' in err)) return undefined;
@@ -1596,11 +1599,11 @@ function usageOf(err: unknown): Usage | undefined {
   const fields = usage as Record<string, unknown>;
   const { input, output, cacheRead, cacheWrite, reasoning } = fields;
   if (
-    typeof input !== 'number' ||
-    typeof output !== 'number' ||
-    typeof cacheRead !== 'number' ||
-    typeof cacheWrite !== 'number' ||
-    (reasoning !== undefined && typeof reasoning !== 'number')
+    !validTokens(input) ||
+    !validTokens(output) ||
+    !validTokens(cacheRead) ||
+    !validTokens(cacheWrite) ||
+    (reasoning !== undefined && !validTokens(reasoning))
   )
     return undefined;
   return {
