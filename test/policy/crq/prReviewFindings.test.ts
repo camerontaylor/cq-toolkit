@@ -725,6 +725,34 @@ describe('POST payload parity', () => {
   });
 });
 
+// Doctrine I11: REST lists paginate — without `--paginate` real `gh api`
+// silently returns page 1 only. The vectors pin the exact argv; this named
+// test states the pagination fact itself.
+describe('reviews pagination fact', () => {
+  test('the reviews request argv includes --paginate', () => {
+    const entry = cases.find((candidate) => candidate.name === 'created-anchored');
+    if (entry === undefined) throw new Error('created-anchored vector missing');
+    const gh = ScriptedGh.fromConfig(asJsonObject(inputValue(entry, 'gh'), 'gh'));
+    const findings = loadFindings(requireString(inputValue(entry, 'events'), 'events'));
+    const meta = asJsonObject(inputValue(entry, 'meta'), 'meta');
+    deliver({
+      repo: requireString(inputValue(entry, 'repo'), 'repo'),
+      pr: requireNumber(inputValue(entry, 'pr'), 'pr'),
+      meta,
+      findings,
+      gh: gh.port,
+      login: null,
+    });
+    const reviews = gh.calls.filter((call) =>
+      call.argv.some((argument) => argument.endsWith('/reviews?per_page=100')),
+    );
+    expect(reviews.length, 'the replay made no reviews request').toBeGreaterThan(0);
+    for (const call of reviews) {
+      expect(call.argv, 'reviews request must carry --paginate').toContain('--paginate');
+    }
+  });
+});
+
 // neutraliseMentions fence/mention invariants beyond single vectors.
 describe('neutralisation invariants', () => {
   test('mention neutralisation and fence closing compose', () => {
