@@ -21,6 +21,7 @@ import {
   HEAD,
   ledgerWith,
   makeFakeEffects,
+  stubScanner,
 } from '../dev/fakes.js';
 import { makeTestRepo, repoEffects, seed, type TestRepo } from '../dev/repo.js';
 
@@ -129,7 +130,7 @@ describe('pr.open', () => {
       }),
     ]);
     const { gh, calls } = ghFake();
-    const result = await makePrOpen(effects(), gh)({ repoRoot: repo.root });
+    const result = await makePrOpen(effects(), gh, stubScanner())({ repoRoot: repo.root });
     expect(state.dirtySha256).toBe('clean-tree');
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') expect(result.reason).toContain('open-blocking-findings');
@@ -139,7 +140,7 @@ describe('pr.open', () => {
   test('creates the PR from a ready record: managed section body, dispositions comment', async () => {
     const state = await ready(true);
     const { gh, calls } = ghFake();
-    const result = await makePrOpen(effects(), gh)({ repoRoot: repo.root });
+    const result = await makePrOpen(effects(), gh, stubScanner())({ repoRoot: repo.root });
     expect(result).toEqual({
       status: 'ok',
       value: {
@@ -170,7 +171,7 @@ describe('pr.open', () => {
   test('adopts the existing OPEN PR: section composed over its prose, no second PR or comment', async () => {
     await ready(true);
     const { gh, calls } = ghFake({ number: 41 });
-    const result = await makePrOpen(effects(), gh)({ repoRoot: repo.root });
+    const result = await makePrOpen(effects(), gh, stubScanner())({ repoRoot: repo.root });
     expect(result.status === 'ok' && result.value.created).toBe(false);
     const edit = calls.find((call) => call.effect === 'editPrBody');
     const body = String(edit?.args[1]);
@@ -184,7 +185,7 @@ describe('pr.open', () => {
     async (existing) => {
       await ready();
       const { gh, calls } = ghFake(existing);
-      const result = await makePrOpen(effects(), gh)({ repoRoot: repo.root });
+      const result = await makePrOpen(effects(), gh, stubScanner())({ repoRoot: repo.root });
       expect(result.status).toBe('failed');
       expect(calls.map((call) => call.effect)).toEqual(['searchPrByHead']);
     },
@@ -192,10 +193,82 @@ describe('pr.open', () => {
 
   test('a not-ready branch is refused with the gaps and ZERO gh calls', async () => {
     const { gh, calls } = ghFake();
-    const result = await makePrOpen(effects(), gh)({ repoRoot: repo.root });
+    const result = await makePrOpen(effects(), gh, stubScanner())({ repoRoot: repo.root });
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') expect(result.reason).toContain('terminal-review-cycle');
     expect(calls).toEqual([]);
+  });
+
+  // #1212: the publication scanner gates every forge write, fail closed.
+  test('missing scanner refuses before any forge write', async () => {
+    await ready(true);
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(effects(), gh)({ repoRoot: repo.root });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed')
+      expect(result.error).toContain('no PR payload denylist scanner is configured');
+    expect(calls).toEqual([]);
+  });
+
+  test('a title hit refuses creation with ZERO forge writes', async () => {
+    await ready(true);
+    const { gh, calls } = ghFake();
+    const scanner = stubScanner([{ component: 'pr-title', ruleId: 'fixture-secret' }]);
+    const result = await makePrOpen(effects(), gh, scanner)({ repoRoot: repo.root });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('denylist gate at createPr');
+      expect(result.error).toContain('fixture-secret');
+    }
+    expect(calls.map((call) => call.effect)).toEqual(['searchPrByHead']);
+  });
+
+  test('a body hit refuses the adoption refresh with ZERO body writes', async () => {
+    await ready(true);
+    const { gh, calls } = ghFake({ number: 41 });
+    const scanner = stubScanner([{ component: 'pr-body', ruleId: 'fixture-secret' }]);
+    const result = await makePrOpen(effects(), gh, scanner)({ repoRoot: repo.root });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('denylist gate at editPrBody');
+      expect(result.error).toContain('fixture-secret');
+    }
+    expect(calls.map((call) => call.effect)).toEqual(['searchPrByHead', 'getPrBody']);
+  });
+
+  test('a comment hit refuses the dispositions comment but the PR stays open with the body', async () => {
+    await ready(true);
+    const { gh, calls } = ghFake();
+    let seen = 0;
+    const scanner: ReturnType<typeof stubScanner> = (components) => {
+      seen += 1;
+      // The creation scan passes; only the dispositions comment payload trips.
+      if (seen === 1) return stubScanner()(components);
+      return stubScanner([{ component: 'pr-body', ruleId: 'fixture-secret' }])(components);
+    };
+    const result = await makePrOpen(effects(), gh, scanner)({ repoRoot: repo.root });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('PR #42 is open with the dispositions in its body');
+      expect(result.error).toContain('denylist gate at comment');
+      expect(result.error).toContain('fixture-secret');
+    }
+    expect(calls.map((call) => call.effect)).toEqual(['searchPrByHead', 'createPr']);
+  });
+
+  test('a scanner fault refuses creation with ZERO forge writes', async () => {
+    await ready(true);
+    const { gh, calls } = ghFake();
+    const scanner = (): never => {
+      throw new Error('synthetic scanner fault');
+    };
+    const result = await makePrOpen(effects(), gh, scanner)({ repoRoot: repo.root });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('denylist gate at createPr');
+      expect(result.error).toContain('denylist scan failed');
+    }
+    expect(calls.map((call) => call.effect)).toEqual(['searchPrByHead']);
   });
 
   test('a tree with staged, unstaged or untracked work is refused even when the record matches it', async () => {
@@ -204,7 +277,7 @@ describe('pr.open', () => {
     await repo.write('src/a.ts', 'export const a = 1;\n');
     await ready();
     const { gh, calls } = ghFake();
-    const result = await makePrOpen(effects(), gh)({ repoRoot: repo.root });
+    const result = await makePrOpen(effects(), gh, stubScanner())({ repoRoot: repo.root });
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human')
       expect(result.reason).toContain('staged, unstaged or untracked');
@@ -215,11 +288,11 @@ describe('pr.open', () => {
     await ready();
     repo.git('push', '-q', 'origin', '--delete', 'feature/x');
     const unpushed = ghFake();
-    const never = await makePrOpen(effects(), unpushed.gh)({ repoRoot: repo.root });
+    const never = await makePrOpen(effects(), unpushed.gh, stubScanner())({ repoRoot: repo.root });
     expect(never.status === 'needs-human' && never.reason).toContain('never pushed');
     repo.git('push', '-q', 'origin', 'HEAD~1:refs/heads/feature/x');
     const behind = ghFake();
-    const other = await makePrOpen(effects(), behind.gh)({ repoRoot: repo.root });
+    const other = await makePrOpen(effects(), behind.gh, stubScanner())({ repoRoot: repo.root });
     expect(other.status === 'needs-human' && other.reason).toContain('push the reviewed head');
     expect([...unpushed.calls, ...behind.calls]).toEqual([]);
   });
@@ -230,14 +303,18 @@ describe('pr.open', () => {
     gh.comment = async () => {
       throw new Error('gh: 502');
     };
-    const result = await makePrOpen(effects(), gh)({ repoRoot: repo.root });
+    const result = await makePrOpen(effects(), gh, stubScanner())({ repoRoot: repo.root });
     expect(result.status === 'failed' && result.error).toContain('PR #42 is open');
   });
 
   test('--draft and --title pass through to the create request', async () => {
     await ready();
     const { gh, calls } = ghFake();
-    await makePrOpen(effects(), gh)({ repoRoot: repo.root, draft: true, title: 'feat: x' });
+    await makePrOpen(
+      effects(),
+      gh,
+      stubScanner(),
+    )({ repoRoot: repo.root, draft: true, title: 'feat: x' });
     expect(calls.find((call) => call.effect === 'createPr')?.args[0]).toMatchObject({
       draft: true,
       title: 'feat: x',
@@ -251,6 +328,7 @@ describe('pr.open', () => {
     const result = await makePrOpen(
       effects(),
       gh,
+      stubScanner(),
     )({
       repoRoot: repo.root,
       draft: true,
@@ -288,6 +366,7 @@ describe('pr.open', () => {
     const result = await makePrOpen(
       effects(),
       gh,
+      stubScanner(),
     )({
       repoRoot: repo.root,
       draft: true,
@@ -309,6 +388,7 @@ describe('pr.open', () => {
     const opened = await makePrOpen(
       effects(),
       first.gh,
+      stubScanner(),
     )({
       repoRoot: repo.root,
       draft: true,
@@ -338,6 +418,7 @@ describe('pr.open', () => {
     const adopted = await makePrOpen(
       effects(),
       second.gh,
+      stubScanner(),
     )({
       repoRoot: repo.root,
     });
@@ -366,6 +447,7 @@ describe('pr.open', () => {
     const result = await makePrOpen(
       effects(),
       gh,
+      stubScanner(),
     )({
       repoRoot: repo.root,
       draftWhenNotReady: true,
@@ -382,6 +464,7 @@ describe('pr.open', () => {
     const result = await makePrOpen(
       effects(),
       gh,
+      stubScanner(),
     )({
       repoRoot: repo.root,
       draft: true,
@@ -398,6 +481,7 @@ describe('pr.open', () => {
     const result = await makePrOpen(
       effects(),
       gh,
+      stubScanner(),
     )({
       repoRoot: repo.root,
       draft: true,
@@ -424,6 +508,7 @@ describe('pr.open', () => {
     const result = await makePrOpen(
       effects(),
       gh,
+      stubScanner(),
     )({
       repoRoot: repo.root,
       draft: true,
@@ -436,7 +521,7 @@ describe('pr.open', () => {
   test('a schema-bypassing input fails before any effect', async () => {
     const dev = makeFakeEffects();
     const { gh, calls } = ghFake();
-    const result = await makePrOpen(dev, gh)({ repoRoot: '' });
+    const result = await makePrOpen(dev, gh, stubScanner())({ repoRoot: '' });
     expect(result.status).toBe('failed');
     expect([...dev.commands, ...calls]).toEqual([]);
   });

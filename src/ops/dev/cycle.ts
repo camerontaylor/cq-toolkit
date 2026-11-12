@@ -393,6 +393,24 @@ export interface DevCycleDeps {
   gh?: PrEffects;
   /** The secret scanner the default check leg binds (registry parity with dev.check). */
   scanSecrets?: DiffSecretScanner;
+  /**
+   * The publication scanner the DEFAULT pr.open legs bind (registry parity
+   * with pr.open): scanned before every forge publication. Built for one
+   * checkout ROOT — the probe/tmp worktree never runs under another tree's
+   * rules.
+   */
+  publicationScanner?: DiffSecretScanner;
+  /**
+   * The publication scanner for a probe/tmp worktree, built from THAT
+   * checkout's own configuration. When the author's check scans with a
+   * configured scanner but none can be bound to the probe root, the default
+   * probe publication leg has no scanner and fails closed (same rule as
+   * scanSecretsFor for the probe check leg).
+   */
+  publicationScannerFor?: (
+    root: string,
+    effects: DevEffects,
+  ) => DiffSecretScanner | undefined | Promise<DiffSecretScanner | undefined>;
   drivers?: DriverFactory;
   /** The git transport the push leg binds (tests script it). */
   git?: GhFn;
@@ -481,7 +499,11 @@ function makeDevCycleCore(
     const open =
       deps.open ??
       ((step: PrOpenInput) =>
-        makePrOpen(deps.effects, gh ?? makeSubprocessPrEffects(input.repoRoot))(step));
+        makePrOpen(
+          deps.effects,
+          gh ?? makeSubprocessPrEffects(input.repoRoot),
+          deps.publicationScanner,
+        )(step));
     const git =
       deps.git ?? makeGhRunner({ bin: 'git', cwd: input.repoRoot, timeoutMs: 10 * 60 * 1000 });
 
@@ -1164,10 +1186,15 @@ function makeDevCycleCore(
               reason: `dev.cycle (push): ${pushedPub.reason}; the remote may carry '${pub}', and the local branch is kept`,
             },
           };
-        const openPub = (
-          deps.openIn ??
-          ((effects) => makePrOpen(effects, gh ?? makeSubprocessPrEffects(input.repoRoot)))
-        )(tmpEffects, tmp);
+        const openPub = await probeOpenFor(tmpEffects, tmp);
+        if (openPub === undefined)
+          return {
+            kind: 'published',
+            result: {
+              status: 'failed',
+              error: `dev.cycle (pr.open): pr.open: refusing publication because no PR payload denylist scanner is configured for the probe worktree at '${tmp}' — a probe never publishes under another tree's rules`,
+            },
+          };
         const openResult = await openPub({
           repoRoot: tmp,
           target,
@@ -1232,6 +1259,28 @@ function makeDevCycleCore(
         return makeDevCheck(effects, await deps.scanSecretsFor(root, effects));
       if (deps.scanSecrets !== undefined) return undefined;
       return makeDevCheck(effects);
+    }
+
+    /**
+     * The probe worktree's publication leg, built fresh for its CURRENT
+     * checkout: an injected `openIn`, else makePrOpen with a publication
+     * scanner bound to that root (`publicationScannerFor`). When the author
+     * scans publications with a configured scanner but none can be bound to
+     * the probe root, there is no leg (undefined): a probe must never
+     * publish under another tree's rules.
+     */
+    async function probeOpenFor(
+      effects: DevEffects,
+      root: string,
+    ): Promise<((step: PrOpenInput) => Promise<OpResult<PrOpenReport>>) | undefined> {
+      if (deps.openIn !== undefined) return deps.openIn(effects, root);
+      const scanner =
+        deps.publicationScannerFor === undefined
+          ? undefined
+          : await deps.publicationScannerFor(root, effects);
+      if (scanner === undefined && deps.publicationScanner !== undefined) return undefined;
+      return (step: PrOpenInput) =>
+        makePrOpen(effects, gh ?? makeSubprocessPrEffects(input.repoRoot), scanner)(step);
     }
 
     // -------- the round-cap / not-ready publication (shared) -------------

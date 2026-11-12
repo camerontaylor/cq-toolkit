@@ -340,9 +340,10 @@ export const registry: OpRegistryEntry[] = [
         import('./effects.js'),
         import('../../adapters/forge-github/ghEffects.js'),
         import('../dev/denylist.js'),
+        import('../pr/registry.js'),
         import('node:fs/promises'),
       ]).then(
-        ([m, effects, ghEffects, denylist, fs]) =>
+        ([m, effects, ghEffects, denylist, prRegistry, fs]) =>
           (async (input: DevCycleCompositionInput) => {
             const dev = effects.makeSubprocessDevEffects(input.repoRoot);
             // The secret scanner a check leg binds: the SAME two-layer
@@ -354,6 +355,17 @@ export const registry: OpRegistryEntry[] = [
             const scannerFor = async (root: string, rootEffects: typeof dev) =>
               denylist.checkScannerFor(root, rootEffects, readFile);
             const scanSecrets = await scannerFor(input.repoRoot, dev);
+            // The publication scanner the default pr.open legs bind (the
+            // pr.open importer's mandatory gate): built for one checkout
+            // ROOT, so the #536 probe worktree binds its own from its own
+            // configuration. An unreadable author cq.json refuses the op
+            // outright (the pr.open fail-closed shape); an unbindable probe
+            // root fails the probe publication (never another tree's rules).
+            const publicationLoaded = await prRegistry.loadPublicationScanner(
+              input.repoRoot,
+              'dev.cycle',
+            );
+            if ('status' in publicationLoaded) return publicationLoaded;
             // #536: the red-final-gate fallback's probe worktree binds its own
             // effects (same construction as `dev`). Its dependency install is
             // wired ONLY for a pnpm-locked repository: an offline, frozen
@@ -367,8 +379,13 @@ export const registry: OpRegistryEntry[] = [
               effects: dev,
               gh: ghEffects.makeSubprocessPrEffects(input.repoRoot),
               ...(scanSecrets === undefined ? {} : { scanSecrets }),
+              publicationScanner: publicationLoaded.scanner,
               effectsFor: (root: string) => effects.makeSubprocessDevEffects(root),
               scanSecretsFor: scannerFor,
+              publicationScannerFor: async (root: string, _rootEffects: typeof dev) => {
+                const probeLoaded = await prRegistry.loadPublicationScanner(root, 'dev.cycle');
+                return 'status' in probeLoaded ? undefined : probeLoaded.scanner;
+              },
               ...(pnpmLocked
                 ? {
                     installDeps: async (root: string, signal: AbortSignal) => {

@@ -8,7 +8,7 @@ import { DEV_READINESS_GAPS_SECTION_MARKER } from '../../../src/ops/pr/open.js';
 import type { PrOpenInput } from '../../../src/ops/pr/open.js';
 import type { DevEffects } from '../../../src/ops/dev/effects.js';
 import type { WorkState } from '../../../src/ops/dev/internal/workState.js';
-import { dispositionRecord } from './fakes.js';
+import { dispositionRecord, stubScanner } from './fakes.js';
 import { makeTestRepo, repoEffects, seed, type TestRepo } from './repo.js';
 import {
   addressReport,
@@ -93,7 +93,7 @@ describe('dev.cycle', () => {
       address: roundCapAddress(state),
       open: ((input: PrOpenInput) => {
         opens.push(input);
-        return makePrOpen(effects(), gh)(input);
+        return makePrOpen(effects(), gh, stubScanner())(input);
       }) as never,
       gh,
       git: async (args) =>
