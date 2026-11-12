@@ -628,6 +628,13 @@ export class ClaudeCodeSdkTransport implements Driver {
     // the COMPLETE denial set instead of a race-dependent subset.
     await Promise.allSettled([...inFlightCalls]);
 
+    // An abort that fired DURING the drain must reach the verdict: the
+    // pre-dispose fold above ran before the wait, and disposal has since
+    // detached the root. The governed signal itself is still live here, and
+    // each drained handler received it, so recheck both sources before the
+    // verdict is built — never report 'complete' for a cancelled run.
+    aborted = aborted || abortRoot?.controller.signal.aborted === true || signalAborted(signal);
+
     // Fail closed: a run whose SDK never reported an init surface ran
     // unverified — whatever it reports is not a model outcome.
     if (
