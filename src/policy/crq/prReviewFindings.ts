@@ -843,6 +843,47 @@ function fenceState(lines: readonly string[]): string | null {
   return fence;
 }
 
+/**
+ * Cut `body` to `limit`, closing any open fence, so the WHOLE result
+ * (prefix + closure + trailer) stays within `limit`.
+ *
+ * Shortening the prefix can re-open an earlier (longer) fence, so one
+ * reservation is not enough; iterate: reserve the currently-scanned
+ * closure from the budget, rescan, until the scan is stable (the
+ * reservation already fits). Each round either stabilises or strictly
+ * shrinks the budget toward the trailer-length floor, so it terminates;
+ * a stable round satisfies prefix+closure+trailer == limit exactly.
+ */
+function bodyCap(body: string, limit: number): string {
+  const trailer = '\n\n… (truncated; full text in the crq run artifacts)\n';
+  let budget = limit;
+  let best: { readonly length: number; readonly text: string } | null = null;
+  while (true) {
+    const prefix = pythonSlice(body, 0, budget);
+    const fence = fenceState(prefix.split('\n'));
+    const closure = fence === null ? '' : `\n${fence}`;
+    const total = pythonLength(prefix) + pythonLength(closure) + pythonLength(trailer);
+    if (total <= limit && (best === null || pythonLength(prefix) > best.length)) {
+      best = { length: pythonLength(prefix), text: `${prefix}${closure}${trailer}` };
+    }
+    const reserved = limit - pythonLength(closure) - pythonLength(trailer);
+    if (reserved >= budget) {
+      return `${prefix}${closure}${trailer}`;
+    }
+    if (reserved <= 0) {
+      break;
+    }
+    budget = reserved;
+  }
+  // Degenerate contents (a fence run longer than the budget): emit the
+  // longest bounded result observed; if none exists, cut to the trailer
+  // floor with no closure so the output is still within `limit`.
+  if (best !== null) {
+    return best.text;
+  }
+  return `${pythonSlice(body, 0, limit - pythonLength(trailer))}${trailer}`;
+}
+
 /** Python `str.rstrip()` (default whitespace) over a JavaScript string. */
 function pythonRstrip(text: string): string {
   const characters = [...text];
@@ -959,26 +1000,7 @@ ${text}`,
   }
   let body = `${rstripTrailingNewlines(lines.join('\n'))}\n`;
   if (pythonLength(body) > MAX_BODY) {
-    const trailer = '\n\n… (truncated; full text in the crq run artifacts)\n';
-    let prefix = pythonSlice(body, 0, MAX_BODY);
-    const fence = fenceState(prefix.split('\n'));
-    if (fence !== null) {
-      // Reserve the closure and trailer from the budget so the final body
-      // keeps its MAX_BODY size with the fence genuinely closed; identity
-      // and summary lines sit at the top and survive any tail cut.
-      // Shortening can change which fence is open, so rescan.
-      let closure = `\n${fence}`;
-      prefix = pythonSlice(body, 0, MAX_BODY - pythonLength(closure) - pythonLength(trailer));
-      const rescanned = fenceState(prefix.split('\n'));
-      if (rescanned !== null) {
-        closure = `\n${rescanned}`;
-      } else {
-        closure = '';
-      }
-      body = `${prefix}${closure}${trailer}`;
-    } else {
-      body = `${prefix}${trailer}`;
-    }
+    body = bodyCap(body, MAX_BODY);
   }
   const review: Array<readonly [string, JsonValue]> = [
     ['event', 'COMMENT'],

@@ -172,12 +172,24 @@ function applyReviewsJq(argv: readonly string[], raw: string): GhResult | string
   const outLines: string[] = [];
   for (const row of page) {
     if (row === null || typeof row !== 'object' || Array.isArray(row)) {
-      // Real jq exits 5 on the first non-object row after emitting earlier
-      // matches; delivery aborts on the returncode either way.
+      // Real jq streams results as it goes: earlier matches stay on stdout
+      // and the message names the row's actual JSON type.
+      const noun =
+        row === null
+          ? 'null'
+          : Array.isArray(row)
+            ? 'array'
+            : typeof row === 'string'
+              ? 'string'
+              : typeof row === 'number'
+                ? 'number'
+                : typeof row === 'boolean'
+                  ? 'boolean'
+                  : 'object';
       return {
         returncode: processCode(5),
         stdout: outLines.map((line) => `${line}\n`).join(''),
-        stderr: 'jq: error (at <stdin>:0): Cannot index string with string ("user")',
+        stderr: `jq: error (at <stdin>:0): Cannot index ${noun} with string ("user")`,
       };
     }
     const record = row as unknown as Record<string, JsonValue>;

@@ -392,14 +392,35 @@ elif '--paginate' not in args:
         self.assertIsNone(prf._fence_state(body.split("\n")),
                           "fence must be closed at the end of the capped body")
 
+    def test_body_cap_rescan_longer_fence_stays_bounded(self):
+        """R4 critic P2: one reservation is not enough. Cutting to reserve a
+        3-backtick closure re-opens an earlier 5,600-tilde fence; the cap
+        must iterate until the scan is stable so the emitted body (prefix +
+        closure + trailer) never exceeds MAX_BODY, and the final fence must
+        be closed."""
+        findings = [{"severity": "none", "path": None, "start": None, "end": None,
+                     "title": "", "text": "x" * 12000} for _ in range(4)] + [
+            {"severity": "none", "path": None, "start": None, "end": None,
+             "title": "", "text": "x" * 100},
+            {"severity": "none", "path": None, "start": None, "end": None,
+             "title": "", "text": "~" * 5600 + "\n" + "~" * 5600 + "\n```python\n" + "z" * 200}]
+        body = prf.build_review({"head": HEAD, "base": BASE, "run_id": "r-ok"}, findings, None)["body"]
+        self.assertLessEqual(len(body), prf.MAX_BODY,
+                             "emitted body must stay within MAX_BODY after re-reservation")
+        self.assertLessEqual(len(body), 65536, "GitHub hard cap")
+        self.assertTrue(body.startswith(prf.marker("r-ok")))
+        self.assertTrue(body.endswith("… (truncated; full text in the crq run artifacts)\n"))
+        self.assertIsNone(prf._fence_state(body.split("\n")),
+                          "final body must not end inside an open fence")
+
     def test_body_cap_no_fence_keeps_previous_shape(self):
-        """Without an open fence the cap keeps the historical 60000+trailer
-        shape and no closure bytes appear."""
+        """Without an open fence the cap keeps the historical shape: prefix
+        then trailer, bounded by MAX_BODY, no closure bytes."""
         findings = [{"severity": "none", "path": None, "start": None, "end": None,
                      "title": "", "text": "y" * 12000} for _ in range(6)]
         review = prf.build_review({"head": HEAD, "base": BASE, "run_id": "r-ok"}, findings, None)
         body = review["body"]
-        self.assertGreater(len(body), prf.MAX_BODY)
+        self.assertLessEqual(len(body), prf.MAX_BODY)
         self.assertTrue(body.startswith(prf.marker("r-ok")))
         self.assertTrue(body.endswith("… (truncated; full text in the crq run artifacts)\n"))
 

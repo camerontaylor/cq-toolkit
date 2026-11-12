@@ -227,8 +227,9 @@ def _apply_reviews_jq(argv, raw):
     compact projected object per matching row. Modelled here:
 
     - non-array or unparsable input -> jq parse failure (returncode 2),
-    - a non-object row -> jq's "Cannot index string with string" runtime
-      error (returncode 5) after emitting any earlier matches,
+    - a non-object row -> jq's runtime error (returncode 5) after emitting
+      any earlier matches to stdout (real jq streams results as it goes;
+      the message names the row's actual JSON type),
     - rows are filtered by the selector's `user.login` and marker predicate
       (`startswith`/`contains`) and projected to `{id, url: .html_url}`.
 
@@ -242,8 +243,8 @@ def _apply_reviews_jq(argv, raw):
             break
     login_match = re.search(r'select\(\.user\.login == "((?:[^"\\]|\\.)*)"', jq)
     literal_match = re.search(r'(startswith|contains)\("((?:[^"\\]|\\.)*)"\)', jq)
-    def _fail(returncode, detail):
-        return SimpleNamespace(returncode=returncode, stdout="", stderr=detail)
+    def _fail(returncode, detail, keep=""):
+        return SimpleNamespace(returncode=returncode, stdout=keep, stderr=detail)
     if login_match is None or literal_match is None:
         # Unmodelled selector: refuse rather than fake agreement.
         return _fail(3, "jq: unmodelled selector in fake")
@@ -256,10 +257,16 @@ def _apply_reviews_jq(argv, raw):
         return _fail(2, "jq: error (at <stdin>:0): parse error")
     if not isinstance(page, list):
         return _fail(2, 'jq: error (at <stdin>:0): Cannot iterate over null')
+    row_type = {list: "array", str: "string", bool: "boolean", int: "number",
+                float: "number", type(None): "null"}
     out_lines = []
     for row in page:
         if not isinstance(row, dict):
-            return _fail(5, 'jq: error (at <stdin>:0): Cannot index string with string ("user")')
+            noun = row_type[type(row)]
+            return _fail(5,
+                         'jq: error (at <stdin>:0): Cannot index %s with string ("user")'
+                         % noun,
+                         keep="".join(line + "\n" for line in out_lines))
         if (row.get("user") or {}).get("login") != login:
             continue
         body = row.get("body") or ""
@@ -831,7 +838,9 @@ def deliver_cases() -> List[Dict[str, Any]]:
         gh=EndpointGh(reviews=json.dumps(
             [{"id": 7, "user": {"login": "crq-host"}, "body": marker_body}]) + "\n"))
     add("reviews-row-not-object", REPO, 77, META, nd,
-        gh=EndpointGh(reviews=reviews_page(["row"])))
+        gh=EndpointGh(reviews=reviews_page(
+            {"id": 1, "user": {"login": "crq-host"}, "body": marker_body},
+            ["row"])))
     add("reviews-row-id-float", REPO, 77, META, nd,
         gh=EndpointGh(reviews=reviews_page(
             {"id": 7.5, "user": {"login": "crq-host"}, "body": marker_body})))

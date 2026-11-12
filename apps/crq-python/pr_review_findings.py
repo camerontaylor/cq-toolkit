@@ -222,6 +222,41 @@ def _fence_state(lines):
     return fence
 
 
+def _body_cap(body: str, limit: int) -> str:
+    """Cut `body` to `limit`, closing any open fence, so the WHOLE result
+    (prefix + closure + trailer) stays within `limit`.
+
+    Shortening the prefix can re-open an earlier (longer) fence, so one
+    reservation is not enough; iterate: reserve the currently-scanned
+    closure from the budget, rescan, until the scan is stable (the
+    reservation already fits). Each round either stabilises or strictly
+    shrinks the budget toward the trailer-length floor, so it terminates;
+    a stable round satisfies prefix+closure+trailer == limit exactly.
+    """
+    trailer = "\n\n… (truncated; full text in the crq run artifacts)\n"
+    budget = limit
+    best: Optional[Tuple[int, str]] = None
+    while True:
+        prefix = body[:budget]
+        fence = _fence_state(prefix.split("\n"))
+        closure = "" if fence is None else "\n" + fence
+        total = len(prefix) + len(closure) + len(trailer)
+        if total <= limit and (best is None or len(prefix) > best[0]):
+            best = (len(prefix), prefix + closure + trailer)
+        reserved = limit - len(closure) - len(trailer)
+        if reserved >= budget:
+            return prefix + closure + trailer
+        if reserved <= 0:
+            break
+        budget = reserved
+    # Degenerate contents (a fence run longer than the budget): emit the
+    # longest bounded result observed; if none exists, cut to the trailer
+    # floor with no closure so the output is still within `limit`.
+    if best is not None:
+        return best[1]
+    return body[:limit - len(trailer)] + trailer
+
+
 def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
@@ -274,24 +309,7 @@ def build_review(meta: Dict[str, Any], findings: List[Dict[str, Any]],
             lines += [f"{heading}{' (' + where + ')' if where else ''}", "", _clip(text, MAX_COMMENT), ""]
     body = "\n".join(lines).rstrip() + "\n"
     if len(body) > MAX_BODY:
-        trailer = "\n\n… (truncated; full text in the crq run artifacts)\n"
-        prefix = body[:MAX_BODY]
-        fence = _fence_state(prefix.split("\n"))
-        if fence is not None:
-            # Reserve the closure and trailer from the budget so the final
-            # body keeps its MAX_BODY size with the fence genuinely closed;
-            # identity/summary lines sit at the top and survive any tail cut.
-            # Shortening can change which fence is open, so rescan.
-            closure = "\n" + fence
-            prefix = body[:MAX_BODY - len(closure) - len(trailer)]
-            fence = _fence_state(prefix.split("\n"))
-            if fence is not None:
-                closure = "\n" + fence
-            else:
-                closure = ""
-            body = prefix + closure + trailer
-        else:
-            body = prefix + trailer
+        body = _body_cap(body, MAX_BODY)
     review: Dict[str, Any] = {"event": "COMMENT", "body": body, "comments": comments}
     if hunks is not None:
         review["commit_id"] = head
