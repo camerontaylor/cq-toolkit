@@ -1349,9 +1349,18 @@ def _completion(adapter, unit, runtime, previous):
     return evidence
 
 
-def recover_unit(effects, adapter, path):
-    """Restore a pre-activation intent; activation ambiguity requires investigation."""
-    if adapter is None:
+def recover_unit(effects, adapter, path, *, adapter_factory=None):
+    """Restore a pre-activation intent; activation ambiguity requires investigation.
+
+    ``adapter_factory(unit, prior_runtime)`` is a composition callback used by
+    the production CLI. It is invoked under the controller lock with values the
+    controller validated from the one retained record, after the read-only
+    queue-drain gate and before snapshot validation, so composition cannot race
+    a second record read. Recovery composes for the record's OWN prior runtime:
+    the snapshot is authoritative for bytes, modes, ownership and activation,
+    and the abandoned target's artifact need not still be installed.
+    """
+    if adapter is None and adapter_factory is None:
         raise Refused("no unit recovery adapter")
     path = Path(path)
     with effects.controller_lock():
@@ -1374,7 +1383,9 @@ def recover_unit(effects, adapter, path):
                 or not _unit_runtime(record.get("runtime"))
                 or not _unit_runtime(record.get("prior_runtime"))
                 or record["runtime"] == record["prior_runtime"]
-                or "snapshot" not in record or "state" not in record
+                or not isinstance(record.get("snapshot"), dict)
+                or record["snapshot"].get("runtime") != record["prior_runtime"]
+                or "state" not in record
                 or record.get("phase") not in ("snapshot", "drained", "activation_pending", "restore_activation_pending")
                 or (record["phase"] == "snapshot" and record.get("state") is not None)
                 or (record["phase"] in ("drained", "activation_pending") and not isinstance(record.get("state"), dict))
@@ -1388,6 +1399,10 @@ def recover_unit(effects, adapter, path):
         # drain or a prior crash left the queue empty. Refusal happens before
         # re-fencing, restore or any journal rewrite.
         queue_drain_gate(effects)
+        if adapter_factory is not None:
+            adapter = adapter_factory(record["unit"], record["prior_runtime"])
+        if adapter is None:
+            raise Refused("no unit recovery adapter")
         adapter.validate_snapshot(record["unit"], record["snapshot"])
         try:
             adapter.stop_and_drain(record["unit"])
@@ -1946,6 +1961,10 @@ def main(argv=None) -> int:
                               help="owner-approved rollback to the recorded prior target")
     rollback.add_argument("--prior-record", required=True, type=Path,
                           help="a controller journal entry naming the prior target")
+    recover = sub.add_parser(
+        "recover", help="restore one retained pre-activation unit intent")
+    recover.add_argument("--record", required=True, type=Path,
+                         help="retained controller unit record to recover")
     health = sub.add_parser("health",
                             help="two advancing completed-tick observations")
     health.add_argument("--interval-seconds", type=int, required=True,
@@ -1995,6 +2014,22 @@ def main(argv=None) -> int:
                                    helper_sha256)
             print(json.dumps({"operation": "rollback", **result}, indent=2,
                              sort_keys=True))
+        elif args.operation == "recover":
+            overlay, _raw = helper_module.load_overlay(args.overlay)
+
+            def adapter_factory(unit, prior_runtime):
+                live = _load_live_binding()
+                try:
+                    adapter, _selection = live.production_adapter(
+                        effects, overlay, unit=unit, runtime=prior_runtime)
+                except (live.LiveBindingRefused, live.factory.FactoryRefused,
+                        live.completion.CompletionError) as exc:
+                    raise Refused(str(exc)[:400]) from exc
+                return adapter
+
+            record = recover_unit(effects, None, args.record,
+                                  adapter_factory=adapter_factory)
+            print(json.dumps(record, indent=2, sort_keys=True))
         else:
             first_observation = True
 
