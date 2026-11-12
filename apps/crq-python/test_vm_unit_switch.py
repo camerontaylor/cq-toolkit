@@ -2199,10 +2199,6 @@ class ActivatorEvidenceTests(unittest.TestCase):
             "rogue-unit", malformed, baseline, unknown, []))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class PartialHarnessCheckTests(unittest.TestCase):
     """Synthetic partial-release evidence through the real host validator."""
 
@@ -3097,3 +3093,7 @@ class PartialHarnessCheckTests(unittest.TestCase):
             harness._verify_partial_raw({}, root, problems, phases_value)
             self.assertTrue(any("record digest does not match" in item
                                 for item in problems), problems)
+
+
+if __name__ == "__main__":
+    unittest.main()

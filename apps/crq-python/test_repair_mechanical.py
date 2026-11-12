@@ -257,12 +257,20 @@ class CqDriverTest(unittest.TestCase):
 ALLOWED = ['git grep -n import.meta.url -- scripts', 'git grep -rn foo', 'git grep foo',
            'git ls-files', 'git ls-files scripts test', 'git ls-tree -r HEAD src',
            'git grep -c needle', 'git grep -n -e def.process -- apps/crq-python/crq_repair.py',
-           'git grep --no-textconv x', 'git grep -n a%b+c,d=e@f:g^h']
+           'git grep --no-textconv x', 'git grep -n a%b+c,d=e@f:g^h',
+           'git grep pattern -- file.py']
 DENIED = [
     # Executing or escaping options, plain and abbreviated.
     'git grep -O vim x', 'git grep -nO x', 'git grep -Ovim x', 'git grep --open-files-in-pager=vim x',
     'git grep --op=vim x', 'git grep --no-index x /etc', 'git grep --no-ind x', 'git grep --textconv x',
     'git grep --tex x', 'git grep --ext-grep x', 'git ls-files --output=x',
+    'git grep --help x', 'git grep --hel x', 'git grep --h x', 'git grep --heading pat',
+    'git ls-files --help', 'git ls-tree --help HEAD',
+    # File-input options: patterns are read from the named file, and invalid
+    # pattern lines reach git's error output verbatim.
+    'git grep -f /etc/shadow x', 'git grep -nf /etc/shadow x', 'git grep --file /etc/shadow x',
+    'git ls-files -X /tmp/excludes', 'git ls-files --exclude-from=/tmp/excludes',
+    'git ls-files --exclude-p=/tmp/excludes', 'git ls-files --exclude-per-directory=/tmp/x',
     # Shell rewriting: quotes, backslashes, globs and expansions hide options from the raw text.
     'git grep "-O"touch x', 'git grep "-O"cat" /home/u/.key" pat', "git grep '-O'touch x",
     'git grep -\\O touch x', 'git grep \\-O touch x', 'git grep -"-"open-files-in-pager=id x',

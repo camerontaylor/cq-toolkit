@@ -116,7 +116,7 @@ aggregate success. Publication stays `unknown` in the aggregate because the
 single-address report has no structured publication witness.
 
 Optional `enrollments` is a JSON array of `{number, request}` rows. Each request
-uses the existing `review.enqueue` input (`requestId` and deferred-author
+uses the queue client's `enqueue` input (`requestId` and deferred-author
 `binding`); only enqueue actions with a matching repository and admitted head
 are accepted. Queue configuration uses `CQ_QUEUE_SSH_ALIAS`. Missing capability,
 rejection or transport failure records `unavailable` on that row and the address

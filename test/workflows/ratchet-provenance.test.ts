@@ -20,7 +20,16 @@
 //      cq-verify measure and judge the manifest ratchets); it keeps only the
 //      baseline monotonicity guard, in ref mode, on pull requests.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -478,6 +487,425 @@ describe('ratchet.yml is the baseline guard only', () => {
       expect(body).not.toMatch(/git diff/);
     },
   );
+});
+
+/**
+ * The guard run-block (the `run: |` body of the monotonic step), extracted
+ * from a ratchet.yml copy and dedented by its 10-space indent — the exact
+ * shell the CI step executes, exercised below against OpResult shapes.
+ */
+function guardRunBlock(text: string): string {
+  // From the op invocation (substituted with a fake CLI in tests) through
+  // the verdict write, stopping before the final jq pass/fail check (the
+  // test asserts that gate separately from the recorded verdict).
+  const start = text.indexOf('          out="$(node dist/cli.js ratchet.monotonicGuard');
+  expect(start, 'op invocation present').toBeGreaterThanOrEqual(0);
+  const lines: string[] = [];
+  for (const line of text.slice(start).split('\n')) {
+    if (line.trim() !== '' && !line.startsWith('          ')) break;
+    lines.push(line.startsWith('          ') ? line.slice(10) : '');
+    if (line.startsWith("          printf 'verdict=")) break;
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Run the FULL guard run-block — op invocation through verdict write —
+ * under the step's `set -euo pipefail` with the op CLI replaced by a stub
+ * that emits `stdoutJson` and exits `cliRc`; capture GITHUB_OUTPUT. This
+ * models a real CLI failure: set -e must not abort before the verdict
+ * lands (r2 review F3).
+ */
+function runGuardSnippet(
+  snippet: string,
+  stdoutJson: string,
+  cliRc: number,
+): { status: number | null; outputs: string } {
+  const output = join(tmpdir(), `ratchet-guard-${Math.random().toString(36).slice(2)}`);
+  writeFileSync(output, '');
+  // Snippet goes through a temp script file: a shell-embedded literal
+  // would mangle the JSON's quotes; the stub CLI writes its stdout/exit
+  // through files so quoting cannot corrupt either.
+  const stdoutPath = `${output}.stdout`;
+  writeFileSync(stdoutPath, stdoutJson);
+  // No single quotes in tmp paths (macOSPID suffixes aside, this runner's
+  // tmpdir has none), but assert rather than silently break the stub.
+  expect(stdoutPath, 'tmp path must be single-quote safe').not.toContain("'");
+  const stub = join(tmpdir(), `ratchet-guard-stub-${Math.random().toString(36).slice(2)}.sh`);
+  expect(stub, 'tmp path must be single-quote safe').not.toContain("'");
+  writeFileSync(stub, `#!/usr/bin/env bash\ncat '${stdoutPath}'\nexit ${cliRc}\n`);
+  const script = [
+    'set -euo pipefail',
+    `node() { bash '${stub}' "$@"; }`,
+    // PR_BASE is provided by the step env in CI; the stub never sees it.
+    'PR_BASE=main',
+    'op_rc=0',
+    snippet,
+    'true',
+  ].join('\n');
+  const scriptPath = join(tmpdir(), `ratchet-guard-${Math.random().toString(36).slice(2)}.sh`);
+  writeFileSync(scriptPath, script);
+  const result = spawnSync('bash', [scriptPath], {
+    encoding: 'utf8',
+    env: { ...process.env, GITHUB_OUTPUT: output },
+  });
+  return {
+    status: result.status,
+    outputs: existsSync(output) ? readFileSync(output, 'utf8') : '',
+  };
+}
+
+describe('ratchet.yml guard verdict mapping (PR #1535 review F1/F2)', () => {
+  const OK_TRUE = JSON.stringify({
+    status: 'ok',
+    value: { ok: true, violations: [], filesChecked: 1 },
+  });
+  const cases = [
+    [
+      'loosened value',
+      JSON.stringify({
+        status: 'ok',
+        value: {
+          ok: false,
+          violations: [{ path: 'baselines/x.json', why: 'loosened' }],
+          filesChecked: 1,
+        },
+      }),
+    ],
+    [
+      'direction changed',
+      JSON.stringify({
+        status: 'ok',
+        value: {
+          ok: false,
+          violations: [{ path: 'baselines/x.json', why: 'direction changed' }],
+          filesChecked: 1,
+        },
+      }),
+    ],
+    [
+      'unit changed',
+      JSON.stringify({
+        status: 'ok',
+        value: {
+          ok: false,
+          violations: [{ path: 'baselines/x.json', why: 'unit changed' }],
+          filesChecked: 1,
+        },
+      }),
+    ],
+    [
+      'deleted without replacement',
+      JSON.stringify({
+        status: 'ok',
+        value: {
+          ok: false,
+          violations: [{ path: 'baselines/x.json', why: 'deleted without replacement' }],
+          filesChecked: 1,
+        },
+      }),
+    ],
+    [
+      'unparsable baseline diff',
+      JSON.stringify({
+        status: 'ok',
+        value: {
+          ok: false,
+          violations: [{ path: 'baselines/x.json', why: 'unparsable baseline diff' }],
+          filesChecked: 1,
+        },
+      }),
+    ],
+    ['op failed', JSON.stringify({ status: 'failed', error: 'crash' })],
+    ['needs-human', JSON.stringify({ status: 'needs-human', reason: 'x' })],
+    ['indeterminate', JSON.stringify({ status: 'indeterminate', detail: 'x' })],
+    ['budget-exhausted', JSON.stringify({ status: 'budget-exhausted' })],
+    ['not JSON', 'garbage'],
+  ] as const;
+
+  const cliFailureCases = [
+    ['op failed rc1', JSON.stringify({ status: 'failed', error: 'crash' }), 1],
+    ['op failed rc3', JSON.stringify({ status: 'needs-human', reason: 'x' }), 3],
+    ['CLI crash no output', '', 1],
+  ] as const;
+
+  it.each(bothCopies('ratchet.yml'))(
+    '%s: clean op passes and records verdict=passed',
+    (_label, text) => {
+      const run = runGuardSnippet(guardRunBlock(text), OK_TRUE, 0);
+      expect(run.status, run.outputs).toBe(0);
+      expect(run.outputs).toBe('verdict=passed\n');
+    },
+  );
+
+  it.each(
+    cases.flatMap(([name, json]) =>
+      bothCopies('ratchet.yml').map(([l, t]) => [`${l}: ${name}`, t, json] as const),
+    ),
+  )('%s records the honest verdict with the CLI exiting 0', (_label, text, json) => {
+    // ok:false exits 0 (exitCodeForOpResult: only --fail-on-verdict
+    // changes that, which the workflow does not pass), so the verdict
+    // branch runs and records loosened; the trailing jq gate then fails
+    // the step.
+    const run = runGuardSnippet(guardRunBlock(text), json, 0);
+    const rejected =
+      spawnSync('jq', ['-e', '.status == "ok" and .value.ok == false'], {
+        input: json,
+        encoding: 'utf8',
+      }).status === 0;
+    expect(run.outputs).toBe(rejected ? 'verdict=loosened\n' : 'verdict=error\n');
+    // The extracted block stops before the final jq gate (the test asserts
+    // the verdict separately), so the full step's nonzero exit comes only
+    // when the real workflow appends that gate: it fails iff rejected.
+  });
+
+  it.each(
+    cliFailureCases.flatMap(([name, json, rc]) =>
+      bothCopies('ratchet.yml').map(([l, t]) => [`${l}: ${name}`, t, json, rc] as const),
+    ),
+  )(
+    '%s: CLI exit %s still records verdict=error under set -e (r2 F3)',
+    (_label, text, json, rc) => {
+      // set -euo pipefail must NOT abort before the verdict lands: a real
+      // CLI failure records verdict=error, it never leaves the output
+      // empty or mislabels a loosening.
+      const run = runGuardSnippet(guardRunBlock(text), json, rc);
+      expect(run.outputs, 'verdict recorded despite CLI failure').toBe('verdict=error\n');
+    },
+  );
+
+  it.each(bothCopies('ratchet.yml'))(
+    '%s: propose-drop fires only on the loosened verdict (never drop)',
+    (_label, text) => {
+      const jobs = jobBlocks(code(text));
+      const guard = jobs.get('ratchet');
+      const propose = jobs.get('propose-drop');
+      expect(guard, 'ratchet job').toBeDefined();
+      expect(propose, 'propose-drop job').toBeDefined();
+      expect(guard).toMatch(/verdict: \$\{\{ steps\.monotonic\.outputs\.verdict \}\}/);
+      expect(guard).toMatch(/drop: \$\{\{ steps\.monotonic\.outcome == 'failure' \}\}/);
+      expect(propose).toMatch(
+        /if: github\.base_ref == 'main' && needs\.ratchet\.outputs\.verdict == 'loosened'/,
+      );
+      expect(propose).not.toMatch(/outputs\.drop/);
+      // The issue body claims only a REJECTED diff: every ok:false verdict
+      // (loosened, direction/unit changed, unreplaced delete, unparsable)
+      // reaches it, so it must not name a cause the op did not report.
+      expect(propose).toContain(
+        'Ratchet baseline monotonicity guard rejected the baseline diff on PR #${PR_NUMBER}.',
+      );
+      expect(propose).not.toMatch(/guard failed[^\n]*loosened/);
+    },
+  );
+
+  it.each(bothCopies('ratchet.yml'))(
+    '%s: issue lookup walks the issues connection to exhaustion',
+    (_label, text) => {
+      const jobs = jobBlocks(code(text));
+      const propose = jobs.get('propose-drop');
+      expect(propose).toBeDefined();
+      // The scan must go through the paginated issues connection, never
+      // gh issue list (no --paginate flag) and never the search API (it
+      // caps at 1,000 results).
+      expect(propose).toMatch(/gh api .* --paginate/);
+      expect(propose).not.toMatch(/gh issue list/);
+      expect(propose).not.toMatch(/search\/issues/);
+    },
+  );
+});
+
+/**
+ * Extract the exact-title lookup line from a propose-drop copy and run it
+ * with a stub `gh` on PATH — a fake gh api --paginate walker, not the real
+ * CLI (no network, no writes). The stub serves `pages` (a JSON array of
+ * arrays, one per page) and records every request URL it sees; it can be
+ * scripted to fail so the abort path is exercised too (r2 review F2).
+ */
+function lookupLine(text: string): string {
+  const jobs = jobBlocks(code(text));
+  const propose = jobs.get('propose-drop');
+  expect(propose, 'propose-drop job').toBeDefined();
+  const line = (propose as string)
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.startsWith('issue="'));
+  expect(line, 'lookup assignment present').toBeDefined();
+  // The line is  issue="$(gh api ... | sed -n '1p')"  — strip the wrapper so
+  // the test runs exactly the command substitution's contents.
+  const m = /^issue="\$\((.*)\)"$/.exec(line as string);
+  expect(m, 'command substitution shape').not.toBeNull();
+  return (m as RegExpExecArray)[1] as string;
+}
+
+interface LookupFixture {
+  pages?: Array<Array<{ number: number; title: string; pull_request?: unknown }>>;
+  failOnPage?: number;
+  /**
+   * Model a live `gh` that emits its first exact-title match, then — after
+   * the consumer has already seen it — writes the later pages' duplicates.
+   * A terminating consumer (head -n1) kills the emitter on EPIPE (SIGPIPE,
+   * rc 141); a draining consumer (sed -n '1p') lets it finish cleanly
+   * (r3 review F2).
+   */
+  emit?: { first: string; rest: string[]; delayMs: number };
+}
+
+function runLookup(
+  command: string,
+  fixture: LookupFixture,
+): { status: number | null; stdout: string; urls: string[]; epipeRc: number | null } {
+  const dir = mkdtempSync(join(tmpdir(), 'ratchet-lookup-'));
+  const bin = join(dir, 'bin');
+  const gh = join(bin, 'gh');
+  mkdirSync(bin, { recursive: true });
+  const urlsPath = join(dir, 'urls.txt');
+  const epipePath = join(dir, 'epipe.txt');
+  // No single quotes in tmp paths (this runner's tmpdir has none); assert
+  // rather than silently break the heredoc below.
+  expect(urlsPath, 'tmp path must be single-quote safe').not.toContain("'");
+  expect(epipePath, 'tmp path must be single-quote safe').not.toContain("'");
+  const emit = fixture.emit;
+  writeFileSync(
+    gh,
+    `#!/usr/bin/env bash
+# stub gh: a single 'gh api <URL> --paginate --jq <prog>' invocation walks
+# every page internally (HTTP Link headers) and emits the CONCATENATED
+# per-page selections as one stream. The stub models exactly that stream:
+# it emits each page's exact-title numbers in order. In emit mode it paces
+# the writes (first match, delay, later duplicates) so a terminating
+# consumer observable dies on EPIPE and a draining consumer does not.
+url=""
+for a in "$@"; do
+  if [ -z "$url" ] && [ "$a" != "api" ]; then url="$a"; fi
+done
+echo "$url" >> "${urlsPath}"
+${
+  emit
+    ? `printf '${emit.first}\\n'
+sleep 0.${String(emit.delayMs).padStart(3, '0')}
+${emit.rest.map((n) => `printf '${n}\\n'`).join('\n')}
+exit 0`
+    : `pages_json=$(cat <<'PAGES'
+${JSON.stringify(fixture.pages ?? [])}
+PAGES
+)
+if [ "${fixture.failOnPage ?? 0}" -ge 1 ]; then
+  # Serve the earlier pages, then fail the walk with an API error.
+  printf '%s' "$pages_json" | jq -c '.[:${(fixture.failOnPage ?? 1) - 1}][][] | select(.pull_request == null and .title == "ratchet") | .number'
+  echo 'gh: API error (HTTP 500)' >&2
+  exit 1
+fi
+printf '%s' "$pages_json" | jq -c '.[][] | select(.pull_request == null and .title == "ratchet") | .number'
+exit 0`
+}
+`,
+  );
+  chmodSync(gh, 0o755);
+  // In emit mode, run the lookup inside a capture assignment so the harness
+  // can also observe whether the stub (the model of gh) itself died on a
+  // broken pipe: a terminating consumer leaves EPIPE evidence, a draining
+  // one records 0.
+  const commandToRun = emit
+    ? `out="$( { ${command}; } 2>/dev/null )" || epipe_rc=$?\nprintf '%s' "$out"\necho "${'$'}{epipe_rc:-0}" > '${epipePath}'`
+    : command;
+  const result = spawnSync('bash', ['-euo', 'pipefail', '-c', commandToRun], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      GH_REPO: 'owner/repo',
+      GH_TOKEN: 'stub-token',
+    },
+  });
+  const urls = existsSync(urlsPath) ? readFileSync(urlsPath, 'utf8').trim().split('\n') : [];
+  const epipeRc = existsSync(epipePath) ? Number(readFileSync(epipePath, 'utf8').trim()) : null;
+  return { status: result.status, stdout: result.stdout, urls, epipeRc };
+}
+
+describe('ratchet.yml issue lookup executes correctly (r2 review F1/F2)', () => {
+  // The endpoint must be double-quoted so ${GH_REPO} expands; with single
+  // quotes the stub would record the literal and the real gh 404s.
+  it.each(bothCopies('ratchet.yml'))(
+    '%s: lookup expands ${GH_REPO} in the endpoint URL',
+    (_label, text) => {
+      const { urls } = runLookup(lookupLine(text), {
+        pages: [[{ number: 762, title: 'ratchet' }]],
+      });
+      expect(urls.length, 'walked at least one page').toBeGreaterThan(0);
+      expect(urls[0]).toContain('repos/owner/repo/issues');
+      expect(urls.every((u) => !u.includes('${GH_REPO}'))).toBe(true);
+    },
+  );
+
+  it.each(bothCopies('ratchet.yml'))(
+    '%s: draining consumer keeps the first match when later pages duplicate the title (r3 F1)',
+    (_label, text) => {
+      // gh writes the page-3 match, pauses mid-walk (later pages still
+      // downloading), then emits the page-3 duplicate and the page-4 one.
+      // head -n1 closes the pipe on the first line: the emitter takes
+      // SIGPIPE (141) and pipefail aborts the assignment before the issue
+      // is reported. The draining consumer must return 0 with '762'.
+      const { status, stdout, epipeRc } = runLookup(lookupLine(text), {
+        pages: [
+          [
+            { number: 1, title: 'unrelated' },
+            { number: 2, title: 'ratchet: other thing' },
+          ],
+          Array.from({ length: 100 }, (_, i) => ({
+            number: 100 + i,
+            title: `filler ${i}`,
+          })),
+          [
+            { number: 762, title: 'ratchet' },
+            { number: 900, title: 'ratchet' }, // duplicate title, later page
+          ],
+          [{ number: 1000, title: 'ratchet' }], // duplicate title, page 4
+        ],
+        emit: { first: '762', rest: ['900', '1000'], delayMs: 150 },
+      });
+      expect(epipeRc, 'the emitter must not die on a broken pipe').toBe(0);
+      expect(status, 'lookup succeeds').toBe(0);
+      expect(stdout.trim()).toBe('762');
+    },
+  );
+
+  it.each(bothCopies('ratchet.yml'))(
+    '%s: PRs on the issues connection are skipped',
+    (_label, text) => {
+      const { status, stdout } = runLookup(lookupLine(text), {
+        pages: [
+          [
+            { number: 5, title: 'ratchet', pull_request: { url: 'x' } },
+            { number: 762, title: 'ratchet' },
+          ],
+        ],
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe('762');
+    },
+  );
+
+  it.each(bothCopies('ratchet.yml'))(
+    '%s: API error aborts nonzero without a value',
+    (_label, text) => {
+      // The walk fails while serving page 1, before any data is emitted —
+      // the assignment gets nothing and set -euo pipefail surfaces rc 1.
+      const { status, stdout } = runLookup(lookupLine(text), {
+        pages: [[{ number: 762, title: 'ratchet' }]],
+        failOnPage: 1,
+      });
+      expect(status, 'set -euo pipefail surfaces the API error').not.toBe(0);
+      expect(stdout).toBe('');
+    },
+  );
+
+  it.each(bothCopies('ratchet.yml'))('%s: no match yields an empty value', (_label, text) => {
+    const { status, stdout } = runLookup(lookupLine(text), {
+      pages: [[{ number: 1, title: 'other' }], [{ number: 2, title: 'ratchetish' }]],
+    });
+    expect(status).toBe(0);
+    expect(stdout.trim()).toBe('');
+  });
 });
 
 describe('trusted recompute lockfile guard', () => {

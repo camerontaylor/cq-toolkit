@@ -20,6 +20,8 @@ ruleTester.run('no-vendor-sdk-in-kernel', rule, {
   valid: [
     { code: 'import x from "zod";', filename: 'src/kernel/a.ts' },
     { code: 'import z from "@ast-grep/napi";', filename: 'src/kernel/a.ts' },
+    { code: "import('proper-lockfile');", filename: 'src/kernel/a.ts' },
+    { code: 'import(`proper-lockfile`);', filename: 'src/kernel/a.ts' },
   ],
   invalid: [
     {
@@ -81,6 +83,18 @@ ruleTester.run('no-vendor-sdk-in-kernel', rule, {
     {
       code: 'require.resolve("openai");',
       errors: [{ messageId: 'vendorSdk' }],
+    },
+    {
+      code: "const m = 'ai'; await import(m);",
+      errors: [{ messageId: 'computedSource' }],
+    },
+    {
+      code: 'import(`ai-${x}`);',
+      errors: [{ messageId: 'computedSource' }],
+    },
+    {
+      code: 'require(m);',
+      errors: [{ messageId: 'computedSource' }],
     },
   ],
 });

@@ -17,6 +17,7 @@ import plistlib
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import uuid
 
@@ -36,14 +37,14 @@ CONFIG_KEYS = {
     'promotion.alert_agent_id', 'promotion.signer.spool.dir',
     'promotion.signer.spool.ssh_alias', 'promotion.signer.spool.ssh_key',
     'repair.enabled', 'repair.cq_bin',
-    'repair.paseo_host', 'repair.blackout.enabled',
+    'repair.paseo_host', 'repair.blackout.enabled', 'repair.max_concurrent_items',
 }
 # Allowlisted but optional: absent means the committed value applies.
 OPTIONAL_KEYS = {'repos', 'notify.hosts', 'alerts.alert_agent_id',
                  'promotion.record_url_template', 'promotion.alert_agent_id',
                  'promotion.signer.spool.dir', 'promotion.signer.spool.ssh_alias',
                  'promotion.signer.spool.ssh_key',
-                 'repair.blackout.enabled'}
+                 'repair.blackout.enabled', 'repair.max_concurrent_items'}
 HOST_KEYS = {'schema_version', 'deploy_root', 'record_dir', 'config', 'fleet_reader'}
 PATH_KEYS = {'clone', 'worktree_root', 'timeout_bin', 'repair.cq_bin',
              'promotion.signer.spool.dir', 'promotion.signer.spool.ssh_key'}
@@ -110,6 +111,9 @@ def validate(overlay):
             # Host switch for the GLM peak blackout; window and times stay committed.
             if type(value) is not bool:
                 raise ValueError('repair.blackout.enabled must be JSON true or false')
+        elif name == 'repair.max_concurrent_items':
+            if type(value) is not int or not 1 <= value <= 10:
+                raise ValueError('repair.max_concurrent_items must be an integer from 1 to 10')
         elif name == 'repair.enabled':
             # Host kill switch. Spend authorization and roles stay committed policy.
             if type(value) is not bool:
@@ -439,6 +443,10 @@ def _package_runner():
     return _PACKAGE_RUNNER
 
 
+CAPABILITY_NAME = 'dist/queue-runner/capabilities.json'
+CAPABILITY_SCHEMA_VERSION = 1
+
+
 def artifact_identity(artifact_root, runtime):
     """Read-only whole-artifact identity check for a packaged node runner.
 
@@ -448,6 +456,11 @@ def artifact_identity(artifact_root, runtime):
     or establish authenticity. The returned identity is integrity of the
     observed bytes against the manifest, and the manifest is still
     self-declared provenance.
+
+    The optional inventoried capability declaration is data for the existing
+    adapter capability check. It carries no separate source proof: the
+    manifest's source commit and this artifact's whole-tree inventory bind it.
+    An artifact without the declaration declares no commands.
     """
     if runtime == 'python':
         return None
@@ -489,6 +502,46 @@ def artifact_identity(artifact_root, runtime):
                   if item['path'] == 'dist/queue-runner/crq.js'), None)
     if entry is None or entry['type'] != 'file':
         raise ValueError('artifact lacks the runner entry point')
+    capability_entry = next((item for item in observed
+                             if item['path'] == CAPABILITY_NAME), None)
+    capabilities = []
+    if capability_entry is not None:
+        if capability_entry['type'] != 'file':
+            raise ValueError(
+                'artifact capability declaration is not a regular file')
+        try:
+            capability_raw = (root / CAPABILITY_NAME).read_bytes()
+        except OSError as exc:
+            raise ValueError(
+                'artifact capability declaration is unreadable') from exc
+        if hashlib.sha256(capability_raw).hexdigest() \
+                != capability_entry['sha256']:
+            raise ValueError(
+                'artifact capability declaration changed after inventory')
+        try:
+            declaration = json.loads(capability_raw)
+        except ValueError as exc:
+            raise ValueError(
+                'artifact capability declaration is invalid') from exc
+        if not isinstance(declaration, dict) or set(declaration) != {
+                'schema_version', 'commands'}:
+            raise ValueError(
+                'artifact capability declaration has unexpected fields')
+        if declaration.get('schema_version') != CAPABILITY_SCHEMA_VERSION:
+            raise ValueError(
+                'artifact capability schema version is unsupported')
+        commands = declaration.get('commands')
+        if not isinstance(commands, list) or not all(
+                isinstance(command, str) for command in commands):
+            raise ValueError(
+                'artifact capability commands must be a list of strings')
+        if len(set(commands)) != len(commands):
+            raise ValueError(
+                'artifact capability commands contain duplicates')
+        if not set(commands) <= set(UNIT_COMMANDS.values()):
+            raise ValueError(
+                'artifact capability declares an unknown unit command')
+        capabilities = sorted(commands)
     facts = manifest['provenance']['runtime']
     return {
         'kind': 'node',
@@ -503,6 +556,7 @@ def artifact_identity(artifact_root, runtime):
         'platform': facts['platform'],
         'arch': facts['arch'],
         'crq_js_sha256': entry['sha256'],
+        'capabilities': capabilities,
         'verification': 'whole-artifact-inventory-matched',
         'authenticity': 'not-established',
     }
@@ -643,8 +697,10 @@ def prepare(root, overlay, raw, output):
             output.mkdir(parents=True, exist_ok=True)
             for path in paths:
                 atomic_bytes(output / Path(path).name, Path(path).read_bytes())
-        atomic_bytes(root / CONFIG, data)
+        # Marker first: a crash before the config write leaves the host inert
+        # on its previous configuration instead of live without the marker.
         atomic_bytes(root / 'apps/crq-python/state/runner-disabled', b'Prepared inert; owner approval required to start.\n')
+        atomic_bytes(root / CONFIG, data)
     run(['systemctl', '--user', 'daemon-reload'])
     # Deliberately no start or enable here.
 
@@ -694,13 +750,17 @@ def switch(root, overlay, raw, target, tag):
         previous = git(root, 'rev-parse', 'HEAD')
         record(root, overlay, raw, current, 'switch-before', target=target, tag=tag)
         git(root, 'restore', '--', CONFIG)
-        if git(root, 'status', '--porcelain', '--untracked-files=all'):
-            raise ValueError('checkout not clean after config restore')
-        git(root, 'checkout', '--detach', target)
+        try:
+            if git(root, 'status', '--porcelain', '--untracked-files=all'):
+                raise ValueError('checkout not clean after config restore')
+            git(root, 'checkout', '--detach', target)
+        except BaseException:
+            atomic_bytes(root / CONFIG, current)
+            raise
         # Same tick lock spans drift check, checkout, render and audit.
         record(root, overlay, raw, destination, 'switch-render', previous_sha=previous, tag=tag)
         atomic_bytes(root / CONFIG, destination)
-        if git(root, 'status', '--porcelain', '--untracked-files=all') != ' M ' + CONFIG:
+        if git(root, 'status', '--porcelain', '--untracked-files=all') not in ('', ' M ' + CONFIG):
             raise ValueError('post-switch status must contain only rendered config')
     return target
 
@@ -738,7 +798,6 @@ def main(argv=None):
     legacy = sub.add_parser('legacy-check')
     legacy.add_argument('--legacy-root', required=True, type=Path)
     if argv is None:
-        import sys
         argv = sys.argv[1:]
     args = parser.parse_args(['live-config' if arg == '--live-config' else arg for arg in argv])
     overlay, raw = load_overlay(args.overlay)
@@ -758,14 +817,16 @@ def main(argv=None):
         require_outside_git(args.output)
         if not outside(args.output, root):
             raise ValueError('preview output must be outside checkout')
-        data = render(root, overlay)
-        record(root, overlay, raw, data, 'preview')
-        atomic_bytes(args.output / 'config.json', data)
-        render_units(root, args.output / 'systemd')
-        render_plists(root, args.output / 'launchd', args.overlay)
+        with tick_lock(root):
+            data = render(root, overlay)
+            record(root, overlay, raw, data, 'preview')
+            atomic_bytes(args.output / 'config.json', data)
+            render_units(root, args.output / 'systemd')
+            render_plists(root, args.output / 'launchd', args.overlay)
     else:
         live_render(root, overlay, raw)
-    print('completed ' + args.operation + '; no units started')
+    print(json.dumps({'operation': args.operation, 'status': 'ok'}, indent=2, sort_keys=True))
+    print('completed ' + args.operation + '; no units started', file=sys.stderr)
 
 
 if __name__ == '__main__':

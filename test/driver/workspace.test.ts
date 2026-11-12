@@ -2,8 +2,15 @@ import { realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as win32 from 'node:path/win32';
 import { describe, expect, test } from 'vitest';
-import { boundWorkspacePath, resumedRecordOrThrow } from '../../src/driver/common/workspace.js';
+import {
+  assertSessionsDirOutsideWorkspace,
+  boundWorkspacePath,
+  isInsideDir,
+  resumedRecordOrThrow,
+} from '../../src/driver/common/workspace.js';
+import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import { SessionStore } from '../../src/harness/session.js';
 
 const LANES = ['acp driver', 'ai-sdk driver', 'claude-code driver'];
@@ -29,6 +36,83 @@ describe('shared driver workspace binding', () => {
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
+  });
+
+  test('assertSessionsDirOutsideWorkspace refuses equal/nested/missing-inside dirs and accepts outside + symlink-outside', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-sessions-contain-'));
+    try {
+      const workspace = realpathSync(scratch);
+      const nested = join(workspace, 'nested');
+      await mkdir(nested);
+      const outside = join(scratch, '..', 'cq-sessions-outside-');
+      const outsideDir = await mkdtemp(outside);
+      try {
+        // Equal, nested, and not-yet-existing nested dirs are refused.
+        for (const dir of [workspace, nested, join(workspace, '.s', 'deep')]) {
+          expect(() => assertSessionsDirOutsideWorkspace(dir, workspace, 'test lane')).toThrow(
+            DispatchError,
+          );
+          expect(() => assertSessionsDirOutsideWorkspace(dir, workspace, 'test lane')).toThrow(
+            'test lane: sessionsDir',
+          );
+        }
+        // Outside passes — including the issue's acceptance case, a
+        // `<workspace>/link -> <outside>` alias that resolves outside.
+        assertSessionsDirOutsideWorkspace(outsideDir, workspace, 'test lane');
+        const link = join(workspace, 'link');
+        await symlink(outsideDir, link, 'dir');
+        assertSessionsDirOutsideWorkspace(link, workspace, 'test lane');
+        // A symlink INTO the workspace (from an outside path) is refused.
+        const inward = join(scratch, 'inward');
+        await symlink(workspace, inward, 'dir');
+        expect(() => assertSessionsDirOutsideWorkspace(inward, workspace, 'test lane')).toThrow(
+          DispatchError,
+        );
+        // A sibling-prefix dir (`…-contain2`) is not "inside" the workspace.
+        const sibling = await mkdtemp(join(tmpdir(), 'cq-sessions-contain2-'));
+        try {
+          assertSessionsDirOutsideWorkspace(sibling, workspace, 'test lane');
+        } finally {
+          await rm(sibling, { recursive: true, force: true });
+        }
+        // The throw carries the structured 'config' class, like the other
+        // pre-dispatch validation rows.
+        try {
+          assertSessionsDirOutsideWorkspace(workspace, workspace, 'test lane');
+          expect.unreachable();
+        } catch (err) {
+          expect(err).toBeInstanceOf(DispatchError);
+          expect(errorClassOf(err)).toBe('config');
+        }
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test('isInsideDir is platform-aware: posix root children are inside, win32 backslash paths compare', () => {
+    // POSIX root: a `parent + '/'` prefix check looks for '//' and misses
+    // every child of `/` — the relative judgment gets it right.
+    expect(isInsideDir('/sessions', '/')).toBe(true);
+    expect(isInsideDir('/', '/')).toBe(true);
+    expect(isInsideDir('/other', '/sessions')).toBe(false);
+    // A literal `..x` child name is inside: only a `..` PATH SEGMENT escapes.
+    expect(isInsideDir('/ws/..x', '/ws')).toBe(true);
+    expect(isInsideDir('/ws/../other', '/ws')).toBe(false);
+    // Windows semantics via the node:path/win32 seam: backslash parents
+    // contain backslash children, siblings and sibling-prefixes do not, and
+    // a different drive is never inside (relative stays absolute).
+    expect(isInsideDir('C:\\work\\.sessions', 'C:\\work', win32)).toBe(true);
+    expect(isInsideDir('C:\\work', 'C:\\work', win32)).toBe(true);
+    expect(isInsideDir('C:\\work2', 'C:\\work', win32)).toBe(false);
+    expect(isInsideDir('C:\\other', 'C:\\work', win32)).toBe(false);
+    expect(isInsideDir('C:\\work\\..\\other', 'C:\\work', win32)).toBe(false);
+    expect(isInsideDir('D:\\sessions', 'C:\\work', win32)).toBe(false);
+    expect(isInsideDir('C:\\work\\..x', 'C:\\work', win32)).toBe(true);
+    expect(isInsideDir('C:\\', 'C:\\', win32)).toBe(true);
+    expect(isInsideDir('C:\\sessions', 'C:\\', win32)).toBe(true);
   });
 
   test('a removed legacy workspace retains its recorded identity', async () => {

@@ -1,5 +1,9 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { lstat, mkdtemp, readFile, readlink, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 
 const MAX_CONTENT = 4 * 1024 * 1024;
 const MAX_OBJECTS = 4096;
@@ -76,6 +80,7 @@ export async function captureSnapshot(
     .toString()
     .trim()
     .split(/\s+/)
+    .filter(Boolean)
     .sort();
   if (ids.length > MAX_OBJECTS) throw new Error('too many snapshot objects');
   const objects: { oid: string; type: string; data: string }[] = [];
@@ -156,4 +161,160 @@ export function snapshotHead(base: string, tree: string): string {
     .update(Buffer.from(`commit ${body.length}\0`))
     .update(body)
     .digest('hex');
+}
+
+/** Capture the final disk tree with a private index; never alter the author index or refs. */
+export async function captureWorkingTree(repo: string, originalHead: string) {
+  if (!/^[0-9a-f]{40}$/.test(originalHead)) throw new Error('invalid working-tree head');
+  const temporary = await mkdtemp(join(tmpdir(), 'cq-working-tree-'));
+  const index = join(temporary, 'index');
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')),
+  );
+  Object.assign(env, {
+    GIT_INDEX_FILE: index,
+    GIT_NO_REPLACE_OBJECTS: '1',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_TERMINAL_PROMPT: '0',
+  });
+  const git = async (...args: string[]) =>
+    (
+      await promisify(execFile)(
+        'git',
+        [
+          '--no-replace-objects',
+          '-c',
+          'core.hooksPath=/dev/null',
+          '-c',
+          'core.fsmonitor=false',
+          ...args,
+        ],
+        { cwd: repo, env, timeout: 30_000, maxBuffer: MAX_WIRE },
+      )
+    ).stdout;
+  const object = async (type: string, content: Buffer) =>
+    new Promise<string>((resolve, reject) => {
+      const child = execFile(
+        'git',
+        ['--no-replace-objects', 'hash-object', '-w', '-t', type, '--stdin'],
+        { cwd: repo, env, timeout: 30_000 },
+        (error, stdout) => (error ? reject(error) : resolve(stdout.trim())),
+      );
+      child.stdin?.on('error', () => {
+        /* callback reports failure */
+      });
+      child.stdin?.end(content);
+    });
+  try {
+    const realEnv = { ...env };
+    delete realEnv['GIT_INDEX_FILE'];
+    const flags = (
+      await promisify(execFile)(
+        'git',
+        ['--no-replace-objects', '-c', 'core.fsmonitor=false', 'ls-files', '-v', '-z'],
+        {
+          cwd: repo,
+          env: realEnv,
+          timeout: 30_000,
+          maxBuffer: MAX_WIRE,
+        },
+      )
+    ).stdout;
+    if (flags.split('\0').some((entry) => /^[Ss] /.test(entry)))
+      throw new Error(
+        'sparse or skip-worktree checkout cannot be captured — materialize the full checkout first',
+      );
+    const entries = (
+      await promisify(execFile)(
+        'git',
+        ['--no-replace-objects', '-c', 'core.fsmonitor=false', 'ls-files', '--stage', '-z'],
+        { cwd: repo, env: realEnv, timeout: 30_000, maxBuffer: MAX_WIRE },
+      )
+    ).stdout;
+    await git('read-tree', '--empty');
+    await new Promise<void>((resolve, reject) => {
+      const child = execFile(
+        'git',
+        ['--no-replace-objects', 'update-index', '-z', '--index-info'],
+        { cwd: repo, env, timeout: 30_000 },
+        (error) => (error ? reject(error) : resolve()),
+      );
+      child.stdin?.on('error', () => {
+        /* callback reports failure */
+      });
+      child.stdin?.end(entries);
+    });
+    const stagedTree = (await git('write-tree')).trim();
+    const tracked = (await git('ls-files', '-z')).split('\0').filter(Boolean);
+    const untracked = (
+      await git('ls-files', '-z', '--others', '--exclude-standard', '--exclude=/.cq/')
+    )
+      .split('\0')
+      .filter(Boolean);
+    const indexed = new Map(
+      entries
+        .split('\0')
+        .filter(Boolean)
+        .map((entry) => {
+          const tab = entry.indexOf('\t');
+          const [mode, oid] = entry.slice(0, tab).split(' ');
+          return [entry.slice(tab + 1), { mode, oid }];
+        }),
+    );
+    for (const path of new Set([...tracked, ...untracked])) {
+      // Operational artifacts are never captured, even in adopter repositories.
+      if (path === '.cq' || path.startsWith('.cq/')) {
+        await git('update-index', '--force-remove', '--', path);
+        continue;
+      }
+      let info;
+      try {
+        const parents = path.split('/').slice(0, -1);
+        for (let end = 1; end <= parents.length; end++) {
+          const parent = await lstat(join(repo, ...parents.slice(0, end)));
+          if (!parent.isDirectory())
+            throw new Error(`working-tree snapshot refuses non-directory ancestor: ${path}`);
+        }
+        info = await lstat(join(repo, path));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        await git('update-index', '--force-remove', '--', path);
+        continue;
+      }
+      if (info.isDirectory() && indexed.get(path)?.mode !== '160000') {
+        await git('update-index', '--force-remove', '--', path);
+        continue;
+      }
+      const trackedLink = info.isSymbolicLink() && indexed.has(path);
+      if (!info.isFile() && !trackedLink)
+        throw new Error(`working-tree snapshot refuses non-regular path: ${path}`);
+      if (info.size > MAX_CONTENT) {
+        // Large unchanged base blobs need no transfer; do not load them into memory.
+        const oid = (await git('hash-object', '--no-filters', '--', path)).trim();
+        if (
+          indexed.get(path)?.oid === oid &&
+          indexed.get(path)?.mode === (info.mode & 0o111 ? '100755' : '100644')
+        )
+          continue;
+        throw new Error('working-tree snapshot file exceeds bound');
+      }
+      const content = trackedLink
+        ? Buffer.from(await readlink(join(repo, path)))
+        : await readFile(join(repo, path));
+      const mode = trackedLink ? '120000' : info.mode & 0o111 ? '100755' : '100644';
+      const digest = createHash('sha1')
+        .update(Buffer.from(`blob ${content.length}\0`))
+        .update(content)
+        .digest('hex');
+      if (indexed.get(path)?.oid === digest && indexed.get(path)?.mode === mode) continue;
+      const blob = await object('blob', content);
+      await git('update-index', '--add', '--cacheinfo', mode, blob, path);
+    }
+    const tree = (await git('write-tree')).trim();
+    const head = await object('commit', commitBody(originalHead, tree));
+    return { head, tree, stagedTree };
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 }

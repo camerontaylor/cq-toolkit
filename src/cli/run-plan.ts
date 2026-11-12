@@ -152,13 +152,18 @@ export const RunPlanInputSchema = z
      */
     releaseQuarantine: z
       .preprocess(
-        (value) =>
-          typeof value === 'string'
-            ? value
+        // parseFlags JSON-parses a canonical decimal id (`--release-quarantine
+        // =42`) into the number 42; job ids are strings, so coerce before the
+        // split (a comma-separated list stays a string and is unaffected).
+        (value) => {
+          const text = typeof value === 'number' ? String(value) : value;
+          return typeof text === 'string'
+            ? text
                 .split(',')
                 .map((key) => key.trim())
                 .filter((key) => key !== '')
-            : value,
+            : text;
+        },
         z.array(z.string().min(1)),
       )
       .default([]),

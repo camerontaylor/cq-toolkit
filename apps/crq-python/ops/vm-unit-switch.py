@@ -355,11 +355,24 @@ def committed_blob(commit, name):
     return result.stdout
 
 
-def upload_files(run, recorder, commit, mode="base"):
+def snapshot_uploads(state, mode="base"):
+    """Freeze the validated upload sources before any image or guest wait."""
+    snapshot = (state / "source-snapshots"
+                / (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+                   + "-" + os.urandom(4).hex()))
+    snapshot.mkdir(parents=True, exist_ok=False)
+    for name in uploads_for(mode):
+        target = snapshot / name
+        shutil.copyfile(OPS / name, target)
+        target.chmod(0o444)
+    return snapshot
+
+
+def upload_files(run, recorder, snapshot, commit, mode="base"):
     source_commit_check(REPO, commit, mode)
     provenance = {}
     for name in uploads_for(mode):
-        source = OPS / name
+        source = pathlib.Path(snapshot) / name
         data = source.read_bytes()
         # The uploaded bytes must be the validated commit's bytes (F1): compare
         # the exact bytes going to the guest, not the checkout they came from.
@@ -385,6 +398,9 @@ def upload_files(run, recorder, commit, mode="base"):
         provenance[name] = {"sha256": local_sha, "remote_sha256": remote_sha,
                             "bytes": len(data), "verified": True}
     archive = pathlib.Path(run["path"]) / RUNNER_ARCHIVE
+    # Archive the validated commit itself: HEAD may have moved while the
+    # image and startup waits ran, and the archive must stay bound to the
+    # commit the report declares.
     result = subprocess.run(
         ["git", "-C", str(REPO), "archive", "--format=tar.gz",
          "--output", str(archive), commit, "apps/crq-python"],
@@ -4144,6 +4160,7 @@ def cmd_run(args):
     state = pathlib.Path(args.state_dir).expanduser().resolve()
     state.mkdir(parents=True, exist_ok=True)
     commit = source_commit_check(REPO, args.source_commit, args.mode)
+    snapshot = snapshot_uploads(state, args.mode)
     recorder = vm.Recorder(state)
     stamps = {"start": vm.host_stamp()}
     image = vm.fetch_image(state, recorder)
@@ -4178,7 +4195,7 @@ def cmd_run(args):
         recorder = vm.Recorder(run_dir)
         boot = vm.boot(run, recorder, args.tools, vm.host_stamp())
         boot["ssh"] = vm.wait_ssh(run, recorder)
-        uploads = upload_files(run, recorder, commit, args.mode)
+        uploads = upload_files(run, recorder, snapshot, commit, args.mode)
         provenance["uploads"] = uploads
         provenance["guest_report"] = guest_artifact.name
         phases = {}

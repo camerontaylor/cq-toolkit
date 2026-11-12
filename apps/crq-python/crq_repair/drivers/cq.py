@@ -22,13 +22,17 @@ from crq_repair import command
 # option that runs a program or leaves the repository, including git's
 # abbreviated long options: `-O`/`--open-files-in-pager` (alone or in a
 # short-option bundle) runs a pager command, `--no-index` searches outside
-# the repo, `--textconv` and `--ext-*` run configured filters. `git show`
-# is not granted (diff output runs textconv/external diff by default).
+# the repo, `--help` (any `--h` prefix, plain or abbreviated) opens the
+# manual through an external viewer, `--textconv` and `--ext-*` run
+# configured filters, and the file-input options `-f`/`--file` (grep) and
+# `-X`/`--exclude-from` or `--exclude-per-directory` (ls-files) read pattern
+# files from anywhere. `git show` is not granted (diff output runs
+# textconv/external diff by default).
 # Git config cannot add an execution path: the harness refuses read/edit of
 # `.git`, so config stays operator-owned. Plain grep/rg/find stay denied:
 # they read outside the worktree (rg --pre and find -exec also run programs).
 _TOKEN = r'[A-Za-z0-9_./:=@%+,^-]+'
-_NO_EXEC = (r'(?!.* (?:-[A-Za-z0-9_./:=@%+,^]*O|--op|--no-i|--tex|--ext|--ou))')
+_NO_EXEC = (r'(?!.* (?:-[A-Za-z0-9_./:=@%+,^]*[OfX]|--op|--no-i|--tex|--ex|--h|--ou|--file))')
 SEARCH_PATTERNS = [
     're:^git (?:grep|ls-files|ls-tree)' + _NO_EXEC + '(?: ' + _TOKEN + ')*$',
 ]
@@ -220,22 +224,27 @@ def invoke(config, role, job, wt, directory):
         if not isinstance(data, dict):
             raise ValueError('cq output must be an object')
     except ValueError:
-        return {'stop': 'error', 'changed': False, 'summary': 'invalid cq output', 'commits': []}
-    # The session link (item 2.3), written even on a non-ok verdict: the
-    # session exists. `review.fixItem` does not put the worker sessionId in
-    # its JSON value, so the job-local store is the source of truth: it holds
-    # one `<sessionId>.jsonl` per session this job's runner created. A
-    # value-level sessionId (if a later runner returns one) wins, and the
-    # current session is taken from `created` only: a deferred rung that
-    # retries in the same directory and then fails before creating a session
-    # must not claim an earlier run's session.
+        data = {}
+        invalid = True
+    else:
+        invalid = False
     result = data.get('value')
     if result is None:
         result = data.get('result')
     if result is None:
         result = {}
     if not isinstance(result, dict):
-        return {'stop': 'error', 'changed': False, 'summary': 'invalid cq output', 'commits': []}
+        invalid, result = True, {}
+    # The session link (item 2.3), written even on a non-ok verdict or
+    # unparseable output: the session exists. A cq process that crashes after
+    # creating a session usually yields non-JSON stdout, and the link is the
+    # only surviving evidence of it. `review.fixItem` does not put the worker
+    # sessionId in its JSON value, so the job-local store is the source of
+    # truth: it holds one `<sessionId>.jsonl` per session this job's runner
+    # created. A value-level sessionId (if a later runner returns one) wins,
+    # and the current session is taken from `created` only: a deferred rung
+    # that retries in the same directory and then fails before creating a
+    # session must not claim an earlier run's session.
     from crq_repair import atomic as _atomic
     try:  # best-effort: the session link never outranks the verdict
         stored = sorted(f.stem for f in sessions_dir.glob('*.jsonl')) if sessions_dir.is_dir() else []
@@ -250,6 +259,8 @@ def invoke(config, role, job, wt, directory):
         })
     except OSError:
         pass
+    if invalid:  # the link above is written first, so the evidence survives
+        return {'stop': 'error', 'changed': False, 'summary': 'invalid cq output', 'commits': []}
     if p.returncode or data.get('status') != 'ok':
         signals = data.get('providerSignals') or {}
         error = str(data.get('error') or '')

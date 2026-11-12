@@ -190,6 +190,7 @@ export function makeReviewAddressMany(
     address?: (input: ReviewAddressInput) => Promise<ReviewAddressResult>;
     /** Driver factory for the default address; carries the alias sink wiring. */
     drivers?: DriverFactory;
+    managedSubmit?: import('../dev/managedReview.js').ManagedReviewSubmit;
   } = {},
 ) {
   return async (input: ReviewAddressManyInput): Promise<ReviewAddressManyResult> => {
@@ -230,6 +231,7 @@ function makeReviewAddressManyCore(
     address?: (input: ReviewAddressInput) => Promise<ReviewAddressResult>;
     /** Driver factory for the default address; carries the alias sink wiring. */
     drivers?: DriverFactory;
+    managedSubmit?: import('../dev/managedReview.js').ManagedReviewSubmit;
   } = {},
   record: (id: string, observation: UsageObservation) => void = () => {},
 ) {
@@ -369,6 +371,7 @@ function makeReviewAddressManyCore(
         address = makeReviewAddress({
           config,
           coordinationRoot,
+          ...(deps.managedSubmit ? { managedSubmit: deps.managedSubmit } : {}),
           ...(deps.drivers === undefined ? {} : { drivers: deps.drivers }),
         });
       }

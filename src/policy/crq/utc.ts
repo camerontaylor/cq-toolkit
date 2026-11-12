@@ -280,8 +280,9 @@ function parseOffset(text: string): bigint | null {
   const seconds = BigInt(match[4] ?? '0');
   const micros = BigInt(parseFraction(match[5]));
   const wholeSeconds = hours * 3_600n + minutes * 60n + seconds;
-  // Python 3.14.10+ returns UTC only when both the whole-second offset and its
-  // microseconds are zero; `+00:00:00.5` is a real 0.5-second offset.
+  // CPython >= 3.14.7 (gh-152079, commit 6f9c76d8d869) and 3.15+ return UTC only
+  // when both the whole-second offset and its microseconds are zero;
+  // `+00:00:00.5` is a real 0.5-second offset. Pre-3.14.7 dropped the fraction.
   const total = wholeSeconds * MICROS_PER_SECOND + micros;
   // Python's timezone() requires strictly between -24h and +24h. It normalises
   // overflowing minutes/seconds (for example +10:60 -> +11:00).

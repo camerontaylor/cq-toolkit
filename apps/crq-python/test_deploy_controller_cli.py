@@ -11,9 +11,11 @@ started; the controller never signals a process.
 import hashlib
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 from test_deploy_controller_fixtures import OPS, ROOT, ControllerFixture, dc, host
@@ -48,6 +50,17 @@ class CliTests(ControllerFixture):
 
     def test_switch_cli_with_matching_pinned_helper_digest_succeeds(self):
         self.switch_cli_fixture(pin_helper=True)
+
+    def test_switch_cli_creates_a_0600_lock_under_a_permissive_umask(self):
+        # The guest proof's umask is 002: a lock opened 0666 becomes 0664 and
+        # the live binding refuses group-writable locks.
+        previous = os.umask(0o002)
+        try:
+            self.switch_cli_fixture()
+        finally:
+            os.umask(previous)
+        lock = self.runner / "state" / dc.LOCK_NAME
+        self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
 
     def test_helper_digest_mismatch_refuses_before_import_lock_or_preflight(self):
         self.write_state("queue.json", {"items": [], "starts": []})
@@ -220,6 +233,60 @@ class CliTests(ControllerFixture):
                               env={"XDG_STATE_HOME": str(self.base / "cli-xdg")})
         self.assertEqual(result.returncode, 2)
         self.assertIn("--interval-seconds", result.stderr)
+
+    def test_usage_error_exits_2_with_subcommand_usage_artifact(self):
+        # I1: an argument failure writes the usage error object to stdout; the
+        # known operation is named, and narration stays on stderr.
+        result = self.run_cli("health", "--interval-seconds", "-1")
+        self.assertEqual(result.returncode, 2)
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["kind"], "usage")
+        self.assertEqual(error["subcommand"], "health")
+        self.assertEqual(error["message"], "health wait intervals must be nonnegative")
+        self.assertEqual(error["exitCode"], 2)
+        self.assertIn("usage: health wait intervals must be nonnegative",
+                      result.stderr)
+
+    def test_unparsed_usage_error_names_no_subcommand(self):
+        # parse_args failed before a namespace existed: no operation is known.
+        result = self.run_cli("health")
+        self.assertEqual(result.returncode, 2)
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["kind"], "usage")
+        self.assertEqual(error["subcommand"], "")
+        self.assertEqual(error["exitCode"], 2)
+
+
+class RecordDirResolutionTests(unittest.TestCase):
+    """--record-dir spelling must survive into record_preflight() unchanged."""
+
+    def test_dotdot_after_a_symlinked_ancestor_keeps_its_filesystem_meaning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real = pathlib.Path(tmp) / "real"
+            nested = real / "nested"
+            records = real / "records"
+            nested.mkdir(parents=True)
+            records.mkdir()
+            link = pathlib.Path(tmp) / "link"
+            link.symlink_to(nested, target_is_directory=True)
+            # The kernel opens link -> real/nested, then '..' -> real, then
+            # records: real/records. A lexical abspath would name tmp/records.
+            spelled = link / ".." / "records"
+            self.assertEqual(dc.absolute_record_dir(spelled), records)
+            self.assertNotEqual(pathlib.Path(os.path.abspath(spelled)), records)
+
+    def test_a_final_symlink_is_still_visible_to_preflight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp) / "records"
+            target.mkdir()
+            target.chmod(0o700)
+            link = pathlib.Path(tmp) / "link"
+            link.symlink_to(target, target_is_directory=True)
+            resolved = dc.absolute_record_dir(link)
+            self.assertTrue(resolved.is_symlink())
+            effects = dc.Effects(pathlib.Path(tmp) / "root", resolved)
+            with self.assertRaises(dc.Refused):
+                effects.record_preflight()
 
 
 if __name__ == "__main__":
