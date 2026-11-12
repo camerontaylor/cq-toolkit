@@ -5,7 +5,7 @@
 > compatibility and existing deployed debt. New CLI attempts no longer create
 > outage authority.
 
-`cq dev.review --reviewer=agent:reviewer` selects `roles.reviewer` from
+`cq dev.review --repoRoot=. --reviewer=agent:reviewer` selects `roles.reviewer` from
 `cq.json`. The suffix is a configured role, not a provider/model address.
 The historical provider/model spelling in #352 does not describe this
 binding: the shipped runner accepts the role `reviewer` only.
