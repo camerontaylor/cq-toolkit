@@ -159,6 +159,26 @@ class SequenceTests(CompletionFixture):
         self.source.complete("", 0, load="masked")
         self.assertEqual(self.port().sequence(UNIT), 0)
 
+    def test_masked_reread_does_not_credit_the_prior_invocation(self):
+        self.source.complete("1" * 32, 100)
+        port = self.port()
+        self.assertEqual(port.sequence(UNIT), 100)
+        # The controller re-reads after its drain/mask. The established
+        # baseline must survive so the prior runtime's invocation cannot be
+        # returned as a completion of the selected runtime.
+        self.source.complete("", 0, load="masked")
+        baseline = port.sequence(UNIT)
+        self.assertEqual(baseline, 100)
+        self.source.complete("1" * 32, 100)
+        self.assertIsNone(port.read(UNIT, "python", baseline))
+
+    def test_a_newer_prior_invocation_raises_the_baseline(self):
+        self.source.complete("1" * 32, 100)
+        port = self.port()
+        self.assertEqual(port.sequence(UNIT), 100)
+        self.source.complete("2" * 32, 130)
+        self.assertEqual(port.sequence(UNIT), 130)
+
     def test_completed_invocation_is_baseline(self):
         self.source.complete("1" * 32, 100)
         self.assertEqual(self.port().sequence(UNIT), 100)
