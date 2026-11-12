@@ -85,6 +85,11 @@ import {
   zList,
   type WorkState,
 } from './internal/workState.js';
+import {
+  runManagedReviewSpan,
+  type ManagedReviewSubmit,
+  type ManagedSpan,
+} from './managedReview.js';
 
 /** Per-component scan cap: a bigger file patch or untracked file is refused, never truncated. */
 export const SCAN_COMPONENT_CAP_BYTES = 4 * 1024 * 1024;
@@ -256,6 +261,14 @@ export interface DevReviewDeps {
     remainingWallMs?: () => number;
   }) => Promise<AgentReviewResult>;
   /**
+   * The managed CodeRabbit route (S2b-i): submit the pinned (base, head)
+   * to the queue via review-v1 instead of spawning the CLI. Injected so
+   * tests script it; production binds the SSH transport (see registry).
+   * Absent means the managed route is unavailable — reported, never a
+   * silent CLI fallback.
+   */
+  managedSubmit?: ManagedReviewSubmit;
+  /**
    * The author-admission transport (admission actions). When omitted, the
    * admission actions report the configuration gap.
    */
@@ -329,6 +342,7 @@ export function makeDevReview(
     deps.remainingWallMs,
     deps.sleep,
     deps.configuredReviewers,
+    deps.managedSubmit,
   );
   return async (input) => {
     if (isAdmissionInput(input)) {
@@ -368,6 +382,7 @@ function makeReviewCycle(
     await delay(ms, undefined, { signal });
   },
   configuredReviewers?: readonly string[],
+  managedSubmit?: ManagedReviewSubmit,
 ): Op<DevCycleInput, DevReviewReport> {
   return guardDevOp('dev.review', DevCycleInputSchema, async (input) => {
     const contextDeadlineAt = Date.now() + DEFAULT_REVIEWER_TIMEOUT_MS;
@@ -580,6 +595,51 @@ function makeReviewCycle(
     // The run under the HOST lock; the completion is decided and the log
     // written inside the span, the record appended after it.
     const at = effects.nowIso();
+    // S2b-i: the managed CodeRabbit route replaces the direct CLI launch.
+    // The agent path below is unchanged; only `reviewer: 'coderabbit'` (the
+    // non-agent default) submits to the queue. An absent managedSubmit or an
+    // unsupported server is REPORTED, never a silent CLI fallback.
+    if (!isAgent) {
+      if (managedSubmit === undefined)
+        return needsHuman(
+          'the queue is the only managed CodeRabbit launch route — no managed submit leg is configured (configure CQ_QUEUE_SSH_ALIAS for a review-v1 runner); no direct CLI fallback',
+        );
+      const managed = await runManagedReviewSpan({
+        effects,
+        state,
+        target,
+        scope,
+        reviewer,
+        at,
+        cwd: input.repoRoot,
+        submit: managedSubmit,
+        ...(signal ? { signal } : {}),
+        remainingWallMs: contextRemaining,
+        refuseDrift,
+      });
+      if (!managed.ok) {
+        const blocked = needsHuman(`managed queue review — ${managed.reason}`);
+        // The #509 class rides the report envelope (stripped before the
+        // strict OpResult parse), never the reason text — mirroring the CLI
+        // path's transient envelope so run.ts marks the block retryable.
+        return managed.transient === true ? { ...blocked, report: { transient: true } } : blocked;
+      }
+      const recorded = await recordManagedTerminal(
+        state,
+        target,
+        scope,
+        reviewer,
+        managed.span,
+        effects,
+      );
+      // A receipt that completed after the caller's wall expired is a budget
+      // stop: the class rides the report envelope (stripped before the
+      // strict OpResult parse), mirroring the CLI path's envelope. The
+      // recorded cycle already carries the blocked budget reason.
+      return managed.budgetStopped === true && recorded.status === 'needs-human'
+        ? { ...recorded, report: { budgetStopped: true } }
+        : recorded;
+    }
     const argv = coderabbitReviewArgv(state.base, scope);
     let span: {
       completion: DevReviewCompletion;
@@ -953,6 +1013,77 @@ function makeReviewCycle(
       },
     };
   });
+}
+
+/**
+ * Persist a managed queue-review span as the cycle record. The quota is
+ * ALREADY spent on the queue (like the CLI path's comment), so a store
+ * fault still reports the verdict and the log path rather than burying the
+ * paid review. A blocked managed completion records the same way a blocked
+ * CLI cycle does — findings stay open until dispositioned.
+ */
+async function recordManagedTerminal(
+  state: WorkState,
+  target: string,
+  scope: 'full' | 'uncommitted',
+  reviewer: string,
+  span: ManagedSpan,
+  effects: DevEffects,
+): Promise<OpResult<DevReviewReport>> {
+  let record: DevCycleRecord;
+  try {
+    record = await effects.openLedger(state.branch).mutate((ledger) => {
+      const cycleCount = ledger.records.filter((entry) => entry.kind === 'cycle').length;
+      const cycleId = `c${String(cycleCount + 1).padStart(3, '0')}-${state.head.slice(0, 8)}`;
+      const entry: DevCycleRecord = {
+        ...span,
+        cycleId,
+        findings: span.findings.map((finding, index) => ({
+          ...finding,
+          id: `${cycleId}#f${String(index + 1)}`,
+        })),
+      };
+      return {
+        ledger: {
+          version: DEV_LEDGER_VERSION,
+          branch: ledger.branch,
+          records: [...ledger.records, entry],
+        },
+        value: entry,
+      };
+    });
+  } catch (err) {
+    const verdict =
+      span.completion.kind === 'terminal'
+        ? 'the cycle TERMINAL'
+        : `the cycle BLOCKED (${span.completion.reason})`;
+    return {
+      status: 'failed',
+      error: `dev.review: ${verdict} with ${String(span.findings.length)} finding(s), but the record could not be persisted — ${faultText(err)}; log: ${span.logPath}`,
+    };
+  }
+  if (record.completion.kind === 'blocked')
+    return needsHuman(
+      `review cycle ${record.cycleId} was BLOCKED (${record.completion.reason}) — the cycle is recorded with ${String(record.findings.length)} finding(s); log: ${record.logPath}`,
+    );
+  return {
+    status: 'ok',
+    value: {
+      cycleId: record.cycleId,
+      reviewer,
+      scope,
+      target,
+      base: record.base,
+      head: record.head,
+      dirtySha256: record.dirtySha256,
+      completion: record.completion,
+      findings: record.findings,
+      advisories: record.advisories ?? [],
+      logPath: record.logPath,
+      untracked: record.untracked,
+      at: record.at,
+    },
+  };
 }
 
 /**

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { makeRepoDiffScanner } from '../../../src/ops/dev/denylist.js';
-import { cycleReview, ran } from './reviewTestKit.js';
+import { cycleReview, managedTerminal, reviewerCalls } from './reviewTestKit.js';
 import { makeTestRepo, repoEffects, type TestRepo } from './repo.js';
 
 let repo: TestRepo;
@@ -57,19 +57,21 @@ describe('dev.review pre-upload project scan fails closed', () => {
     await repo.write('policy/denylist/patterns.yml', policy);
     await repo.write('src/a.ts', `export const leak = '${SENTINEL}';\n`);
     repo.commitAll('sentinel');
-    let uploads = 0;
-    const effects = repoEffects(repo, (command) => {
-      if (command !== 'coderabbit') return undefined;
-      uploads += 1;
-      return ran(0);
-    });
+    // S2b-i: the scan fails closed before the managed queue submit — the
+    // scripted leg throws if the gate ever lets the submit through.
+    const effects = repoEffects(repo);
     const result = await cycleReview(
       effects,
       makeRepoDiffScanner(repo.root),
+      undefined,
+      (async () => {
+        throw new Error('fixture: the managed leg must not run past a scan refusal');
+      }) as ReturnType<typeof managedTerminal>,
     )({
       repoRoot: repo.root,
     });
-    expect({ status: result.status, uploads }).toEqual({ status: 'needs-human', uploads: 0 });
+    expect(result.status).toBe('needs-human');
+    expect(reviewerCalls(effects)).toEqual([]);
     expect(result.status === 'needs-human' && result.reason).toContain(reason);
     expect(effects.openLedger('feature/x').load().records).toEqual([]);
   });

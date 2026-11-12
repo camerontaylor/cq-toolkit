@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DevReviewInputSchema, registry } from '../../../src/ops/dev/registry.js';
 import type { DevCycleInput } from '../../../src/ops/dev/review.js';
 import { stubScanner } from './fakes.js';
-import { admissionInput, cycleReview, ran, reviewer, reviewerCalls } from './reviewTestKit.js';
+import { admissionInput, cycleReview, managedTerminal, reviewerCalls } from './reviewTestKit.js';
 import { makeTestRepo, repoEffects, type TestRepo } from './repo.js';
 
 let repo: TestRepo;
@@ -19,10 +19,12 @@ afterEach(async () => {
 
 describe('dev.review — one op discriminated on action', () => {
   it('accepts an explicit action "cycle" as the review cycle', async () => {
-    const effects = repoEffects(repo, reviewer(ran(0)));
+    const effects = repoEffects(repo);
     const result = await cycleReview(
       effects,
       stubScanner(),
+      undefined,
+      managedTerminal(),
     )({
       repoRoot: repo.root,
       action: 'cycle',
@@ -31,10 +33,12 @@ describe('dev.review — one op discriminated on action', () => {
   });
 
   it('refuses an unknown action with the failed taxonomy (never a silent cycle)', async () => {
-    const effects = repoEffects(repo, reviewer(ran(0)));
+    const effects = repoEffects(repo);
     const result = await cycleReview(
       effects,
       stubScanner(),
+      undefined,
+      managedTerminal(),
     )({
       repoRoot: repo.root,
       action: 'bogus',

@@ -1,24 +1,71 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import type { ManagedReviewSubmit } from '../../../src/ops/dev/managedReview.js';
+import type { ScanComponentInput } from '../../../src/ops/dev/denylist.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
 import { repoEffects, makeTestRepo } from '../dev/repo.js';
 import { configureAgentRepo, scriptedDrivers } from './run.helpers.js';
 
+/**
+ * S2b-i: the CodeRabbit leg rides the managed queue route — the tests script
+ * the submit outcome (submit-wait-fetch is covered in managedReview.test.ts).
+ * The CLI fixtures below are inert (no CLI is spawned); the scripted leg
+ * carries the same finding shapes the CLI stream used to emit.
+ */
+const managedTerminal = (
+  findings: { severity: string; fileName?: string; comment?: string }[] = [
+    { severity: 'major', fileName: 'src/a.ts', comment: 'seeded CodeRabbit finding' },
+  ],
+): ManagedReviewSubmit =>
+  (async () => ({
+    status: 'completed',
+    value: {
+      receiptId: 'r'.repeat(64),
+      completion: { kind: 'terminal' },
+      findings: findings.map((finding) => ({
+        severity: finding.severity,
+        ...(finding.fileName === undefined ? {} : { fileName: finding.fileName }),
+        ...(finding.comment === undefined ? {} : { excerpt: finding.comment }),
+      })),
+      advisories: [],
+    },
+  })) as ManagedReviewSubmit;
+
+const managedBlocked = (reason: string): ManagedReviewSubmit =>
+  (async () => ({
+    status: 'completed',
+    value: {
+      receiptId: 'b'.repeat(64),
+      completion: { kind: 'blocked', reason },
+      findings: [
+        { severity: 'critical', fileName: 'src/a.ts', excerpt: 'partial critical evidence' },
+      ],
+      advisories: [],
+    },
+  })) as ManagedReviewSubmit;
+
+const runWithManaged = (managedSubmit: ManagedReviewSubmit) => ({
+  drivers: scriptedDrivers(),
+  scannerFactory: () => async (components: readonly ScanComponentInput[]) =>
+    components.map((component) => ({ component: component.component, hits: [] })),
+  managedSubmit,
+});
+
 describe('review.run', () => {
   it.each([
     [
-      'a dropped connection (con_err) is marked blockedTransient',
-      'Review failed: con_err: webSocket connection failed',
+      'a delivery-unknown queue refusal is marked blockedTransient',
+      { status: 'refused', reason: 'status — queue delivery unknown', transient: true },
       true,
     ],
-    ['any other CLI error is not', 'Review failed: auth_required', false],
+    ['any other managed refusal is not', { status: 'refused', reason: 'submit — refused' }, false],
     [
-      'a dropped connection followed by an auth error is not',
-      'Review failed: con_err: socket closed\nAUTH',
+      'a refused queue submit without the network class is not',
+      { status: 'refused', reason: 'the queue saw no committed changes to review' },
       false,
     ],
-  ] as const)('#509: %s', async (_label, message, transient) => {
+  ] as const)('#509 (managed route): %s', async (_label, outcome, transient) => {
     const repo = await makeTestRepo();
     try {
       await repo.write('package.json', JSON.stringify({ name: 'fixture-review' }));
@@ -31,28 +78,11 @@ describe('review.run', () => {
         }),
       );
       repo.commitAll('configure CodeRabbit-only review');
-      const effects = repoEffects(repo, (command) =>
-        command === 'coderabbit'
-          ? {
-              exitCode: 1,
-              stdout: message
-                .split('\nAUTH')
-                .map((text, index) =>
-                  index === 0
-                    ? `${JSON.stringify({ type: 'error', errorType: 'review', message: text, recoverable: false })}\n`
-                    : `${JSON.stringify({ type: 'error', errorType: 'review', message: 'Review failed: auth_err: login required', recoverable: false })}\n`,
-                )
-                .join(''),
-              stderr: 'Error: An unexpected error occurred.',
-              timedOut: false,
-            }
-          : undefined,
-      );
+      const submit = (async () => outcome) as ManagedReviewSubmit;
+      const effects = repoEffects(repo);
       const result = await makeReviewRun({
-        drivers: scriptedDrivers(),
+        ...runWithManaged(submit),
         effectsFactory: () => effects,
-        scannerFactory: () => async (components) =>
-          components.map((component) => ({ component: component.component, hits: [] })),
       })({ repoRoot: repo.root });
       expect(result.status).toBe('needs-human');
       expect(result.report?.blockedTransient).toBe(transient ? true : undefined);
@@ -74,24 +104,11 @@ describe('review.run', () => {
         }),
       );
       repo.commitAll('configure CodeRabbit-only review');
-      const effects = repoEffects(repo, (command) =>
-        command === 'coderabbit'
-          ? {
-              exitCode: 0,
-              stdout:
-                `${JSON.stringify({ type: 'finding', severity: 'major', fileName: 'src/a.ts', comment: 'seeded CodeRabbit finding' })}\n` +
-                `${JSON.stringify({ type: 'complete', status: 'review_completed' })}\n`,
-              stderr: '',
-              timedOut: false,
-            }
-          : undefined,
-      );
-      const drivers = scriptedDrivers();
+      const effects = repoEffects(repo);
+      const runDeps = runWithManaged(managedTerminal());
       const result = await makeReviewRun({
-        drivers,
+        ...runDeps,
         effectsFactory: () => effects,
-        scannerFactory: () => async (components) =>
-          components.map((component) => ({ component: component.component, hits: [] })),
       })({ repoRoot: repo.root });
       expect(result.status).toBe('ok');
       if (result.status !== 'ok') return;
@@ -107,7 +124,7 @@ describe('review.run', () => {
           status: 'open',
         }),
       ]);
-      expect(drivers.resolve).not.toHaveBeenCalled();
+      expect(runDeps.drivers.resolve).not.toHaveBeenCalled();
     } finally {
       await repo.cleanup();
     }
@@ -128,21 +145,10 @@ describe('review.run', () => {
         }),
       );
       repo.commitAll('fixture blocked CodeRabbit review');
-      const effects = repoEffects(repo, (command) =>
-        command === 'coderabbit'
-          ? {
-              exitCode: 1,
-              stdout: `${JSON.stringify({ type: 'finding', severity: 'critical', fileName: 'src/a.ts', comment: 'partial critical evidence' })}\n`,
-              stderr: 'review interrupted',
-              timedOut: false,
-            }
-          : undefined,
-      );
+      const effects = repoEffects(repo);
       const result = await makeReviewRun({
-        drivers: scriptedDrivers(),
+        ...runWithManaged(managedBlocked('the queue returned no countable verdict')),
         effectsFactory: () => effects,
-        scannerFactory: () => async (components) =>
-          components.map((component) => ({ component: component.component, hits: [] })),
       })({ repoRoot: repo.root });
       expect(result.status).toBe('needs-human');
       if (result.status !== 'needs-human') return;
@@ -185,11 +191,7 @@ describe('review.run', () => {
         }),
       );
       repo.commitAll('fixture blocked CodeRabbit review');
-      const effects = repoEffects(repo, (command) =>
-        command === 'coderabbit'
-          ? { exitCode: 1, stdout: '', stderr: 'not authenticated', timedOut: false }
-          : undefined,
-      );
+      const effects = repoEffects(repo);
       const openLedger = effects.openLedger.bind(effects);
       effects.openLedger = (branch) => {
         const ledger = openLedger(branch);
@@ -201,10 +203,8 @@ describe('review.run', () => {
         };
       };
       const result = await makeReviewRun({
-        drivers: scriptedDrivers(),
+        ...runWithManaged(managedBlocked('the queue returned no countable verdict')),
         effectsFactory: () => effects,
-        scannerFactory: () => async (components) =>
-          components.map((component) => ({ component: component.component, hits: [] })),
       })({ repoRoot: repo.root });
       expect(result.status).toBe('indeterminate');
       if (result.status === 'indeterminate') expect(result.detail).toContain('ledger read fault');
@@ -232,7 +232,7 @@ describe('review.run', () => {
       const result = await makeReviewRun({
         drivers: scriptedDrivers(),
         effectsFactory: () => effects,
-        scannerFactory: () => async (components) =>
+        scannerFactory: () => async (components: readonly ScanComponentInput[]) =>
           components.map((component) => ({ component: component.component, hits: [] })),
       })({ repoRoot: repo.root });
       expect(result.status).toBe('failed');

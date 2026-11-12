@@ -783,17 +783,55 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'review.run',
     inputSchema: ReviewRunInputSchema,
+    // S2b-i: the op's CodeRabbit leg rides the managed queue route
+    // (review-v1 on the queue identity) via run.ts's `managedSubmit` dep.
+    // The binding is inert at construction (closures only — no spawn, no
+    // env read), so resolving the entry still touches nothing. `gh` resolves
+    // the forge repo itself from the input repoRoot; the server re-derives
+    // every hashed fact and refuses a mismatch (plan D2).
     importer: (wiring) =>
-      import('./run.js').then(
-        (m) =>
-          m.makeReviewRun({
-            drivers: createDriverFactory({
-              ...(wiring?.onDeprecatedAlias !== undefined
-                ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-                : {}),
-              ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
-            }),
-          }) as Op<unknown, unknown>,
+      Promise.all([
+        import('./run.js'),
+        import('../dev/managedReview.js'),
+        import('./internal/queueClient.js'),
+        import('../../adapters/forge-github/gh.js'),
+        import('../../config/run-env.js'),
+      ]).then(
+        ([m, managed, queueClient, gh, runEnv]) =>
+          ((input: ReviewRunInput) =>
+            m.makeReviewRun({
+              drivers: createDriverFactory({
+                ...(wiring?.onDeprecatedAlias !== undefined
+                  ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+                  : {}),
+                ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+              }),
+              managedSubmit: managed.makeManagedReviewSubmit(
+                () => {
+                  const alias = runEnv.currentCqEnv().values['CQ_QUEUE_SSH_ALIAS'];
+                  if (typeof alias !== 'string' || alias === '')
+                    throw new queueClient.QueueConfigurationError(
+                      'Configure CQ_QUEUE_SSH_ALIAS for review-v1',
+                    );
+                  return queueClient.sshQueueTransport(alias, 'review-v1');
+                },
+                async () => {
+                  const run = gh.makeGhRunner({ cwd: input.repoRoot, timeoutMs: 30_000 });
+                  const result = await run([
+                    'repo',
+                    'view',
+                    '--json',
+                    'nameWithOwner',
+                    '--jq',
+                    '.nameWithOwner',
+                  ]);
+                  const repo = result.stdout.trim();
+                  if (result.code !== 0 || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))
+                    throw new Error('cannot verify deferred forge identity');
+                  return repo;
+                },
+              ),
+            })(input)) as Op<unknown, unknown>,
       ),
   },
   {
