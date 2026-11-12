@@ -191,6 +191,7 @@ REQUIRED = {
         "clip-four-backtick-closed",
         "clip-five-tilde-closed",
         "body-cap-fence-closed",
+        "body-cap-rescan-longer-bounded",
         "body-truncated-large",
         "body-truncated-astral",
         "findings-not-a-list",

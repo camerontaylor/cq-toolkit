@@ -638,6 +638,14 @@ def build_review_cases() -> List[Dict[str, Any]]:
     add("body-cap-fence-closed", meta_full,
         [dict(severity="none", path=None, start=None, end=None, title="",
               text="```py\n" + "x" * 12000) for _ in range(6)], hunks)
+    add("body-cap-rescan-longer-bounded", meta_full,
+        [dict(severity="none", path=None, start=None, end=None, title="",
+              text="x" * 12000) for _ in range(4)]
+        + [dict(severity="none", path=None, start=None, end=None, title="",
+                text="x" * 100),
+           dict(severity="none", path=None, start=None, end=None, title="",
+                text="~" * 5600 + "\n" + "~" * 5600 + "\n```python\n" + "z" * 200)],
+        None)
     add("body-truncated-large", meta_full,
         [dict(severity="none", path=None, start=None, end=None, title="t", text="q" * 30000),
          dict(severity="none", path=None, start=None, end=None, title="t", text="q" * 30000)],
