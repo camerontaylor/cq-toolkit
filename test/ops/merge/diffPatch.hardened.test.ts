@@ -253,7 +253,8 @@ describe('diffPatch pins core.quotePath=true over hostile repo config (review P2
       // And the scan pipeline decodes it: the component path is the TRUE
       // path, so a path-scoped rule fires.
       const components = addedLineComponents(patch.stdout, 'probe');
-      expect(components).toHaveLength(1);
+      // One content component + one path component per added path (tOU-/sULl).
+      expect(components).toHaveLength(2);
       expect(components[0]?.path).toBe('config/café"note.txt');
       const scans = scanComponents(components, [
         { id: 'config-token', description: 'd', regex: 'ghp_', path: '^config/' },

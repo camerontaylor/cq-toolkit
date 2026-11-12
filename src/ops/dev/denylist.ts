@@ -470,10 +470,27 @@ function splitHeaderPaths(raw: string, source: string): [string, string] | undef
     }
     tokens.push(raw.slice(start, index));
   }
-  // An UNQUOTED path containing a space (a hand-written or foreign patch)
-  // cannot be split reliably; leave the b-side unknown and let the
-  // ---/+++ headers attribute it. Git always quotes such paths itself.
-  if (tokens.length !== 2) return undefined;
+  // Git only C-quotes special characters, NOT spaces: `diff --git a/my
+  // file.md b/my file.md` is legal for an empty new file. The a- and
+  // b-sides are identical there, so split at the last ` b/` (or ` "b/`)
+  // delimiter; otherwise leave the b-side unknown and let ---/+++ attribute it.
+  if (tokens.length !== 2) {
+    const delimiter = raw.lastIndexOf(' b/');
+    if (delimiter > 0) {
+      return [
+        decodeGitQuotedPath(raw.slice(0, delimiter), source),
+        decodeGitQuotedPath(raw.slice(delimiter + 1), source),
+      ];
+    }
+    const quoted = raw.lastIndexOf(' "b/');
+    if (quoted > 0) {
+      return [
+        decodeGitQuotedPath(raw.slice(0, quoted), source),
+        decodeGitQuotedPath(raw.slice(quoted + 1), source),
+      ];
+    }
+    return undefined;
+  }
   return [
     decodeGitQuotedPath(tokens[0] as string, source),
     decodeGitQuotedPath(tokens[1] as string, source),

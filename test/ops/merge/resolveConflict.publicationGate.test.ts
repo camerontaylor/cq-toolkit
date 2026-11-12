@@ -26,6 +26,7 @@ import { makeResolveConflictOp } from '../../../src/ops/merge/resolveConflict.js
 import { scanComponents } from '../../../src/ops/dev/denylist.js';
 import type { DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
 import { MODEL_SPEC, fakeLoadPrompt, recordingScan, scanClean } from './resolveConflict.helpers.js';
+import { runLadder } from '../../../src/kernel/governor.js';
 
 const git = promisify(execFile);
 const gitIn = async (cwd: string, ...args: string[]): Promise<string> =>
@@ -674,6 +675,52 @@ describe('the publication gate vs credential-shaped filenames (review P2 tOU-)',
       if (result.status === 'needs-human') {
         expect(result.reason).toContain('github-pat');
         expect(result.reason).toContain(`path ${fakeToken}`);
+      }
+      expect(f.pushes).toEqual([]);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the publication gate vs cancellation (review P2 sML8)', () => {
+  test('a governed abort during the scan publishes nothing — the pre-push check returns indeterminate', async () => {
+    const f = await publicationFixture();
+    const controller = new AbortController();
+    try {
+      const driver = new GitWorkerDriver(
+        { origin: f.origin, repoRoot: f.repoRoot },
+        async (worktree) => {
+          await promptMerge(worktree);
+        },
+      );
+      // The scan is the last gate step before the push: aborting here
+      // simulates a cancellation that lands after driver.run returned.
+      const scanning = (components: Parameters<typeof scanClean>[0]) => {
+        controller.abort();
+        return scanClean(components);
+      };
+      const op = makeResolveConflictOp({
+        effects: f.effects,
+        drivers: {
+          resolve: (): ResolvedDriver => ({ driver, lane: 'ai-sdk', modelSpec: MODEL_SPEC }),
+        },
+        loadPrompt: fakeLoadPrompt,
+        scan: scanning,
+      });
+      const outcome = await runLadder(
+        async () => run(f, op),
+        { wallClockMs: 60_000, abortGraceMs: 60_000, killGraceMs: 60_000 },
+        { op: 'merge.resolveConflict', jobKey: 'resolve-cancel', attempt: 1 },
+        { signal: controller.signal },
+      );
+      expect(outcome.outcome).toBe('completed');
+      if (outcome.outcome === 'completed') {
+        expect(outcome.value.status).toBe('indeterminate');
+        if (outcome.value.status === 'indeterminate') {
+          expect(outcome.value.detail).toContain('cancelled');
+          expect(outcome.value.detail).toContain('NOT pushed');
+        }
       }
       expect(f.pushes).toEqual([]);
     } finally {

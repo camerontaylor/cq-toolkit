@@ -692,6 +692,18 @@ describe('addedLineComponents — one component per changed path of ADDED lines'
     expect(scans[1]?.hits).toEqual([{ ruleId: 'github-pat', lines: [1] }]);
   });
 
+  test('an empty added file with a SPACE in its name registers from the header (git does not quote spaces)', () => {
+    const patch = [
+      'diff --git a/my file.md b/my file.md',
+      'new file mode 100644',
+      'index 0000000..e69de29',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([
+      { component: 'my file.md', text: '', path: 'my file.md' },
+      { component: 'path my file.md', text: 'my file.md', path: 'my file.md' },
+    ]);
+  });
+
   test('an empty patch yields zero components (nothing to scan is clean)', () => {
     expect(addedLineComponents('', 'gate')).toEqual([]);
   });
