@@ -1963,12 +1963,14 @@ def main(argv=None) -> int:
                              "polls --first-tick-timeout-seconds instead)")
     health.add_argument("--first-tick-timeout-seconds", type=int, default=1500,
                         help="first completed-tick wait (default: 20-minute cadence plus 5-minute slack)")
+    operation = ""
     try:
         args = parser.parse_args(argv)
+        operation = args.operation
         if args.operation == "health" and (args.first_tick_timeout_seconds < 0 or args.interval_seconds < 0):
             raise _UsageError("health wait intervals must be nonnegative")
     except _UsageError as exc:
-        print(json.dumps(_error_artifact("usage", "", str(exc), 2),
+        print(json.dumps(_error_artifact("usage", operation, str(exc), 2),
                          indent=2, sort_keys=True))
         print("usage: " + str(exc), file=sys.stderr)
         return 2
