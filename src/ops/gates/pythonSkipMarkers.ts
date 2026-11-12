@@ -265,6 +265,10 @@ export class PythonSectionScanner {
       this.signatureParens = Math.max(0, this.signatureParens + bracketBalance(code));
       return;
     }
+    // A hunk can START inside a signature whose opening line is not visible,
+    // so the bracket depth is unknown here: a line that begins with a closing
+    // bracket continues that signature and must not pop the def stack.
+    if (/^\s*[)\]}]/.test(code)) return;
     const indent = /^\s*/.exec(code)![0].length;
     while (this.defs.length > 0 && this.defs.at(-1)!.indent >= indent) {
       this.defs.pop();
