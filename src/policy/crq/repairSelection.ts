@@ -396,7 +396,7 @@ export function selectJob(input: RepairSelectJobInput): RepairSelectJobResult {
   }
   const revalidationSha256 = findingDigest(evidence);
   if (
-    record.get('origin_job') !== job.get('origin_job') ||
+    !pythonEqual(record.get('origin_job'), job.get('origin_job')) ||
     record.get('revalidation_sha256') !== revalidationSha256
   ) {
     return refusal('revalidation-lineage-mismatch');
@@ -431,6 +431,16 @@ function mergeBinding(
     if (!job.has(key)) entries.push([key, value]);
   }
   return new JsonObject(entries);
+}
+
+/**
+ * Python `==` between two decoded JSON values: structural, not instance
+ * identity. The canonical text is hashed with the same digest used for
+ * findings and receipts, so two equal documents parsed independently compare
+ * equal. Missing keys read as `None`, as `.get` does.
+ */
+function pythonEqual(a: JsonValue | undefined, b: JsonValue | undefined): boolean {
+  return findingDigest(a ?? null) === findingDigest(b ?? null);
 }
 
 /**

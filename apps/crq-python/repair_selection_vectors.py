@@ -471,6 +471,10 @@ def _order_case(name: str, spec) -> dict:
 def build() -> dict:
     prepared_job, prepared_evidence = _prepared()
     prepared_queue = _prepared_queue(prepared_job, prepared_evidence)
+    # The origin job id is a string in production. This pair exercises
+    # Python's structural `==` on a schema-invalid non-string value: the two
+    # documents are serialised and re-parsed independently by select_job.
+    structural_job, structural_evidence = _prepared(origin_job={"id": ORIGIN})
 
     cases = [
         # Ordering: drain_order filters the *.json glob, JOB_ID, symlinks, then
@@ -743,6 +747,15 @@ def build() -> dict:
         ),
         # Explicit selection: exactly one named job, or a typed refusal.
         _select_case("select-prepared", job=prepared_job, queue=prepared_queue),
+        _select_case(
+            "select-origin-job-structural-equality",
+            job=structural_job,
+            queue=_prepared_queue(
+                structural_job,
+                structural_evidence,
+                origin_job={"id": ORIGIN},
+            ),
+        ),
         _select_case("select-source-sha-invalid", job=prepared_job, queue=prepared_queue, source_sha="nope"),
         _select_case("select-job-id-invalid", job_id="bad id", job=prepared_job, queue=prepared_queue),
         _select_case(

@@ -215,6 +215,20 @@ function canonical(value: JsonValue | Record<string, JsonValue>): string {
   return receiptJsonText(value);
 }
 
+/** Replace every `origin_job` value, preserving the surrounding document. */
+function replaceOriginJob(value: JsonValue, origin: JsonValue): JsonValue {
+  if (value instanceof JsonObject) {
+    return new JsonObject(
+      value.entries.map(([key, child]) => [
+        key,
+        key === 'origin_job' ? origin : replaceOriginJob(child, origin),
+      ]),
+    );
+  }
+  if (Array.isArray(value)) return value.map((child) => replaceOriginJob(child, origin));
+  return value;
+}
+
 describe('repair selection oracle parity', () => {
   test('fixture shape and every outcome is present', () => {
     expect(string(fixture.get('schema'))).toBe('cq.crq-repair-selection-vector/v1');
@@ -411,6 +425,54 @@ describe('repair explicit selection', () => {
       originJob: 'crq-origin-F1',
       revalidationSha256: result.selection.revalidationSha256,
     });
+  });
+
+  test('structurally equal origin_job values from independent documents select', () => {
+    const entry = caseByName('select-prepared');
+    const { input } = selectInputOf(entry);
+    if (input.jobFile.kind !== 'value' || !(input.jobFile.value instanceof JsonObject)) {
+      throw new Error('select-prepared job is not an object');
+    }
+
+    // Two equal, non-string values: Python compares `origin_job` with `==`,
+    // so separately parsed documents must select. This value is schema
+    // invalid and can only be constructed by hand.
+    const jobText = receiptJsonText(
+      replaceOriginJob(
+        input.jobFile.value,
+        new JsonObject([
+          ['id', 'crq-origin-F1'],
+          ['round', JsonNumber.int(1)],
+        ]),
+      ),
+    );
+    const queueText = receiptJsonText(
+      replaceOriginJob(
+        input.queue,
+        new JsonObject([
+          ['id', 'crq-origin-F1'],
+          ['round', JsonNumber.int(1)],
+        ]),
+      ),
+    );
+    const independentJob = asObject(parseJsonValue(jobText));
+    const independentQueue = asObject(parseJsonValue(queueText));
+    const record = asObject(
+      asObject(asArray(independentQueue.get('items'))[0]).get('repair_runs'),
+    ).get('revalidated-fixture');
+    const jobOrigin = independentJob.get('origin_job');
+    const recordOrigin = asObject(record).get('origin_job');
+    expect(jobOrigin).toEqual(recordOrigin);
+    expect(jobOrigin).not.toBe(recordOrigin);
+
+    const result = selectJob({
+      ...input,
+      jobFile: { kind: 'value', value: independentJob },
+      queue: independentQueue,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.selection.originJob).toEqual(jobOrigin);
   });
 
   test('selection failures are typed and never carry a selected job id', () => {
