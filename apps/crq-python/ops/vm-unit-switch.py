@@ -1248,7 +1248,7 @@ def _snapshot_preserved(before, after, service_sha=None):
                            "all_records", "history", "completions", "files"))
 
 
-def _queue_restored_ok(queue, before_key, after_key=None):
+def _queue_restored_ok(queue, before_key, after_key=None, baseline_queue=None):
     after_key = after_key or before_key
     return (_sha256_text(queue.get(before_key))
             and _sha256_text(queue.get(after_key))
@@ -1256,7 +1256,9 @@ def _queue_restored_ok(queue, before_key, after_key=None):
             and _sha256_text(queue.get("restored_sha256"))
             and queue[before_key] == queue[after_key]
             and queue["baseline_sha256"] == queue["restored_sha256"]
-            and queue[before_key] != queue["restored_sha256"])
+            and queue[before_key] != queue["restored_sha256"]
+            and (baseline_queue is None
+                 or queue["baseline_sha256"] == baseline_queue))
 
 
 def _count_value_ok(value, *, positive=False):
@@ -1272,7 +1274,7 @@ def _record_pending_ok(value):
             and value.get("phase") == "drained")
 
 
-def _drain_refusal_ok(phase, kind):
+def _drain_refusal_ok(phase, kind, baseline_queue):
     cli = phase.get("cli") or {}
     queue = phase.get("queue") or {}
     before = phase.get("before") or {}
@@ -1287,6 +1289,7 @@ def _drain_refusal_ok(phase, kind):
     return (
         cli.get("rc") == 2
         and service_sha is not None
+        and _sha256_text(baseline_queue)
         and "queue-owned work" in (phase.get("refused") or "")
         and _blocked_observation_ok(observation)
         and _blocked_observation_ok(drain)
@@ -1295,7 +1298,8 @@ def _drain_refusal_ok(phase, kind):
                 and entry.get("run") == seeded_run
                 for entry in observation["blocked"])
         and _liveness_ok(phase, kind)
-        and _queue_restored_ok(queue, "before_sha256", "after_sha256")
+        and _queue_restored_ok(queue, "before_sha256", "after_sha256",
+                               baseline_queue)
         and _path_list_ok(phase.get("records_before"))
         and phase.get("records_before") == phase.get("records_after")
         and _count_value_ok(phase.get("completions_before"))
@@ -3832,7 +3836,7 @@ def build_checks(phases, restarts=None, reboots=None, mode="base"):
             checks[name.replace("-", "_") + "_refused"] = False
             continue
         checks[name.replace("-", "_") + "_refused"] = _drain_refusal_ok(
-            phase, kind)
+            phase, kind, (prepared.get("state") or {}).get("queue.json"))
 
     harvest = phases.get("drain-harvest") or {}
     if not _ok_phase(harvest, "drain-harvest", problems):
