@@ -8,13 +8,13 @@ desk-continuation directory referenced below.
 
 ## Timeline (UTC, 2026-11-12)
 
-| Time | Event |
-| ---- | ----- |
-| pre-03:15 | Frozen-c6 preflight completed read-only: wrapper, dist tree, candidate config, signer schema and tag all verified against the recorded digests |
-| 03:15:22 | c6 deploy wrapper launched on a genuine quiet poll |
-| 03:18:28 | Wrapper failed rc=1 at its fixed 180 s drain timeout: a repair pass had started 10 s before the disable marker and ignores it, so the drain never completed. Fail-stop engaged: phase `recovery_required`, marker owned, nine triggers stopped, no switch (HEAD/config/SDK unchanged, zero controller journals) |
-| 04:25:05 | Restore script (independently reviewed, 53-check harness, no P1/P2 findings) executed, exit 0: marker removed, nine triggers restored, exact pre-switch D41 state |
-| 04:37:59 | HEALTHY receipt accepted: two advancing ticks, publication delta 11→0, zero new errors |
+| Time      | Event                                                                                                                                                                                                                                                                                                           |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| pre-03:15 | Frozen-c6 preflight completed read-only: wrapper, dist tree, candidate config, signer schema and tag all verified against the recorded digests                                                                                                                                                                  |
+| 03:15:22  | c6 deploy wrapper launched on a genuine quiet poll                                                                                                                                                                                                                                                              |
+| 03:18:28  | Wrapper failed rc=1 at its fixed 180 s drain timeout: a repair pass had started 10 s before the disable marker and ignores it, so the drain never completed. Fail-stop engaged: phase `recovery_required`, marker owned, nine triggers stopped, no switch (HEAD/config/SDK unchanged, zero controller journals) |
+| 04:25:05  | Restore script (independently reviewed, 53-check harness, no P1/P2 findings) executed, exit 0: marker removed, nine triggers restored, exact pre-switch D41 state                                                                                                                                               |
+| 04:37:59  | HEALTHY receipt accepted: two advancing ticks, publication delta 11→0, zero new errors                                                                                                                                                                                                                          |
 
 ## Corrected operational facts worth keeping
 
