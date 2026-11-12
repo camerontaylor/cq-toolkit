@@ -856,7 +856,10 @@ export function aggregateAddressMany(input: {
         attribution: 'absent',
         reason: outcome.notAdmitted,
         fixesPerRun: 0,
-        deferredVendorDebt: 'absent',
+        // A not-admitted leg can still have run far enough to leave durable
+        // author debt (addressMany skips candidates without reading their
+        // existing debt); with no report there is no evidence either way.
+        deferredVendorDebt: 'unknown',
       });
       continue;
     }

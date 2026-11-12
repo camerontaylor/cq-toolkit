@@ -221,6 +221,12 @@ describe('aggregateAddressMany truth', () => {
     if (!cancelled.ok) return;
     expect(cancelled.aggregate.status).toBe('budget-exhausted');
     expect(cancelled.aggregate.totals).toMatchObject({ budgetExhausted: 1, notAdmitted: 1 });
+    // A cancelled leg never produced a report, so its durable-debt state is
+    // unknowable, never affirmatively absent (crq finding F1).
+    expect(cancelled.aggregate.rows[1]).toMatchObject({
+      status: 'not-admitted',
+      deferredVendorDebt: 'unknown',
+    });
   });
 
   test('reports enrollment as advisory metadata, separate from the settled outcome', () => {
