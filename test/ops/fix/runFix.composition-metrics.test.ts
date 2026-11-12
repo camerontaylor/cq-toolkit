@@ -383,10 +383,12 @@ process.exitCode = failed ? 1 : 0;
   // measurement). Every named case runs through makeFixRun.
 
   /**
-   * A driver whose dispatches meter real governed usage but never leave
-   * surviving attempt evidence: it throws a fault after settlement, so the
-   * unit folds to a rejected result with no FixTaskReport attempts. The
-   * engine's ledger is the only carrier that observed the spend.
+   * A driver whose dispatches meter real governed usage and then throw a
+   * fault AFTER settlement, carrying the settled usage on the rejection
+   * (#1195): the thrown attempt row records it, and the engine's once-only
+   * rollup folds the spend exactly once from the surviving row evidence —
+   * never a double fold with the governed ledger that metered the same
+   * dispatch.
    */
   const meterThenFaultDriver = (): DriverFactory => ({
     resolve: ({ modelSpec }) => ({
@@ -441,14 +443,14 @@ process.exitCode = failed ? 1 : 0;
   test('M7-fix nominal evidence', async () => {
     const f = await fixture();
     try {
-      // A fault thrown AFTER settlement: governed metering still observed
-      // the dispatch spend, so the failed report retains it via the engine
-      // ledger instead of the zeroed attempt fold.
+      // A fault thrown AFTER settlement with the settled usage attached to
+      // the rejection (#1195): governed metering observed the dispatch spend,
+      // and the failed report retains it exactly once.
       const result = await makeFixRun({ drivers: meterThenFaultDriver() })(input(f));
       // A thrown dispatch folds to needs-human (a misconfiguration-class
       // ending), which still flows through finish(). The fixture repo has
       // four tasks, so the fault metered four governed dispatches: the
-      // ledger retains exactly that spend once.
+      // report retains exactly that spend once.
       expect(result.status).toBe('needs-human');
       expect(result.report?.usage).toEqual({
         input: 28,
@@ -456,15 +458,17 @@ process.exitCode = failed ? 1 : 0;
         cacheRead: 8,
         cacheWrite: 4,
       });
-      // Settled exactly once through the runner rollup: the surviving attempt
-      // rows carry NO usage (the driver threw before returning a
-      // measurement), so the report's spend comes solely from the ledger,
-      // never double folded.
-      expect(
-        result.report?.tasks.flatMap((task) =>
-          (task.attempts ?? []).filter((attempt) => attempt.usage !== undefined),
-        ),
-      ).toHaveLength(0);
+      // Settled exactly once (#1195): every thrown attempt row now carries
+      // the rejection's settled usage (four rows, one {7,3,2,1} each), and
+      // the rollup above still folds 28/12/8/4 — the once-only fold reads
+      // the surviving row evidence without double-counting the governed
+      // ledger that metered the same dispatches.
+      const usageRows = result.report?.tasks.flatMap((task) =>
+        (task.attempts ?? []).filter((attempt) => attempt.usage !== undefined),
+      );
+      expect(usageRows).toHaveLength(4);
+      for (const attempt of usageRows ?? [])
+        expect(attempt.usage).toEqual({ input: 7, output: 3, cacheRead: 2, cacheWrite: 1 });
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
@@ -485,6 +489,13 @@ process.exitCode = failed ? 1 : 0;
         cacheWrite: 0,
       });
       expect(result.report?.run?.usage).toBeUndefined();
+      // The bare rejection carries no usage attachment (#1195's no-usage
+      // twin): no thrown attempt row invents a measurement.
+      expect(
+        result.report?.tasks.flatMap((task) =>
+          (task.attempts ?? []).filter((attempt) => attempt.usage !== undefined),
+        ),
+      ).toHaveLength(0);
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
@@ -548,8 +559,9 @@ process.exitCode = failed ? 1 : 0;
       // (runFix.ts:289) already summed `reasoning` before the kernel folds
       // were fixed, and the ledger adoption (report.usage = report.run?.usage)
       // carries it once either way. A fault thrown after settlement carrying
-      // additive reasoning: the ledger is the only carrier, and the report
-      // retains the reasoning sum exactly once.
+      // additive reasoning: the settled usage rides the surviving attempt
+      // rows too (#1195), and the report retains the reasoning sum exactly
+      // once.
       // Four governed dispatches metered, so reasoning sums to 4×4 = 16.
       const result = await makeFixRun({ drivers: reasoningFaultDriver() })(input(f));
       expect(result.status).toBe('needs-human');
