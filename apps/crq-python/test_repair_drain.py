@@ -340,6 +340,32 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(journal['source_resolutions'], [job_id])
         self.assertIn('--body-file', c.run.call_args.args[0])
 
+    def test_delayed_graphql_thread_keeps_source_feedback_pending(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        job_id = record['jobs'][0]
+        path = self.root / 'state/repair/inbox' / (job_id + '.json')
+        job = json.loads(path.read_text())
+        job['source'] = {'finding_number': 2, 'run': 'run1'}
+        atomic(path, job)
+        record.update(publication={'head': self.tip}, fix_pr={'url': 'https://github.com/example/repo/pull/99'},
+                      verdicts=[{'job': job_id, 'verdict': 'FIXED'}])
+        journal = self.root / 'state/repair' / job_id / 'publication.json'
+        atomic(journal, record['publication'])
+        comment = {'path': 'src/kept.ts', 'body': '**crq finding F2 [major]** issue\n<sub>crq run `run1`, line 1</sub>'}
+        def graphql(threads):
+            return [{'data': {'repository': {'pullRequest': {'reviewThreads': {'nodes': threads}}}}}]
+        thread = {'id': 'thread-node', 'comments': {'nodes': [comment]}}
+        c = SimpleNamespace(STATE=self.root / 'state', REPO='example/repo', run=mock.Mock(),
+                            gh_json=mock.Mock(side_effect=[[], graphql([]), [[comment]],
+                                                           [], graphql([thread]),
+                                                           {'data': {'resolveReviewThread': {'thread': {'isResolved': True}}}}]))
+        repair_tick.publish_source_resolution(c, record, self.tip)
+        self.assertEqual(json.loads(journal.read_text()), {'head': self.tip})
+        self.assertIn('pulls/1/comments', c.gh_json.call_args_list[2].args[1])
+        repair_tick.publish_source_resolution(c, record, self.tip)
+        self.assertEqual(json.loads(journal.read_text())['source_resolutions'], [job_id])
+
     def test_enqueue_preserves_explicit_source_ids_and_published_ordinal(self):
         rdir = self.root / 'runs/source'
         rdir.mkdir(parents=True)

@@ -709,6 +709,23 @@ def source_thread(c, job):
     return next(iter(matches), None)
 
 
+def rest_source_thread(c, job):
+    """REST presence of the source finding comment; GraphQL reviewThreads lag REST."""
+    source = job.get('source', {})
+    number = source.get('finding_number')
+    if not number or not job.get('pr'):
+        return False  # Same bounds as source_thread: no thread identity to verify.
+    pages = c.gh_json(['api', 'repos/' + c.REPO + '/pulls/' + str(job['pr']) + '/comments',
+                       '--paginate', '--slurp'])
+    for page in pages:
+        for comment in page:
+            if (comment.get('path') == job['finding'].get('path') and
+                    comment.get('body', '').startswith('**crq finding F' + str(number) + ' [') and
+                    '<sub>crq run `' + source.get('run', job['run']) + '`' in comment.get('body', '')):
+                return True
+    return False
+
+
 def publish_source_resolution(c, record, merge):
     """Resume source comments/resolves in the existing publication journal."""
     publication = record.get('publication')
@@ -738,6 +755,8 @@ def publish_source_resolution(c, record, merge):
             response = c.gh_json(['api', 'graphql', '--input', str(request)])
             if response.get('errors') or not response.get('data', {}).get('resolveReviewThread', {}).get('thread', {}).get('isResolved'):
                 raise ValueError('source thread resolution unconfirmed')
+        elif rest_source_thread(c, job):
+            continue  # REST shows the source thread but GraphQL reviewThreads lag it; keep feedback pending for retry.
         completed.append(job['job'])
         atomic(journal, publication)
 
