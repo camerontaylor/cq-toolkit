@@ -1,5 +1,6 @@
 {
   "test/adapters/crq/repairScan.test.ts": "pure",
+  "test/adapters/crq/summarySource.test.ts": "process",
   "test/adapters/forge-github/forge.test.ts": "pure",
   "test/adapters/lock/slotMetadata.test.ts": "process",
   "test/adversarial/a14-privileged-workflow.benign-edits.test.ts": "process",
