@@ -36,8 +36,11 @@ full-branch readiness, independent acceptance or remediation completion.
 
 ## SDK and generated CLI
 
-Import `makeConfiguredQueueClient` (uses operator `CQ_QUEUE_SSH_ALIAS`) or
-`makeQueueClient(transport)` from the SDK review family. The client exposes
+Import `makeConfiguredQueueClient` (uses the operator `CQ_QUEUE_SSH_ALIAS`
+resolved in the CqEnv snapshot: the caller's snapshot argument, or the
+enclosing run's snapshot — the value the entry captured when the process
+started, so changing the ambient variable afterwards has no effect on an
+existing client) or `makeQueueClient(transport)` from the SDK review family. The client exposes
 `enqueue(reference)`, `bind({...reference, pr, mergeSha?})`, `cancel(reference)`,
 `status(reference)` and `report(reference, evidenceDir)`. Every call requires
 the original immutable `{requestId, binding}`; a failed read creates no ID.

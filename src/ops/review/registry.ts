@@ -88,12 +88,17 @@ import {
   QueueReportInputSchema,
 } from './internal/queueProtocol.js';
 
-// The queue family entries' importers pass the host's resolved CQ_* snapshot
-// into `makeQueueOps` so every alias read is entry-time (ADR-0009 resolve
-// once): the ops are constructed with the run's snapshot, and a later ambient
-// env change cannot alter queue configuration. The explicit `undefined` keeps
-// the transport unbound while the default-parameter rule applies the run's
-// snapshot when the wiring carries none (library behavior preserved).
+// ---------------------------------------------------------------------------
+// QUEUE SNAPSHOT WIRING — the six `review.*` queue importers below (retry,
+// drain, enqueue, queueHealth, queueStatus, report) pass the host's resolved
+// CQ_* snapshot into `makeQueueOps` so every alias read is entry-time
+// (ADR-0009 resolve once): the ops are constructed with the run's snapshot,
+// and a later ambient env change cannot alter queue configuration. The
+// explicit `undefined` keeps the transport unbound while the default-parameter
+// rule applies the run's snapshot when the wiring carries none (library
+// behavior preserved). The other importers in the table below do NOT pass
+// snapshots here — their ops read `currentCqEnv()` themselves.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Adapter helpers — the one fold every library op rides (module doc)

@@ -106,4 +106,30 @@ describe('queue alias reads the CqEnv snapshot, not the ambient env', () => {
     await expect(op(ref)).resolves.toMatchObject({ status: 'ok', value: pendingStatus });
     expect(aliases).toEqual(['fixture']);
   });
+
+  test('whitespace in the snapshot matches the old ambient read verbatim', async () => {
+    // The old call-time read took process.env verbatim; the snapshot's text
+    // parser also passes values verbatim, so a whitespace-padded alias is NOT
+    // trimmed or silently repaired. Wrap the real factory (the alias test's
+    // technique): it records the alias it received and then refuses the padded
+    // value before any spawn, proving both verbatim flow and the refusal.
+    const padded = makeQueueOps(undefined, readCqEnv({ CQ_QUEUE_SSH_ALIAS: ' fixture ' }));
+    const seen: string[] = [];
+    const real = queueClient.sshQueueTransport;
+    vi.spyOn(queueClient, 'sshQueueTransport').mockImplementation((alias: string) => {
+      seen.push(alias);
+      return real(alias);
+    });
+    await expect(padded.queueStatus(ref)).resolves.toMatchObject({
+      status: 'failed',
+      error: 'invalid queue SSH alias',
+    });
+    expect(seen).toEqual([' fixture ']);
+    // Whitespace-only is blank, and blank means unset: needs-human, never a
+    // dispatch with a whitespace alias (the old `!alias` check agreed, since
+    // '   ' is falsy in JavaScript).
+    const blank = makeQueueOps(undefined, readCqEnv({ CQ_QUEUE_SSH_ALIAS: '   ' }));
+    await expect(blank.queueStatus(ref)).resolves.toMatchObject({ status: 'needs-human' });
+    expect(seen).toEqual([' fixture ']);
+  });
 });
