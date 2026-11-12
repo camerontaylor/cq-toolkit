@@ -65,21 +65,27 @@ Relevant topology facts for a switch:
 
 ## Journal interoperability: the code gap
 
-This is ours to design and implement; only the physical reconciliation of
-production history belongs to the parent. The source shows a concrete defect,
-not merely an unknown record location.
+The numbered findings below are the pre-change finding: they describe the
+controller as reviewed, before the "Implemented in the existing controller"
+list below resolved items 2 and 3 in code. Items 1 and 4 remain open and are
+carried by the "Remaining gaps" list below; only the physical reconciliation
+of production history belongs to the parent. The pre-change source showed a
+concrete defect, not merely an unknown record location.
 
-1. **Two record roots are not bound to each other.** `prepare-host.record()`
+1. **Two record roots are not bound to each other (still open).**
+   `prepare-host.record()`
    writes render-intent `<uuid>.json` records into the overlay `record_dir`
    (`prepare-host.py:305-319`). The deploy controller writes
    `controller-<uuid>.json` into its own `--record-dir`
    (`deploy-controller.py:241-269`). Nothing in source requires those paths to
    resolve to the same directory, and the runbook's example values differ
    (`HOST-DEPLOY.md:65-66`, `HOST-DEPLOY.md:204-206`). An operator can
-   therefore maintain two stores without any tool noticing.
-2. **The unfinished guard is one-sided.** `refuse_unfinished_unit_switches`
-   (`deploy-controller.py:1324-1333`) blocks only an unfinished
-   `operation == "unit_switch"`. Checkout mutations are written as
+   therefore maintain two stores without any tool noticing. Still open; see
+   "Remaining gaps" below.
+2. **The unfinished guard was one-sided (resolved below).** The pre-change
+   `refuse_unfinished_unit_switches` (`deploy-controller.py:1324-1333`)
+   blocked only an unfinished `operation == "unit_switch"`. Checkout
+   mutations are written as
    `deploy_pending`/`rollback_pending` (`mutation_record`,
    `deploy-controller.py:1120-1135`), failures as `recovery_required`
    (`deploy-controller.py:1149`), and successful checkout records as
@@ -91,19 +97,27 @@ not merely an unknown record location.
      call the same guard (`deploy-controller.py:1218`, `:1528`);
    - a unit-switch `recovery_required` blocks, because its outcome is neither
      `completed` nor `rolled_back`.
-   The asymmetry is the interop defect: a host mutation can be pending while
-   the unit seam believes it is clear.
-3. **There is no machine-verifiable resolution.** `recover_unit`
-   (`deploy-controller.py:1271-1320`) accepts only `operation ==
-   "unit_switch"`. `HOST-DEPLOY.md:319-330` says earlier intent, recovery and
-   refusal records are not consumed by later preflight, and resolution is a
-   separate prose `OPERATOR-RESOLUTION.md`. Prose is not checked against the
-   retained record or the physical state.
-4. **Record identity is weak.** Records do not retain the record root, the
-   controller version or a host identity. The controller lock is
+   The asymmetry was the interop defect: a host mutation could be pending
+   while the unit seam believed it was clear. The implemented
+   `refuse_unfinished_transactions` (`deploy-controller.py:1615`) replaced it
+   as the one guard for checkout deploy/rollback and unit switch/recovery.
+3. **There was no machine-verifiable resolution (resolved below).** The
+   pre-change `recover_unit` (`deploy-controller.py:1271-1320`) accepted only
+   `operation == "unit_switch"`. `HOST-DEPLOY.md:319-330` says earlier intent,
+   recovery and refusal records are not consumed by later preflight, and
+   resolution is a separate prose `OPERATOR-RESOLUTION.md`. Prose is not
+   checked against the retained record or the physical state. The implemented
+   `recover_unit` (`deploy-controller.py:1313`) now calls that guard with
+   `exclude=<its own record>`, so a legitimate recovery does not block itself
+   while any other unfinished transaction still does. A checkout
+   `deploy_pending`, `rollback_pending` or `recovery_required` record has no
+   machine-verifiable resolution in `recover_unit`; keep it as an open gap.
+4. **Record identity is weak (still open).** Records do not retain the record
+   root, the controller version or a host identity. The controller lock is
    `state/controller.lock` inside the checkout (`deploy-controller.py:85`,
-   `:215-226`), so an older controller or a different `--record-dir` bypasses
-   the guard without touching the same lock.
+   `:228`), so an older controller or a different `--record-dir` bypasses the
+   guard without touching the same lock. Still open; see "Remaining gaps"
+   below.
 
 Implemented in the existing controller (2026-11-11; no second store):
 

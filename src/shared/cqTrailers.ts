@@ -6,12 +6,14 @@
  */
 
 /**
- * Render `Key: value` trailer lines. Values containing embedded newlines are
- * rejected: a trailer is a single physical line by construction, and a
- * smuggled newline could forge subsequent trailers.
+ * Render `Key: value` trailer lines. Keys and values containing embedded
+ * newlines are rejected: a trailer is a single physical line by construction,
+ * and a smuggled newline in either tuple field could forge subsequent
+ * trailers.
  */
 export function formatCqTrailers(entries: ReadonlyArray<readonly [string, string]>): string {
   for (const [key, value] of entries) {
+    if (/[\r\n]/.test(key)) throw new Error('Cq trailer key contains an embedded newline');
     if (/[\r\n]/.test(value)) throw new Error(`Cq trailer ${key} contains an embedded newline`);
   }
   return entries.map(([key, value]) => `${key}: ${value}`).join('\n');

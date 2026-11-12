@@ -236,6 +236,87 @@ class RepairDrainTest(unittest.TestCase):
             repair_tick.mark_finding_outcome(c, job, {'verdict': 'FIXED'})
             inbox.assert_not_called()
 
+    def test_legacy_fixed_evidence_journal_replay_and_staleness(self):
+        job_id = 'crq-run1-F2'
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        publication = {'head': self.pin, 'commits': [self.pin], 'branch': 'fix',
+                       'target': self.pin, 'open_pr': False}
+        record.update(state='published', jobs=[job_id], publication=copy.deepcopy(publication),
+                      fix_pr={'number': 99}, verdicts=[{'job': job_id, 'verdict': 'FIXED', 'reason': 'fixed'}])
+        journal = self.root / 'state/repair' / job_id / 'publication.json'
+        atomic(journal, publication)
+        info = {'number': 99, 'state': 'MERGED', 'headRefOid': self.tip, 'mergeCommit': {'oid': self.tip}}
+        c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', iso=lambda: 'now',
+                            git=self.git, pr_info=mock.Mock(return_value=info),
+                            ensure_commit=mock.Mock(return_value=True),
+                            is_ancestor=lambda a, b: subprocess.run(['git', '-C', str(self.clone),
+                                'merge-base', '--is-ancestor', a, b]).returncode == 0,
+                            save_queue=mock.Mock())
+        job = json.loads(bounded.job_path(self.root, job_id).read_text())
+        paths = ['src/kept.ts', 'src/moved.ts']
+        sources = {p: {'published': repair_tick.repair_source_entry(c, self.pin, p),
+                       'actual': repair_tick.repair_source_entry(c, self.tip, p),
+                       'current': repair_tick.repair_source_entry(c, self.tip, p)} for p in paths}
+        evidence = json.loads(json.dumps({'job': job_id, 'item': item['id'], 'run': 'run1',
+            'finding_sha256': bounded.identity(job['finding']), 'pr': 99, 'published_head': self.pin,
+            'actual_head': self.tip, 'merge_commit': self.tip, 'source_sha': self.tip, 'sources': sources,
+            'verdict': 'fixed', 'reviewer': 'reviewer', 'reason': 'verified corrected source'}))
+        for key in ('job', 'item', 'run', 'finding_sha256', 'pr', 'published_head', 'actual_head',
+                    'merge_commit', 'source_sha', 'sources', 'verdict', 'reviewer', 'reason'):
+            bad = copy.deepcopy(evidence)
+            bad[key] = None
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, bad)
+        with self.assertRaisesRegex(ValueError, 'source changed'):
+            repair_tick.merge_head_evidence(c, record, self.tip)
+        c.ensure_commit.return_value = False
+        with self.assertRaisesRegex(ValueError, 'head unavailable'):
+            repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, evidence)
+        c.ensure_commit.return_value = True
+        repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, evidence)
+        old_publication = copy.deepcopy(record['publication'])
+        replacement = {**evidence, 'reason': 'reviewed replacement'}
+        c.save_queue.side_effect = OSError('crash before queue save')
+        with self.assertRaisesRegex(OSError, 'crash'):
+            repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, replacement)
+        c.save_queue.side_effect = None
+        record['publication'] = copy.deepcopy(old_publication)  # restart from old persisted queue
+        saved = json.loads(journal.read_text())
+        stale = {**replacement, 'source_sha': self.pin}
+        atomic(journal, {**saved, 'fixed_revalidation': stale})
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
+             mock.patch.object(repair_tick, 'publish_source_resolution') as publish:
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            mark.assert_not_called()
+            publish.assert_not_called()
+            self.assertIn('binding changed', record['source_publication_error'])
+        atomic(journal, saved)
+        evidence = replacement
+        changed_info = {**info, 'headRefOid': self.pin}
+        c.pr_info.return_value = changed_info
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
+             mock.patch.object(repair_tick, 'publish_source_resolution') as publish:
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            mark.assert_not_called()
+            publish.assert_not_called()
+            self.assertNotIn('fix_merged', record)
+        c.pr_info.return_value = info
+        record['publication']['source_resolutions'] = ['unexpected']
+        with self.assertRaisesRegex(ValueError, 'resolutions contradict'):
+            repair_tick.publication_journal(c, record)
+        record['publication'] = copy.deepcopy(old_publication)  # restart from old persisted queue
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
+             mock.patch.object(repair_tick, 'publish_source_resolution', side_effect=[RuntimeError('offline'), None]) as publish:
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            self.assertNotIn('fix_merged', record)
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            self.assertEqual(publish.call_count, 2)
+            self.assertEqual(record['fix_merged'], 'now')
+            self.assertEqual(mark.call_count, 2)
+        self.assertEqual(json.loads(journal.read_text())['fixed_revalidation'], evidence)
+
     def test_merge_reconciliation_marks_threadless_ledger_only_after_merge(self):
         job_id = 'crq-run1-F1'
         item = self.queue['items'][0]
@@ -254,6 +335,23 @@ class RepairDrainTest(unittest.TestCase):
             repair_tick.reconcile_fix_prs(c, self.queue)
             self.assertEqual(mark.call_count, 1)
 
+    def test_closed_fix_pr_is_terminal_and_never_polled_again(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        record.update(fix_pr={'number': 99, 'url': 'https://github.com/example/repo/pull/99'},
+                      verdicts=[{'job': 'crq-run1-F1', 'verdict': 'FIXED', 'reason': 'verified'}])
+        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: 'now',
+                            pr_info=mock.Mock(return_value={'state': 'CLOSED'}),
+                            git=lambda *args: self.tip, is_ancestor=lambda *args: True)
+        repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertEqual(record['fix_closed'], 'now')
+        self.assertEqual(c.pr_info.call_count, 1)
+        self.assertEqual(record['fix_pr']['state'], 'CLOSED')
+        repair_tick.reconcile_fix_prs(c, self.queue)
+        repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertEqual(c.pr_info.call_count, 1)
+        self.assertNotIn('fix_merged', record)
+
     def test_source_failure_is_retained_without_aborting_reconciliation(self):
         item = self.queue['items'][0]
         record = item['repair_runs']['run1']
@@ -267,10 +365,24 @@ class RepairDrainTest(unittest.TestCase):
         self.assertNotIn('fix_merged', record)
         errors = repair_tick.digest(self.root, self.queue)['source_publication_errors']
         self.assertEqual(errors, [{'item': item['id'], 'run': 'run1', 'error': 'forge exhausted'}])
-        with mock.patch.object(repair_tick, 'publish_source_resolution'):
+        with mock.patch.object(repair_tick, 'publish_source_resolution', return_value=False):
             repair_tick.reconcile_fix_prs(c, self.queue)
         self.assertEqual(record['fix_merged'], 'now')
         self.assertNotIn('source_publication_error', record)
+
+    def test_pending_source_resolution_defers_fix_merged_until_retry(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        record.update(fix_pr={'number': 99}, verdicts=[])
+        c = SimpleNamespace(iso=lambda: 'now', git=lambda *args: self.tip,
+                            is_ancestor=lambda *args: True,
+                            pr_info=lambda n: {'state': 'MERGED', 'mergeCommit': {'oid': self.tip}})
+        with mock.patch.object(repair_tick, 'publish_source_resolution', return_value=True):
+            repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertNotIn('fix_merged', record)
+        with mock.patch.object(repair_tick, 'publish_source_resolution', return_value=False):
+            repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertEqual(record['fix_merged'], 'now')
 
     def test_unverifiable_head_mismatch_cannot_mark_prepared_finding_fixed(self):
         record = self.queue['items'][0]['repair_runs']['run1']
@@ -339,7 +451,8 @@ class RepairDrainTest(unittest.TestCase):
                 item['repair_runs'] = {'run1': record}
                 c.pr_info = lambda n: {'state': 'MERGED', 'headRefOid': actual, 'mergeCommit': {'oid': actual}}
                 with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
-                     mock.patch.object(repair_tick, 'publish_source_resolution') as source:
+                     mock.patch.object(repair_tick, 'publish_source_resolution',
+                                       return_value=False) as source:
                     repair_tick.reconcile_fix_prs(c, self.queue)
                 self.assertEqual(mark.call_count, 2 if allowed else 0)
                 self.assertEqual(source.call_count, 1 if allowed else 0)
@@ -484,6 +597,32 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(journal['source_resolutions'], [job_id])
         self.assertIn('--body-file', c.run.call_args.args[0])
 
+    def test_delayed_graphql_thread_keeps_source_feedback_pending(self):
+        item = self.queue['items'][0]
+        record = item['repair_runs']['run1']
+        job_id = record['jobs'][0]
+        path = self.root / 'state/repair/inbox' / (job_id + '.json')
+        job = json.loads(path.read_text())
+        job['source'] = {'finding_number': 2, 'run': 'run1'}
+        atomic(path, job)
+        record.update(publication={'head': self.tip}, fix_pr={'url': 'https://github.com/example/repo/pull/99'},
+                      verdicts=[{'job': job_id, 'verdict': 'FIXED'}])
+        journal = self.root / 'state/repair' / job_id / 'publication.json'
+        atomic(journal, record['publication'])
+        comment = {'path': 'src/kept.ts', 'body': '**crq finding F2 [major]** issue\n<sub>crq run `run1`, line 1</sub>'}
+        def graphql(threads):
+            return [{'data': {'repository': {'pullRequest': {'reviewThreads': {'nodes': threads}}}}}]
+        thread = {'id': 'thread-node', 'comments': {'nodes': [comment]}}
+        c = SimpleNamespace(STATE=self.root / 'state', REPO='example/repo', run=mock.Mock(),
+                            gh_json=mock.Mock(side_effect=[[], graphql([]), [[comment]],
+                                                           [], graphql([thread]),
+                                                           {'data': {'resolveReviewThread': {'thread': {'isResolved': True}}}}]))
+        repair_tick.publish_source_resolution(c, record, self.tip)
+        self.assertEqual(json.loads(journal.read_text()), {'head': self.tip})
+        self.assertIn('pulls/1/comments', c.gh_json.call_args_list[2].args[0][1])
+        self.assertFalse(repair_tick.publish_source_resolution(c, record, self.tip))
+        self.assertEqual(json.loads(journal.read_text())['source_resolutions'], [job_id])
+
     def test_enqueue_preserves_explicit_source_ids_and_published_ordinal(self):
         rdir = self.root / 'runs/source'
         rdir.mkdir(parents=True)
@@ -537,7 +676,7 @@ class RepairDrainTest(unittest.TestCase):
                             pr_info=mock.Mock(return_value={'state': 'OPEN'}))
         repair_tick.finalize_publication(c, self.queue, item, 'run1', record, publication)
         self.assertEqual(record['fix_pr']['number'], item['pr'])
-        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, mock.patch.object(repair_tick, 'publish_source_resolution'):
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, mock.patch.object(repair_tick, 'publish_source_resolution', return_value=False):
             repair_tick.reconcile_fix_prs(c, self.queue)
             mark.assert_not_called()
             c.pr_info.return_value = {'state': 'MERGED', 'headRefOid': self.tip, 'mergeCommit': {'oid': self.tip}}
@@ -1512,6 +1651,27 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(result['verdict'], 'NOT-FIXED')
         self.assertNotIn('pending_judge', result)
         self.assertNotIn('retry_after', result)
+
+    def test_pending_judge_with_missing_worktree_fails_closed(self):
+        self.job('crq-run1-F1', 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')
+        wt = self.worktree()
+        _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
+        missing = str(wt) + '-A2'
+        self.assertFalse(Path(missing).exists())
+        progress = self.root / 'state/repair/crq-run1-F1/progress.json'
+        atomic(progress, {'job': 'crq-run1-F1', 'item': 'pr1-merged',
+                          'repair_base': self.pin, 'verdict': 'FAILED', 'reason': '',
+                          'commits': [], 'attempts': [], 'judge': None,
+                          'worktree': missing, 'next_rung': 2,
+                          'pending_judge': {'fixer_reason': 'no change warranted', 'rung': 1}})
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service.cq, 'judge') as judge:
+            result = service.process(self.config, dict(job), wt)
+        judge.assert_not_called()
+        self.assertEqual(result['verdict'], 'FAILED')
+        self.assertIn('pending judge worktree unavailable', result['reason'])
+        self.assertNotIn('pending_judge', result)
+        self.assertEqual(json.loads((self.root / 'state/repair/crq-run1-F1/result.json').read_text())['verdict'], 'FAILED')
 
     def test_harvest_publishes_fixed_findings_around_a_stale_one(self):
         jobs = ['crq-run5-F1', 'crq-run5-F2', 'crq-run5-F3']

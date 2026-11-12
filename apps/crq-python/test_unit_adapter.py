@@ -49,7 +49,7 @@ def _elf_header():
     return bytes(header)
 
 
-def _node_artifact(base, sha):
+def _node_artifact(base, sha, capabilities=None):
     """A minimally packageable extracted Node artifact under ``base``."""
     package = host._package_runner()
     root = Path(base) / ".local/opt" / ("crq-" + sha)
@@ -62,6 +62,10 @@ def _node_artifact(base, sha):
     (fs_ext / "package.json").write_text(
         json.dumps({"name": "fs-ext", "version": package.FS_EXT_VERSION}))
     (fs_ext / "build/Release/fs_ext.node").write_bytes(_elf_header())
+    if capabilities is not None:
+        (root / "dist/queue-runner/capabilities.json").write_text(
+            json.dumps({"schema_version": 1,
+                        "commands": list(capabilities)}))
     files = package.inventory(root)
     facts = package.staging_facts(root)
     provenance = {
@@ -506,17 +510,18 @@ class InventoryTests(unittest.TestCase):
     def test_declared_inventory_parses_schedules(self):
         inventory = adapter_mod.declared_inventory(self.root, self.sha)
         self.assertEqual(inventory["crq-tick.service"]["timer_bound_seconds"],
-                         12 * 60)
+                         12 * 60 + 60)
         self.assertEqual(inventory["crq-slot.service"]["timer_bound_seconds"],
                          61)
         self.assertEqual(
-            inventory["crq-backfill.service"]["timer_bound_seconds"], 6 * 3600)
+            inventory["crq-backfill.service"]["timer_bound_seconds"],
+            6 * 3600 + 60)
         self.assertEqual(
             inventory["crq-publisher.service"]["timer_bound_seconds"], 65)
         self.assertEqual(inventory["crq-repair.service"]["service_type"],
                          "simple")
-        self.assertIsNone(
-            inventory["crq-watchdog.service"]["service_timeout_seconds"])
+        self.assertEqual(
+            inventory["crq-watchdog.service"]["service_timeout_seconds"], 300)
 
     def test_undeclared_template_refuses(self):
         (self.template("crq-extra.service")).write_text(
@@ -626,10 +631,15 @@ class AdapterTests(AdapterFixture):
 
     def test_preflight_refuses_unbounded_oneshot_timeout(self):
         self.fake.active["crq-watchdog.timer"] = "active"
+        current = self.make_adapter()
+        inventory = current._inventory()
+        inventory["crq-watchdog.service"] = dict(
+            inventory["crq-watchdog.service"], service_timeout_seconds=None)
+        current._inventory = lambda: inventory
         before = _tree(self.unit_dir)
         with self.assertRaisesRegex(dc.Refused,
                                     "start timeout is not bounded"):
-            self.adapter.preflight("crq-watchdog.service", NODE_RUNTIME)
+            current.preflight("crq-watchdog.service", NODE_RUNTIME)
         self.assertEqual(_tree(self.unit_dir), before)
 
     def test_preflight_refuses_installed_timer_schedule_drift(self):
@@ -675,6 +685,25 @@ class AdapterTests(AdapterFixture):
         current = self.make_adapter(capability=capability)
         with self.assertRaisesRegex(dc.Refused, "does not implement"):
             current.preflight("crq-tick.service", NODE_RUNTIME)
+
+    def test_declared_node_capability_accepts_only_its_command(self):
+        capability = adapter_mod.DeclaredCapabilities(node_commands=["tick"])
+        self.assertEqual(capability.commands(NODE_RUNTIME), frozenset({"tick"}))
+        self.assertEqual(capability.commands("python"),
+                         frozenset(host.UNIT_COMMANDS.values()))
+        current = self.make_adapter(capability=capability)
+        prior = current.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(prior["capability"]["command"], "tick")
+        self.assertEqual(prior["capability"]["commands"], ["tick"])
+        with self.assertRaisesRegex(dc.Refused, "does not implement"):
+            self.make_adapter(capability=capability).preflight(
+                "crq-slot.service", NODE_RUNTIME)
+
+    def test_declared_node_capability_rejects_malformed_commands(self):
+        for value in ("tick", [1], object()):
+            with self.subTest(value=value):
+                with self.assertRaises(TypeError):
+                    adapter_mod.DeclaredCapabilities(node_commands=value)
 
     def test_preflight_without_completion_refuses_before_mutation(self):
         before = _tree(self.unit_dir)

@@ -33,6 +33,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 
@@ -673,8 +674,37 @@ def verify_archive(archive, expected_sha256=None, lockfile=None, smoke=True,
             manager.cleanup()
 
 
+def _machine_error(kind, subcommand, message, exit_code):
+    """One JSON error artifact on stdout; stderr stays empty (doctrine I1)."""
+    artifact = {'error': {'kind': kind, 'subcommand': subcommand,
+                          'message': message, 'exitCode': exit_code}}
+    sys.stdout.write(json.dumps(artifact, sort_keys=True, indent=2) + '\n')
+    raise SystemExit(exit_code)
+
+
+class _MachineArgumentParser(argparse.ArgumentParser):
+    """Argument parser whose usage errors honor machine mode (doctrine I1).
+
+    `--json` is detected in argv before parsing; in machine mode an argparse
+    usage error writes one JSON error artifact to stdout, keeps stderr empty
+    and exits 2 instead of narrating on stderr.
+    """
+
+    def __init__(self, *args, machine=False, subcommand=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._machine = machine
+        self._subcommand = subcommand
+
+    def error(self, message):
+        if self._machine:
+            _machine_error('usage', self._subcommand, message, 2)
+        super().error(message)
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    machine = '--json' in sys.argv[1:]
+    parser = _MachineArgumentParser(description=__doc__, machine=machine,
+                                    subcommand='package-runner')
     parser.add_argument('command', nargs='?', choices=('package', 'verify'),
                         default='package')
     parser.add_argument('--staging', type=Path)
@@ -706,21 +736,24 @@ def main():
                                     lockfile=args.lockfile,
                                     smoke=not args.no_smoke, node=args.node,
                                     keep=args.keep)
-            if args.json:
-                print(json.dumps(report, sort_keys=True, indent=2))
-            else:
-                print('verified ' + report['archive_sha256'] + ' ' + report['archive'])
+            print(json.dumps(report, sort_keys=True, indent=2))
+            if not args.json:
+                print('verified ' + report['archive_sha256'] + ' ' + report['archive'],
+                      file=sys.stderr)
                 if report['observed'] is not None:
                     print('fs-ext ' + report['observed']['fsExt'] + ' Node '
                           + report['observed']['node'] + ' ABI '
-                          + report['observed']['modules'] + ' flock ok')
+                          + report['observed']['modules'] + ' flock ok', file=sys.stderr)
                 if report['runner'] is not None:
                     print('runner exit ' + str(report['runner']['exit_code']) + ' status '
                           + report['runner']['status'] + ' detail '
-                          + report['runner']['detail'])
+                          + report['runner']['detail'], file=sys.stderr)
                 if args.keep:
-                    print('extracted tree ' + report['root'])
-    except (ArtifactError, OSError, ValueError) as exc:
+                    print('extracted tree ' + report['root'], file=sys.stderr)
+    except (ArtifactError, OSError, ValueError, subprocess.TimeoutExpired,
+            tarfile.TarError) as exc:
+        if machine:
+            _machine_error('thrown', 'package-runner', str(exc), 1)
         parser.exit(1, 'package-runner: ' + str(exc) + '\n')
 
 

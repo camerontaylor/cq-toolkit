@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { makeSubprocessDevEffects } from '../../../src/ops/dev/effects.js';
 import { cycleRecord, stubScanner } from './fakes.js';
-import { cycleReview, ran, reviewer, reviewerCalls } from './reviewTestKit.js';
+import { cycleReview, managedBlocked, managedTerminal, reviewerCalls } from './reviewTestKit.js';
 import { makeTestRepo, repoEffects, seed, type TestRepo } from './repo.js';
 
 let repo: TestRepo;
@@ -17,23 +17,18 @@ afterEach(async () => {
 describe('dev.review cycle', () => {
   // --- Q4 (#485): exact-terminal reuse before vendor dispatch --------------
 
-  test('rate limits remain blocked without creating vendor-deferral authority', async () => {
-    const effects = repoEffects(
-      repo,
-      reviewer(
-        ran(
-          1,
-          JSON.stringify({
-            type: 'error',
-            errorType: 'rate_limit',
-            recoverable: true,
-          }),
-        ),
-      ),
-    );
-    expect((await cycleReview(effects, stubScanner())({ repoRoot: repo.root })).status).toBe(
-      'needs-human',
-    );
+  test('a blocked queue receipt leaves no vendor-deferral authority', async () => {
+    const effects = repoEffects(repo);
+    expect(
+      (
+        await cycleReview(
+          effects,
+          stubScanner(),
+          undefined,
+          managedBlocked('the queue returned no countable verdict'),
+        )({ repoRoot: repo.root })
+      ).status,
+    ).toBe('needs-human');
     expect(
       effects
         .openLedger('feature/x')
@@ -48,61 +43,45 @@ describe('dev.review cycle', () => {
       .records.find((entry) => entry.kind === 'cycle');
     expect(record?.kind === 'cycle' ? record.vendorFailure : undefined).toBeUndefined();
   });
-  const literalVendor = { type: 'error', errorType: 'rate_limit', recoverable: true };
-  const scanWithVendorProse = {
-    type: 'error',
-    errorType: 'scan',
-    message: 'Review failed: con_err: fixture',
-  };
-  test.each([
-    [scanWithVendorProse],
-    [literalVendor, scanWithVendorProse],
-    [scanWithVendorProse, literalVendor],
-    [{ type: 'error', errorType: 'unknown', message: 'Review failed: rate_limited: fixture' }],
-    [{ type: 'error', errorType: 'rate_limit', recoverable: false }],
-    [literalVendor, { type: 'status', status: 'budget_exhausted' }],
-    [literalVendor, { type: 'status', status: 'cancelled' }],
-    [literalVendor, { type: 'finding', severity: 'major', comment: 'defect' }],
-
-    [
-      { type: 'error', message: 'Review failed: con_err: fixture' },
-      { type: 'error', message: 'Review failed: scan_err: fixture' },
-    ],
-    [{ type: 'error', message: 'please login again' }],
-    [{ type: 'error', message: 'Review failed: auth: fixture' }, { type: 'action_required' }],
-    [
-      { type: 'error', message: 'Review failed: auth: fixture' },
-      { type: 'complete', status: 'review_skipped' },
-    ],
-  ])(
-    'mixed/unknown vendor stream keeps the blocker without outage authority: %j',
-    async (...events) => {
-      const effects = repoEffects(
-        repo,
-        reviewer(ran(1, events.map((event) => JSON.stringify(event)).join('\n'))),
-      );
-      expect((await cycleReview(effects, stubScanner())({ repoRoot: repo.root })).status).toBe(
-        'needs-human',
-      );
-      const cycle = effects
-        .openLedger('feature/x')
-        .load()
-        .records.find((entry) => entry.kind === 'cycle');
-      expect(cycle?.kind === 'cycle' ? cycle.vendorFailure : undefined).toBeUndefined();
-    },
-  );
+  test('a blocked queue receipt keeps no outage authority', async () => {
+    const effects = repoEffects(repo);
+    expect(
+      (
+        await cycleReview(
+          effects,
+          stubScanner(),
+          undefined,
+          managedBlocked('the queue returned no countable verdict', [
+            { severity: 'major', excerpt: 'defect' },
+          ]),
+        )({ repoRoot: repo.root })
+      ).status,
+    ).toBe('needs-human');
+    const cycle = effects
+      .openLedger('feature/x')
+      .load()
+      .records.find((entry) => entry.kind === 'cycle');
+    expect(cycle?.kind === 'cycle' ? cycle.vendorFailure : undefined).toBeUndefined();
+  });
 
   const NO_FRESH_REASON =
     "reviewer completed 'review_completed' with an AFFIRMATIVE no-fresh/skipped notice " +
     '("No fresh detailed file review was performed in this run.") — a fresh detailed review never ran';
 
   test.each([false, true])('fresh cycles survive hash failure=%s', async (fails) => {
-    const effects = repoEffects(repo, reviewer(ran(0)));
+    const effects = repoEffects(repo);
     effects.reviewLogSha256 = async () => {
       if (fails) throw new Error('log temporarily unreadable');
       return 'a'.repeat(64);
     };
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    const result = await cycleReview(
+      effects,
+      stubScanner(),
+      undefined,
+      managedTerminal(),
+    )({
+      repoRoot: repo.root,
+    });
     expect(result.status).toBe('ok');
     const cycle = effects
       .openLedger('feature/x')
@@ -131,7 +110,14 @@ describe('dev.review cycle', () => {
       reads += 1;
       return 'a'.repeat(64);
     };
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    const result = await cycleReview(
+      effects,
+      stubScanner(),
+      undefined,
+      managedTerminal(),
+    )({
+      repoRoot: repo.root,
+    });
     expect(result.status).toBe('ok');
     expect(reads).toBe(1);
     expect(reviewerCalls(effects)).toHaveLength(0);
@@ -161,11 +147,15 @@ describe('dev.review cycle', () => {
     'retained %s log does not reuse',
     async (fault) => {
       await seed(repo);
-      let vendorCalls = 0;
-      const effects = repoEffects(repo, (command) => {
-        if (command === 'coderabbit') vendorCalls += 1;
-        return reviewer(ran(0))(command, []);
-      });
+      // S2b-i: a retained-log fault forces a fresh managed cycle — the
+      // scripted submit counts managed dispatches, not CLI spawns.
+      let managedCalls = 0;
+      const submit = vi.fn(managedTerminal());
+      const counted = (async (input: Parameters<typeof submit>[0]) => {
+        managedCalls += 1;
+        return submit(input);
+      }) as typeof submit;
+      const effects = repoEffects(repo);
       if (fault === 'missing') {
         const path = join(dirname(repo.root), 'retained-review.log');
         await writeFile(path, 'retained review');
@@ -196,9 +186,16 @@ describe('dev.review cycle', () => {
           value: undefined,
         }));
       }
-      const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+      const result = await cycleReview(
+        effects,
+        stubScanner(),
+        undefined,
+        counted,
+      )({
+        repoRoot: repo.root,
+      });
       expect(result.status).toBe(fault === 'altered' ? 'needs-human' : 'ok');
-      expect(vendorCalls).toBe(fault === 'altered' ? 0 : 1);
+      expect(managedCalls).toBe(fault === 'altered' ? 0 : 1);
       expect(
         effects
           .openLedger('feature/x')
@@ -208,18 +205,26 @@ describe('dev.review cycle', () => {
     },
   );
 
-  test('an unchanged rerun over an exact terminal record makes ZERO vendor calls and returns reuse evidence', async () => {
+  test('an unchanged rerun over an exact terminal record makes ZERO managed dispatches and returns reuse evidence', async () => {
     const state = await seed(repo);
     // The reuse id derives the head8 of the CURRENT HEAD (review.ts).
     const reuseId = `r001-${state.head.slice(0, 8)}`;
-    let coderabbitRuns = 0;
-    const effects = repoEffects(repo, (command) => {
-      if (command === 'coderabbit') coderabbitRuns += 1;
-      return reviewer(ran(0))(command, []);
+    let managedCalls = 0;
+    const submit = (async (input: { cwd: string; target: string; base: string; head: string }) => {
+      managedCalls += 1;
+      return managedTerminal()(input);
+    }) as ReturnType<typeof managedTerminal>;
+    const effects = repoEffects(repo);
+    const result = await cycleReview(
+      effects,
+      stubScanner(),
+      undefined,
+      submit,
+    )({
+      repoRoot: repo.root,
     });
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
     expect(result.status).toBe('ok');
-    expect(coderabbitRuns).toBe(0);
+    expect(managedCalls).toBe(0);
     if (result.status !== 'ok') return;
     expect(result.value.reuse).toMatchObject({
       reuseId,
@@ -260,8 +265,15 @@ describe('dev.review cycle', () => {
     ]);
     // The reuse id derives the head8 of the CURRENT HEAD (review.ts).
     const reuseId = `r001-${state.head.slice(0, 8)}`;
-    const effects = repoEffects(repo, reviewer(ran(0)));
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    const effects = repoEffects(repo);
+    const result = await cycleReview(
+      effects,
+      stubScanner(),
+      undefined,
+      managedTerminal(),
+    )({
+      repoRoot: repo.root,
+    });
     expect(result.status).toBe('ok');
     if (result.status !== 'ok') return;
     expect(result.value.reuse).toMatchObject({
@@ -286,24 +298,32 @@ describe('dev.review cycle', () => {
     expect(effects.logs.at(-1)).toContain('resolves blocked attempt: c002-bbbbbbbb');
   });
 
-  test('a genuine later blocker (CLI error tail) refuses reuse and dispatches a fresh cycle', async () => {
+  test('a genuine later blocker (queue receipt tail) refuses reuse and dispatches a fresh cycle', async () => {
     await seed(repo, (current) => [
       cycleRecord({
         cycleId: 'c002-bbbbbbbb',
-        completion: { kind: 'blocked', reason: 'reviewer stream carried an error event' },
+        completion: { kind: 'blocked', reason: 'the queue returned no countable verdict' },
         base: current.base,
         head: current.head,
         dirtySha256: current.dirtySha256,
       }),
     ]);
-    let coderabbitRuns = 0;
-    const effects = repoEffects(repo, (command) => {
-      if (command === 'coderabbit') coderabbitRuns += 1;
-      return reviewer(ran(0))(command, []);
+    let managedCalls = 0;
+    const submit = (async (input: { cwd: string; target: string; base: string; head: string }) => {
+      managedCalls += 1;
+      return managedTerminal()(input);
+    }) as ReturnType<typeof managedTerminal>;
+    const effects = repoEffects(repo);
+    const result = await cycleReview(
+      effects,
+      stubScanner(),
+      undefined,
+      submit,
+    )({
+      repoRoot: repo.root,
     });
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
     expect(result.status).toBe('ok');
-    expect(coderabbitRuns).toBe(1);
+    expect(managedCalls).toBe(1);
     if (result.status === 'ok') expect(result.value.reuse).toBeUndefined();
     const ledger = effects.openLedger('feature/x').load();
     expect(ledger.records.some((r) => r.kind === 'reuse')).toBe(false);
@@ -314,14 +334,22 @@ describe('dev.review cycle', () => {
     await seed(repo);
     await repo.write('src/a.ts', 'export const a = 2;\n');
     repo.commitAll('more work');
-    let coderabbitRuns = 0;
-    const effects = repoEffects(repo, (command) => {
-      if (command === 'coderabbit') coderabbitRuns += 1;
-      return reviewer(ran(0))(command, []);
+    let managedCalls = 0;
+    const submit = (async (input: { cwd: string; target: string; base: string; head: string }) => {
+      managedCalls += 1;
+      return managedTerminal()(input);
+    }) as ReturnType<typeof managedTerminal>;
+    const effects = repoEffects(repo);
+    const result = await cycleReview(
+      effects,
+      stubScanner(),
+      undefined,
+      submit,
+    )({
+      repoRoot: repo.root,
     });
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
     expect(result.status).toBe('ok');
-    expect(coderabbitRuns).toBe(1);
+    expect(managedCalls).toBe(1);
     if (result.status === 'ok') expect(result.value.reuse).toBeUndefined();
   });
 
@@ -344,21 +372,17 @@ describe('dev.review cycle', () => {
   test('drift while the reuse ledger is read refuses before any vendor call or append', async () => {
     await seed(repo);
     // The tree changes while the reuse selection holds the host lock: the
-    // in-lock re-read must see it and refuse before the vendor (which this
-    // fixture makes fatal) or any append can happen.
-    const effects = repoEffects(
-      repo,
-      reviewer(() => {
-        throw new Error('fixture: the vendor must never run on a reuse path');
-      }),
-      {
-        withHostLock: async (fn) => {
-          await repo.write('src/a.ts', 'export const a = 3;\n');
-          return fn();
-        },
+    // in-lock re-read must see it and refuse before any queue submit or
+    // append can happen. The scripted leg throws if it ever runs.
+    const effects = repoEffects(repo, undefined, {
+      withHostLock: async (fn) => {
+        await repo.write('src/a.ts', 'export const a = 3;\n');
+        return fn();
       },
-    );
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    });
+    const result = await cycleReview(effects, stubScanner(), undefined, (async () => {
+      throw new Error('fixture: the managed leg must never run on a reuse path');
+    }) as ReturnType<typeof managedTerminal>)({ repoRoot: repo.root });
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human')
       expect(result.reason).toContain('while the reuse ledger was read');
@@ -390,7 +414,14 @@ describe('dev.review cycle', () => {
           : record,
       ),
     });
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    const result = await cycleReview(
+      effects,
+      stubScanner(),
+      undefined,
+      managedTerminal(),
+    )({
+      repoRoot: repo.root,
+    });
     expect(result.status).toBe('ok');
     if (result.status === 'ok') {
       expect(result.value.findings).toEqual([

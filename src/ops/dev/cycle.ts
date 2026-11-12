@@ -66,6 +66,8 @@ import { makePrOpen } from '../pr/open.js';
 import type { ReviewAddressInput, ReviewAddressReport } from '../review/address.js';
 import type { AddressFix } from '../review/addressWorker.js';
 import { makeReviewAddress } from '../review/address.js';
+import type { ExpectationChange } from '../gates/expectationChanges.js';
+import type { ValidationVerdict } from '../fix/validate.js';
 import type { FindingsRecord } from '../review/findings.js';
 import type { ReviewRunInput } from '../review/run.js';
 import { makeReviewRun } from '../review/run.js';
@@ -92,6 +94,7 @@ import {
   type KnownUsageSummary,
   type UsageObservation,
 } from '../../shared/knownUsage.js';
+import { cqConfigFaultText, readCqConfigText } from '../../shared/readCqConfigText.js';
 import { usageProvenanceOf } from '../../driver/usageProvenance.js';
 
 /**
@@ -221,6 +224,31 @@ function mdLine(text: string): string {
 }
 
 /**
+ * Every distinct expectation change the address run reported (#1198), in
+ * first-seen order: attempt rows carry per-invocation verdicts and fixes the
+ * final ones; the same rewrite seen on both sides dedups to one line. This
+ * reads the validation evidence verbatim — the reviewer-facing projection of
+ * the oracle-dispute observation, never an adjudication of it.
+ */
+function expectationChangesOfReport(report: ReviewAddressReport): ExpectationChange[] {
+  const seen = new Set<string>();
+  const changes: ExpectationChange[] = [];
+  const collect = (verdicts: readonly ValidationVerdict[] | undefined): void => {
+    for (const verdict of verdicts ?? []) {
+      for (const change of verdict.expectationChanges ?? []) {
+        const key = `${change.file}\u0000${String(change.line)}\u0000${change.before}\u0000${change.after}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        changes.push(change);
+      }
+    }
+  };
+  for (const attempt of report.attempts) collect(attempt.validation);
+  for (const fix of report.fixes) collect(fix.validation);
+  return changes;
+}
+
+/**
  * The not-ready draft's public record: the open findings (severity and file,
  * one line each) and every attempt logged against them, markdown-safe. The
  * attempts ARE the spec's "attempt logs" — finding id, tier/invocation,
@@ -290,6 +318,20 @@ export function renderFindingsSection(
     lines.push(
       `  - \`${mdLine(attempt.finding)}\` ${attempt.tier}/${attempt.invocation} #${String(attempt.attempt)} — ${mdLine(attempt.reason)} (${mdLine(attempt.model.model)}${attempt.usage === undefined ? '' : `, tokens ${String(attempt.usage.input + attempt.usage.output)}`}, ${String(attempt.wallMs)}ms)`,
     );
+  }
+  // The oracle-dispute record (#1198; contract item 10, Giles Q32): every
+  // test expectation an attempt rewrote in place, with the before/after
+  // pair, so the independent reviewer can apply Q32 to the exact change.
+  // Evidence only — the listing never adjudicates the dispute. No attempt
+  // carried an observation means NO section, never an empty one.
+  const expectationChanges = expectationChangesOfReport(report);
+  if (expectationChanges.length > 0) {
+    lines.push('- Expectation changes:');
+    for (const change of expectationChanges) {
+      lines.push(
+        `  - \`${mdLine(change.file)}:${String(change.line)}\` — ${mdLine(change.before)} → ${mdLine(change.after)}`,
+      );
+    }
   }
   lines.push('<!-- /cq:dev-findings -->');
   return lines.join('\n');
@@ -418,6 +460,7 @@ export interface DevCycleDeps {
     effects: DevEffects,
   ) => DiffSecretScanner | undefined | Promise<DiffSecretScanner | undefined>;
   drivers?: DriverFactory;
+  managedSubmit?: import('./managedReview.js').ManagedReviewSubmit;
   /** The git transport the push leg binds (tests script it). */
   git?: GhFn;
   /**
@@ -478,7 +521,13 @@ function makeDevCycleCore(
     const target = input.target ?? DEFAULT_DEV_TARGET;
     const check =
       deps.check ?? ((step: DevCheckInput) => makeDevCheck(deps.effects, deps.scanSecrets)(step));
-    const review = deps.review ?? ((step: ReviewRunInput) => makeReviewRun({ drivers })(step));
+    const review =
+      deps.review ??
+      ((step: ReviewRunInput) =>
+        makeReviewRun({
+          drivers,
+          ...(deps.managedSubmit ? { managedSubmit: deps.managedSubmit } : {}),
+        })(step));
     // The default address leg is CONSTRUCTED with the cycle's (metered)
     // driver factory: the whole cycle honours one wiring — test transports
     // injected here must not be replaced by real provider factories inside
@@ -494,7 +543,12 @@ function makeDevCycleCore(
     // alone, Driver is `run` alone, lane/modelSpec ride the spread — so
     // the legs share the wiring, never driver state.
     const address =
-      deps.address ?? ((step: ReviewAddressInput) => makeReviewAddress({ drivers })(step));
+      deps.address ??
+      ((step: ReviewAddressInput) =>
+        makeReviewAddress({
+          drivers,
+          ...(deps.managedSubmit ? { managedSubmit: deps.managedSubmit } : {}),
+        })(step));
     // The forge effects for the findings-section compose: the DEFAULT
     // publication leg's own effects. When deps.open is injected WITHOUT
     // deps.gh, the injected leg owns the forge — no effects are constructed
@@ -562,7 +616,12 @@ function makeDevCycleCore(
     };
 
     // ---- policy (the reviewers/severities the readiness read honours) ----
-    const configText = await readFile(join(input.repoRoot, 'cq.json'), 'utf8').catch(() => null);
+    // Only an ABSENT cq.json means "no config"; any other read fault refuses
+    // under needs-human instead of silently applying the default policy.
+    const configRead = await readCqConfigText(input.repoRoot);
+    if (configRead.outcome === 'fault')
+      return { status: 'needs-human', reason: `dev.cycle: ${cqConfigFaultText(configRead.error)}` };
+    const configText = configRead.outcome === 'text' ? configRead.text : null;
     let policy:
       | {
           reviewers: readonly string[];
@@ -1103,7 +1162,19 @@ function makeDevCycleCore(
                     verdict: 'fault',
                     detail: 'its dependency inputs differ and the reserve cannot cover a reinstall',
                   };
-                await installDeps(tmp, AbortSignal.timeout(reinstallMs));
+                try {
+                  await installDeps(tmp, AbortSignal.timeout(reinstallMs));
+                } catch (err) {
+                  // A rejected reinstall (a short AbortSignal, a broken
+                  // network) says nothing about this commit's gates, so it is
+                  // a fault verdict for THIS commit: the scan stops, keeps the
+                  // earlier probe lines and names the failing commit.
+                  return {
+                    commit,
+                    verdict: 'fault',
+                    detail: `dependency reinstall failed: ${(err instanceof Error ? err.message : String(err)).slice(0, 300)}`,
+                  };
+                }
                 installedAt = commit;
               }
             }

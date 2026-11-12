@@ -33,6 +33,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DevEffects } from '../dev/effects.js';
 import { faultText, guardDevOp } from '../dev/effects.js';
+import { cqConfigFaultText, readCqConfigText } from '../../shared/readCqConfigText.js';
 import type {
   DevCheckGate,
   DevCheckRecord,
@@ -293,7 +294,12 @@ export function makePrOpen(
       };
     }
     const target = input.target ?? DEFAULT_DEV_TARGET;
-    const configText = await readFile(join(input.repoRoot, 'cq.json'), 'utf8').catch(() => null);
+    // Only an ABSENT cq.json means "no config"; any other read fault refuses
+    // under needs-human instead of silently applying the default policy.
+    const configRead = await readCqConfigText(input.repoRoot);
+    if (configRead.outcome === 'fault')
+      return { status: 'needs-human', reason: `pr.open: ${cqConfigFaultText(configRead.error)}` };
+    const configText = configRead.outcome === 'text' ? configRead.text : null;
     let policy: { reviewers: readonly string[]; blockingSeverities: readonly string[] } | undefined;
     if (configText !== null) {
       const parsed = parseCqConfig(configText, input.repoRoot);

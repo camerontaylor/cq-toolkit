@@ -41,15 +41,23 @@ def update(q, request_id, value, config):
     accepted = destination(value, config)
     if accepted:
         request["notify"] = accepted
+        delivered = False
         for event_id, event in q.get("review_events", {}).items():
             if event["item"] == request["item"]:
                 key = ledger.digest([request_id, event_id, accepted])
-                q.setdefault("review_notify_outbox", {})[key] = dict(v=1, request_id=request_id,
+                outbox = q.setdefault("review_notify_outbox", {})
+                # A repeated destination keeps completed rows; re-sending is not idempotent.
+                if outbox.get(key, {}).get("state") == "sent":
+                    delivered = True
+                    continue
+                outbox[key] = dict(v=1, request_id=request_id,
                     event_id=event_id, destination=accepted, state="pending", receipt_id=event["receipt_id"])
         item = next((i for i in q.get("items", []) if i["id"] == request["item"]), None)
         pending = any(row["request_id"] == request_id and row["state"] == "pending"
                       for row in q.get("review_notify_outbox", {}).values())
-        if item is not None and not pending and request_id not in item.get("observers", []):
+        if not pending and delivered:
+            request["notify_status"] = {"state": "sent"}
+        elif item is not None and not pending and request_id not in item.get("observers", []):
             request["notify_status"] = {"state": "not-required"}
 
 

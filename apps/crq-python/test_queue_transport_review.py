@@ -12,6 +12,7 @@ from unittest import mock
 import author_snapshot
 import capability_dispatcher
 import crq
+import review_history
 import review_receipt
 import review_transport as transport
 from test_author_snapshot_fixtures import SnapshotTransportFixture
@@ -576,3 +577,85 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
                 self.call_review(self.review)
             fetch.assert_called_once_with(clone=clone)
         self.assertEqual(self.saved, before)
+
+    def snapshot_for(self, head, tree):
+        ids = sorted(self.git("rev-list", "--objects", "--no-object-names", head, "^" + self.base).split())
+        objects, digest = [], hashlib.sha256()
+        for oid in ids:
+            kind = self.git("cat-file", "-t", oid)
+            data = base64.b64encode(author_snapshot.git(self.repo, "cat-file", kind, oid)).decode()
+            objects.append(dict(oid=oid, type=kind, data=data))
+            digest.update((oid + "\0" + kind + "\0" + data + "\n").encode())
+        return dict(v=1, tree=tree, objects=objects, sha256=digest.hexdigest())
+
+    def test_history_cue_names_ancestral_predecessor_and_review_history_pages(self):
+        first = dict(self.review, task="T")
+        self.assertEqual(self.call_review(first)["action"], "created")
+        self.saved["items"][0].update(state="done", scope_adequate=True, receipt_id="e" * 64)
+        tree = self.tree(b"second head\n")
+        head = self.commit(tree, self.head)
+        second = dict(self.review, request_id="local-2", task="T",
+                      inputs=dict(self.review["inputs"], head_commit=head, head_tree=tree),
+                      snapshot=self.snapshot_for(head, tree))
+        result = self.call_review(second)
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(result["history"]["status"], "ok")
+        self.assertIn("Previously reviewed", result["history"]["cue"])
+        self.assertIn("wait behind first reviews", result["history"]["cue"])
+        item = next(i for i in self.saved["items"] if i["id"] == result["item"])
+        self.assertIs(item["ancestry_repeat"], True)
+        item["created_at"] = crq.iso()
+        self.assertEqual(crq.rank(item), 1)
+        item["created_at"] = "2020-01-01T00:00:00Z"
+        self.assertEqual(crq.rank(item), 0)
+        page = self.call_review(dict(v=1, op="review-history", request_id="local-2",
+                                     limit=1, cursor=0))
+        self.assertEqual(page["status"], "ok")
+        self.assertEqual(page["relation"], "ancestral")
+        self.assertTrue(page["repeat"])
+        self.assertEqual(len(page["entries"]), 1)
+        self.assertEqual(page["entries"][0]["request_id"], "local-1")
+        self.assertIsNone(page["next_cursor"])
+        again = self.call_review(dict(v=1, op="review-history", request_id="local-2",
+                                      limit=1, cursor=1))
+        self.assertEqual(again["entries"], [])
+
+    def test_degraded_history_leaves_exact_reuse_intact(self):
+        self.assertEqual(self.call_review(self.review)["action"], "created")
+        item = self.saved["items"][0]
+        item["receipt_id"] = review_receipt.write_receipt(self.state / "receipts", dict(
+            v=1, kind="local-review-full-diff", identity=item["identity"],
+            identity_inputs=item["identity_inputs"], profile=item["profile"],
+            run_id="fixture-run", outcome="clean", scope_adequate=True,
+            findings=[], report="clean", observed={}, independent_acceptance=False))
+        item.update(state="done", scope_adequate=True)
+        reuse = dict(self.review, request_id="local-reuse")
+        reuse.pop("snapshot")
+        with mock.patch.object(transport, "history_projection",
+                               return_value=review_history.degraded("index unavailable")):
+            result = self.call_review(reuse)
+        self.assertEqual(result["action"], "reused")
+        self.assertEqual(result["history"]["status"], "degraded")
+        self.assertIn("index unavailable", result["history"]["reason"])
+
+    def test_exact_reuse_gets_no_repeat_or_wait_behind_cue(self):
+        self.assertEqual(self.call_review(self.review)["action"], "created")
+        item = self.saved["items"][0]
+        item["receipt_id"] = review_receipt.write_receipt(self.state / "receipts", dict(
+            v=1, kind="local-review-full-diff", identity=item["identity"],
+            identity_inputs=item["identity_inputs"], profile=item["profile"],
+            run_id="fixture-run", outcome="clean", scope_adequate=True,
+            findings=[], report="clean", observed={}, independent_acceptance=False))
+        item.update(state="done", scope_adequate=True)
+        reuse = dict(self.review, request_id="local-reuse")
+        reuse.pop("snapshot")
+        result = self.call_review(reuse)
+        self.assertEqual(result["action"], "reused")
+        self.assertEqual(result["history"]["status"], "ok")
+        self.assertNotIn("cue", result["history"])
+        page = self.call_review(dict(v=1, op="review-history", request_id="local-reuse",
+                                     limit=20, cursor=0))
+        self.assertEqual(page["relation"], "none")
+        self.assertFalse(page["repeat"])
+        self.assertEqual(page["entries"], [])
+        self.assertIsNone(page["cue"])

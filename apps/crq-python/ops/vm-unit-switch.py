@@ -336,10 +336,23 @@ def prepare_run(state, image, recorder, tools):
             "port": vm.free_port(), "started_at": vm.utc_now()}
 
 
-def upload_files(run, recorder, mode="base"):
+def snapshot_uploads(state, mode="base"):
+    """Freeze the validated upload sources before any image or guest wait."""
+    snapshot = (state / "source-snapshots"
+                / (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+                   + "-" + os.urandom(4).hex()))
+    snapshot.mkdir(parents=True, exist_ok=False)
+    for name in uploads_for(mode):
+        target = snapshot / name
+        shutil.copyfile(OPS / name, target)
+        target.chmod(0o444)
+    return snapshot
+
+
+def upload_files(run, recorder, snapshot, commit, mode="base"):
     provenance = {}
     for name in uploads_for(mode):
-        source = OPS / name
+        source = pathlib.Path(snapshot) / name
         data = source.read_bytes()
         local_sha = sha256_bytes(data)
         remote = ("cat > /home/%s/proof-bin/%s && chmod 700 /home/%s/proof-bin/%s"
@@ -359,9 +372,12 @@ def upload_files(run, recorder, mode="base"):
         provenance[name] = {"sha256": local_sha, "remote_sha256": remote_sha,
                             "bytes": len(data), "verified": True}
     archive = pathlib.Path(run["path"]) / RUNNER_ARCHIVE
+    # Archive the validated commit itself: HEAD may have moved while the
+    # image and startup waits ran, and the archive must stay bound to the
+    # commit the report declares.
     result = subprocess.run(
         ["git", "-C", str(REPO), "archive", "--format=tar.gz",
-         "--output", str(archive), "HEAD", "apps/crq-python"],
+         "--output", str(archive), commit, "apps/crq-python"],
         capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError("could not build the committed runner source archive: "
@@ -385,7 +401,7 @@ def upload_files(run, recorder, mode="base"):
     provenance["runner_source"] = {
         "name": RUNNER_ARCHIVE, "sha256": local_sha,
         "remote_sha256": remote_sha, "bytes": len(data), "verified": True,
-        "source": "git-archive:HEAD:apps/crq-python"}
+        "source": "git-archive:%s:apps/crq-python" % commit}
     return provenance
 
 
@@ -1232,7 +1248,7 @@ def _snapshot_preserved(before, after, service_sha=None):
                            "all_records", "history", "completions", "files"))
 
 
-def _queue_restored_ok(queue, before_key, after_key=None):
+def _queue_restored_ok(queue, before_key, after_key=None, baseline_queue=None):
     after_key = after_key or before_key
     return (_sha256_text(queue.get(before_key))
             and _sha256_text(queue.get(after_key))
@@ -1240,7 +1256,9 @@ def _queue_restored_ok(queue, before_key, after_key=None):
             and _sha256_text(queue.get("restored_sha256"))
             and queue[before_key] == queue[after_key]
             and queue["baseline_sha256"] == queue["restored_sha256"]
-            and queue[before_key] != queue["restored_sha256"])
+            and queue[before_key] != queue["restored_sha256"]
+            and (baseline_queue is None
+                 or queue["baseline_sha256"] == baseline_queue))
 
 
 def _count_value_ok(value, *, positive=False):
@@ -1256,7 +1274,7 @@ def _record_pending_ok(value):
             and value.get("phase") == "drained")
 
 
-def _drain_refusal_ok(phase, kind):
+def _drain_refusal_ok(phase, kind, baseline_queue):
     cli = phase.get("cli") or {}
     queue = phase.get("queue") or {}
     before = phase.get("before") or {}
@@ -1271,6 +1289,7 @@ def _drain_refusal_ok(phase, kind):
     return (
         cli.get("rc") == 2
         and service_sha is not None
+        and _sha256_text(baseline_queue)
         and "queue-owned work" in (phase.get("refused") or "")
         and _blocked_observation_ok(observation)
         and _blocked_observation_ok(drain)
@@ -1279,7 +1298,8 @@ def _drain_refusal_ok(phase, kind):
                 and entry.get("run") == seeded_run
                 for entry in observation["blocked"])
         and _liveness_ok(phase, kind)
-        and _queue_restored_ok(queue, "before_sha256", "after_sha256")
+        and _queue_restored_ok(queue, "before_sha256", "after_sha256",
+                               baseline_queue)
         and _path_list_ok(phase.get("records_before"))
         and phase.get("records_before") == phase.get("records_after")
         and _count_value_ok(phase.get("completions_before"))
@@ -3816,7 +3836,7 @@ def build_checks(phases, restarts=None, reboots=None, mode="base"):
             checks[name.replace("-", "_") + "_refused"] = False
             continue
         checks[name.replace("-", "_") + "_refused"] = _drain_refusal_ok(
-            phase, kind)
+            phase, kind, (prepared.get("state") or {}).get("queue.json"))
 
     harvest = phases.get("drain-harvest") or {}
     if not _ok_phase(harvest, "drain-harvest", problems):
@@ -4118,6 +4138,7 @@ def cmd_run(args):
     state = pathlib.Path(args.state_dir).expanduser().resolve()
     state.mkdir(parents=True, exist_ok=True)
     commit = source_commit_check(REPO, args.source_commit, args.mode)
+    snapshot = snapshot_uploads(state, args.mode)
     recorder = vm.Recorder(state)
     stamps = {"start": vm.host_stamp()}
     image = vm.fetch_image(state, recorder)
@@ -4152,7 +4173,7 @@ def cmd_run(args):
         recorder = vm.Recorder(run_dir)
         boot = vm.boot(run, recorder, args.tools, vm.host_stamp())
         boot["ssh"] = vm.wait_ssh(run, recorder)
-        uploads = upload_files(run, recorder, args.mode)
+        uploads = upload_files(run, recorder, snapshot, commit, args.mode)
         provenance["uploads"] = uploads
         provenance["guest_report"] = guest_artifact.name
         phases = {}

@@ -1,10 +1,11 @@
-# Unwired live unit-switch binding
+# Live unit-switch binding
 
-Status: internal composition only. `ops/unit-live-binding.py` is not imported
-by `deploy-controller.py`, `unit-switch.py` or `prepare-host.py`, is not a CLI,
-and does not enable a production switch. Every host observation is read-only.
-The module exists so the mechanical port, root binding, record binding and lock
-observation can be tested while the companion factory PR is reviewed.
+Status: CLI composition. `deploy-controller.py` loads
+`ops/unit-live-binding.py` lazily for `switch --unit ... --runtime ...` and
+`recover --record ...`; it is not a CLI and does not enable a production
+switch or recovery. Every host observation is read-only. The module exists so
+the mechanical port, root binding, record binding and lock observation can be
+tested without a live host.
 
 ## Composition
 
@@ -12,13 +13,26 @@ observation can be tested while the companion factory PR is reviewed.
 existing factory with:
 
 * `prepare-host.render_service` through `unit-switch-factory.select`;
-* `ProductionUnitAdapter` with the real static `DeclaredCapabilities`;
+* `ProductionUnitAdapter` with `DeclaredCapabilities` fed from the verified
+  artifact's declared live commands;
 * `SystemdJournalCompletionPort` over the real `SystemdJournalSource`;
 * `SubprocessSystemd` and `ProcessIdentity`;
 * the caller's existing `runner_queue_drain(effects)`.
 
 It returns the adapter and its selected identity. It never calls
 `switch_unit`, `recover_unit`, the controller CLI or a unit command.
+
+Recovery composes the same adapter through
+`production_adapter(effects, overlay, unit=record.unit,
+runtime=record.prior_runtime)`. The controller supplies the unit and prior
+runtime from the one retained record it has already validated, under its lock,
+and calls the composition callback after the read-only queue-drain gate and
+before snapshot validation. The record's snapshot is authoritative for the
+bytes, modes, ownership and activation that are restored, so a checkout `HEAD`
+advance between the failed switch and the recovery changes the composed
+selection but not what recovery restores, and the composed render is not
+consumed by the recovery path. Composing for the abandoned target instead
+would make recovery depend on an artifact that may no longer be installed.
 
 The adapter's `error_type` and default queue drain come from the loaded
 controller module that owns the supplied `Effects` object, not from a second
@@ -66,13 +80,14 @@ shapes:
   and the service is the requested unit;
 * no unexpected prefix entry, enablement link, drop-in directory, extra
   installed or loaded manager unit, or job on an unexpected prefix unit;
-* no dependency directive in a source file outside the declared set names a
-  CRQ unit, and no directive in a declared source names a CRQ unit outside the
-  expected units: `Wants`, `Requires`, `Requisite`, `BindsTo`, `PartOf`,
-  `Conflicts`, `WantedBy`, `RequiredBy`, `Also`, `Upholds`, `OnFailure`,
-  `OnSuccess`, `Triggers`, `TriggersBy` and `Unit` (the timer/path target).
-  A declared timer may name its own declared service; a foreign timer naming
-  that service is still foreign.
+* no dependency directive in a source file outside the declared set names an
+  expected unit, and no directive in a declared source names a CRQ unit
+  outside the expected units: `Wants`, `Requires`, `Requisite`, `BindsTo`,
+  `PartOf`, `Conflicts`, `WantedBy`, `RequiredBy`, `Also`, `Upholds`,
+  `OnFailure`, `OnSuccess`, `Triggers`, `TriggersBy` and `Unit` (the
+  timer/path target). A declared timer may name its own declared service; a
+  foreign timer naming that service is still foreign. An undeclared unit of
+  another CRQ group naming only its own units is not foreign.
 
 The recursive dependency scan is bounded by visited entry count, does not
 follow symlinked directories, and reads a symlink file only when its resolved
@@ -105,7 +120,8 @@ The lock observation is read-only. It stats
 `<root>/apps/crq-python/state/controller.lock` without following a symlink,
 reports `dev:ino`, mode, owner and state-directory identity, and refuses a
 symlink, non-regular file, group/world-writable mode, foreign owner, or a state
-directory that resolves outside the root. It never creates the lock, never
+directory that resolves outside the root. The controller writes that lock mode
+0600 independently of the ambient umask. It never creates the lock, never
 acquires it and adds no new lock or store. Two `Effects` objects on one root
 observe the same inode; a second root does not. Cross-namespace identity and
 actual contention remain parent-owned.
@@ -118,6 +134,12 @@ files. Only the systemctl process runner is injected. The final test composes
 the real adapter and drives the real `deploy_controller.switch_unit` seam; an
 unsupported discovery topology refuses before any journal or unit mutation.
 
-The module remains unwired until actual topology evidence and the companion
-review are complete. It makes no Node capability claim: `DeclaredCapabilities`
-still refuses every Node target.
+The binding is reached through the controller CLI's switch and recover paths.
+The recovery wiring tests drive `recover --record` with the real production
+adapter and injected systemd and journal ports over a real temporary unit
+directory and record directory; an `activation_pending` record still stops and
+drains owned work, then refuses with rc 3 and unchanged record bytes. `watchdog`
+is the only Node command the verified artifact currently declares; `tick`,
+`slot`, `publisher`, `backfill` and `repair` still refuse for a Node target. The
+binding does not call `switch_unit` or `recover_unit` itself; the controller
+owns that seam.

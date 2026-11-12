@@ -41,6 +41,7 @@ import type { DevCheckGate, DevCheckRecord, DevLoadStamp } from './record.js';
 import { DEFAULT_DEV_TARGET, DEV_LEDGER_VERSION } from './record.js';
 import { DevCheckInputSchema } from './registry.js';
 import { git, gitStdout, IDENTITY_DIFF_FLAGS, readWorkState, zList } from './internal/workState.js';
+import { cqConfigFaultText, readCqConfigText } from '../../shared/readCqConfigText.js';
 
 /** Wall-clock caps, generous outer bounds (each inner tool enforces its own). */
 export const STATIC_GATE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -449,7 +450,12 @@ export function makeDevCheck(
     const loadStamp: DevLoadStamp = effects.loadStamp();
     const at = effects.nowIso();
     const gates: DevCheckGate[] = [];
-    const configText = await readFile(join(input.repoRoot, 'cq.json'), 'utf8').catch(() => null);
+    // Only an ABSENT cq.json means "no config"; any other read fault refuses
+    // under needs-human instead of silently applying the default policy.
+    const configRead = await readCqConfigText(input.repoRoot);
+    if (configRead.outcome === 'fault')
+      return { status: 'needs-human', reason: `dev.check: ${cqConfigFaultText(configRead.error)}` };
+    const configText = configRead.outcome === 'text' ? configRead.text : null;
     const packageText = await readFile(join(input.repoRoot, 'package.json'), 'utf8').catch(
       () => '{}',
     );

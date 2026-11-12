@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { needsDist } from '../scripts/lib/dist-tests.mjs';
 
 import { cliFileFilters, distPrepared, scrubbedBuildEnv } from './global-setup.js';
@@ -18,6 +19,10 @@ describe('scrubbedBuildEnv', () => {
       AWS_SECRET_ACCESS_KEY: 'e',
       ENCRYPTION_KEY: 'f',
       SIGNING_KEY: 'g',
+      SSH_PASSPHRASE: 'h',
+      GPG_PASSPHRASE: 'i',
+      KEY_PASSPHRASE: 'j',
+      AWS_ACCESS_KEY_ID: 'k',
     });
     expect(env).toEqual({ PATH: '/usr/bin', HOME: '/home/x' });
   });
@@ -69,7 +74,7 @@ describe('selected dist dependencies', () => {
 });
 
 it('recognizes reviewed indirect dist consumers via relative and absolute paths', () => {
-  const root = new URL('..', import.meta.url).pathname;
+  const root = fileURLToPath(new URL('..', import.meta.url));
   for (const file of [
     'test/e2e/review/review-address.e2e.test.ts',
     'test/e2e/fix/fix-run-cli.e2e.test.ts',

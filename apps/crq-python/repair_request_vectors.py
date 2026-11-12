@@ -140,7 +140,7 @@ def _anchor(body):
 def _body(job):
     try:
         return cq.fixer_body(copy.deepcopy(job)), None
-    except Exception as exc:  # The production ValueError text is the oracle.
+    except ValueError as exc:  # The production ValueError text is the oracle.
         return None, str(exc)
 
 

@@ -275,7 +275,7 @@ class CliTests(unittest.TestCase):
             "outcome": "pending",
             "phase": "snapshot",
             "at": "2026-01-01T00:00:00Z",
-            "snapshot": {},
+            "snapshot": {"runtime": "python"},
             "state": None,
         }))
         with mock.patch.object(cli.adapter_mod, "GuestFixtureAdapter",

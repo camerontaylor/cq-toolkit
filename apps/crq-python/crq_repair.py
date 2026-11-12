@@ -22,6 +22,13 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_RATE_LIMIT_PAUSE = dt.timedelta(minutes=30)
 MAX_RATE_LIMIT_PAUSE = dt.timedelta(hours=24)
 TICK_LOCK_WAIT_S = 300
+# The only stamp shape remember_provider_limit persists (the policy schema's
+# provider-cooldowns value pattern). Anything else in the state file is corrupt.
+COOLDOWN_STAMP = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z')
+# Fail-closed marker dispatch_paused returns while persisted provider-cooldowns
+# state is corrupt: never a live timestamp, and lifted only by an operator
+# repairing state/repair/provider-cooldowns.json.
+OPERATOR_RECOVERY_PAUSE = 'operator recovery required (corrupt provider-cooldowns.json)'
 
 
 @contextlib.contextmanager
@@ -148,12 +155,37 @@ def provider_ready(role):
     return all(os.environ.get(key) for key in keys.get(provider, ()))
 
 
+class CooldownStateError(ValueError):
+    """Persisted provider-cooldown state is corrupt; operator recovery is required."""
+
+
+def valid_cooldown_stamp(stamp):
+    """A persisted stamp is usable only at the canonical UTC shape and a real
+    date: an empty string or any other invalid value must never compare as an
+    expired cooldown."""
+    if not isinstance(stamp, str) or not COOLDOWN_STAMP.fullmatch(stamp):
+        return False
+    try:
+        dt.datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+    except ValueError:
+        return False
+    return True
+
+
 def provider_cooldowns():
     path = ROOT / 'state/repair/provider-cooldowns.json'
     if not path.exists():
         return {}
-    # Corrupt state must not silently spend against a known exhausted provider.
-    return json.loads(path.read_text())
+    # Corrupt state must not silently spend against a known exhausted provider:
+    # validate the complete document and reject every invalid timestamp before a
+    # caller compares one with utc().
+    try:
+        state = json.loads(path.read_text())
+    except ValueError as exc:
+        raise CooldownStateError('provider-cooldowns.json is not valid JSON: ' + str(exc)[:200]) from exc
+    if not isinstance(state, dict) or not all(valid_cooldown_stamp(stamp) for stamp in state.values()):
+        raise CooldownStateError('provider-cooldowns.json holds an invalid cooldown timestamp')
+    return state
 
 
 def remember_provider_limit(provider, report):
@@ -184,7 +216,12 @@ def remember_provider_limit(provider, report):
 
 def dispatch_paused(config):
     if config['repair'].get('fallback_models'):
-        state = provider_cooldowns()
+        try:
+            state = provider_cooldowns()
+        except CooldownStateError:
+            # Fail closed rather than reading a corrupt stamp as expired: no
+            # provider spend until an operator repairs the persisted state.
+            return OPERATOR_RECOVERY_PAUSE
         now = utc()
         roles = [candidate for role in config['repair']['roles'].values()
                  for candidate in fallback_roles(config, role) if provider_ready(candidate)]
@@ -221,6 +258,11 @@ def dispatch(config, role, job, wt, directory, judge=False):
                 retain(wt, baseline, previous_directory)
                 git(wt, 'reset', '--hard', baseline)
                 git(wt, 'clean', '-fd')
+                # Retention and reset consume the shared budget; remeasure so
+                # the next provider never starts past the deadline.
+                remaining = deadline - time.monotonic()
+                if remaining < 0.001:
+                    return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
             attempted = True
             bounded_config = copy.deepcopy(config)
             bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
@@ -255,6 +297,20 @@ def _dispatch(config, role, job, wt, directory, judge=False):
     raise ValueError('unsupported role driver')
 
 
+def resume_worktree(result, wt):
+    """Resume states record the rung's worktree (A2 is a suffixed checkout),
+    but process_item passes the original worktree on restart. Validate the
+    recorded tree and restore it before handling either resume state so
+    interrupted retention and deferred judging use the tree the result names."""
+    recorded = result.get('worktree')
+    if not recorded:
+        return wt
+    recorded = Path(recorded).resolve()
+    if recorded != Path(wt).resolve() and recorded.is_dir() and (recorded / '.git').exists():
+        return recorded
+    return wt
+
+
 def process(config, job, wt):
     repair = config['repair']
     directory = ROOT / 'state/repair' / job['job']
@@ -274,8 +330,22 @@ def process(config, job, wt):
         result = json.loads(result_path.read_text())
         result.pop('retry_after', None)
     progress_path = directory / 'progress.json'
-    if progress_path.exists() and (not result_path.exists() or progress_path.stat().st_mtime_ns > result_path.stat().st_mtime_ns):
+    resume_progress = progress_path.exists() and (not result_path.exists() or progress_path.stat().st_mtime_ns > result_path.stat().st_mtime_ns)
+    if resume_progress:
         result = json.loads(progress_path.read_text())
+    if result.get('dispatch_pending') or result.get('pending_judge'):
+        wt = resume_worktree(result, wt)
+    if (result.get('pending_judge') and result.get('worktree')
+            and Path(result['worktree']).resolve() != Path(wt).resolve()):
+        # The A2 tree the deferred judge must inspect is gone: judging the
+        # base tree would record a verdict and snapshot for the wrong checkout.
+        result.update(verdict='FAILED',
+                      reason='pending judge worktree unavailable; needs human',
+                      finished_at=utc())
+        result.pop('pending_judge', None)
+        atomic(result_path, result)
+        return result
+    if resume_progress:
         if result.get('dispatch_pending'):
             saved_wt = Path(result.get('worktree', '')).resolve()
             if saved_wt == Path(wt).resolve():
@@ -435,9 +505,16 @@ def process(config, job, wt):
                 else:
                     result['failure_class'] = 'evidence' if judged.get('stop') == 'ok' and judged.get('verdict') == 'unsure' else 'exhausted'
                 break
-            confirmed = (result.get('judge') or {}).get('verdict') == 'valid'
-            result.update(verdict='FAILED' if confirmed else 'NOT-FIXED',
-                          reason='judge-confirmed defect unresolved after A2; needs human' if confirmed else reason)
+            prior_verdict = (result.get('judge') or {}).get('verdict')
+            if prior_verdict == 'valid':
+                result.update(verdict='FAILED', reason='judge-confirmed defect unresolved after A2; needs human')
+            elif prior_verdict == 'unsure':
+                # The stored verdict judged an earlier rung; A2's unchanged claim
+                # was never judged, so it must not dismiss the finding.
+                result.update(verdict='FAILED', failure_class='evidence',
+                              reason='judge unsure and A2 unchanged; needs human')
+            else:
+                result.update(verdict='NOT-FIXED', reason=reason)
             break
         except Exception as exc:
             result.pop('dispatch_pending', None)
@@ -769,9 +846,8 @@ def reap_item(active):
 def process_item(config, jobs):
     # Each finding has its own worktree; successful commits chain by base.
     item = jobs[0]['item']
-    base = jobs[0]['repair_base']
     jobs.sort(key=finding_order)
-    last_run = None
+    bases = {}  # run -> tip of that run's successful chain
     for job in jobs:
         if blocked(config['repair']):
             break  # never start a new finding inside the GLM peak window
@@ -782,12 +858,10 @@ def process_item(config, jobs):
         except ValueError as exc:
             print('repair ' + job['job'] + ': skipped: ' + str(exc))
             continue
-        if job['run'] != last_run:
-            base = job['repair_base']
-            last_run = job['run']
+        base = bases.get(job['run'], job['repair_base'])
         job['repair_base'] = base
         wt = Path(config['worktree_root']) / ('crq-repair-' + item + '-' + job['job'])
-        if not wt.exists():
+        if pending(job['job']) and not wt.exists():
             p = command(['git', 'worktree', 'add', '--detach', str(wt), base], cwd=config['clone'])
             if p.returncode:
                 raise RuntimeError('repair worktree creation failed')
@@ -797,7 +871,7 @@ def process_item(config, jobs):
         if res.get('retry_after'):
             break
         if res['verdict'] == 'FIXED':
-            base = res['commits'][-1]
+            bases[job['run']] = res['commits'][-1]
     return None
 
 

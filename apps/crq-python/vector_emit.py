@@ -295,7 +295,7 @@ def classify_vectors() -> Dict[str, Any]:
                   '{"type":"error","errorType":"network_error","recoverable":true}\n'
                   '{"type":"complete","status":"review_completed"}\n', 1),
         _classify("timeout-exit-is-transient", "", 124),
-        _classify("sighup-exit-is-transient", "", 129),
+        _classify("sighup-exit-is-not-transient", "", 129),
         _classify("empty-existing-stream-is-interrupted", "", 0),
         _classify("absent-stream-is-interrupted", None, 0),
         _classify("unknown-severity-is-counted-under-its-name",
@@ -381,6 +381,34 @@ def queue_bytes_vectors() -> Dict[str, Any]:
         "rl_backoff_min": 15,
     }
     canonical = json.dumps(realistic, indent=2) + "\n"
+    # The C1 repair-prepare commit point rewrites the whole queue from a
+    # re-serialized parse. These are the value shapes a production queue can
+    # contain that a naive encoder loses: float repr, integers beyond 2**53,
+    # non-BMP text, numeric-looking keys, and empty/nested containers.
+    production_shaped = {
+        "items": [
+            {
+                "id": "pr-9007199254740993",
+                "pr": 9007199254740993,
+                "kind": "merged",
+                "state": "done",
+                "ratio": 0.1,
+                "weight": 1.0,
+                "runs": {
+                    "10": {"round": 2, "nested": {"empty": {}, "list": []}},
+                    "2": {"round": 1, "canonical_id": "f" * 64},
+                },
+                "notes": ["\u96ea", "\U0001f600", "\u007f"],
+                "empty": {},
+                "nested": {"a": {"b": [1, 2.5, None, False]}},
+            }
+        ],
+        "paused": False,
+        "cooldown_until": None,
+        "rl_backoff_min": 15,
+        "counter": 2 ** 63,
+        "tiny": 5e-324,
+    }
     cases = [
         encoded("insertion-order-is-preserved", {"z": 1, "a": 2, "m": {"b": 1, "a": 2}}),
         encoded("ascii-escaping-is-the-default", {"emoji": "😀", "unicode": "雪",
@@ -400,6 +428,7 @@ def queue_bytes_vectors() -> Dict[str, Any]:
                                            "shortest_round_trip": 0.30000000000000004}),
         encoded("large-integers-are-written-in-full", {"safe": 9007199254740991,
                                                        "wide": 2 ** 63}),
+        encoded("production-shaped-queue-values", production_shaped),
         encoded("empty-containers-and-scalars", {"array": [], "object": {},
                                                  "none": None, "false": False}),
         encoded("realistic-queue-shape", realistic),

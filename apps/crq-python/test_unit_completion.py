@@ -305,9 +305,9 @@ class ReadTests(CompletionFixture):
             port.read(UNIT, "python", 100)
 
     def test_runtime_mismatch_refuses(self):
-        port = self.port()
-        self.baseline(invocation="1" * 32, exit_monotonic=100)
         self.unit_path.write_bytes(_node_unit())
+        port = self.port(service_sha256=_sha256(_node_unit()))
+        self.baseline(invocation="1" * 32, exit_monotonic=100)
         self.source.complete("2" * 32, 200)
         with self.assertRaises(completion.CompletionRefused):
             port.read(UNIT, "python", 100)
@@ -584,6 +584,12 @@ class IdentityTests(CompletionFixture):
         with self.assertRaises(completion.CompletionRefused):
             port.read(UNIT, "python", 100)
 
+    def test_service_identity_still_refuses_a_timer_unit(self):
+        with self.assertRaises(completion.CompletionRefused) as raised:
+            self.identity(unit="crq-tick.timer").validate()
+        self.assertEqual(str(raised.exception),
+                         "expected identity names an invalid unit")
+
 
 class ParserTests(unittest.TestCase):
     def test_show_output_parses_values_and_empty_strings(self):
@@ -701,6 +707,22 @@ class ParserTests(unittest.TestCase):
             popen=lambda *a, **k: self.fail("invalid unit must not run"))
         with self.assertRaises(completion.CompletionRefused):
             source.show("--help", ["LoadState"])
+
+    def test_source_accepts_activator_unit_reads(self):
+        source = self.source_for(
+            "import sys; sys.stdout.write('ActiveState=active\\n')")
+        for unit in ("crq-tick.timer", "crq-tick.path", "crq-tick.socket"):
+            self.assertEqual(source.show(unit, ["ActiveState"]),
+                             {"ActiveState": "active"})
+
+    def test_source_refuses_unsupported_unit_types(self):
+        source = completion.SystemdJournalSource(
+            popen=lambda *a, **k: self.fail("invalid unit must not run"))
+        for unit in ("crq-tick.mount", "crq-tick.swap", "crq-tick.slice",
+                     "crq-tick"):
+            with self.assertRaises(completion.CompletionRefused) as raised:
+                source.show(unit, ["LoadState"])
+            self.assertEqual(str(raised.exception), "invalid unit name")
 
     def test_source_accepts_output_at_the_exact_bound(self):
         source = self.source_for(

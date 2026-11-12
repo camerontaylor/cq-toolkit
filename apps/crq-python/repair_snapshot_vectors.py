@@ -83,8 +83,17 @@ GIT_ROUTING_VARS = frozenset(
         "GIT_DISCOVERY_ACROSS_FILESYSTEM",
         "GIT_PREFIX",
         "GIT_QUARANTINE_PATH",
+        "GIT_TEMPLATE_DIR",
     }
 )
+
+# `git init` (and `git clone`) copy the template directory -- hooks included --
+# into each new repository, and `git commit` then executes those hooks, so a
+# caller-exported `GIT_TEMPLATE_DIR` could inject an active pre-commit hook
+# into every throwaway oracle repository: a rejecting hook would block every
+# vector, and any other hook could act outside the temp directory. The oracle
+# always points Git at this guaranteed-empty template directory instead.
+EMPTY_GIT_TEMPLATE_DIR = tempfile.mkdtemp(prefix="crq-oracle-git-template-empty-")
 
 
 def _git_environment() -> dict[str, str]:
@@ -100,6 +109,8 @@ def _git_environment() -> dict[str, str]:
     # overrides above are the only config the oracle accepts.
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_SYSTEM"] = os.devnull
+    # Fresh repositories copy nothing from any template: no host hooks.
+    env["GIT_TEMPLATE_DIR"] = EMPTY_GIT_TEMPLATE_DIR
     # Disable the system-wide gitattributes file as well; global attributes
     # are already inert via the `core.attributesFile` override in GIT_CONFIG.
     env["GIT_ATTR_NOSYSTEM"] = "1"
@@ -121,6 +132,7 @@ def _clean_git_environment():
         os.environ.update(GIT_ENV)
         os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
         os.environ["GIT_CONFIG_SYSTEM"] = os.devnull
+        os.environ["GIT_TEMPLATE_DIR"] = EMPTY_GIT_TEMPLATE_DIR
         os.environ["GIT_ATTR_NOSYSTEM"] = "1"
         yield
     finally:
@@ -146,7 +158,7 @@ def _commit_source(root: Path, relative: str, text: str) -> tuple[str, str]:
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8", newline="") as handle:
         handle.write(text)
-    _git(root, "init", "-q", "-b", "main")
+    _git(root, "init", "-q", "-b", "main", "--object-format=sha1")
     _git(root, "add", "--", relative)
     _git(
         root,

@@ -197,12 +197,8 @@ The rule `cq/no-process-env-accessor` bans importing or calling `processEnv()` (
 - `src/driver/acp/binaries.ts`
 - `src/driver/claude-code/routing.ts`
 - `src/driver/sessions-dir.ts`
-- `src/ops/config/show.ts`
-- `src/ops/dev/review-transport.ts`
 - `src/ops/fix/runFix.ts`
 - `src/ops/review/internal/addressEvidence.ts`
-- `src/ops/review/internal/queueClient.ts`
-- `src/ops/review/queue.ts`
 - `src/sandbox/launcher.ts`
 - `src/selfhost/observe-prs.ts`
 - `src/selfhost/self-review-loop.ts`
@@ -213,4 +209,6 @@ registered `CqEnv` snapshot (`currentCqEnv()`) — the entry/run snapshot, never
 a live ambient re-read — so an ambient policy-knob change after entry cannot
 move a mid-run gate (issue #1185). An explicit `env` argument remains the
 deliberate foreign-environment injection path and still overrides the
-snapshot; launcher PATH and child env are untouched.
+snapshot; launcher PATH and child env are untouched. The author-admission
+transport (`makeAuthorAdmission`/`envAuthorAdmission`) was subsequently retired
+with its module in the S2b-ii slice, so no `processEnv()` debt remains there.

@@ -252,6 +252,16 @@ class ReportTest(unittest.TestCase):
         self.assertFalse(result["strict_T1_zero"])
         self.assertEqual(len(result["tiers"]["T1"]["unresolved_objects"]), 1)
 
+    def test_a_baseline_without_an_id_is_integrity_evidence_not_a_key_error(self):
+        # `original` present but empty is provided evidence: it must report
+        # through IntegrityError, the type callers already handle, never KeyError.
+        ranked = {"target": "a" * 40, "manifest_id": "m", "required": [], "evidence_gaps": [],
+                  "paths": []}
+        for original in ({}, {"target": "a" * 40, "paths": []}):
+            with self.subTest(original=original):
+                with self.assertRaises(ledger.IntegrityError):
+                    reporting.summary(None, ranked, {"items": []}, original)
+
 
 if __name__ == "__main__":
     unittest.main()
