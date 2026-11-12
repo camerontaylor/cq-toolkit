@@ -255,6 +255,20 @@ def _dispatch(config, role, job, wt, directory, judge=False):
     raise ValueError('unsupported role driver')
 
 
+def resume_worktree(result, wt):
+    """Resume states record the rung's worktree (A2 is a suffixed checkout),
+    but process_item passes the original worktree on restart. Validate the
+    recorded tree and restore it before handling either resume state so
+    interrupted retention and deferred judging use the tree the result names."""
+    recorded = result.get('worktree')
+    if not recorded:
+        return wt
+    recorded = Path(recorded).resolve()
+    if recorded != Path(wt).resolve() and recorded.is_dir() and (recorded / '.git').exists():
+        return recorded
+    return wt
+
+
 def process(config, job, wt):
     repair = config['repair']
     directory = ROOT / 'state/repair' / job['job']
@@ -274,8 +288,12 @@ def process(config, job, wt):
         result = json.loads(result_path.read_text())
         result.pop('retry_after', None)
     progress_path = directory / 'progress.json'
-    if progress_path.exists() and (not result_path.exists() or progress_path.stat().st_mtime_ns > result_path.stat().st_mtime_ns):
+    resume_progress = progress_path.exists() and (not result_path.exists() or progress_path.stat().st_mtime_ns > result_path.stat().st_mtime_ns)
+    if resume_progress:
         result = json.loads(progress_path.read_text())
+    if result.get('dispatch_pending') or result.get('pending_judge'):
+        wt = resume_worktree(result, wt)
+    if resume_progress:
         if result.get('dispatch_pending'):
             saved_wt = Path(result.get('worktree', '')).resolve()
             if saved_wt == Path(wt).resolve():
