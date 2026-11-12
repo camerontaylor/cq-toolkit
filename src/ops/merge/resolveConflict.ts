@@ -507,7 +507,14 @@ export function makeResolveConflictOp(
           // The dispatch wiring's alias-notice sink (PR #238 review P2)
           // rides the DEFAULT factory's config; absent, the library default
           // — one stderr line — is unchanged.
-          deps.onDeprecatedAlias !== undefined ? { onDeprecatedAlias: deps.onDeprecatedAlias } : {},
+          {
+            ...(deps.onDeprecatedAlias !== undefined
+              ? { onDeprecatedAlias: deps.onDeprecatedAlias }
+              : {}),
+            // The same entry snapshot the protected-branch mirror uses; the
+            // default factory's session-logs and CQ_SESSIONS_DIR reads bind to it.
+            ...(deps.cqEnv !== undefined ? { cqEnv: deps.cqEnv } : {}),
+          },
         )
       ).resolve({
         role: 'conflict-resolver',
