@@ -1841,19 +1841,22 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
                           "provably read (explicit schema marker or author_* state "
                           "keys); operator recovery required (never restore old queue "
                           "snapshots or start incompatible binaries)")
+        runner_units_stopped(helper_module, effects.root)
+        drain = drain_check(effects, _runner_liveness(effects))
+        if not drain["drained"]:
+            raise Refused("cannot roll back with live/ambiguous reviews: "
+                          + json.dumps(drain["blocked"])[:400])
         # The journal predates any state written by the newly deployed runner.
-        # Recheck the live queue for the recorded prior reader under this lock.
+        # Recheck the live queue for the recorded prior reader under this lock,
+        # only after the units are stopped and drained: a tick still finishing
+        # before the fence could otherwise add author_* keys between this check
+        # and captured_state below.
         live_compatibility = compatibility_record(effects, record["prior_head"])
         if not rollback_compatible(live_compatibility):
             raise Refused("rollback disabled: current queue state the prior target "
                           "cannot provably read; operator recovery required "
                           "(never restore old queue snapshots or start "
                           "incompatible binaries)")
-        runner_units_stopped(helper_module, effects.root)
-        drain = drain_check(effects, _runner_liveness(effects))
-        if not drain["drained"]:
-            raise Refused("cannot roll back with live/ambiguous reviews: "
-                          + json.dumps(drain["blocked"])[:400])
         state = captured_state(effects)
         prior_tag = prior_tag_for(effects, state["prior_head"])
         overlay, raw = helper_module.load_overlay(overlay_path)
