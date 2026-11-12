@@ -256,53 +256,12 @@ export const registry: OpRegistryEntry[] = [
           fs,
           sharedRead,
         ]) =>
-          // The wiring body runs INSIDE the family boundary: a
-          // schema-bypassing input keeps the `failed` taxonomy of
-          // guardDevOp (never a rejected promise, never a read fault
-          // masquerading as one), and the cq.json read fault below refuses
-          // only a schema-valid dispatch.
-          effects.guardDevOp('dev.review', DevReviewInputSchema, async (input: DevReviewInput) => {
-            if (m.isAdmissionInput(input))
-              return admission.envAuthorAdmission(
-                input,
-                ...(wiring?.cqEnv !== undefined ? [wiring.cqEnv] : []),
-              );
-            const { repoRoot } = input as DevCycleInput;
-            const dev = effects.makeSubprocessDevEffects(repoRoot);
-            // Portable default: gitleaks' built-in rules apply everywhere.
-            // A repo-specific scanner is added only when cq.json configures
-            // its optional patterns file; missing toolkit policy is never a
-            // prerequisite for an adopter review.
-            const readFile = (path: string) => fs.readFile(path, 'utf8');
-            // Only an ABSENT cq.json means "no config"; any other read fault
-            // refuses the review under needs-human instead of silently
-            // binding the default scanner and reviewer policy.
-            const configRead = await sharedRead.readCqConfigText(repoRoot, readFile);
-            if (configRead.outcome === 'fault')
-              return {
-                status: 'needs-human',
-                reason: `dev.review: ${sharedRead.cqConfigFaultText(configRead.error)}`,
-              };
-            const configText = configRead.outcome === 'text' ? configRead.text : null;
-            const packageName = await agentReview.readPackageName(readFile, repoRoot);
-            const scanSecrets = denylist.makePortableReviewScanner(
-              repoRoot,
-              dev,
-              configText,
-              packageName,
-            );
-            let patternsFile: string | undefined;
-            let configuredReviewers: readonly string[] | undefined;
-            if (configText !== null) {
-              const parsed = cqConfig.parseCqConfig(configText, repoRoot);
-              if (parsed.ok) {
-                const policy = cqDefaults.resolveCqConfigDefaults(parsed.config, {
-                  packageName,
-                }).review;
-                patternsFile = policy.denylistPatternsFile;
-                configuredReviewers = policy.reviewers;
-              }
-            }
+          (async (raw: unknown) => {
+            // The #1185 invariant: the driver factory binds PER DISPATCH,
+            // from the wiring snapshot, BEFORE input validation — even a
+            // schema-bypassing dispatch binds it (the driver-cqenv probes
+            // dispatch a schema-invalid dummy and still expect the factory
+            // line to have run).
             const drivers = driverFactory.createDriverFactory({
               // The dispatch wiring's snapshot wins when supplied (a direct
               // importer call with explicit wiring outside a run); inside a
@@ -315,20 +274,72 @@ export const registry: OpRegistryEntry[] = [
                 ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
                 : {}),
             });
-            return m.makeDevReview({
-              effects: dev,
-              scanSecrets,
-              ...(patternsFile === undefined ? {} : { patternsFile }),
-              ...(configuredReviewers === undefined ? {} : { configuredReviewers }),
-              runAgentReviewer: agentReview.makeAgentReviewRunner({
-                repoRoot,
-                readFile,
-                drivers,
-                scanSecrets,
-                run: agentReviewer.runAgentReviewer,
-              }),
-            })(input);
-          }),
+            // The guarded body runs INSIDE the family boundary: a
+            // schema-bypassing input keeps the `failed` taxonomy of
+            // guardDevOp (never a rejected promise, never a read fault
+            // masquerading as one), and the cq.json read fault below refuses
+            // only a schema-valid dispatch.
+            return effects.guardDevOp(
+              'dev.review',
+              DevReviewInputSchema,
+              async (valid: DevReviewInput) => {
+                if (m.isAdmissionInput(valid))
+                  return admission.envAuthorAdmission(
+                    valid,
+                    ...(wiring?.cqEnv !== undefined ? [wiring.cqEnv] : []),
+                  );
+                const { repoRoot } = valid as DevCycleInput;
+                const dev = effects.makeSubprocessDevEffects(repoRoot);
+                // Portable default: gitleaks' built-in rules apply everywhere.
+                // A repo-specific scanner is added only when cq.json configures
+                // its optional patterns file; missing toolkit policy is never a
+                // prerequisite for an adopter review.
+                const readFile = (path: string) => fs.readFile(path, 'utf8');
+                // Only an ABSENT cq.json means "no config"; any other read fault
+                // refuses the review under needs-human instead of silently
+                // binding the default scanner and reviewer policy.
+                const configRead = await sharedRead.readCqConfigText(repoRoot, readFile);
+                if (configRead.outcome === 'fault')
+                  return {
+                    status: 'needs-human',
+                    reason: `dev.review: ${sharedRead.cqConfigFaultText(configRead.error)}`,
+                  };
+                const configText = configRead.outcome === 'text' ? configRead.text : null;
+                const packageName = await agentReview.readPackageName(readFile, repoRoot);
+                const scanSecrets = denylist.makePortableReviewScanner(
+                  repoRoot,
+                  dev,
+                  configText,
+                  packageName,
+                );
+                let patternsFile: string | undefined;
+                let configuredReviewers: readonly string[] | undefined;
+                if (configText !== null) {
+                  const parsed = cqConfig.parseCqConfig(configText, repoRoot);
+                  if (parsed.ok) {
+                    const policy = cqDefaults.resolveCqConfigDefaults(parsed.config, {
+                      packageName,
+                    }).review;
+                    patternsFile = policy.denylistPatternsFile;
+                    configuredReviewers = policy.reviewers;
+                  }
+                }
+                return m.makeDevReview({
+                  effects: dev,
+                  scanSecrets,
+                  ...(patternsFile === undefined ? {} : { patternsFile }),
+                  ...(configuredReviewers === undefined ? {} : { configuredReviewers }),
+                  runAgentReviewer: agentReview.makeAgentReviewRunner({
+                    repoRoot,
+                    readFile,
+                    drivers,
+                    scanSecrets,
+                    run: agentReviewer.runAgentReviewer,
+                  }),
+                })(valid);
+              },
+            )(raw);
+          }) as Op<unknown, unknown>,
       ),
   },
   {
