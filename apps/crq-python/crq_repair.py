@@ -330,6 +330,16 @@ def process(config, job, wt):
         result = json.loads(progress_path.read_text())
     if result.get('dispatch_pending') or result.get('pending_judge'):
         wt = resume_worktree(result, wt)
+    if (result.get('pending_judge') and result.get('worktree')
+            and Path(result['worktree']).resolve() != Path(wt).resolve()):
+        # The A2 tree the deferred judge must inspect is gone: judging the
+        # base tree would record a verdict and snapshot for the wrong checkout.
+        result.update(verdict='FAILED',
+                      reason='pending judge worktree unavailable; needs human',
+                      finished_at=utc())
+        result.pop('pending_judge', None)
+        atomic(result_path, result)
+        return result
     if resume_progress:
         if result.get('dispatch_pending'):
             saved_wt = Path(result.get('worktree', '')).resolve()
