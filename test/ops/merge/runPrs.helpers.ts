@@ -65,6 +65,9 @@ const LAST_COMMIT = '2026-01-01T00:00:00Z';
 const LAST_COMMIT_MS = Date.parse(LAST_COMMIT);
 export const NOW_MS = LAST_COMMIT_MS + REVIEW_ACCEPT_SETTLE_MS;
 const AFTER_COMMIT = '2026-01-01T00:00:00.500Z';
+/** The reviewed head SHA — `eligible()` and `approved()` agree on it so the
+ * default fixture is a valid head-bound pair (#1213). */
+export const HEAD = 'a'.repeat(40);
 
 /** An acceptable review that is NOT an all-clear: non-author, APPROVED,
  * postdates the last commit (the classifyPrs.helpers.ts fixture body — known
@@ -74,6 +77,7 @@ export const approved = (pr: number): ReviewSummary => ({
   authorLogin: 'alice',
   state: 'APPROVED',
   body: 'approving the cache changes',
+  commitOid: HEAD,
   submittedAt: AFTER_COMMIT,
 });
 
@@ -89,6 +93,7 @@ export const eligible = (pr: number, extra?: Partial<MergePrsCandidate>): MergeP
   reviews: [approved(pr)],
   issueComments: [],
   lastCommitAt: LAST_COMMIT,
+  headRefOid: HEAD,
   headRefName: `feat/${String(pr)}`,
   baseRefName: 'main',
   state: 'open',
