@@ -321,22 +321,22 @@ def main():
     if args.report is not None:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(data)
-    if args.json:
-        sys.stdout.write(data)
-    else:
-        print('archive ' + report['archive_sha256'] + ' ' + report['archive'])
+    sys.stdout.write(data)
+    if not args.json:
+        print('archive ' + report['archive_sha256'] + ' ' + report['archive'],
+              file=sys.stderr)
         print('source ' + report['source_sha'] + ' content ' + report['content_sha256']
-              + ' files ' + str(report['file_count']))
-        print('provenance ' + report['provenance_path'])
+              + ' files ' + str(report['file_count']), file=sys.stderr)
+        print('provenance ' + report['provenance_path'], file=sys.stderr)
         if report['observed'] is not None:
             print('fs-ext ' + report['observed']['fsExt'] + ' Node '
                   + report['observed']['node'] + ' ABI '
-                  + report['observed']['modules'] + ' flock ok')
+                  + report['observed']['modules'] + ' flock ok', file=sys.stderr)
         if report['runner'] is not None:
             print('runner exit ' + str(report['runner']['exit_code']) + ' status '
-                  + report['runner']['status'])
+                  + report['runner']['status'], file=sys.stderr)
         if 'staging' in report:
-            print('staging ' + report['staging'])
+            print('staging ' + report['staging'], file=sys.stderr)
 
 
 if __name__ == '__main__':

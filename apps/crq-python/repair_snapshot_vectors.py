@@ -138,7 +138,7 @@ def _commit_source(root: Path, relative: str, text: str) -> tuple[str, str]:
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8", newline="") as handle:
         handle.write(text)
-    _git(root, "init", "-q", "-b", "main")
+    _git(root, "init", "-q", "-b", "main", "--object-format=sha1")
     _git(root, "add", "--", relative)
     _git(
         root,

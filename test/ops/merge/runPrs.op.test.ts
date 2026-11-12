@@ -7,7 +7,6 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { headRefFor } from '../../../src/adapters/forge-github/mergeEffects.js';
 import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/types.js';
 import { defaultHarnessConfig } from '../../../src/harness/config.js';
 import { makeRunMergePrsOp } from '../../../src/ops/merge/runPrs.js';
@@ -20,6 +19,7 @@ import {
   NOW_MS,
   ZERO_USAGE,
 } from './runPrs.helpers.js';
+import { scanClean } from './resolveConflict.helpers.js';
 
 describe('runMergePrs', () => {
   test('the default op completes an empty run end to end — zero processes, zero driver runs', async () => {
@@ -73,7 +73,9 @@ describe('runMergePrs', () => {
     const dir = await mkdtemp(join(tmpdir(), 'runprs-harness-'));
     try {
       const effects = new FakeMergeEffects();
-      effects.driftRefs.add(headRefFor(45)); // the acted verification must see the head MOVE
+      // The publication gate (#1193) reads the resolution from the
+      // prepared worktree's branch; the fake answers a MOVED sha there by
+      // default (the fake's resolutionSha), so the commit claim verifies.
       const runs: OpInvocation[] = [];
       const driver: Driver = {
         run: async (invocation: OpInvocation): Promise<WorkerResult> => {
@@ -92,6 +94,7 @@ describe('runMergePrs', () => {
         effects,
         drivers: factory,
         harnessConfig: defaultHarnessConfig,
+        scan: scanClean,
       });
       const result = await op({
         ...baseInput([conflicting(45)], MODEL_SPEC),

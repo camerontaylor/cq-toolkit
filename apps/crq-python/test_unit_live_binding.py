@@ -145,6 +145,26 @@ class CommandTests(PortFixture):
             port.show("crq-tick.service", ["ActiveState"])
         self.assertIn("user bus is unavailable", str(caught.exception))
 
+    def test_show_accepts_activator_units(self):
+        port = self.port(lambda command: {
+            "rc": 0, "stdout": "ActiveState=active\n",
+            "stderr": "", "timeout": False})
+        for unit in ("crq-tick.timer", "crq-tick.path", "crq-tick.socket"):
+            self.assertEqual(port.show(unit, ["ActiveState"]),
+                             {"ActiveState": "active"})
+        self.assertEqual([call[0][4] for call in self.calls],
+                         ["crq-tick.timer", "crq-tick.path",
+                          "crq-tick.socket"])
+
+    def test_show_refuses_unsupported_unit_types(self):
+        port = self.port()
+        for unit in ("crq-tick.mount", "crq-tick.swap", "crq-tick.slice",
+                     "crq-tick"):
+            with self.assertRaises(live.LiveBindingRefused) as raised:
+                port.show(unit, ["ActiveState"])
+            self.assertEqual(str(raised.exception), "invalid unit name")
+        self.assertEqual(self.calls, [])
+
     def test_jobs_returns_list_jobs_lines(self):
         port = self.port(lambda command: {
             "rc": 0, "stdout": "17 crq-tick.service start running\n",
@@ -304,15 +324,26 @@ class DiscoveryTests(PortFixture):
             "systemctl", "--user", "--no-pager", "list-unit-files",
             "--no-legend", "--plain", "crq-tick*"])
 
-    def test_foreign_dependency_reference_is_unsupported(self):
+    def test_undeclared_units_of_another_crq_group_are_supported(self):
         declared = self.declare()
-        self.write("other.service",
-                   "[Unit]\nDescription=Other\nWants=crq-slot.service\n")
+        self.write("crq-publisher.timer",
+                   "[Timer]\nUnit=crq-publisher.service\n")
+        self.write("crq-publisher.path",
+                   "[Path]\nWants=crq-publisher.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+
+    def test_declared_foreign_dependency_reference_is_unsupported(self):
+        declared = self.declare()
+        declared.append(self.write("crq-tick.path",
+                                   "[Path]\nWants=crq-slot.service\n"))
         evidence = self.discover(declared)
         self.assertEqual(evidence["complete"], True)
         self.assertEqual(evidence["supported"], False)
         self.assertIn("crq-slot.service", " ".join(evidence["foreign"]))
-        self.assertIn("other.service", evidence["error"])
+        self.assertIn("crq-tick.path", evidence["error"])
 
     def test_dropin_directory_is_unsupported(self):
         declared = self.declare()
@@ -322,6 +353,56 @@ class DiscoveryTests(PortFixture):
         evidence = self.discover(declared)
         self.assertEqual(evidence["supported"], False)
         self.assertIn("drop-in", " ".join(evidence["foreign"]))
+
+    def test_symlinked_dropin_directory_is_not_scanned_as_a_dropin(self):
+        declared = self.declare()
+        held = self.unit_dir / "held-dropin"
+        held.mkdir()
+        (held / "override.conf").write_text("[Service]\nNice=5\n")
+        (self.unit_dir / "crq-tick.service.d").symlink_to(held)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertNotIn("drop-in", " ".join(evidence["foreign"]))
+
+    def test_dangling_symlink_entry_is_not_a_dropin_directory(self):
+        declared = self.declare()
+        (self.unit_dir / "crq-tick.service.d").symlink_to("gone")
+        evidence = self.discover(declared)
+        self.assertNotIn("drop-in", " ".join(evidence["foreign"]))
+        self.assertEqual(evidence["complete"], False)
+        self.assertIn("cannot resolve a symlink", evidence["error"])
+
+    def test_unreadable_enablement_entry_is_incomplete(self):
+        declared = self.declare()
+        wants = self.unit_dir / "timers.target.wants"
+        real_stat = os.stat
+
+        def failing_stat(path, *args, **kwargs):
+            if path == wants:
+                raise OSError("injected stat failure")
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(live.os, "stat", failing_stat):
+            evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertIn("unreadable", evidence["error"])
+        self.assertIn(str(wants), evidence["error"])
+
+    def test_unreadable_unrelated_entry_is_not_reported(self):
+        declared = self.declare()
+        unrelated = self.write("other.service", "[Service]\n")
+        real_stat = os.stat
+
+        def failing_stat(path, *args, **kwargs):
+            if path == unrelated:
+                raise OSError("injected stat failure")
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(live.os, "stat", failing_stat):
+            evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertIsNone(evidence["error"])
+        self.assertEqual(evidence["foreign"], [])
 
     def test_extra_prefix_entry_is_unsupported(self):
         declared = self.declare()
@@ -354,8 +435,10 @@ class DiscoveryTests(PortFixture):
 
     def test_foreign_unit_directives_are_unsupported(self):
         declared = self.declare()
-        self.write("foreign.timer", "[Timer]\nUnit=crq-slot.service\n")
-        self.write("foreign.service", "[Unit]\nPartOf=crq-slot.service\n")
+        self.write("crq-tick.timer",
+                   "[Timer]\nOnCalendar=*:0/12\nUnit=crq-slot.service\n")
+        self.write("crq-tick.service",
+                   "[Service]\nExecStart=/bin/true\nPartOf=crq-slot.service\n")
         evidence = self.discover(declared)
         self.assertEqual(evidence["complete"], True)
         self.assertEqual(evidence["supported"], False)
@@ -513,6 +596,31 @@ class LayoutTests(ControllerFixture):
         self.overlay_records.symlink_to(real)
         with self.assertRaises(live.LiveBindingRefused):
             self.layout.validate()
+
+    def test_accepts_a_lock_created_under_a_permissive_umask(self):
+        # The writer and this reader must agree under an operator umask 002,
+        # not only under systemd's 022 (guest proof 20261112T214654Z).
+        previous = os.umask(0o002)
+        try:
+            with self.effects.controller_lock():
+                pass
+        finally:
+            os.umask(previous)
+        observed = self.layout.lock_identity()
+        self.assertEqual(observed["exists"], True)
+        self.assertEqual(observed["mode"], 0o600)
+
+    def test_accepts_a_normalised_preexisting_group_readable_lock(self):
+        state = self.root / "apps/crq-python/state"
+        state.mkdir(parents=True, exist_ok=True)
+        lock = state / dc.LOCK_NAME
+        lock.write_text("")
+        lock.chmod(0o664)
+        with self.effects.controller_lock():
+            pass
+        observed = self.layout.lock_identity()
+        self.assertEqual(observed["exists"], True)
+        self.assertEqual(observed["mode"], 0o600)
 
     def test_lock_identity_is_stable_for_one_root_and_differs_for_another(self):
         with self.effects.controller_lock():

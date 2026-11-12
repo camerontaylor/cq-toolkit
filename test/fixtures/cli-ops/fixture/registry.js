@@ -17,4 +17,9 @@ export const registry = [
   // NOT a taxonomy verdict: the CX1 gate probe — the CLI must reject this
   // result (exit 1, stdout EMPTY) before any artifact is written.
   { name: 'garbage', inputSchema: z.object({}).strict(), importer: lazy('./garbage.js') },
+  // #1195 throw twins: a rejection WITH the settled-usage carrier (the error
+  // artifact must carry it) and a bare rejection (the artifact must stay
+  // carrier-free).
+  { name: 'spendthrow', inputSchema: z.object({}).strict(), importer: lazy('./spendthrow.js') },
+  { name: 'plainthrow', inputSchema: z.object({}).strict(), importer: lazy('./plainthrow.js') },
 ];

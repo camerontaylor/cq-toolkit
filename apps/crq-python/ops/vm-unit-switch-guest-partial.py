@@ -185,6 +185,8 @@ def partial_cli(command, directory, extra=None, extra_env=None, timeout=180):
 
 def partial_reset_repair():
     """Reset the repair topology without touching any retained record or log."""
+    require(os.uname().nodename == "crq-probe",
+            "partial proof driver only runs on the disposable crq-probe guest")
     UNIT_DIR.mkdir(parents=True, exist_ok=True)
     REPAIR_TIMER_WANTS.parent.mkdir(parents=True, exist_ok=True)
     REPAIR_PATH_WANTS.parent.mkdir(parents=True, exist_ok=True)

@@ -233,11 +233,13 @@ describe('the operator ledger is durable before it reports a spend (ADR-0003 §4
 
     // The SAME instance refuses again, and so does a FRESH one (a new
     // process, a resumed run) — neither is allowed to read the torn bytes as
-    // history. A malformed record fails the read closed, which is the guard
-    // that fires first here: the partial bytes are not a valid nonce shape.
-    await expect(torn.consume(nonce)).rejects.toThrow(/malformed/);
+    // history. The TORN-TAIL guard fires first: the six bytes have no
+    // terminating newline, and the single read validates that before any
+    // record can enter `known`. (A terminated but malformed record is the
+    // separate path covered by the malformed tests above.)
+    await expect(torn.consume(nonce)).rejects.toThrow(/unterminated record/);
     const fresh = makeFileNonceLedger(ledgerPath);
-    await expect(fresh.consume(nonce)).rejects.toThrow(/malformed/);
+    await expect(fresh.consume(nonce)).rejects.toThrow(/unterminated record/);
     // Neither refusal appended anything: the file is exactly as torn as it
     // was, so no record was fused and nothing was lost.
     expect(readFileSync(ledgerPath, 'utf8')).toBe(nonce.slice(0, 6));

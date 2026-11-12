@@ -1,7 +1,7 @@
 // Split provenance: test/ops/review/address-local.test.ts was split into
 // subject files sharing ./address-local.helpers.ts. This file holds the
 // cancellation cases for a single edit and for cancelled siblings.
-import { readFile, writeFile } from 'node:fs/promises';
+import { lstat, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test } from 'vitest';
 import { makeReviewAddress, type ReviewAddressReport } from '../../../src/ops/review/address.js';
@@ -67,6 +67,83 @@ test('cancelled edit reports an ordinary local branch and finding pointer withou
     await f.cleanup();
   }
 });
+
+// #1194: tracked symlinks, submodule pointers and glob-character file names
+// are ordinary repository shapes; cancelling must retain the report anyway.
+test.each(['true', 'false'] as const)(
+  'cancelled settlement keeps the report across ordinary repo shapes: core.symlinks=%s',
+  async (symlinks) => {
+    const f = await fixture();
+    const parent = new AbortController();
+    f.repo.git('config', 'core.symlinks', symlinks);
+    await symlink('src/a.ts', join(f.repo.root, 'link.ts'));
+    f.repo.git('add', '--', 'link.ts');
+    f.repo.git('init', '-q', 'sub');
+    await f.repo.write('sub/inner.txt', 'inner\n');
+    f.repo.git('-C', 'sub', 'add', '-A');
+    f.repo.git('-C', 'sub', 'commit', '-q', '-m', 'inner');
+    await f.repo.write('pages/[id].tsx', 'export const page = 1;\n');
+    f.record.head = f.repo.commitAll('ordinary repository shapes');
+    const drivers: DriverFactory = {
+      resolve: (request) => {
+        const resolved = f.drivers.resolve(request);
+        return {
+          ...resolved,
+          driver: {
+            run: async (input) => {
+              await writeFile(join(input.workspace!.path, 'src/a.ts'), 'CANCELLED PARTIAL\n');
+              parent.abort();
+              return {
+                stopReason: 'aborted',
+                usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+                denials: [],
+              };
+            },
+          },
+        };
+      },
+    };
+    try {
+      const governed = await runLadder(
+        () =>
+          makeReviewAddress({ drivers, initialRecord: f.record })({
+            repoRoot: f.repo.root,
+            source: 'local',
+            journalDir: f.journalDir,
+            push: true,
+          }),
+        {},
+        { op: 'review.address', jobKey: 'cancelled-shape-address', attempt: 1 },
+        { signal: parent.signal },
+      );
+      expect(governed.outcome).toBe('completed');
+      if (governed.outcome !== 'completed') return;
+      const result = governed.value;
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'ok') return;
+      const report = result.report!;
+      expect(report.failed).toHaveLength(1);
+      const retained = report.failed[0]!;
+      expect(retained.gate).toBe('budget');
+      expect(f.repo.git('show', `${retained.branch}:src/a.ts`)).toBe('CANCELLED PARTIAL\n');
+      expect(
+        (JSON.parse(await readFile(report.reportPath, 'utf8')) as ReviewAddressReport).failed,
+      ).toEqual(report.failed);
+      expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe(
+        'export const a = "BAD";\n',
+      );
+      // The ordinary shapes survive untouched in the caller tree.
+      expect(await readFile(join(f.repo.root, 'pages/[id].tsx'), 'utf8')).toBe(
+        'export const page = 1;\n',
+      );
+      expect(await readFile(join(f.repo.root, 'sub/inner.txt'), 'utf8')).toBe('inner\n');
+      expect((await lstat(join(f.repo.root, 'link.ts'))).isSymbolicLink()).toBe(true);
+      expect(f.repo.git('ls-remote', '--heads', 'origin', 'cq-address/*')).toBe('');
+    } finally {
+      await f.cleanup();
+    }
+  },
+);
 
 test('cancelled siblings settle their actual writes before any terminal pin, restore or report', async () => {
   const f = await fixture();

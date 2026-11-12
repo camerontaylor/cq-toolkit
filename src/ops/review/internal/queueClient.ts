@@ -491,8 +491,10 @@ export function makeReviewClient(transport: QueueTransport) {
       options?.signal?.throwIfAborted();
       if (Date.now() >= retryUntil || (lifetimeRemaining(options) ?? Infinity) <= 0) throw fault;
     }
+    const historyResponse = parsed.op === 'review-history' && 'status' in result;
     if (
       parsed.op !== 'capabilities' &&
+      !historyResponse &&
       ((!('state' in result) && !(parsed.op === 'result' && 'index' in result)) ||
         ('request_id' in result &&
           result.request_id !== undefined &&

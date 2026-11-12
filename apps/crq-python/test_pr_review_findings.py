@@ -360,6 +360,107 @@ elif '--paginate' not in args:
             prf.deliver(REPO, 7, {**META, "run_id": "bad run -->"}, write_ndjson(self.td.name, [ANCHORED]), gh=gh)
         self.assertEqual(gh.calls, [])
 
+    def test_clip_closes_severed_fence_with_full_opener_run(self):
+        """R4 F1: the closure is the full opener run, not three characters."""
+        for opener in ("```", "````", "`````", "~~~", "~~~~~"):
+            with self.subTest(opener=opener):
+                cut = prf._clip(opener + "py\n@user\n" + "x" * 12000, 200)
+                body, sep, trailer = cut.partition("\n\n… (truncated")
+                self.assertNotEqual(sep, "", "truncation trailer must be present")
+                self.assertTrue(body.endswith("\n" + opener),
+                                f"{opener}: cut must close with the full run")
+                self.assertTrue(trailer.startswith("; full text in the crq run artifacts)"))
+
+    def test_clip_tab_prefixed_closer_closes_but_tab_opener_does_not_open(self):
+        """Closers follow the neutralise rule (line.strip()); openers are
+        spaces-only, so a tab-indented delimiter never opens a fence."""
+        closed = prf._clip("```py\n@user\n\t```\n" + "x" * 12000, 200)
+        self.assertFalse(closed.split("\n\n… (truncated")[0].endswith("\n```"))
+        opened = prf._clip("text\n\t```py\n" + "x" * 12000, 200)
+        self.assertFalse(opened.split("\n\n… (truncated")[0].endswith("\n```"))
+
+    def test_body_cap_closes_severed_fence_within_budget(self):
+        """R4 F2: the MAX_BODY cut closes a severed fence, keeps the final
+        body at MAX_BODY units, and preserves the identity marker."""
+        findings = [{"severity": "none", "path": None, "start": None, "end": None,
+                     "title": "", "text": "```py\n" + "x" * 12000} for _ in range(6)]
+        review = prf.build_review({"head": HEAD, "base": BASE, "run_id": "r-ok"}, findings, None)
+        body = review["body"]
+        self.assertEqual(len(body), prf.MAX_BODY)
+        self.assertTrue(body.startswith(prf.marker("r-ok")))
+        self.assertIn("… (truncated; full text in the crq run artifacts)", body)
+        self.assertIsNone(prf._fence_state(body.split("\n")),
+                          "fence must be closed at the end of the capped body")
+
+    def test_body_cap_rescan_longer_fence_stays_bounded(self):
+        """R4 critic P2: one reservation is not enough. Cutting to reserve a
+        3-backtick closure re-opens an earlier 5,600-tilde fence; the cap
+        must iterate until the scan is stable so the emitted body (prefix +
+        closure + trailer) never exceeds MAX_BODY, and the final fence must
+        be closed."""
+        findings = [{"severity": "none", "path": None, "start": None, "end": None,
+                     "title": "", "text": "x" * 12000} for _ in range(4)] + [
+            {"severity": "none", "path": None, "start": None, "end": None,
+             "title": "", "text": "x" * 100},
+            {"severity": "none", "path": None, "start": None, "end": None,
+             "title": "", "text": "~" * 5600 + "\n" + "~" * 5600 + "\n```python\n" + "z" * 200}]
+        body = prf.build_review({"head": HEAD, "base": BASE, "run_id": "r-ok"}, findings, None)["body"]
+        self.assertLessEqual(len(body), prf.MAX_BODY,
+                             "emitted body must stay within MAX_BODY after re-reservation")
+        self.assertLessEqual(len(body), 65536, "GitHub hard cap")
+        self.assertTrue(body.startswith(prf.marker("r-ok")))
+        self.assertTrue(body.endswith("… (truncated; full text in the crq run artifacts)\n"))
+        self.assertIsNone(prf._fence_state(body.split("\n")),
+                          "final body must not end inside an open fence")
+
+    def test_body_cap_degenerate_opener_cut_before_fence(self):
+        """R4b critic P3: a fence opener whose closure cannot fit any budget
+        (59900/60000-tilde summary) must not leave the body open and must
+        not lose everything: the cap cuts BEFORE the first fence opener and
+        keeps marker + prose head, bounded and closed."""
+        for tilde_count in (59900, 60000):
+            with self.subTest(tildes=tilde_count):
+                body = prf.build_review(
+                    {"head": HEAD, "base": BASE, "run_id": "r-ok",
+                     "summary": "~" * tilde_count}, [], None)["body"]
+                self.assertLessEqual(len(body), prf.MAX_BODY)
+                self.assertLessEqual(len(body), 65536)
+                self.assertTrue(body.startswith(prf.marker("r-ok")))
+                self.assertTrue(body.endswith("… (truncated; full text in the crq run artifacts)\n"))
+                self.assertIsNone(prf._fence_state(body.split("\n")),
+                                  "degenerate opener must leave the body closed")
+
+    def test_body_cap_boundaries_stay_bounded(self):
+        """Boundary neighbours: near-budget openers, backtick degenerate,
+        prose-head + huge run, and the untruncated under-limit shape all
+        stay within MAX_BODY and never end inside an open fence."""
+        metas = {
+            "tilde-59950": {"summary": "~" * 59950},
+            "backtick-60000": {"summary": "`" * 60000},
+            "prose-then-huge-run": {"summary": "prose " + "~" * 58000 + " tail"},
+            "open-near-budget": {"summary": "ok\n```py\n" + "~" * 58000},
+            "just-under-limit": {"summary": "~" * 57000},
+        }
+        for name, extra in metas.items():
+            with self.subTest(name=name):
+                meta = {"head": HEAD, "base": BASE, "run_id": "r-ok", **extra}
+                body = prf.build_review(meta, [], None)["body"]
+                self.assertLessEqual(len(body), prf.MAX_BODY, name)
+                self.assertTrue(body.startswith(prf.marker("r-ok")), name)
+                self.assertIsNone(prf._fence_state(body.split("\n")),
+                                  f"{name}: body must not end inside an open fence")
+
+    def test_body_cap_no_fence_keeps_previous_shape(self):
+        """Without an open fence the cap keeps the historical shape: prefix
+        then trailer, bounded by MAX_BODY, no closure bytes."""
+        findings = [{"severity": "none", "path": None, "start": None, "end": None,
+                     "title": "", "text": "y" * 12000} for _ in range(6)]
+        review = prf.build_review({"head": HEAD, "base": BASE, "run_id": "r-ok"}, findings, None)
+        body = review["body"]
+        self.assertLessEqual(len(body), prf.MAX_BODY)
+        self.assertTrue(body.startswith(prf.marker("r-ok")))
+        self.assertTrue(body.endswith("… (truncated; full text in the crq run artifacts)\n"))
+
 
 class CrqIntegrationTest(unittest.TestCase):
     def harvest(self, item, events, findings):

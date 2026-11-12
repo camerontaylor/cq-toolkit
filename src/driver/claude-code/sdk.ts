@@ -121,7 +121,11 @@ import { z } from 'zod';
 import { boundedErrorText, describeError, redactSensitiveText } from '../error-text.js';
 import { DispatchError } from '../errors.js';
 import { assertStrictTokenBudgetSupported } from '../common/strict-budget.js';
-import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
+import {
+  assertSessionsDirOutsideWorkspace,
+  boundWorkspacePath,
+  resumedRecordOrThrow,
+} from '../common/workspace.js';
 import { stripMetaSchema } from '../../shared/json-schema.js';
 import { compileOutputSchema, uncompilableSchemaVerdict } from '../common/structured.js';
 import type {
@@ -406,8 +410,14 @@ export class ClaudeCodeSdkTransport implements Driver {
     // --- I6 isolation / §2.4 workspace table: a fresh record — created in
     // the bound workspace when one is set, else in a fresh temp workspace —
     // or a real resume, which must record the SAME realpath when a workspace
-    // is bound (else a pre-dispatch config throw).
+    // is bound (else a pre-dispatch config throw). Annex A: the session
+    // binding file must live OUTSIDE the model-editable tree — a sessions
+    // dir at or under the bound workspace is refused BEFORE any session
+    // state exists (explicit and default dirs alike).
     const sessionsDir = this.sessionsDir ?? defaultSessionsDir();
+    if (boundWorkspace !== undefined) {
+      assertSessionsDirOutsideWorkspace(sessionsDir, boundWorkspace, 'claude-code driver');
+    }
     const store = new SessionStore(sessionsDir);
     const record =
       sessionRef === undefined

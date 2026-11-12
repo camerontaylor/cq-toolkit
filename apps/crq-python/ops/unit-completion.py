@@ -35,6 +35,10 @@ HEX32_RE = re.compile(r"[0-9a-f]{32}")
 HEX40_RE = re.compile(r"[0-9a-f]{40}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
 UNIT_RE = re.compile(r"[A-Za-z0-9_.@:-]+\.service")
+# The read-only ``show`` port observes the service under test and its timer,
+# path, socket and target activators. It cannot read arbitrary unit types.
+READ_UNIT_RE = re.compile(
+    r"[A-Za-z0-9_.@:-]+\.(?:service|timer|path|socket|target)")
 NODE_POINTER_RE = re.compile(
     r"^(?P<root>.+)/dist/queue-runner/crq\.js$")
 
@@ -410,7 +414,7 @@ class SystemdJournalSource:
                     stream.close()
 
     def _unit(self, unit: str) -> None:
-        if UNIT_RE.fullmatch(unit) is None:
+        if READ_UNIT_RE.fullmatch(unit) is None:
             raise CompletionRefused("invalid unit name")
 
     def show(self, unit: str, props: Sequence[str]) -> Mapping[str, str]:

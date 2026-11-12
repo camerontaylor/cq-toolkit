@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Internal composition factory for one per-unit switch transaction. Unwired.
+"""Composition factory for one per-unit switch transaction.
 
 This module is the only place that binds the merged production pieces
 together for a single unit switch:
@@ -8,12 +8,13 @@ together for a single unit switch:
 * ``unit-adapter.ProductionUnitAdapter`` as the controller seam;
 * ``unit-completion.SystemdJournalCompletionPort`` as the runtime-bound
   completion provider, built from the same selected render;
-* ``DeclaredCapabilities`` for the truthful static runtime declaration.
+* ``DeclaredCapabilities`` fed from the verified artifact's declared live
+  commands.
 
-It is deliberately not a CLI, not an enablement path and not a production
-factory. It constructs no live ``SystemdPort`` and no live ``JournalSource``;
-both remain injected, so this module cannot reach a host by itself. Nothing in
-``unit-switch.py``, ``deploy-controller.py`` or ``prepare-host.py`` calls it.
+It is deliberately not a CLI and not an enablement path. It constructs no live
+``SystemdPort`` and no live ``JournalSource``; both remain injected, so this
+module cannot reach a host by itself. The controller CLI reaches it through
+``unit-live-binding.production_adapter`` for ``switch --unit --runtime``.
 
 The selected identity is rendered once, read-only, before the adapter exists.
 The completion provider therefore binds the exact service digest, source
@@ -34,10 +35,11 @@ Known limits, unchanged by this composition:
   observations are monotonic-clock facts; a masked unit yields baseline zero;
 * root, record-directory and shared-lock coverage are wiring preconditions
   owned by the coordinator, not fields in this factory;
-* a Node target still refuses in preflight: ``DeclaredCapabilities`` declares
-  no Node commands, and the TypeScript runner's non-tick commands remain
-  unimplemented. Only a Node-to-Python direction is reachable, and only with a
-  prior Node unit already installed.
+* a Node target is accepted only when the verified artifact's declaration
+  names the selected command. ``watchdog`` is currently the only declared live
+  command; ``tick``, ``slot``, ``publisher``, ``backfill`` and ``repair`` still
+  refuse. The selected artifact must already be installed and inventory
+  verified; this factory does not stage it.
 """
 from __future__ import annotations
 
@@ -214,6 +216,18 @@ def build(
         expected=selection.identity,
         require_journal_witness=require_journal_witness,
     )
+    artifact = (selection.render.get("artifact")
+                if selection.runtime != "python" else None)
+    if artifact is not None and not isinstance(artifact, Mapping):
+        raise FactoryRefused("selected artifact identity is not an object")
+    node_commands = (artifact.get("capabilities", [])
+                     if artifact is not None else [])
+    try:
+        capability = adapter_module.DeclaredCapabilities(
+            node_commands=node_commands)
+    except TypeError as exc:
+        raise FactoryRefused(
+            "adapter composition refused: " + str(exc)[:300]) from exc
     options = {
         "root": selection.root,
         "source_sha": selection.source_sha,
@@ -221,7 +235,7 @@ def build(
         "artifact_root": selection.artifact_root,
         "systemd": systemd,
         "identity": identity,
-        "capability": adapter_module.DeclaredCapabilities(),
+        "capability": capability,
         "completion": completion,
         "queue_drain": queue_drain,
         "error_type": error_type,
