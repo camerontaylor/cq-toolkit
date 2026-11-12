@@ -91,6 +91,20 @@ class MechanicalGateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'hack detector did not pass: .*suppression'):
             service.mechanical(self.config, self.wt, self.base, commits, 'crq-run1-F1', out)
 
+    def test_structured_cli_error_is_retryable_and_findings_are_terminal(self):
+        error = {'error': {'kind': 'import-error', 'subcommand': 'gates.hackDetector',
+                           'message': 'cannot import op', 'exitCode': 1}}
+        with mock.patch.object(crq_repair, 'command', return_value=SimpleNamespace(
+                returncode=1, stdout=json.dumps(error), stderr='')):
+            with self.assertRaises(crq_repair.DetectorUnavailable):
+                crq_repair.hack_detector('/x/cli.js', 'diff --git a/x b/x\n', self.wt)
+        value = {'status': 'ok', 'value': [{'kind': 'suppression', 'file': 'src/a.ts',
+                                            'message': 'new suppression'}]}
+        with mock.patch.object(crq_repair, 'command', return_value=SimpleNamespace(
+                returncode=0, stdout=json.dumps(value), stderr='')):
+            with self.assertRaises(crq_repair.DetectorRejection):
+                crq_repair.hack_detector('/x/cli.js', 'diff --git a/x b/x\n', self.wt)
+
     def test_indeterminate_and_oversized_diffs_fail_closed(self):
         with self.assertRaisesRegex(ValueError, 'does not parse as a unified diff'):
             crq_repair.hack_detector(str(self.cq_bin), '@/tmp/repair.patch', self.wt)

@@ -6,7 +6,8 @@ import copy
 import json
 from pathlib import Path
 import re
-from crq_repair import atomic, findings, git as wt_git, hack_detector, verify
+from crq_repair import (DetectorUnavailable, atomic, findings, git as wt_git,
+                         hack_detector, verify)
 from crq_repair.bounded import JOB_ID, identity, job_path, require_canonical_delivery, source_path, validate_revalidation
 
 
@@ -304,6 +305,29 @@ def record_terminal_failure(c, q, item, record, verdicts, expected, job_id, exc)
         item['last_error'] = 'repair_failed; needs human'
     c.save_queue(q)  # terminal identity before authoritative write-back
     mark_finding_outcome(c, expected, failure)
+    record_unpublished_siblings(c, record, job_id)
+
+
+def record_unpublished_siblings(c, record, job_id):
+    """A failed run can never publish. A FIXED sibling records no outcome of
+    its own (only publication fixes a finding), so give each verified sibling
+    an explicit decision instead of leaving it bound to a dead run."""
+    for other in record['jobs']:
+        if other == job_id:
+            continue
+        try:
+            result = json.loads((c.STATE / 'repair' / other / 'result.json').read_text())
+            job = json.loads((c.STATE / 'repair/inbox' / (other + '.json')).read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(result, dict) or not isinstance(job, dict):
+            continue
+        if result.get('verdict') != 'FIXED' or not job.get('canonical_finding_id'):
+            continue
+        finding_inbox(c).repair_outcome(
+            job['canonical_finding_id'], other, 'needs-human',
+            'repair run failed before publication; the verified fix was not published',
+            c.iso(), repair_base=job.get('repair_base'), failure_class='exhausted')
 
 
 def harvest(c, q, item, dry=False):
@@ -415,14 +439,14 @@ def harvest(c, q, item, dry=False):
                             module.mechanical(c.CONFIG, check_wt, predecessor, commits, job_id, path.parent)
                         finally:
                             c.remove_worktree(check_wt, branch)
+                    except DetectorUnavailable:
+                        # The detector never rendered a verdict; keep it on the
+                        # retry path, as RuntimeError from git() already is.
+                        raise
                     except ValueError as exc:
                         # A rejected claimed range is deterministic (duplicate
                         # commits, oversize or flagged diff), so record the same
-                        # terminal failure as a defective result artifact. A
-                        # hack-detector CLI failure is environmental: keep it on
-                        # the retry path, as RuntimeError from git() already is.
-                        if str(exc).startswith('hack detector did not pass: unreadable output'):
-                            raise
+                        # terminal failure as a defective result artifact.
                         record_terminal_failure(c, q, item, record, verdicts, expected, job_id, exc)
                         break
                 predecessor = commits[-1]
