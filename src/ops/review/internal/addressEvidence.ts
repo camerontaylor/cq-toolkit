@@ -775,6 +775,13 @@ export async function settleAddressTerminalEvidence(
         ...(index ? { index } : {}),
         ...(input ? { input } : {}),
       });
+    // The worktree representation of a tracked symlink follows core.symlinks;
+    // read it at most once per attempt (unset means Git's default, true).
+    let symlinks: Promise<boolean> | undefined;
+    const symlinksEnabled = () =>
+      (symlinks ??= git(['config', '--bool', '--default=true', 'core.symlinks']).then(
+        (value) => value.toString().trim() !== 'false',
+      ));
     const verify = async (expected?: Buffer) => {
       await validateEvidenceAuthority(token, true);
       const source = await terminalPath(attempt.root, attempt.file);
@@ -848,14 +855,19 @@ export async function settleAddressTerminalEvidence(
           throw new Error('terminal foreign changed path; caller bytes retained');
         const changed = new Error('terminal foreign changed path; caller bytes retained');
         if (entry[1] === '120000') {
-          // A tracked symlink: with core.symlinks=true the worktree entry is
-          // the link itself and its target text is the blob; with
-          // core.symlinks=false Git checked that text out as an ordinary
-          // file, and the byte comparison applies instead.
+          // A tracked symlink's blob is its target text. The worktree entry
+          // may legitimately be the link itself under either core.symlinks
+          // setting (a caller tree checked out while symlinks was enabled,
+          // or before the config was flipped: Git never rewrites existing
+          // entries, and with symlinks=false it reads the link's target text
+          // and treats the entry clean). An ordinary FILE is legitimate only
+          // while core.symlinks=false — under true, Git shows it as a dirty
+          // type change, so it refuses as tampered even when the bytes match.
           if (stat.isSymbolicLink()) {
             if ((await terminalLinkIdentity(token, foreign, entry[2]!.length, stat)) !== entry[2])
               throw changed;
           } else if (stat.isFile()) {
+            if (await symlinksEnabled()) throw changed;
             if (
               (await terminalBlobIdentity(token, foreign, entry[2]!.length, stat, true)) !==
               entry[2]

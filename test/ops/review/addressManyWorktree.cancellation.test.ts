@@ -200,6 +200,7 @@ test('cancelled settlement verifies a symlink checked out as a plain file', asyn
     // The core.symlinks=false checkout shape: the index carries a 120000
     // entry whose worktree representation is an ordinary file holding the
     // link-target text. Staged with cacheinfo so `add -A` cannot re-type it.
+    f.repo.git('config', 'core.symlinks', 'false');
     await f.repo.write('link.ts', 'src/a.ts');
     const sha = f.repo.git('hash-object', '-w', 'link.ts').trim();
     f.repo.git('update-index', '--add', '--cacheinfo', `120000,${sha},link.ts`);
@@ -231,6 +232,97 @@ test('cancelled settlement verifies a symlink checked out as a plain file', asyn
     expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('export const a = 1;\n');
     expect(await readFile(join(f.repo.root, 'link.ts'), 'utf8')).toBe('src/a.ts');
     expect((await lstat(join(f.repo.root, 'link.ts'))).isSymbolicLink()).toBe(false);
+    await withAddressOwnership(
+      { repoRoot: f.repo.root, git: f.run, source: 'local', production: false },
+      async () => {},
+    );
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+test('cancelled settlement refuses a tracked symlink replaced by a plain file', async () => {
+  const f = await fixture();
+  const parent = new AbortController();
+  const report = terminalReport(join(f.root, 'symlink-typechange.json'));
+  try {
+    await symlink('src/a.ts', join(f.repo.root, 'link.ts'));
+    f.repo.git('add', '--', 'link.ts');
+    f.repo.commitAll('track a symlink');
+    // With core.symlinks=true (unset default) a plain file carrying the same
+    // target text is a type change even though its bytes match the blob.
+    await unlink(join(f.repo.root, 'link.ts'));
+    await writeFile(join(f.repo.root, 'link.ts'), 'src/a.ts');
+    await expect(
+      withAddressOwnership(
+        {
+          repoRoot: f.repo.root,
+          git: f.run,
+          source: 'local',
+          production: false,
+          signal: parent.signal,
+        },
+        async (lease) => {
+          await ownershipModule.bindAddressTerminalReport(lease, report);
+          const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+          const attempt = await ownershipModule.recordAddressTerminalAttempt(
+            binding,
+            terminalInput(f.repo),
+          );
+          await writeFile(join(f.repo.root, 'src/a.ts'), 'CANCELLED OWN FILE\n');
+          parent.abort();
+          ownershipModule.deferAddressTerminalAttempt(binding, attempt);
+          return ownershipModule.addressCancelledResult(lease);
+        },
+      ),
+    ).rejects.toThrow('terminal foreign changed path; caller bytes retained');
+    // Refusal retains the caller's bytes instead of restoring or settling.
+    expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('CANCELLED OWN FILE\n');
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+test('cancelled settlement tolerates a real link in a core.symlinks=false caller tree', async () => {
+  const f = await fixture();
+  const parent = new AbortController();
+  const report = terminalReport(join(f.root, 'symlink-stale-link.json'));
+  try {
+    f.repo.git('config', 'core.symlinks', 'false');
+    await f.repo.write('link.ts', 'src/a.ts');
+    const sha = f.repo.git('hash-object', '-w', 'link.ts').trim();
+    f.repo.git('update-index', '--add', '--cacheinfo', `120000,${sha},link.ts`);
+    f.repo.git('commit', '-q', '-m', 'track a symlink without checkout support');
+    // A caller tree checked out while symlinks was enabled keeps its real
+    // link after the config flips: Git never rewrites existing entries and
+    // reads the target text as the content, so the shape is clean and
+    // settlement must not refuse it as a type change.
+    await unlink(join(f.repo.root, 'link.ts'));
+    await symlink('src/a.ts', join(f.repo.root, 'link.ts'));
+    const result = await withAddressOwnership(
+      {
+        repoRoot: f.repo.root,
+        git: f.run,
+        source: 'local',
+        production: false,
+        signal: parent.signal,
+      },
+      async (lease) => {
+        await ownershipModule.bindAddressTerminalReport(lease, report);
+        const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+        const attempt = await ownershipModule.recordAddressTerminalAttempt(
+          binding,
+          terminalInput(f.repo),
+        );
+        await writeFile(join(f.repo.root, 'src/a.ts'), 'CANCELLED OWN FILE\n');
+        parent.abort();
+        ownershipModule.deferAddressTerminalAttempt(binding, attempt);
+        return ownershipModule.addressCancelledResult(lease);
+      },
+    );
+    expect(result.status).toBe('needs-human');
+    expect(report.failed).toHaveLength(1);
+    expect(f.repo.git('show', `${report.failed[0]!.sha}:src/a.ts`)).toBe('CANCELLED OWN FILE\n');
+    expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('export const a = 1;\n');
+    expect((await lstat(join(f.repo.root, 'link.ts'))).isSymbolicLink()).toBe(true);
     await withAddressOwnership(
       { repoRoot: f.repo.root, git: f.run, source: 'local', production: false },
       async () => {},
