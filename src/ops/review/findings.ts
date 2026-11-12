@@ -280,7 +280,7 @@ export function findingDispositionView(finding: Finding): FindingDispositionView
     unknown('/observedHead', 'no observed head recorded; the disposition is tied to no head');
   if (finding.observedAt === undefined)
     unknown('/observedAt', 'no observed-at timestamp recorded; the adjudication time is unknown');
-  if (finding.acceptedRisk === undefined)
+  if (finding.acceptedRisk === undefined || finding.acceptedRisk === null)
     unknown(
       '/acceptedRisk',
       'the adjudicator recorded no accepted risk (null is unknown, never none)',
