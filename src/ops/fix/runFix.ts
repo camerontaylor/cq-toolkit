@@ -967,8 +967,10 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       }
       // ADR-0008: link every RETURNED kernel run explicitly after the
       // runPlan result — never a guessed link. The kernelRunId is the run's
-      // actual v3 run id; the descriptor list comes from the T29
-      // foldObservations join surface so a fold can resolve the link.
+      // actual run id; the descriptor list comes from the T29
+      // foldObservations join surface so a fold can resolve the link (its
+      // workId join resolves for v3 descriptors and stays unknown with the
+      // journal version named for v1/v2 descriptors — T04).
       // A descriptor read is observation, not verdict: its failure is
       // indeterminate evidence and never changes the run's own result.
       try {
