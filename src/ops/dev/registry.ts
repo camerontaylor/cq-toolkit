@@ -447,7 +447,7 @@ export const registry: OpRegistryEntry[] = [
               .then(() => true)
               .catch(() => false);
             return m.makeDevCycle({
-              managedSubmit: managed.makeConfiguredManagedReviewSubmit(),
+              managedSubmit: managed.makeConfiguredManagedReviewSubmit(wiring?.cqEnv),
               effects: dev,
               gh: ghEffects.makeSubprocessPrEffects(input.repoRoot),
               // The dispatch wiring's snapshot, when explicitly supplied: the

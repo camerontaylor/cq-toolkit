@@ -1,6 +1,10 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test, vi } from 'vitest';
+import { readCqEnv } from '../../../src/config/env.js';
+import { registry } from '../../../src/ops/review/registry.js';
+import * as queue from '../../../src/ops/review/internal/queueClient.js';
+import * as forge from '../../../src/adapters/forge-github/gh.js';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import { makeDevCycle } from '../../../src/ops/dev/cycle.js';
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
@@ -9,6 +13,35 @@ import { bindCycleRepo, greenCheck } from '../dev/cycle.helpers.js';
 import { fixture, useGitleaksPath } from './address-local.helpers.js';
 
 useGitleaksPath();
+
+test('configured review.run reports an explicitly missing queue alias as blocked without fallback', async () => {
+  const f = await fixture();
+  try {
+    const config = JSON.parse(await readFile(join(f.repo.root, 'cq.json'), 'utf8')) as CqConfig;
+    config.review = { ...config.review, reviewers: ['coderabbit'] };
+    await f.repo.write('cq.json', JSON.stringify(config));
+    f.repo.commitAll('managed review config');
+    vi.stubEnv('CQ_QUEUE_SSH_ALIAS', 'hostile-ambient');
+    const ssh = vi.spyOn(queue, 'sshQueueTransport').mockImplementation(() => {
+      throw new Error('unexpected transport construction');
+    });
+    const forgeFactory = vi.spyOn(forge, 'makeGhRunner');
+    const entry = registry.find((entry) => entry.name === 'review.run')!;
+    const op = await entry.importer({ cqEnv: readCqEnv({}) });
+    const result = await op({ repoRoot: f.repo.root });
+    expect(result).toMatchObject({
+      status: 'needs-human',
+      report: { sources: [{ kind: 'coderabbit', status: 'blocked' }] },
+    });
+    expect(JSON.stringify(result)).toContain('Configure CQ_QUEUE_SSH_ALIAS for review-v1');
+    expect(JSON.stringify(result)).toContain('no direct CLI fallback');
+    expect(ssh).not.toHaveBeenCalled();
+    expect(forgeFactory).not.toHaveBeenCalled();
+  } finally {
+    vi.restoreAllMocks();
+    await f.cleanup();
+  }
+});
 
 test('cycle default review reaches managed submit with a nonempty real diff', async () => {
   const f = await fixture();

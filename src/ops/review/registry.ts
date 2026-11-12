@@ -678,7 +678,7 @@ export const registry: OpRegistryEntry[] = [
     importer: async (wiring) => {
       const managed = await import('../dev/managedReview.js');
       return (await import('./addressMany.js')).makeReviewAddressMany({
-        managedSubmit: managed.makeConfiguredManagedReviewSubmit(),
+        managedSubmit: managed.makeConfiguredManagedReviewSubmit(wiring?.cqEnv),
         drivers: createDriverFactory({
           ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
@@ -774,7 +774,7 @@ export const registry: OpRegistryEntry[] = [
     importer: async (wiring) => {
       const managed = await import('../dev/managedReview.js');
       return (await import('./address.js')).makeReviewAddress({
-        managedSubmit: managed.makeConfiguredManagedReviewSubmit(),
+        managedSubmit: managed.makeConfiguredManagedReviewSubmit(wiring?.cqEnv),
         drivers: createDriverFactory({
           ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
@@ -803,7 +803,7 @@ export const registry: OpRegistryEntry[] = [
                 : {}),
               ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
             }),
-            managedSubmit: managed.makeConfiguredManagedReviewSubmit(),
+            managedSubmit: managed.makeConfiguredManagedReviewSubmit(wiring?.cqEnv),
           }) as Op<unknown, unknown>,
       ),
   },

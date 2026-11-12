@@ -10,6 +10,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { CqEnv } from '../../config/env.js';
 import type { DevEffects } from './effects.js';
 import { faultText } from './effects.js';
 import { captureWorkingTree } from './internal/snapshot.js';
@@ -22,8 +23,8 @@ import { makeSubmit } from '../review/submit.js';
 import { makeStatus } from '../review/status.js';
 import { makeResult } from '../review/result.js';
 
-/** Inert production binding; resolve forge identity in each actual checkout. */
-export function makeConfiguredManagedReviewSubmit(): ManagedReviewSubmit {
+/** Inert binding; explicit dispatch env wins, otherwise resolve the run env at submit. */
+export function makeConfiguredManagedReviewSubmit(cqEnv?: CqEnv): ManagedReviewSubmit {
   return async (input) => {
     const [{ currentCqEnv }, queue, { makeGhRunner }] = await Promise.all([
       import('../../config/run-env.js'),
@@ -32,7 +33,7 @@ export function makeConfiguredManagedReviewSubmit(): ManagedReviewSubmit {
     ]);
     return makeManagedReviewSubmit(
       () => {
-        const alias = currentCqEnv().values['CQ_QUEUE_SSH_ALIAS'];
+        const alias = (cqEnv ?? currentCqEnv()).values['CQ_QUEUE_SSH_ALIAS'];
         if (typeof alias !== 'string' || alias === '')
           throw new queue.QueueConfigurationError('Configure CQ_QUEUE_SSH_ALIAS for review-v1');
         return queue.sshQueueTransport(alias, 'review-v1');

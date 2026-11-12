@@ -1,4 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest';
+import { readCqEnv } from '../../../src/config/env.js';
+import { runWithCqEnv } from '../../../src/config/run-env.js';
 import * as managed from '../../../src/ops/dev/managedReview.js';
 import * as cycle from '../../../src/ops/dev/cycle.js';
 import * as address from '../../../src/ops/review/address.js';
@@ -48,6 +50,73 @@ test('production registry binds the managed route in every composed root without
     await repo.cleanup();
   }
 });
+
+test.each(['explicit', 'missing', 'run', 'ambient'] as const)(
+  'every composed root resolves the %s queue alias through the real configured helper',
+  async (source) => {
+    const repo = await makeTestRepo();
+    try {
+      vi.stubEnv('CQ_QUEUE_SSH_ALIAS', 'ambient-at-construction');
+      const wiring =
+        source === 'explicit' || source === 'missing'
+          ? {
+              cqEnv: readCqEnv(
+                source === 'explicit' ? { CQ_QUEUE_SSH_ALIAS: 'explicit-snapshot' } : {},
+              ),
+            }
+          : undefined;
+      const ssh = vi.spyOn(queue, 'sshQueueTransport').mockImplementation(() => {
+        throw new Error('offline transport construction probe');
+      });
+      const forgeFactory = vi.spyOn(forge, 'makeGhRunner');
+      const run = vi.fn(async () => ({ status: 'needs-human' as const, reason: 'binding probe' }));
+      const roots = [
+        ['dev.cycle', vi.spyOn(cycle, 'makeDevCycle').mockReturnValue(run)],
+        ['review.address', vi.spyOn(address, 'makeReviewAddress').mockReturnValue(run)],
+        ['review.addressMany', vi.spyOn(many, 'makeReviewAddressMany').mockReturnValue(run)],
+        ['review.run', vi.spyOn(reviewRun, 'makeReviewRun').mockReturnValue(run)],
+      ] as const;
+      const runEnv = readCqEnv({ CQ_QUEUE_SSH_ALIAS: 'run-snapshot' });
+      for (const [name, factory] of roots) {
+        vi.stubEnv('CQ_QUEUE_SSH_ALIAS', 'ambient-at-construction');
+        const entry = [...devRegistry, ...reviewRegistry].find((entry) => entry.name === name)!;
+        const op = await entry.importer(wiring);
+        await op({ repoRoot: repo.root });
+        expect(ssh).not.toHaveBeenCalled();
+        expect(forgeFactory).not.toHaveBeenCalled();
+        const submit = factory.mock.calls[0]?.[0]?.managedSubmit;
+        if (submit === undefined) throw new Error(`${name} dropped the managed binding`);
+        vi.stubEnv('CQ_QUEUE_SSH_ALIAS', 'ambient-at-submit');
+        const invoke = () =>
+          submit({ cwd: repo.root, target: 'main', base: 'unused', head: 'unused' });
+        const result = await (source === 'run' || source === 'missing'
+          ? runWithCqEnv(runEnv, invoke)
+          : invoke());
+        expect(result).toEqual({
+          status: 'unsupported',
+          reason:
+            source === 'missing'
+              ? 'Configure CQ_QUEUE_SSH_ALIAS for review-v1'
+              : 'offline transport construction probe',
+        });
+        if (source === 'missing') expect(ssh).not.toHaveBeenCalled();
+        else
+          expect(ssh).toHaveBeenCalledExactlyOnceWith(
+            source === 'explicit'
+              ? 'explicit-snapshot'
+              : source === 'run'
+                ? 'run-snapshot'
+                : 'ambient-at-submit',
+            'review-v1',
+          );
+        expect(forgeFactory).not.toHaveBeenCalled();
+        ssh.mockClear();
+      }
+    } finally {
+      await repo.cleanup();
+    }
+  },
+);
 
 test('addressMany default construction carries the managed route into each address operation', async () => {
   const repo = await makeTestRepo();
