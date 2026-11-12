@@ -144,6 +144,7 @@
         "src/ops/fix/runFix.ts",
         "src/ops/gates/policyConfig.ts",
         "src/ops/gates/registry.ts",
+        "src/ops/review/addressMany.ts",
         "src/ops/review/internal/addressEvidence.ts",
         "src/ops/review/internal/queueClient.ts",
         "src/ops/review/queue.ts",

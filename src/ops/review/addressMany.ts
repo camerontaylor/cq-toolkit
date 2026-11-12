@@ -1,5 +1,6 @@
 import { checkoutWriterContext } from '../../shared/checkoutWriterContext.js';
 import { checkoutWriterCommand } from '../../shared/checkoutWriterCommand.js';
+import { processEnv } from '../../config/process-env.js';
 import { z } from 'zod';
 import { mkdtemp, symlink, access, readFile, mkdir, rm, realpath } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
@@ -80,10 +81,21 @@ class IsolationRefusal extends Error {}
  * usable credential would otherwise stall the worker (and its reservation)
  * forever; the timeout bounds hangs that no prompt explains.
  */
-const gitSubprocess = (): { timeout: number; env: NodeJS.ProcessEnv } => ({
-  timeout: 300_000,
-  env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-});
+const gitSubprocess = (): { timeout: number; env: NodeJS.ProcessEnv } => {
+  const env: NodeJS.ProcessEnv = { ...processEnv(), GIT_TERMINAL_PROMPT: '0' };
+  // GIT_TERMINAL_PROMPT=0 covers git's own credential prompts, but OpenSSH
+  // reads /dev/tty directly for passphrase/host-key prompts and ignores it.
+  // BatchMode makes ssh non-interactive (it refuses instead of prompting)
+  // without discarding caller-configured SSH commands or settings; an ssh
+  // variant that does not know BatchMode would only fail earlier, which the
+  // timeout below bounds anyway.
+  if (env['GIT_SSH'] === undefined && env['GIT_SSH_COMMAND'] === undefined) {
+    env['GIT_SSH_COMMAND'] = 'ssh -oBatchMode=yes';
+  } else if (env['GIT_SSH_COMMAND'] !== undefined && !/(^|[\s"'])-oBatchMode=yes([\s"']|$)/.test(env['GIT_SSH_COMMAND'])) {
+    env['GIT_SSH_COMMAND'] = `${env['GIT_SSH_COMMAND']} -oBatchMode=yes`;
+  }
+  return { timeout: 300_000, env };
+};
 
 /** Independent object store and common directory; caller receipts remain durable. */
 export async function isolateAddressMany(
