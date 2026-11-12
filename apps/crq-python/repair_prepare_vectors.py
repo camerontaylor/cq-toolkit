@@ -423,7 +423,7 @@ def _prepare_case(spec):
                 "idempotent_git_calls": idempotent_calls,
                 "second_job_id": second,
                 "idempotent_job_bytes_unchanged": idempotent_bytes == job_bytes,
-                "idempotent_record_unchanged": record_after == record,
+                "idempotent_record_unchanged": _dump(record_after) == record_bytes,
                 "recovery_worktree": job.get("recovery_worktree", False),
                 "old_record_state": queue["items"][0]["repair_runs"][OLD_RUN]["state"],
                 "run_count": len(queue["items"][0]["repair_runs"]),
