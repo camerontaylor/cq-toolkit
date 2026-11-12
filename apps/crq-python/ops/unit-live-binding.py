@@ -267,6 +267,9 @@ class SubprocessSystemd:
         if not isinstance(cgroup, str):
             raise LiveBindingRefused("ControlGroup is not text")
         if cgroup == "":
+            if main_pid != 0:
+                raise LiveBindingRefused(
+                    "ControlGroup is empty for a running main process")
             return {"main_pid": main_pid, "pids": [], "cgroup": cgroup}
         if not cgroup.startswith("/") or "\x00" in cgroup:
             raise LiveBindingRefused("ControlGroup is not an absolute cgroup path")

@@ -211,6 +211,11 @@ class CgroupTests(PortFixture):
         self.assertEqual(port.cgroup_pids("crq-tick.service"),
                          {"main_pid": 0, "pids": [], "cgroup": ""})
 
+    def test_empty_control_group_for_a_running_main_process_refuses(self):
+        port = self.port(self.show(123, ""), cgroup_root=self.cgroup_root)
+        with self.assertRaises(live.LiveBindingRefused):
+            port.cgroup_pids("crq-tick.service")
+
     def test_missing_procs_for_an_empty_group_is_empty(self):
         port = self.port(self.show(0, "/user.slice/empty.service"),
                          cgroup_root=self.cgroup_root)
