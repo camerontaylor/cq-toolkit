@@ -418,6 +418,11 @@ describe('the publication gate topology proof (real git, review P1 rounds 2-3)',
   });
 });
 describe('the publication gate message scan and locality fetch (review P2 ntJt/ntJj)', () => {
+  // The FAKE token is constructed at runtime from fragments — a matching
+  // literal in the source (or any commit message) would trip the repo's
+  // own denylist scan (generic-api-key), which is the very check this
+  // gate mirrors. Fragmented like denylist.test.ts's corpus.
+  const fakeToken = ['ghp', '0123456789abcdef'].join('_');
   test('(f) a credential in the commit SUBJECT refuses — rule named, token never quoted, pushRef never called', async () => {
     const f = await publicationFixture();
     try {
@@ -431,7 +436,7 @@ describe('the publication gate message scan and locality fetch (review P2 ntJt/n
             'commit',
             '--quiet',
             '-m',
-            'resolve: set GITHUB_TOKEN=ghp_0123456789abcdef for deploy',
+            `resolve: set GITHUB_TOKEN=${fakeToken} for deploy`,
           );
         },
       );
@@ -449,7 +454,7 @@ describe('the publication gate message scan and locality fetch (review P2 ntJt/n
       if (result.status === 'needs-human') {
         expect(result.reason).toContain('github-pat');
         expect(result.reason).toContain('commit message');
-        expect(result.reason).not.toContain('ghp_0123456789abcdef');
+        expect(result.reason).not.toContain(fakeToken);
       }
       expect(f.pushes).toEqual([]);
       expect(lastComponents()).toBeDefined(); // the scan ran (and flagged)
@@ -473,7 +478,7 @@ describe('the publication gate message scan and locality fetch (review P2 ntJt/n
             '-m',
             'resolve cleanly',
             '-m',
-            'rotated key: GITHUB_TOKEN=ghp_0123456789abcdef',
+            `rotated key: GITHUB_TOKEN=${fakeToken}`,
           );
         },
       );
@@ -490,7 +495,7 @@ describe('the publication gate message scan and locality fetch (review P2 ntJt/n
       expect(result.status).toBe('needs-human');
       if (result.status === 'needs-human') {
         expect(result.reason).toContain('github-pat');
-        expect(result.reason).not.toContain('ghp_0123456789abcdef');
+        expect(result.reason).not.toContain(fakeToken);
       }
       expect(f.pushes).toEqual([]);
     } finally {
