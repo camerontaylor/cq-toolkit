@@ -532,21 +532,19 @@ export function findingTriage(rows: readonly TriageRowFile[]): Record<string, un
   return result;
 }
 
-/** `collections.Counter` sorted by key: Python sorts str keys by code point. */
-function sortedCounts(counts: ReadonlyMap<string, number>): Record<string, number> {
+/** `collections.Counter` sorted by key: Python sorts str keys by code point
+ * and re-inserts into a FRESH dict in that order. The emitted mapping must
+ * therefore carry the sorted insertion order itself: a plain-object hop
+ * re-enumerates integer-like keys numerically, publishing {"2":1,"10":1}
+ * where Python publishes {"10":1,"2":1} (audit klv-).
+ */
+function sortedCounts(counts: ReadonlyMap<string, number>): JsonObject {
   const keys = [...counts.keys()].sort(compareCodePoints);
-  // Own-property writes: a `__proto__` status is an ordinary Counter key in
-  // Python; an assignment would set the prototype and silently drop the key.
-  const sorted: Record<string, number> = {};
-  for (const key of keys) {
-    Object.defineProperty(sorted, key, {
-      value: counts.get(key) as number,
-      enumerable: true,
-      writable: true,
-      configurable: true,
-    });
-  }
-  return sorted;
+  // Counter values are Python ints: the lossless JsonValue models them as
+  // JsonNumber (serialising as plain digits), never a rounded JS number.
+  return new JsonObject(
+    keys.map((key) => [key, JsonNumber.int(BigInt(counts.get(key) ?? 0))] as const),
+  );
 }
 
 const TIMERS = [

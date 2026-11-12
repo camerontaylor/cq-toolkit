@@ -429,11 +429,44 @@ describe('finding triage oracle', () => {
     });
   }
 
+  test('numeric status counters publish in code-point order, not numeric order', () => {
+    // Audit klv- (reproduced at 888fbd1d3): Python `dict(sorted(counter))`
+    // re-inserts "2" after "10" by code point ("1" < "2"), and the fresh
+    // dict keeps that insertion order in the bytes ({"10":1,"2":1}). The
+    // plain-object hop re-enumerated integer-like keys numerically and
+    // published {"2":1,"10":1} regardless of the sort. The counters now
+    // emit as an insertion-ordered JsonObject so the exact-byte serializer
+    // preserves the producer's order.
+    const outcome = findingTriage([
+      {
+        name: 'a.json',
+        bytes: new TextEncoder().encode(
+          '{"status":"10","target":"t","canonical_id":"c","finding":{"id":"i","title":"x","severity":"s"}}',
+        ),
+      },
+      {
+        name: 'b.json',
+        bytes: new TextEncoder().encode(
+          '{"status":"2","target":"t","canonical_id":"c","finding":{"id":"i","title":"x","severity":"s"}}',
+        ),
+      },
+    ]);
+    const serialized = pythonJsonText(outcome, {
+      asciiOnly: true,
+      sortKeys: false,
+      keyOrder: 'insertion',
+      indent: null,
+    });
+    expect(serialized).toContain('"counts":{"10":1,"2":1}');
+  });
+
   test('a missing row file is an OSError-class row error', () => {
     const outcome = findingTriage([{ name: 'gone.json', bytes: null }]);
     expect(outcome['error_count']).toBe(1);
     expect(outcome['errors']).toEqual([{ file: 'gone.json', error: 'OSError' }]);
-    expect(outcome['counts']).toEqual({});
+    // Counters are a serializer-native JsonObject now (audit klv-); empty is
+    // still an empty mapping, just not a plain JS object.
+    expect((outcome['counts'] as JsonObject).entries).toEqual([]);
     expect(outcome['counts_complete']).toBe(false);
   });
 

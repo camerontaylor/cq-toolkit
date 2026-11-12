@@ -166,8 +166,15 @@ export function publishSummary(
       // still Python's int; a float lexeme never qualifies). The gh seam
       // returns null for a failed process; the producer swallows those.
       const stdout = effects.ghTitle(repo as string, ghPr);
-      const title = stdout === null ? null : stdout.trim();
-      item['title'] = title === '' ? null : title;
+      const fetched = stdout === null ? null : stdout.trim();
+      // Python `item["title"] = item["title"] or (gh_title(...) or None)`:
+      // the assignment substitutes only when the lookup YIELDS something
+      // truthy. A failed or blank gh call yields falsy and `or` falls
+      // through to the EXISTING falsy title, so '' / {} / 0 / false survive
+      // (audit klwA); only a null pr title keeps its cache-miss None here.
+      if (fetched !== null && fetched !== '') {
+        item['title'] = fetched;
+      }
     }
   }
 

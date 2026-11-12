@@ -563,6 +563,47 @@ describe('publish-full oracle replay through publishSummary', () => {
     expect(result.text).not.toContain('"title":""');
   });
 
+  it('a failed gh lookup keeps the cached falsy title instead of clobbering null', () => {
+    // Audit klwA (reproduced at 888fbd1d3): Python's
+    // `item["title"] = item["title"] or (gh_title(...) or None)` substitutes
+    // only when the lookup YIELDS a truthy title; a failed/blank call is
+    // falsy and `or` falls through to the EXISTING falsy title. The port
+    // clobbered the cached falsy value with null on failure, and the
+    // cached-{} arm is newly reachable since the lossless cache landed.
+    const previous = '{"last_tick":"x","pending_items":[{"repo":"r","pr":5,"title":{}}]}';
+    const core = {
+      last_tick: 'x',
+      pending_items: [{ repo: 'r', pr: 5, title: null }],
+      starts_cap: 8,
+      generated_at: 'g',
+    };
+    const queue = { items: [], starts: [], last_tick: 'x' } as unknown as CrqRecord;
+    const result = publishSummary(
+      core,
+      queue,
+      {},
+      {},
+      {
+        root: '/state',
+        xdgStateHome: '/xdg',
+        now: 0,
+        previousBytes: new TextEncoder().encode(previous),
+        inbox: {
+          entries: [],
+          readResult: () => null,
+          hasResult: () => false,
+          hasProgress: () => false,
+        },
+        triageRows: [],
+        systemd: { error: 'x' },
+        systemdClock: { realtime: 0, monotonic: 0 },
+        ghTitle: () => null,
+        readReceipt: () => null,
+      },
+    );
+    expect(result.text).toContain('"title":{}');
+  });
+
   it('preserves integer-like context_error key order byte-exactly', () => {
     // Audit igxr (reproduced at c00f2109): Python dicts keep insertion order
     // for integer-like string keys (json.loads preserves the raw lexeme
