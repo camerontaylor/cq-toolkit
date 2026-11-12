@@ -763,3 +763,63 @@ class RecoverFactoryTests(ControllerFixture):
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(json.loads(path.read_text())["phase"],
                          "activation_pending")
+
+
+class ControllerLockModeTests(ControllerFixture):
+    """The controller lock's mode never depends on the ambient umask."""
+
+    def lock_path(self):
+        return self.runner / "state" / dc.LOCK_NAME
+
+    @staticmethod
+    def mode_of(path):
+        return path.stat().st_mode & 0o777
+
+    def test_lock_is_created_0600_under_a_permissive_umask(self):
+        path = self.lock_path()
+        self.assertFalse(path.exists())
+        previous = os.umask(0o002)
+        try:
+            with self.effects.controller_lock():
+                self.assertEqual(self.mode_of(path), 0o600)
+        finally:
+            os.umask(previous)
+        # The guest proof saw an 0664 lock from exactly this umask.
+        self.assertEqual(self.mode_of(path), 0o600)
+
+    def test_a_preexisting_group_readable_lock_is_normalised_to_0600(self):
+        path = self.lock_path()
+        path.parent.mkdir(parents=True)
+        path.write_text("")
+        path.chmod(0o664)
+        with self.effects.controller_lock():
+            self.assertEqual(self.mode_of(path), 0o600)
+        self.assertEqual(self.mode_of(path), 0o600)
+
+    def test_a_second_acquisition_is_refused_with_the_busy_lock_text(self):
+        with self.effects.controller_lock():
+            with self.assertRaisesRegex(dc.Refused, "controller lock busy"):
+                with self.effects.controller_lock():
+                    self.fail("a second acquisition must be refused")
+
+    def test_context_manager_contract_is_unchanged(self):
+        path = self.lock_path()
+        path.parent.mkdir(parents=True)
+        path.write_text("retained\n")
+        path.chmod(0o600)
+        with self.assertRaises(RuntimeError):
+            with self.effects.controller_lock():
+                descriptor = os.open(path, os.O_RDONLY)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(descriptor)
+                raise RuntimeError("block failed")
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+        self.assertEqual(path.read_text(), "retained\n")
+        self.assertEqual(self.mode_of(path), 0o600)
