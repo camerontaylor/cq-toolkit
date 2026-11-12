@@ -377,12 +377,14 @@ export const GITLEAKS_TIMEOUT_MS = 10 * 60 * 1000;
  * are written one-per-file into a scratch dir OUTSIDE the worktree, gitleaks
  * runs over them (`detect --no-git`, JSON report, redacted), and findings
  * map back to components with absolute line numbers. The scratch dir is
- * removed afterwards. Exit 0 = clean unless the report contains findings;
- * exit 1 = findings (the report is the evidence); ANY other exit is a run
- * FAULT (thrown — the caller refuses the upload, never uploads unscanned).
- * An exit 1 with an unreadable report is also a fault: a claimed finding
- * without readable evidence cannot gate. A report row that cannot be mapped
- * back to its component is a fault at every exit code, including 0.
+ * removed afterwards. Exit 0 with a readable empty report = clean (a real
+ * gitleaks run always writes its report, even when empty); exit 1 =
+ * findings (the report is the evidence); ANY other exit is a run FAULT
+ * (thrown — the caller refuses the upload, never uploads unscanned). A
+ * missing or unreadable report is a fault at EVERY exit code, including 0:
+ * a clean verdict without its evidence cannot gate. A run that reports a
+ * timeout is a fault even alongside exit 0. A report row that cannot be
+ * mapped back to its component is a fault at every exit code, including 0.
  */
 export function makeGitleaksDefaultsScanner(effects: GitleaksEffects): DiffSecretScanner {
   return async (components, options): Promise<ComponentScan[]> => {
@@ -396,6 +398,7 @@ export function makeGitleaksDefaultsScanner(effects: GitleaksEffects): DiffSecre
         });
       }
       const reportPath = join(scratch, 'report.json');
+      const timeoutMs = Math.max(1, Math.min(GITLEAKS_TIMEOUT_MS, options?.timeoutMs ?? Infinity));
       const result = await effects.runCommand(
         'gitleaks',
         [
@@ -410,23 +413,28 @@ export function makeGitleaksDefaultsScanner(effects: GitleaksEffects): DiffSecre
           reportPath,
           '--redact',
         ],
-        { timeoutMs: Math.max(1, Math.min(GITLEAKS_TIMEOUT_MS, options?.timeoutMs ?? Infinity)) },
+        { timeoutMs },
       );
       if (result.exitCode !== 0 && result.exitCode !== 1) {
         throw new Error(
           `gitleaks failed to run (exit ${result.exitCode === null ? 'none (killed)' : String(result.exitCode)}) — ${result.stderr.trim().slice(0, 300)}`,
         );
       }
+      // A TIMEOUT means the scan did not complete: a verdict from an
+      // incomplete run cannot gate, even when the exit code looks clean.
+      const exitLabel = result.exitCode === null ? 'none (killed)' : String(result.exitCode);
+      if (result.timedOut) {
+        throw new Error(
+          `gitleaks timed out after ${String(timeoutMs)}ms (exit ${exitLabel}) — the upload is refused`,
+        );
+      }
       let report: unknown;
       try {
         report = JSON.parse(await readFile(reportPath, 'utf8'));
       } catch {
-        if (result.exitCode === 1) {
-          throw new Error(
-            'gitleaks reported findings but wrote an unreadable report — the upload is refused',
-          );
-        }
-        report = [];
+        throw new Error(
+          `gitleaks wrote no readable report (exit ${exitLabel}) — the upload is refused`,
+        );
       }
       if (!Array.isArray(report)) {
         throw new Error('gitleaks report was not a JSON array — the upload is refused');
