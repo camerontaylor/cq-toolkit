@@ -79,10 +79,30 @@ function main() {
       .readFileSync("/proc/sys/kernel/random/boot_id", "utf8")
       .trim(),
   };
+  // writeSync may perform a partial write, so loop until every byte of the
+  // encoded record lands; if the write cannot finish, restore the original
+  // file length so no partial JSON line is left for the next run to parse.
+  const payload = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
   const descriptor = fs.openSync(completions, "a");
+  const originalLength = fs.fstatSync(descriptor).size;
+  let written = 0;
   try {
-    fs.writeSync(descriptor, `${JSON.stringify(record)}\n`);
+    while (written < payload.length) {
+      const count = fs.writeSync(
+        descriptor,
+        payload,
+        written,
+        payload.length - written,
+      );
+      if (!Number.isInteger(count) || count <= 0) {
+        throw new Error("completion record write made no progress");
+      }
+      written += count;
+    }
     fs.fsyncSync(descriptor);
+  } catch (error) {
+    fs.ftruncateSync(descriptor, originalLength);
+    throw error;
   } finally {
     fs.closeSync(descriptor);
   }
