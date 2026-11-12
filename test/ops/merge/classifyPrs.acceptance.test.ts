@@ -4,9 +4,12 @@
 // as acceptable review evidence: plain exact-head PASS signals, the row-6
 // reviewer rules, and the row-7 verdict states.
 import { describe, expect, test } from 'vitest';
+import { readCqEnv } from '../../../src/config/env.js';
 import { defaultClassifyPrConfig } from '../../../src/ops/merge/classify.config.js';
 import { classifyPr } from '../../../src/ops/merge/classifyPrs.js';
+import { registry } from '../../../src/ops/merge/registry.js';
 import {
+  HEAD,
   PENDING_MS,
   SETTLED_MS,
   agentMarker,
@@ -211,13 +214,62 @@ describe('plain independent review acceptance', () => {
         classifyPr(
           candidate({
             headRefOid: 'a'.repeat(40),
-            reviews: [approved({ state: 'COMMENTED', body })],
+            // This review carries no head binding: the comment-body PASS is
+            // not acceptance when the review cannot prove it covers HEAD.
+            reviews: [approved({ state: 'COMMENTED', body, commitOid: null })],
           }),
           PENDING_MS,
         ).reason,
       ).toBe('no_acceptable_review');
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// #1213 — an absent headRefOid must fail closed exactly like an explicit null
+// ---------------------------------------------------------------------------
+
+describe('classifyPr — a missing head is not a wildcard (#1213)', () => {
+  const reviewed = approved({ commitOid: HEAD });
+
+  test('an omitted headRefOid with a post-commit APPROVED review awaits', () => {
+    const { headRefOid: _omitted, ...headless } = candidate({ reviews: [reviewed] });
+    expect(classifyPr(headless, SETTLED_MS)).toMatchObject({
+      verdict: 'awaiting',
+      reason: 'no_acceptable_review',
+    });
+  });
+
+  test('an explicit null head classifies identically to an omitted head', () => {
+    const { headRefOid: _omitted, ...headless } = candidate({ reviews: [reviewed] });
+    expect(classifyPr({ ...headless, headRefOid: null }, SETTLED_MS)).toEqual(
+      classifyPr(headless, SETTLED_MS),
+    );
+  });
+
+  test('a matching head still accepts the same review (head-bound case preserved)', () => {
+    expect(classifyPr(candidate({ reviews: [reviewed] }), SETTLED_MS)).toMatchObject({
+      verdict: 'eligible',
+      reason: 'settle_window_elapsed',
+    });
+  });
+
+  test('a review bound to a different head is still rejected', () => {
+    expect(
+      classifyPr(candidate({ reviews: [approved({ commitOid: 'b'.repeat(40) })] }), SETTLED_MS),
+    ).toMatchObject({ verdict: 'awaiting', reason: 'no_acceptable_review' });
+  });
+
+  test('the dispatched merge.classifyPrs op fails closed on an omitted headRefOid', async () => {
+    const entry = registry.find((candidate) => candidate.name === 'merge.classifyPrs');
+    if (entry === undefined) throw new Error('merge.classifyPrs is not registered');
+    const op = await entry.importer({ cqEnv: readCqEnv({}) });
+    const { headRefOid: _omitted, ...headless } = candidate({ reviews: [reviewed] });
+    await expect(op({ candidate: headless, nowMs: SETTLED_MS })).resolves.toMatchObject({
+      status: 'ok',
+      value: { verdict: 'awaiting', reason: 'no_acceptable_review' },
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
