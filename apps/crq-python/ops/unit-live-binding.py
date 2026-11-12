@@ -173,7 +173,10 @@ class SubprocessSystemd:
         return number
 
     def _unit(self, unit):
-        if not isinstance(unit, str) or completion.UNIT_RE.fullmatch(unit) is None:
+        # ``show`` is the adapter's read port: it observes the unit under test
+        # and its timer/path activators, so it uses the read grammar.
+        if not isinstance(unit, str) \
+                or completion.READ_UNIT_RE.fullmatch(unit) is None:
             raise LiveBindingRefused("invalid unit name")
 
     def _execute(self, command, *, timeout):
