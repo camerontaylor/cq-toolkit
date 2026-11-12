@@ -96,8 +96,10 @@ import {
 // and a later ambient env change cannot alter queue configuration. The
 // explicit `undefined` keeps the transport unbound while the default-parameter
 // rule applies the run's snapshot when the wiring carries none (library
-// behavior preserved). The other importers in the table below do NOT pass
-// snapshots here — their ops read `currentCqEnv()` themselves.
+// behavior preserved). Among the other importers, the five driver-factory
+// sites (addressMany, address, run, fixItem, fixFinding) also forward
+// `wiring.cqEnv` into `createDriverFactory` (driver PR #1568); the rest do
+// NOT pass snapshots — their ops read `currentCqEnv()` themselves.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
