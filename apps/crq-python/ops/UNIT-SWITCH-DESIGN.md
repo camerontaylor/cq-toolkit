@@ -89,6 +89,70 @@ class/CLI/capability wiring, real per-unit runtime-bound completion,
 exhaustive activation discovery, shared root/lock coverage, drain races, and
 restart/reboot/power-loss behavior remain separate acceptance work.
 
+## Unwired production adapter slice
+
+`ops/unit-adapter.py` now implements the injected seam with an injected
+`SystemdPort`, `IdentityPort`, `CapabilityPort`, `CompletionPort` and
+queue-drain observation. It reuses `render_service`, derives its declared
+six-unit inventory from the pinned template blobs, and reuses the guest
+snapshot payload's schema-version-1 top-level keys and state shapes. It is not
+wired to the CLI, has no production factory or live systemd binding, and
+refuses Node by default because no machine-readable artifact capability
+declaration exists.
+
+The slice remains fail-closed: discovery must enumerate the exact declared
+paths and units and report no foreign activators; unknown entries, missing
+completion or queue observations, live jobs, malformed cgroups, non-advancing
+or foreign completion evidence, and unsupported snapshot metadata refuse before
+mutation or at the fenced boundary. Restore stages the prior service behind the
+durable mask; only `restore_activation` releases it, and the caller must have
+persisted the pending journal first. The controller lock remains
+checkout-local, and the adapter claims no root, caller, arbitrary activator or
+production completion coverage. `test_unit_adapter.py` exercises both
+runtimes, forward and recovery, real temporary files and injected host ports
+only.
+
+The completion budget is derived from the declared topology rather than a
+fixed default. Preflight requires the prior timer to be active, parses the
+committed timer schedule and service start timeout, and refuses when the
+declared bound exceeds the supported maximum or the caller's deadline is below
+it. An inactive timer has no bounded second invocation and refuses before
+snapshot or mutation; the 6-hour backfill and 45-minute publisher shapes exceed
+the default supported maximum, and an oneshot without a declared start timeout
+(the watchdog template) has no bounded completion and refuses. A
+`Type=simple` service has no declared invocation execution bound either, so
+preflight refuses that topology rather than treating its startup timeout as a
+completion bound; restore still rejects a failed simple service if a recovery
+snapshot supplies one. The verified Node artifact tree must also
+resolve to the rendered canonical ExecStart tree; an alternate tree that
+passes manifest verification is rejected. Staged mode, ownership and xattrs are
+validated before the atomic release, so a tampered staged file refuses while
+the durable mask is still in place. A forward fence re-checks service bytes
+against the snapshot (or the verified rendered target after release); a fresh
+recovery adapter does not require the post-switch service to equal the prior
+snapshot. `restore_activation` rejects a failed service and requires a simple
+service to be active. Drain diagnostics distinguish queued jobs, owned
+processes, active services and active activators, and malformed `list-jobs`
+observations refuse. A pre-release refusal at `start` leaves the mask in place,
+but the controller's `activation_pending` gate still refuses automatic restore
+after any `start` attempt; it records `recovery_required` rather than claiming
+a rollback. The adapter does not change that controller contract.
+
+The installed timer file must hash-match the pinned template before its
+schedule is used, so preflight cannot certify a bound for a timer the
+transaction will not install. Service start commands use the declared
+`TimeoutStartSec` plus the completion margin (`_service_start_timeout`) rather
+than a fixed 60-second command timeout; the same applies to the restore service
+start. A blocking `systemctl start` for a healthy 10-minute oneshot therefore
+does not fail the transaction at 60 seconds.
+
+Restore applies the saved service active/inactive policy and verifies it before
+releasing any timer or path activator. A timer or path that then starts the
+service is a normal new activation and is not stopped by the recovery. This
+avoids killing a path-triggered publisher run after the path is restarted.
+Injected capability and completion-sequence failures are converted to refusals
+in preflight, so a port exception cannot bypass the adapter's error type.
+
 ## Proposed stable-manager sequence
 
 1. Under the existing controller lock, validate the unit and target, artifact
