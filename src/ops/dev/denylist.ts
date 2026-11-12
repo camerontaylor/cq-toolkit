@@ -375,19 +375,23 @@ const GIT_C_ESCAPES: Record<string, number> = {
   '"': 0x22,
 };
 
+const utf8 = new TextEncoder();
+
 /**
  * Decode Git's C-quoted pathname form (`core.quotePath`, review P2 on PR
- * #1628): git wraps unusual pathnames in double quotes and escapes
- * non-ASCII and control bytes as `\NNN` octal (plus the C letter
- * escapes) — the raw quoted string is NOT the path, and feeding it to the
- * scan verbatim would let a path-scoped rule (`^config/`) miss content
- * under an unusual-but-scoped name. Unquoted lines pass through as-is
- * (quotePath=false repos emit raw UTF-8, which the patch already carries
- * as text). A quoted form that does not decode cleanly — an unknown
- * escape, a stray high byte, bytes that are not valid UTF-8 — THROWS
- * naming `source`: a path the parser cannot name is a component the gate
- * cannot attribute, and unattributable content must fault, never pass
- * under a mangled name.
+ * #1628; literal-UTF-8 tolerance added for review P2 p52p on #1641): git
+ * wraps unusual pathnames in double quotes and escapes non-ASCII and
+ * control bytes as `\NNN` octal (plus the C letter escapes) — the raw
+ * quoted string is NOT the path, and feeding it to the scan verbatim
+ * would let a path-scoped rule (`^config/`) miss content under an
+ * unusual-but-scoped name. Literal UTF-8 inside the quotes is also
+ * decoded (the core.quotePath=false form — git quotes for the `"` but
+ * leaves UTF-8 raw; the publication gate pins quotePath on, so this is
+ * tolerance for foreign patches). Unquoted lines pass through as-is. A
+ * quoted form that does not decode cleanly — an unknown escape, bytes
+ * that are not valid UTF-8 — THROWS naming `source`: a path the parser
+ * cannot name is a component the gate cannot attribute, and
+ * unattributable content must fault, never pass under a mangled name.
  */
 function decodeGitQuotedPath(raw: string, source: string): string {
   if (!raw.startsWith('"') || !raw.endsWith('"')) return raw;
@@ -398,12 +402,16 @@ function decodeGitQuotedPath(raw: string, source: string): string {
     const ch = inner[index] as string;
     if (ch !== '\\') {
       const code = inner.codePointAt(index) as number;
-      // A literal high codepoint inside the quotes is not a form git
-      // produces — refuse it rather than guess a truncation.
+      // Literal non-ASCII inside the quotes is the core.quotePath=false
+      // form (git C-quotes for the `"` but leaves UTF-8 raw — review P2
+      // p52p, PR #1641): accept it, re-encoded into the byte stream so
+      // octal escapes and literal UTF-8 mix losslessly. The publication
+      // gate additionally pins quotePath on, so this is tolerance for
+      // foreign patches, not a guess about our own diffs.
       if (code > 0x7f) {
-        throw new Error(
-          `${source}: undecodable git pathname escape in ${JSON.stringify(raw)} — refusing the unattributable component`,
-        );
+        for (const b of utf8.encode(ch)) bytes.push(b);
+        index += ch.length;
+        continue;
       }
       bytes.push(code);
       index += 1;

@@ -582,3 +582,65 @@ describe('the publication gate message scan and locality fetch (review P2 ntJt/n
     }
   });
 });
+
+describe('the publication gate vs refs/replace substitutions (review P1 p528)', () => {
+  test('a worker-planted replacement ref cannot mask a secret-bearing resolution — the gate reads the TRUE commit and refuses', async () => {
+    const f = await publicationFixture();
+    try {
+      const fakeToken = ['ghp', 'substitutedtoken123'].join('_');
+      const driver = new GitWorkerDriver(
+        { origin: f.origin, repoRoot: f.repoRoot },
+        async (worktree) => {
+          // The TRUE resolution: the credential hides in the commit message.
+          await writeFile(join(worktree, 'base.txt'), 'baseline\nresolved cleanly\n');
+          await gitIn(worktree, 'add', '-A');
+          await gitIn(
+            worktree,
+            'commit',
+            '--quiet',
+            '-m',
+            `resolve: rotate GITHUB_TOKEN=${fakeToken} now`,
+          );
+          const resolution = await gitIn(worktree, 'rev-parse', 'HEAD');
+          // The substitution: a clean twin (same base, innocent message and
+          // content), planted behind refs/replace/<resolution>.
+          const base = await gitIn(worktree, 'rev-parse', 'refs/heads/cq-merge/pr-44^');
+          const twinTree = await gitIn(worktree, 'rev-parse', `${resolution}^{tree}`);
+          const twin = await gitIn(
+            worktree,
+            'commit-tree',
+            twinTree,
+            '-p',
+            base,
+            '-m',
+            'resolve cleanly (nothing to see here)',
+          );
+          await gitIn(worktree, 'replace', resolution, twin);
+        },
+      );
+      const { scanner, lastComponents } = recordingScan(tokenScanner);
+      const op = makeResolveConflictOp({
+        effects: f.effects,
+        drivers: {
+          resolve: (): ResolvedDriver => ({ driver, lane: 'ai-sdk', modelSpec: MODEL_SPEC }),
+        },
+        loadPrompt: fakeLoadPrompt,
+        scan: scanner,
+      });
+      const result = await run(f, op);
+      // With replacements disabled, every gate read saw the TRUE commit:
+      // the message scan flagged it, and the clean twin was never read —
+      // let alone published.
+      expect(result.status, JSON.stringify(result, null, 2)).toBe('needs-human');
+      if (result.status === 'needs-human') {
+        expect(result.reason).toContain('github-pat');
+        expect(result.reason).toContain('commit message');
+        expect(result.reason).not.toContain(fakeToken);
+      }
+      expect(f.pushes).toEqual([]);
+      expect(lastComponents()).toBeDefined();
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+});

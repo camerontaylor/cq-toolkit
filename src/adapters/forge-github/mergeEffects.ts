@@ -100,13 +100,15 @@ const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
  *       (round 3: the documented shapes carry no flags, so `worktree
  *       remove --force <path>` is refused — the real impl deliberately
  *       omits --force)
- *   push <remote> <src:dst>                   — an EXPLICIT src:dst refspec
- *       is required with BOTH halves non-empty (round 3: `:dst` deletes a
- *       remote branch — refused), no '+' force marker (round 2 — I3
- *       forbids force, period), NO flags anywhere in the tail (round 3:
- *       the documented shape carries none, so `push origin --force
- *       feat:x` cannot ride a discarded-flag blind spot), and the
- *       destination must not be the protected branch
+ *   push --no-follow-tags <remote> <src:dst>  — the EXACT hardened shape
+ *       (review P1 p522, PR #1641): the flag pins push.followTags OFF (a
+ *       repo/user config could otherwise publish annotated tags — and a
+ *       credential in a tag annotation bypasses every scan), an EXPLICIT
+ *       src:dst refspec is required with BOTH halves non-empty (`:dst`
+ *       deletes a remote branch — refused), no '+' force marker (I3
+ *       forbids force, period), NO flag beyond the hardened prefix
+ *       (`--force` cannot follow it), and the destination must not be the
+ *       protected branch. The flag-less historical shape is refused.
  *   gh pr merge <n> --merge [--match-head-commit <sha>]  — the ONLY merge
  *       method (I3); the head-commit pin is allowed only as a 40-hex sha
  *       (review-debt #186)
@@ -204,24 +206,33 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
     }
     case 'push': {
       const tail = rest.slice(1);
-      // NO FLAGS IN THE TAIL (round 3 — the bypass is closed): the
-      // documented push shape carries none, and the previous filter
-      // silently DISCARDED flags before the checks — `push origin --force
-      // feat:refs/heads/feat` rode straight through. Any `-`-prefixed
-      // token (the remote slot included) is refused on sight.
-      for (const arg of tail) {
+      // EXACTLY ONE FLAG, FIRST (review P1 p522, PR #1641): the push must
+      // lead with --no-follow-tags — repo/user `push.followTags` would
+      // otherwise publish annotated tags alongside the explicit refspec,
+      // and a credential in a tag annotation bypasses every gate scan.
+      // The flag-less historical shape is refused like any other
+      // undocumented one, and no SECOND flag can ride (the round-3 rule
+      // stands: any further `-`-prefixed token is refused on sight —
+      // `--force` cannot follow the hardened prefix).
+      if (tail[0] !== '--no-follow-tags') {
+        throw new UnsafeMergeArgsError(
+          args,
+          `the push shape must lead with --no-follow-tags (push.followTags would publish unscanned annotated tags) — refused ${JSON.stringify(tail[0] ?? '')}`,
+        );
+      }
+      for (const arg of tail.slice(1)) {
         if (arg.startsWith('-')) {
           throw new UnsafeMergeArgsError(
             args,
-            `flags are not part of the documented push shape — refused ${JSON.stringify(arg)}`,
+            `flags beyond --no-follow-tags are not part of the documented push shape — refused ${JSON.stringify(arg)}`,
           );
         }
       }
-      // tail[0] is the REMOTE; the rest are the refspecs. Fewer than two
-      // tokens means NO explicit refspec (round 1): push.default would
-      // choose the destination — possibly the protected branch.
-      if (tail.length < 2) throw unknown();
-      for (const refspec of tail.slice(1)) {
+      // tail[1] is the REMOTE; the rest are the refspecs. Fewer than
+      // three tokens means NO explicit refspec (round 1): push.default
+      // would choose the destination — possibly the protected branch.
+      if (tail.length < 3) throw unknown();
+      for (const refspec of tail.slice(2)) {
         if (refspec.startsWith('+')) {
           // Force-marker bypass, closed (round 2): a '+'-marked PUSH
           // refspec is a force-push — I3 forbids force outright, whatever
@@ -648,8 +659,10 @@ export interface RealMergeEffectsOpts {
  *   - readBaseRef:  `gh pr view <pr> --json baseRefName,baseRefOid` (the
  *                   forge base-ref read + the base tip — review-debt #193,
  *                   tip for the gate's topology proof, review P1 round 3)
- *   - pushRef:      `git -C <fromPath> push origin <src:dst>` (an explicit
- *                   refspec — round 2: bare/symbolic forms are refused)
+ *   - pushRef:      `git -C <fromPath> push --no-follow-tags origin
+ *                   <src:dst>` (an explicit refspec — round 2: bare/
+ *                   symbolic forms are refused; the flag pins
+ *                   push.followTags off, review P1 p522)
  *   - diffPatch:    `git -C <repoRoot> diff <HARDENED_DIFF_FLAGS>
  *                   --unified=0 <from> <to>` (both full 40-hex shas — the
  *                   hardened read-only patch read behind the resolver's
@@ -692,6 +705,24 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   const gitRunnerOpts = {
     ...(opts.gitBin !== undefined ? { bin: opts.gitBin } : {}),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    // OBJECT-GRAPH HARDENING (review P1 p528, PR #1641): every gate read
+    // — validate/parents/diff/message/ancestry/presence — and the push
+    // must see the TRUE objects, never attacker-chosen refs/replace
+    // substitutions (a worker can map a secret-bearing resolution to a
+    // clean replacement commit; without this the gate would read the
+    // clean twin). Also CONFIG-PINNED QUOTING (review P2 p52p):
+    // core.quotePath is forced on for this runner so the diff's header
+    // paths are always C-quoted deterministically (a repo setting
+    // quotePath=false would otherwise emit literal UTF-8 inside quotes
+    // the scanner must not have to guess about). The same layering
+    // src/ops/dev/internal/snapshot.ts uses, via makeGhRunner's env
+    // merge.
+    env: {
+      GIT_NO_REPLACE_OBJECTS: '1',
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'core.quotePath',
+      GIT_CONFIG_VALUE_0: 'true',
+    },
   };
   const gh = safeRunner(opts.run ?? makeGhRunner(ghRunnerOpts), guardOpts);
   const git = safeRunner(
@@ -836,8 +867,13 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   const retargetBase = (pr: number, newBase: string): Promise<GhResult> =>
     gh(['pr', 'edit', String(pr), '--base', newBase]);
 
+  // The publication/executor push (review P1 p522, PR #1641): the argv is
+  // pinned by safeArgs to lead with --no-follow-tags — repo/user
+  // `push.followTags` would otherwise publish ANNOTATED TAGS alongside the
+  // explicit branch refspec, and a credential in a tag annotation bypasses
+  // every scan this family runs.
   const pushRef = (ref: string, fromPath: string): Promise<GhResult> =>
-    git(['-C', fromPath, 'push', 'origin', ref]);
+    git(['-C', fromPath, 'push', '--no-follow-tags', 'origin', ref]);
 
   // The read-only patch read (issue #1193): the argv shape is pinned by
   // safeArgs to HARDENED_DIFF_FLAGS + --unified=0 plus two 40-hex shas —

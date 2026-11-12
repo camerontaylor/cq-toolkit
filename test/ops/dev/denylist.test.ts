@@ -748,3 +748,30 @@ describe('addedLineComponents — git C-quoted pathnames (core.quotePath, review
     expect(() => addedLineComponents(patch, 'gate')).toThrow(/not valid UTF-8/);
   });
 });
+
+describe('addedLineComponents — literal UTF-8 inside quoted paths (quotePath=false form, review P2 p52p)', () => {
+  test('a quoted path with a literal é and an escaped quote decodes — no false refusal', () => {
+    // git C-quotes for the `"` even with core.quotePath=false, leaving
+    // non-ASCII raw: "b/config/café\"note.txt"
+    const patch = [
+      'diff --git "a/config/café\\"note.txt" "b/config/café\\"note.txt"',
+      '--- "a/config/café\\"note.txt"',
+      '+++ "b/config/café\\"note.txt"',
+      '@@ -0,0 +1,1 @@',
+      '+const token = "sk-live-cafe";',
+    ].join('\n');
+    const components = addedLineComponents(patch, 'gate');
+    expect(components).toEqual([
+      {
+        component: 'config/café"note.txt',
+        text: 'const token = "sk-live-cafe";',
+        path: 'config/café"note.txt',
+      },
+    ]);
+    // And a path-scoped rule fires on the decoded name.
+    const scans = scanComponents(components, [
+      { id: 'config-token', description: 'd', regex: 'sk-live-', path: '^config/' },
+    ]);
+    expect(scans[0]?.hits).toEqual([{ ruleId: 'config-token', lines: [1] }]);
+  });
+});
