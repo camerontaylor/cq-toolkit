@@ -685,20 +685,21 @@ describe('safeArgs round-1193-r3: the ancestry read shape (merge-base --is-ances
 describe('safeArgs round-1193-r4: the message read and object-presence shapes (P2 ntJt/ntJj)', () => {
   const resolved = sha('c');
 
-  test('the EXACT log shape passes — -1 --format=%B plus one full 40-hex sha', () => {
-    expect(safeArgs(['-C', '/repo', 'log', '-1', '--format=%B', resolved])).toEqual([
-      '-C',
-      '/repo',
-      'log',
-      '-1',
-      '--format=%B',
-      resolved,
-    ]);
-    // Message-shaping drift (patches, ranges, extra commits) is refused.
+  test('the EXACT log shape passes — -1 --encoding=UTF-8 --format=%B plus one full 40-hex sha', () => {
+    expect(
+      safeArgs(['-C', '/repo', 'log', '-1', '--encoding=UTF-8', '--format=%B', resolved]),
+    ).toEqual(['-C', '/repo', 'log', '-1', '--encoding=UTF-8', '--format=%B', resolved]);
+    // Message-shaping drift (patches, ranges, extra commits) is refused,
+    // and the encoding is PINNED: the old flag-less shape and any other
+    // encoding must not pass (review P1 q2-s).
     expect(() => safeArgs(['log', '-1', '--format=%b', resolved])).toThrow(UnsafeMergeArgsError);
     expect(() => safeArgs(['log', '-p', '--format=%B', resolved])).toThrow(UnsafeMergeArgsError);
     expect(() => safeArgs(['log', '-1', '--format=%B', 'abc123'])).toThrow(UnsafeMergeArgsError);
     expect(() => safeArgs(['log', '--format=%B', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['log', '-1', '--format=%B', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['log', '-1', '--encoding=UTF-16LE', '--format=%B', resolved])).toThrow(
+      UnsafeMergeArgsError,
+    );
   });
 
   test('the EXACT cat-file shape passes — -e plus one full 40-hex sha', () => {
@@ -742,7 +743,7 @@ describe('safeArgs round-1193-r4: the message read and object-presence shapes (P
     await effects.objectExists(resolved);
     await effects.fetchBaseBranch('main');
     expect(gitCalls).toEqual([
-      ['-C', '/repo', 'log', '-1', '--format=%B', resolved],
+      ['-C', '/repo', 'log', '-1', '--encoding=UTF-8', '--format=%B', resolved],
       ['-C', '/repo', 'cat-file', '-e', resolved],
       ['-C', '/repo', 'fetch', 'origin', 'main'],
     ]);
