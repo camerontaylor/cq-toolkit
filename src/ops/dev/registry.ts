@@ -127,50 +127,11 @@ export const DevCycleInputSchema: z.ZodType<DevCycleInput> = z
   .strict();
 
 /**
- * The author-admission branch of the `dev.review` union (the worker
- * transport's wire shape from the merged worker-transport PR — the crq-side
- * invocation `cq dev.review --action=enroll --head=…` keeps working
- * byte-for-byte). P5 adds `tree` as the alternative to `head`: exactly one.
+ * The `dev.review` op's input: the CodeRabbit review cycle (no action, or
+ * `action: 'cycle'`). S2b-ii retired the author-admission branch and its
+ * `enroll | status | fallback` actions; unknown actions still refuse.
  */
-export const DevTransportInputSchema = z
-  .object({
-    action: z.enum(['enroll', 'status', 'fallback']),
-    requestId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/),
-    base: z.string().regex(/^[0-9a-f]{40}$/),
-    head: z
-      .string()
-      .regex(/^[0-9a-f]{40}$/)
-      .optional(),
-    tree: z
-      .string()
-      .regex(/^[0-9a-f]{40}$/)
-      .optional(),
-    target: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/),
-    cycle: z.number().int().min(1).max(2),
-  })
-  .strict()
-  .refine(
-    (i) => [i.requestId, i.base, i.head ?? i.tree ?? '', i.target].every((v) => v.trim() === v),
-    'binding must not contain whitespace or controls',
-  )
-  .refine((i) => Boolean(i.head) !== Boolean(i.tree), 'provide exactly one of head or tree')
-  .refine((i) => i.base !== i.head, 'base and head must differ')
-  // Published as JSON Schema too: a refinement alone is invisible to schema consumers.
-  .meta({ oneOf: [{ required: ['head'] }, { required: ['tree'] }] });
-
-export type DevTransportInput = z.infer<typeof DevTransportInputSchema>;
-
-/**
- * The ONE `dev.review` op's input: the CodeRabbit review cycle (no action,
- * or `action: 'cycle'`) or the author-admission transport
- * (`enroll | status | fallback`). Both branches are strict objects, so the
- * union is unambiguous — an unknown key or an unknown action spelling fails
- * every branch and the schema refuses.
- */
-export const DevReviewInputSchema: z.ZodType<DevReviewInput> = z.union([
-  DevCycleInputSchema,
-  DevTransportInputSchema,
-]);
+export const DevReviewInputSchema: z.ZodType<DevReviewInput> = DevCycleInputSchema;
 
 // Defaults are applied by the OPS (`target ?? DEFAULT_DEV_TARGET`), not the
 // schemas — the drift pins mirror the hand-written optional input types, so
@@ -264,10 +225,9 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'dev.review',
     inputSchema: DevReviewInputSchema,
-    // ONE ENTRY, TWO BRANCHES (the composition ruling): an admission action
-    // binds only the dispatch wiring's author snapshot (#332's adapter,
-    // unchanged — the transport input carries no repoRoot); the cycle branch
-    // binds the subprocess effects and the two-layer secret scanner from the
+    // ONE ENTRY, ONE BRANCH: S2b-ii retired the author-admission branch, so
+    // the frozen DevCycleInputSchema below is the whole input. The cycle binds
+    // the subprocess effects and the two-layer secret scanner from the
     // dispatched repoRoot. S2b-i: the cycle's `coderabbit` path rides the
     // managed queue route (review-v1 on the queue identity); the binding is
     // inert at construction (closures only — no spawn, no env read), so
@@ -275,7 +235,6 @@ export const registry: OpRegistryEntry[] = [
     importer: (wiring) =>
       Promise.all([
         import('./review.js'),
-        import('./review-transport.js'),
         import('./effects.js'),
         import('./denylist.js'),
         import('../../driver/factory.js'),
@@ -290,7 +249,6 @@ export const registry: OpRegistryEntry[] = [
       ]).then(
         ([
           m,
-          admission,
           effects,
           denylist,
           driverFactory,
@@ -338,12 +296,7 @@ export const registry: OpRegistryEntry[] = [
               'dev.review',
               DevReviewInputSchema,
               async (valid: DevReviewInput) => {
-                if (m.isAdmissionInput(valid))
-                  return admission.envAuthorAdmission(
-                    valid,
-                    ...(wiring?.cqEnv !== undefined ? [wiring.cqEnv] : []),
-                  );
-                const { repoRoot } = valid as DevCycleInput;
+                const { repoRoot } = valid;
                 // `dev` is the per-dispatch effects bound BEFORE validation;
                 // for a schema-valid dispatch it binds this same repoRoot.
                 // Portable default: gitleaks' built-in rules apply everywhere.

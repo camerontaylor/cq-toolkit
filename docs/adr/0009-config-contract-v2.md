@@ -209,11 +209,6 @@ registered `CqEnv` snapshot (`currentCqEnv()`) — the entry/run snapshot, never
 a live ambient re-read — so an ambient policy-knob change after entry cannot
 move a mid-run gate (issue #1185). An explicit `env` argument remains the
 deliberate foreign-environment injection path and still overrides the
-snapshot; launcher PATH and child env are untouched.
-`src/ops/dev/review-transport.ts`'s `makeAuthorAdmission`/`envAuthorAdmission`
-`env` default is now `currentCqEnv()`, resolved per invocation — the dispatch
-wiring's snapshot inside a run, one fresh validated read per standalone
-invocation (a factory built once never freezes a construction-time read) —
-while an explicitly injected raw record stays a first-class seam keeping its
-historical `''`-only blank rule (the snapshot path treats a whitespace-only
-value as unset via the registry).
+snapshot; launcher PATH and child env are untouched. The author-admission
+transport (`makeAuthorAdmission`/`envAuthorAdmission`) was subsequently retired
+with its module in the S2b-ii slice, so no `processEnv()` debt remains there.

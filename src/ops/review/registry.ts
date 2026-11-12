@@ -82,15 +82,12 @@ import { FindingSchema } from './findings.js';
 import {
   QueueEnqueueInputSchema,
   QueueRetryInputSchema,
-  QueueDrainInputSchema,
-  QueueReferenceSchema,
   QueueHealthReferenceSchema,
-  QueueReportInputSchema,
 } from './internal/queueProtocol.js';
 
 // ---------------------------------------------------------------------------
-// QUEUE SNAPSHOT WIRING — the six `review.*` queue importers below (retry,
-// drain, enqueue, queueHealth, queueStatus, report) pass the host's resolved
+// QUEUE SNAPSHOT WIRING — the two `review.*` queue importers below (retry,
+// queueHealth) pass the host's resolved
 // CQ_* snapshot into `makeQueueOps` so every alias read is entry-time
 // (ADR-0009 resolve once): the ops are constructed with the run's snapshot,
 // and a later ambient env change cannot alter queue configuration. The
@@ -724,46 +721,10 @@ export const registry: OpRegistryEntry[] = [
       >,
   },
   {
-    name: 'review.drain',
-    inputSchema: QueueDrainInputSchema,
-    importer: async (wiring) =>
-      (await import('./queue.js')).makeQueueOps(undefined, wiring?.cqEnv).drain as Op<
-        unknown,
-        unknown
-      >,
-  },
-  {
-    name: 'review.enqueue',
-    inputSchema: QueueEnqueueInputSchema,
-    importer: async (wiring) =>
-      (await import('./queue.js')).makeQueueOps(undefined, wiring?.cqEnv).enqueue as Op<
-        unknown,
-        unknown
-      >,
-  },
-  {
     name: 'review.queueHealth',
     inputSchema: QueueHealthReferenceSchema,
     importer: async (wiring) =>
       (await import('./queue.js')).makeQueueOps(undefined, wiring?.cqEnv).queueHealth as Op<
-        unknown,
-        unknown
-      >,
-  },
-  {
-    name: 'review.queueStatus',
-    inputSchema: QueueReferenceSchema,
-    importer: async (wiring) =>
-      (await import('./queue.js')).makeQueueOps(undefined, wiring?.cqEnv).queueStatus as Op<
-        unknown,
-        unknown
-      >,
-  },
-  {
-    name: 'review.report',
-    inputSchema: QueueReportInputSchema,
-    importer: async (wiring) =>
-      (await import('./queue.js')).makeQueueOps(undefined, wiring?.cqEnv).report as Op<
         unknown,
         unknown
       >,
