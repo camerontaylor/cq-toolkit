@@ -307,10 +307,11 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
         timer_wants = None
         path_wants = None
         timer_bound = None
+        timer_sha256 = None
         blobs = {unit: service_oid}
         declared_templates.add(unit)
         if timer in committed:
-            timer_oid, _timer_raw, timer_text = _read_template(
+            timer_oid, timer_raw, timer_text = _read_template(
                 prepare, root, source_sha, timer)
             prepare.validate_unit_template(timer, timer_text)
             wanted = _section_values(timer_text, "Install", "WantedBy")
@@ -323,6 +324,7 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
             timer_wants = wanted[0] + ".wants/" + timer
             _valid_template_name(timer_wants)
             timer_bound = _timer_bound_seconds(timer_text)
+            timer_sha256 = hashlib.sha256(timer_raw).hexdigest()
             blobs[timer] = timer_oid
             declared_templates.add(timer)
         if path_unit in committed:
@@ -349,6 +351,7 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
             "service_type": service_type,
             "service_timeout_seconds": service_timeout,
             "timer_bound_seconds": timer_bound,
+            "timer_sha256": timer_sha256,
             "blobs": blobs,
         }
     extra = sorted(committed - declared_templates)
@@ -852,6 +855,20 @@ class ProductionUnitAdapter:
                             + props["ActiveState"])
             if props["UnitFileState"] not in UNIT_FILE_STATES:
                 self.refuse(role + " activator enablement state is unknown")
+            if role == "timer":
+                timer_state = self._path_state(paths[role])
+                self._validate_state_shape(paths[role], timer_state)
+                if timer_state["type"] != "file":
+                    self.refuse("installed timer is not a regular file")
+                try:
+                    timer_bytes = paths[role].read_bytes()
+                except OSError as exc:
+                    self.refuse("installed timer is unreadable: "
+                                + str(exc)[:160])
+                if (_sha256_bytes(timer_bytes)
+                        != inventory[unit]["timer_sha256"]):
+                    self.refuse("installed timer does not match the pinned "
+                                "schedule")
             observed[role + "_active"] = props["ActiveState"]
             observed[role + "_unit_file_state"] = props["UnitFileState"]
         return observed
@@ -943,6 +960,12 @@ class ProductionUnitAdapter:
                 % (self.completion_timeout, required))
         self._completion_window = required
         return required
+
+    def _service_start_timeout(self, unit, inventory):
+        declared = inventory[unit]["service_timeout_seconds"]
+        if type(declared) is int and declared > 0:
+            return declared + COMPLETION_MARGIN_SECONDS
+        return 60
 
     # -- seam: snapshot and validation ----------------------------------
     def snapshot(self, unit):
@@ -1311,7 +1334,9 @@ class ProductionUnitAdapter:
                 or released["size"] != install["size"] \
                 or self._runtime_from_unit(service) != install["runtime"]:
             self.refuse("released unit metadata does not match the staged target")
-        self._ok(self._run("start", unit, timeout=60), "service release")
+        self._ok(self._run(
+            "start", unit, timeout=self._service_start_timeout(unit, inventory)),
+            "service release")
         release_order = ["service"]
         for role, name in self._activator_units(unit, inventory):
             desired = snapshot["activators"][role + "_active"]
@@ -1542,7 +1567,9 @@ class ProductionUnitAdapter:
             restore_order.append(role)
         desired_service = snapshot["activators"]["service_active"]
         if desired_service == "active":
-            self._ok(self._run("start", unit, timeout=60),
+            self._ok(self._run(
+                "start", unit,
+                timeout=self._service_start_timeout(unit, inventory)),
                      "restore service activation")
         elif desired_service == "inactive":
             result = self._run("stop", unit, timeout=60)

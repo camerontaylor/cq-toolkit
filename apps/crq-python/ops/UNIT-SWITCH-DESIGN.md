@@ -135,6 +135,14 @@ but the controller's `activation_pending` gate still refuses automatic restore
 after any `start` attempt; it records `recovery_required` rather than claiming
 a rollback. The adapter does not change that controller contract.
 
+The installed timer file must hash-match the pinned template before its
+schedule is used, so preflight cannot certify a bound for a timer the
+transaction will not install. Service start commands use the declared
+`TimeoutStartSec` plus the completion margin (`_service_start_timeout`) rather
+than a fixed 60-second command timeout; the same applies to the restore service
+start. A blocking `systemctl start` for a healthy 10-minute oneshot therefore
+does not fail the transaction at 60 seconds.
+
 ## Proposed stable-manager sequence
 
 1. Under the existing controller lock, validate the unit and target, artifact

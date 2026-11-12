@@ -211,6 +211,7 @@ class FakeSystemd:
         self.fail_commands = set()
         self.incomplete_discovery = False
         self.calls = []
+        self.service_start_delay = 0
         self.post_start_state = {}
         self._services = {entry["service"] for entry in inventory.values()}
         for entry in inventory.values():
@@ -290,6 +291,9 @@ class FakeSystemd:
             if self._masked(unit):
                 return {"argv": list(args), "rc": 1, "stdout": "",
                         "stderr": "Unit is masked.", "timeout": False}
+            if unit in self._services and timeout < self.service_start_delay:
+                return {"argv": list(args), "rc": None, "stdout": "",
+                        "stderr": "", "timeout": True}
             if unit in self.active:
                 self.active[unit] = self.post_start_state.get(unit, "active")
             return {"argv": list(args), "rc": 0, "stdout": "",
@@ -368,10 +372,12 @@ class AdapterFixture(ControllerFixture):
             mode = 0o600 if unit == "crq-tick.service" else 0o644
             self.prior_modes[unit] = mode
             _write(self.unit_dir / unit, rendered["bytes"], mode)
-            timer_text = host.git(
-                self.root, "show",
-                self.before + ":apps/crq-python/ops/systemd/" + entry["timer"])
-            _write(self.unit_dir / entry["timer"], timer_text.encode(), 0o644)
+            timer_bytes = subprocess.run(
+                ["git", "-C", str(self.root), "cat-file", "blob",
+                 self.before + ":apps/crq-python/ops/systemd/"
+                 + entry["timer"]],
+                check=True, capture_output=True).stdout
+            _write(self.unit_dir / entry["timer"], timer_bytes, 0o644)
             if entry["timer_wants"]:
                 self._link(entry["timer_wants"], entry["timer"])
             if entry["path"]:
@@ -611,6 +617,17 @@ class AdapterTests(AdapterFixture):
             self.adapter.preflight("crq-watchdog.service", NODE_RUNTIME)
         self.assertEqual(_tree(self.unit_dir), before)
 
+    def test_preflight_refuses_installed_timer_schedule_drift(self):
+        timer = self.unit_dir / "crq-tick.timer"
+        timer.write_text(timer.read_text().replace(
+            "OnCalendar=*:0/12", "OnCalendar=*-*-* *:00:00"))
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(
+                dc.Refused,
+                "installed timer does not match the pinned schedule"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
     def test_default_node_capability_is_empty_and_refuses(self):
         capability = adapter_mod.DeclaredCapabilities()
         self.assertEqual(capability.commands(NODE_RUNTIME), frozenset())
@@ -833,6 +850,16 @@ class AdapterTests(AdapterFixture):
         self.assertEqual(self.fake.active["crq-tick.timer"], "active")
         self.assertEqual(result["release_order"], ["service", "timer"])
 
+    def test_start_command_timeout_covers_service_budget(self):
+        current, _prior, _snapshot = self.switch_ready(
+            "crq-tick.service", NODE_RUNTIME)
+        current.stop_and_drain("crq-tick.service")
+        current.install("crq-tick.service", NODE_RUNTIME)
+        self.fake.service_start_delay = 120
+        current.start("crq-tick.service")
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+        self.assertEqual(self.fake.active["crq-tick.timer"], "active")
+
     def test_start_refuses_without_install(self):
         current, _prior, _snapshot = self.switch_ready(
             "crq-tick.service", NODE_RUNTIME)
@@ -981,6 +1008,22 @@ class AdapterTests(AdapterFixture):
         self.fake.post_start_state["crq-repair.service"] = "failed"
         with self.assertRaisesRegex(dc.Refused, "restored service is failed"):
             recovery.restore_activation("crq-repair.service", snapshot)
+
+    def test_restore_activation_command_timeout_covers_service_budget(self):
+        self.fake.active["crq-tick.service"] = "active"
+        current, _prior, snapshot = self.switch_ready(
+            "crq-tick.service", NODE_RUNTIME)
+        current.stop_and_drain("crq-tick.service")
+        current.install("crq-tick.service", NODE_RUNTIME)
+        current.start("crq-tick.service")
+        recovery = self.make_adapter()
+        recovery.validate_snapshot("crq-tick.service", snapshot)
+        recovery.stop_and_drain("crq-tick.service")
+        recovery.restore("crq-tick.service", snapshot)
+        self.fake.service_start_delay = 120
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+        self.assertEqual(self.fake.active["crq-tick.timer"], "active")
 
     def test_forward_and_recovery_for_both_runtimes(self):
         cases = [
