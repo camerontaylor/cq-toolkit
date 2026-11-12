@@ -90,8 +90,8 @@ def _capture_document(paths: List[Dict[str, Any]], **overrides: Any) -> Dict[str
         "reviewer": REVIEWER,
         "reviewer_version": "fixture",
     }
-    capture["equivalence"] = review_receipt.current_equivalence(capture)
     capture.update(overrides)
+    capture["equivalence"] = review_receipt.current_equivalence(capture)
     return capture
 
 
