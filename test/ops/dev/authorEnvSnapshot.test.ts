@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { readCqEnv } from '../../../src/config/env.js';
+import { readCqEnv, type CqEnv } from '../../../src/config/env.js';
+import { runWithCqEnv } from '../../../src/config/run-env.js';
 import { snapshotHead } from '../../../src/ops/dev/internal/snapshot.js';
 import { registry } from '../../../src/ops/dev/registry.js';
 import {
+  AUTHOR_TRANSPORT_HINT,
   envAuthorAdmission,
   makeAuthorAdmission,
   resolveAuthorEnv,
@@ -136,6 +138,22 @@ describe('dev.review author-env snapshot (#1185)', () => {
     });
   });
 
+  it('treats a whitespace-only snapshot value as unset while an explicit raw record keeps it verbatim', () => {
+    // The registry's isBlank trims, so the snapshot path (the default and
+    // the wired dispatch) can never mistake a whitespace-only value for a
+    // repo path or scanner. An explicitly injected raw record keeps its
+    // historical ''-only rule: whitespace-only is a live (if useless) value,
+    // and no non-blank configured value changes meaning on either path.
+    expect(resolveAuthorEnv(readCqEnv({ CQ_AUTHOR_REPO: '   ' }))).toEqual({
+      repo: undefined,
+      scanner: undefined,
+    });
+    expect(resolveAuthorEnv({ CQ_AUTHOR_REPO: '   ' })).toEqual({
+      repo: '   ',
+      scanner: undefined,
+    });
+  });
+
   it('refuses an errored snapshot by name before falling back to the default', () => {
     // The AUTHOR keys use the identity parser, so no raw value can fail it;
     // the guard still names the key first if the snapshot ever carries one
@@ -187,6 +205,137 @@ describe('dev.review author-env snapshot (#1185)', () => {
       }
     } finally {
       if (previous !== undefined) process.env['CQ_AUTHOR_SSH_ALIAS'] = previous;
+    }
+  });
+
+  it('the wired registry snapshot wins over an enclosing run snapshot', async () => {
+    const entry = registry.find((item) => item.name === 'dev.review');
+    const op = await entry?.importer({ cqEnv: readCqEnv({}) });
+    const previous = process.env['CQ_AUTHOR_SSH_ALIAS'];
+    delete process.env['CQ_AUTHOR_SSH_ALIAS'];
+    try {
+      // The wired (empty) snapshot is passed explicitly, so the default —
+      // and with it the enclosing run snapshot's alias — is never consulted:
+      // the admission reports the configuration gap instead of dispatching.
+      await runWithCqEnv(readCqEnv({ CQ_AUTHOR_SSH_ALIAS: 'run-snapshot-alias' }), async () => {
+        const result = await op?.(admissionInput);
+        expect(result).toMatchObject({ status: 'needs-human' });
+        if (result !== null && typeof result === 'object' && 'reason' in result) {
+          expect(String(result.reason)).toContain('CQ_AUTHOR_SSH_ALIAS');
+        }
+      });
+    } finally {
+      if (previous !== undefined) process.env['CQ_AUTHOR_SSH_ALIAS'] = previous;
+    }
+  });
+
+  it('without wiring, the admission resolves the enclosing run snapshot through the default', async () => {
+    const entry = registry.find((item) => item.name === 'dev.review');
+    const op = await entry?.importer({});
+    const previous = process.env['CQ_AUTHOR_SSH_ALIAS'];
+    delete process.env['CQ_AUTHOR_SSH_ALIAS'];
+    try {
+      // No wiring: the `env` default (`currentCqEnv()`) evaluates at call
+      // time inside the run scope and reaches the enclosing run snapshot, so
+      // its alias binds and the transport is attempted (it fails locally →
+      // indeterminate — never the alias configuration gap).
+      await runWithCqEnv(readCqEnv({ CQ_AUTHOR_SSH_ALIAS: 'run-snapshot-alias' }), async () => {
+        const result = await op?.(admissionInput);
+        expect(result).toMatchObject({ status: 'indeterminate' });
+      });
+    } finally {
+      if (previous !== undefined) process.env['CQ_AUTHOR_SSH_ALIAS'] = previous;
+    }
+  });
+
+  it('the standalone default is one fresh validated snapshot, not the ambient raw record', async () => {
+    const previous = process.env['CQ_AUTHOR_SSH_ALIAS'];
+    try {
+      // A whitespace-only ambient alias is blank to the registry: the fresh
+      // snapshot default reports the configuration gap, where the old raw
+      // default mistook it for a live alias and failed transport
+      // construction with the other message.
+      process.env['CQ_AUTHOR_SSH_ALIAS'] = '   ';
+      const blank = await envAuthorAdmission(admissionInput);
+      expect(blank).toMatchObject({ status: 'needs-human', reason: AUTHOR_TRANSPORT_HINT });
+      // A fresh read per call: a non-blank ambient alias set after the
+      // snapshot above was taken is honored by the NEXT default read.
+      process.env['CQ_AUTHOR_SSH_ALIAS'] = 'ambient-default-alias';
+      const set = await envAuthorAdmission(admissionInput);
+      expect(set).toMatchObject({ status: 'indeterminate' });
+    } finally {
+      if (previous !== undefined) process.env['CQ_AUTHOR_SSH_ALIAS'] = previous;
+    }
+  });
+
+  it('the default re-checks a fabricated errored snapshot on every call (nothing cached)', () => {
+    // The AUTHOR keys use the identity parser, so readCqEnv cannot produce
+    // an error for them; only a fabricated (or denied, in future) snapshot
+    // reaches the name guard. The default evaluates PER CALL, so both calls
+    // inside the run scope re-check the enclosing snapshot and throw —
+    // nothing about the first resolution is cached.
+    const errored = {
+      ...readCqEnv({}),
+      errors: [{ name: 'CQ_AUTHOR_SSH_ALIAS', message: 'CQ_AUTHOR_SSH_ALIAS: boom' }],
+    } as unknown as CqEnv;
+    runWithCqEnv(errored, () => {
+      expect(() => envAuthorAdmission(admissionInput)).toThrow(/CQ_AUTHOR_SSH_ALIAS/);
+      expect(() => envAuthorAdmission(admissionInput)).toThrow(/CQ_AUTHOR_SSH_ALIAS/);
+    });
+  });
+
+  it('a factory built outside a run resolves the env per invocation, not per construction', async () => {
+    const wire = echoRecorder();
+    const previousScanner = process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'];
+    process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'] = '/bin/false';
+    let factory: ReturnType<typeof makeAuthorAdmission>;
+    try {
+      // Built OUTSIDE any run scope while the ambient scanner is absolute:
+      // a construction-time default would freeze that value into the factory.
+      factory = makeAuthorAdmission(wire.transport);
+    } finally {
+      if (previousScanner === undefined) delete process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'];
+      else process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'] = previousScanner;
+    }
+    // Invoked inside an EMPTY run scope: the per-invocation default reaches
+    // the enclosing snapshot, whose (unset) scanner reports the
+    // configuration gap. A frozen construction-time snapshot would have
+    // carried /bin/false past the gate and failed differently.
+    await runWithCqEnv(readCqEnv({}), async () => {
+      const result = await factory(treeInput(treeOid));
+      expect(result).toMatchObject({
+        status: 'needs-human',
+        reason: 'Configure CQ_AUTHOR_SNAPSHOT_SCANNER as an absolute operator scanner path.',
+      });
+    });
+    expect(wire.sent).toEqual([]);
+  });
+
+  it('the standalone default is re-read on every invocation of the same factory', async () => {
+    const wire = echoRecorder();
+    const previousScanner = process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'];
+    delete process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'];
+    try {
+      // Built once with the ambient scanner unset; every invocation takes a
+      // fresh validated read of the ambient environment (the old live-read
+      // behaviour, now through the snapshot path).
+      const factory = makeAuthorAdmission(wire.transport);
+      const first = await factory(treeInput(treeOid));
+      expect(first).toMatchObject({
+        status: 'needs-human',
+        reason: 'Configure CQ_AUTHOR_SNAPSHOT_SCANNER as an absolute operator scanner path.',
+      });
+      // With the ambient scanner now absolute, the SAME factory proceeds
+      // past the gate: capture runs (and fails differently — /bin/false on
+      // snapshot objects absent from the default repo) instead of
+      // reporting the configuration gap again.
+      process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'] = '/bin/false';
+      const second = await factory(treeInput(treeOid));
+      expect(second.status).not.toBe('needs-human');
+      expect(second).toMatchObject({ status: 'failed' });
+    } finally {
+      if (previousScanner === undefined) delete process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'];
+      else process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'] = previousScanner;
     }
   });
 

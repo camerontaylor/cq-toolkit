@@ -972,7 +972,13 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       try {
         report.run = await runPlan(
           plan,
-          { concurrency: input.concurrency ?? 1, stopOnError: false, journalDir, maxTokens },
+          {
+            concurrency: input.concurrency ?? 1,
+            stopOnError: false,
+            journalDir,
+            maxTokens,
+            cqEnv,
+          },
           view,
           {
             governor: createGovernor({ maxTokens, perJobWallClockMs: policy.budgets.unit.wallMs }),
@@ -1199,7 +1205,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
                   { ...template, input: { ...assembly, packages }, dependsOn: [tracker.id] },
                 ],
               },
-              { concurrency: 1, stopOnError: false, journalDir },
+              { concurrency: 1, stopOnError: false, journalDir, cqEnv },
               view,
               parentSignal === undefined
                 ? undefined

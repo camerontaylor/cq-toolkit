@@ -30,7 +30,7 @@ import type { Op, OpResult } from '../../kernel/types.js';
 import { DevTransportInputSchema, type DevTransportInput } from './registry.js';
 import { assertCqEnvName } from '../../config/entry.js';
 import type { CqEnv } from '../../config/env.js';
-import { processEnv } from '../../config/process-env.js';
+import { currentCqEnv } from '../../config/run-env.js';
 
 const DecisionSchema = z
   .object({
@@ -172,9 +172,15 @@ export function resolveAuthorEnv(env: AuthorEnv): {
 export function makeAuthorAdmission(
   transport: AuthorTransport,
   capture?: (base: string, tree: string) => Promise<{ head: string; snapshot: object }>,
-  env: AuthorEnv = processEnv(),
+  env?: AuthorEnv,
 ): Op<DevTransportInput, AuthorDecision> {
   return async (input) => {
+    // Per INVOCATION: the explicit env wins; otherwise the enclosing run's
+    // snapshot (`currentCqEnv()` — one fresh validated read outside a run).
+    // A factory built once must never freeze a construction-time read, and
+    // inside a run it follows the run's snapshot even when the factory
+    // outlives the scope that built it.
+    const authorEnv = env ?? currentCqEnv();
     let i: DevTransportInput;
     let binding: AuthorDecision['binding'];
     let request: string;
@@ -186,7 +192,7 @@ export function makeAuthorAdmission(
       binding = { request_id: i.requestId, base: i.base, head, target: i.target, cycle: i.cycle };
       let envelope: object = { v: 1, op: i.action, binding };
       if (i.tree && i.action === 'enroll') {
-        const resolved = resolveAuthorEnv(env);
+        const resolved = resolveAuthorEnv(authorEnv);
         const doCapture =
           capture ??
           ((base: string, tree: string) =>
@@ -246,11 +252,12 @@ export function makeAuthorAdmission(
  * from the merged PR's registry adapter — a missing alias is a
  * needs-human configuration gap, an invalid alias a configuration fault).
  * The alias resolves from the dispatch wiring's snapshot (or the explicit
- * record); the ambient environment is the default only.
+ * record); the default is the enclosing run's snapshot (`currentCqEnv()` —
+ * one fresh validated read when called outside a run).
  */
 export function envAuthorAdmission(
   input: DevTransportInput,
-  env: AuthorEnv = processEnv(),
+  env: AuthorEnv = currentCqEnv(),
 ): Promise<OpResult<AuthorDecision> | { status: 'needs-human'; reason: string }> {
   if (isCqEnv(env)) {
     assertCqEnvName(env, 'dev.review', 'CQ_AUTHOR_SSH_ALIAS');
