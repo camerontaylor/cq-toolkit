@@ -20,6 +20,7 @@ import { appendFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { currentJobContext, createGovernor } from '../../src/kernel/governor.js';
+import { readCqEnv } from '../../src/config/env.js';
 import { openRunLog } from '../../src/kernel/journal.js';
 import { makeManifest } from '../../src/kernel/manifest.js';
 import { type OpResult, type Plan } from '../../src/kernel/types.js';
@@ -249,6 +250,100 @@ describe('governed journal v2 + resume', () => {
       expect(seen).toEqual([undefined, 'paseo:agent-7', 'outer-parent', 'crq:r-1']);
     },
     journalEnclosure(4),
+  );
+
+  test(
+    'the run entry CqEnv snapshot fixes the parent against post-entry ambient drift (#1185)',
+    async () => {
+      const seen: (string | undefined)[] = [];
+      const probe = async (): Promise<OpResult<unknown>> => {
+        seen.push(currentJobContext()?.info.correlation?.parentWorkId);
+        return { status: 'ok', value: {} };
+      };
+      const cqEnv = readCqEnv({ CQ_WORK_ID: 'snapshot-parent' });
+      try {
+        // Hostile ambient after the snapshot was taken: none of it may win.
+        vi.stubEnv('CQ_WORK_ID', 'ambient-parent');
+        vi.stubEnv('CQ_PARENT_WORK_ID', 'ambient-outer');
+        vi.stubEnv('PASEO_AGENT_ID', 'agent-7');
+        await runPlan(
+          independentPlan('plan-gov-parent-entry-snapshot', 1, 'probe'),
+          { concurrency: 1, stopOnError: false, journalDir: dir, cqEnv },
+          viewWith(entry('probe', probe)),
+          { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+      expect(seen).toEqual(['snapshot-parent']);
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'the live Paseo fallback still applies when the entry snapshot carries no CQ_* identity (#1185)',
+    async () => {
+      const seen: (string | undefined)[] = [];
+      const probe = async (): Promise<OpResult<unknown>> => {
+        seen.push(currentJobContext()?.info.correlation?.parentWorkId);
+        return { status: 'ok', value: {} };
+      };
+      const cqEnv = readCqEnv({});
+      try {
+        // An ambient CQ_WORK_ID is NOT a fallback tier any more (the CQ_*
+        // tiers are snapshot-only); the foreign Paseo id still is.
+        vi.stubEnv('CQ_WORK_ID', 'ambient-parent');
+        vi.stubEnv('CQ_PARENT_WORK_ID', '');
+        vi.stubEnv('PASEO_AGENT_ID', 'agent-7');
+        await runPlan(
+          independentPlan('plan-gov-parent-live-paseo', 1, 'probe'),
+          { concurrency: 1, stopOnError: false, journalDir: dir, cqEnv },
+          viewWith(entry('probe', probe)),
+          { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+      expect(seen).toEqual(['paseo:agent-7']);
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'resume keeps the recorded parent over a new entry snapshot and ambient drift (#1185)',
+    async () => {
+      const seen: (string | undefined)[] = [];
+      let fail = true;
+      const probe = async (): Promise<OpResult<unknown>> => {
+        seen.push(currentJobContext()?.info.correlation?.parentWorkId);
+        return fail ? { status: 'failed', error: 'retry on resume' } : { status: 'ok', value: {} };
+      };
+      const plan = independentPlan('plan-gov-parent-resume-snapshot', 1, 'probe');
+      const run = (opts: { resume?: boolean; cqEnv: ReturnType<typeof readCqEnv> }) =>
+        runPlan(
+          plan,
+          { concurrency: 1, stopOnError: false, journalDir: dir, ...opts },
+          viewWith(entry('probe', probe)),
+          { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+        );
+      await run({ cqEnv: readCqEnv({ CQ_WORK_ID: 'recorded-parent' }) });
+      fail = false;
+      try {
+        // The finish recorded 'recorded-parent'; neither the new entry
+        // snapshot nor the ambient identity may replace it.
+        vi.stubEnv('CQ_WORK_ID', 'resume-ambient-parent');
+        vi.stubEnv('CQ_PARENT_WORK_ID', 'resume-ambient-outer');
+        vi.stubEnv('PASEO_AGENT_ID', 'agent-9');
+        await run({
+          resume: true,
+          cqEnv: readCqEnv({ CQ_WORK_ID: 'resume-snapshot-parent' }),
+        });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+      expect(seen).toEqual(['recorded-parent', 'recorded-parent']);
+    },
+    journalEnclosure(2),
   );
 
   test(

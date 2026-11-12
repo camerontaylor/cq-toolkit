@@ -331,6 +331,8 @@
   "test/ops/fix/runFix.composition-metrics.test.ts": "process",
   "test/ops/fix/runFix.fixes-per-run.test.ts": "process",
   "test/ops/fix/runFix.pr-base.test.ts": "process",
+  "test/ops/fix/runFix.provenance-snapshot.test.ts": "process",
+  "test/ops/fix/runFix.registry-snapshot.test.ts": "process",
   "test/ops/gates/adapters.checkRunner.test.ts": "process",
   "test/ops/gates/adapters.eslintJson.test.ts": "process",
   "test/ops/gates/adapters.oxfmtCheck.test.ts": "process",

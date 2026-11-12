@@ -28,6 +28,7 @@ import {
   applyCorrelationEnv,
   correlationEnvRemovals,
   inboundParentWorkId,
+  inboundParentWorkIdFromSnapshot,
 } from '../../src/driver/correlation-env.js';
 import { sessionsOfResult } from '../../src/kernel/runner.js';
 import { readCqEnv } from '../../src/config/env.js';
@@ -251,6 +252,36 @@ describe('1.4 CQ_* correlation env', () => {
       inboundParentWorkId({ CQ_WORK_ID: ' ', CQ_PARENT_WORK_ID: '', PASEO_AGENT_ID: 'a1' }),
     ).toBe('paseo:a1');
     expect(inboundParentWorkId({ PASEO_AGENT_ID: '  ' })).toBeUndefined();
+  });
+
+  test('inboundParentWorkIdFromSnapshot: CQ_* is snapshot-only, PASEO stays live', () => {
+    const empty = readCqEnv({});
+    const both = readCqEnv({ CQ_WORK_ID: 'snapshot-work', CQ_PARENT_WORK_ID: 'snapshot-parent' });
+    const parentOnly = readCqEnv({ CQ_PARENT_WORK_ID: 'snapshot-parent' });
+    // The explicit tiers come from the snapshot; an ambient CQ_* identity is
+    // never consulted (foreignEnv's CQ_WORK_ID is ignored).
+    expect(
+      inboundParentWorkIdFromSnapshot(both, {
+        CQ_WORK_ID: 'ambient-work',
+        PASEO_AGENT_ID: 'a1',
+      }),
+    ).toBe('snapshot-work');
+    expect(
+      inboundParentWorkIdFromSnapshot(parentOnly, {
+        CQ_WORK_ID: 'ambient-work',
+        PASEO_AGENT_ID: 'a1',
+      }),
+    ).toBe('snapshot-parent');
+    // With no explicit snapshot identity the foreign Paseo fallback is still
+    // a LIVE read of the supplied foreign environment.
+    expect(inboundParentWorkIdFromSnapshot(empty, { CQ_WORK_ID: 'ambient-work' })).toBeUndefined();
+    expect(inboundParentWorkIdFromSnapshot(empty, { PASEO_AGENT_ID: 'a1' })).toBe('paseo:a1');
+    // Blank snapshot values count as absent (readCqEnv drops them).
+    expect(
+      inboundParentWorkIdFromSnapshot(readCqEnv({ CQ_WORK_ID: ' ', CQ_PARENT_WORK_ID: ' ' }), {
+        PASEO_AGENT_ID: 'a1',
+      }),
+    ).toBe('paseo:a1');
   });
 
   test('PASEO_AGENT_ID itself is not forwarded to children', () => {
