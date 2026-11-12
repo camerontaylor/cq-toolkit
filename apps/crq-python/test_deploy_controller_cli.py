@@ -11,9 +11,11 @@ started; the controller never signals a process.
 import hashlib
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 from test_deploy_controller_fixtures import OPS, ROOT, ControllerFixture, dc, host
@@ -231,6 +233,38 @@ class CliTests(ControllerFixture):
                               env={"XDG_STATE_HOME": str(self.base / "cli-xdg")})
         self.assertEqual(result.returncode, 2)
         self.assertIn("--interval-seconds", result.stderr)
+
+
+class RecordDirResolutionTests(unittest.TestCase):
+    """--record-dir spelling must survive into record_preflight() unchanged."""
+
+    def test_dotdot_after_a_symlinked_ancestor_keeps_its_filesystem_meaning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real = pathlib.Path(tmp) / "real"
+            nested = real / "nested"
+            records = real / "records"
+            nested.mkdir(parents=True)
+            records.mkdir()
+            link = pathlib.Path(tmp) / "link"
+            link.symlink_to(nested, target_is_directory=True)
+            # The kernel opens link -> real/nested, then '..' -> real, then
+            # records: real/records. A lexical abspath would name tmp/records.
+            spelled = link / ".." / "records"
+            self.assertEqual(dc.absolute_record_dir(spelled), records)
+            self.assertNotEqual(pathlib.Path(os.path.abspath(spelled)), records)
+
+    def test_a_final_symlink_is_still_visible_to_preflight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp) / "records"
+            target.mkdir()
+            target.chmod(0o700)
+            link = pathlib.Path(tmp) / "link"
+            link.symlink_to(target, target_is_directory=True)
+            resolved = dc.absolute_record_dir(link)
+            self.assertTrue(resolved.is_symlink())
+            effects = dc.Effects(pathlib.Path(tmp) / "root", resolved)
+            with self.assertRaises(dc.Refused):
+                effects.record_preflight()
 
 
 if __name__ == "__main__":
