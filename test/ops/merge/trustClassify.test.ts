@@ -15,7 +15,7 @@ import {
   resolveClassifyTrust,
 } from '../../../src/ops/merge/trustMirrors.js';
 import { buildRunInput } from '../../../src/selfhost/self-merge-prs.js';
-import { eligible, FakeMergeEffects, NOW_MS } from './runPrs.helpers.js';
+import { eligible, FakeMergeEffects, HEAD, NOW_MS } from './runPrs.helpers.js';
 
 const env = (v: Record<string, string> = {}) => readCqEnv(v);
 const entryOf = (name: string): OpRegistryEntry => registry.find((e) => e.name === name)!;
@@ -46,6 +46,7 @@ describe('classify trust inputs', () => {
           authorLogin: 'bob',
           state: 'APPROVED',
           body: 'approving the cache changes',
+          commitOid: HEAD,
           submittedAt: '2026-01-01T00:00:00.500Z',
         },
       ],
@@ -196,6 +197,7 @@ describe('classify trust defaults are independent per key', () => {
         authorLogin: 'good[bot]',
         state: 'APPROVED',
         body: 'approving the cache changes',
+        commitOid: HEAD,
         submittedAt: '2026-01-01T00:00:00.500Z',
       },
       {
@@ -203,6 +205,7 @@ describe('classify trust defaults are independent per key', () => {
         authorLogin: 'maintainer',
         state: 'CHANGES_REQUESTED',
         body: 'not yet',
+        commitOid: HEAD,
         submittedAt: '2026-01-01T00:00:00.700Z',
         authorAssociation: 'MEMBER',
       },
@@ -244,6 +247,7 @@ describe('classify trust defaults are independent per key', () => {
       authorLogin: 'maintainer',
       state,
       body: 'looked at it',
+      commitOid: HEAD,
       submittedAt: at,
       authorAssociation: 'MEMBER' as const,
     });
@@ -269,6 +273,7 @@ describe('classify trust defaults are independent per key', () => {
       authorLogin: 'coderabbitai[bot]',
       state,
       body: 'CodeRabbit skipped this run because the PR is too large',
+      commitOid: HEAD,
       submittedAt: '2026-01-01T00:00:00.500Z',
     });
     const cqEnv = env({
@@ -312,6 +317,7 @@ describe('classify trust defaults are independent per key', () => {
           authorLogin: 'excluded-member',
           state: 'COMMENTED',
           body: 'looked at it',
+          commitOid: HEAD,
           submittedAt: '2026-01-01T00:00:00.500Z',
           authorAssociation: 'MEMBER',
         },
@@ -356,6 +362,7 @@ describe('classify trust defaults are independent per key', () => {
       authorLogin: 'coderabbitai[bot]',
       state: 'COMMENTED' as const,
       body,
+      commitOid: HEAD,
       submittedAt: '2026-01-01T00:00:00.500Z',
     });
     const reason = async (body: string, config?: object) =>
@@ -421,6 +428,7 @@ describe('classify trust defaults are independent per key', () => {
           authorLogin: 'alice',
           state: 'APPROVED',
           body: 'approving the cache changes',
+          commitOid: HEAD,
           submittedAt: new Date(now - 4000).toISOString(),
         },
       ],
@@ -597,6 +605,7 @@ describe('classify trust defaults are independent per key', () => {
           authorLogin: 'excluded-member',
           state: 'APPROVED',
           body: 'approving the cache changes',
+          commitOid: HEAD,
           submittedAt: '2026-01-01T00:00:00.500Z',
           authorAssociation: 'MEMBER',
         },

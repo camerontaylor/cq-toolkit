@@ -292,6 +292,21 @@ def harvest(c, q, item, dry=False):
     messages = []
     for run, record in item.get('repair_runs', {}).items():
         if record['state'] in ('published', 'done', 'failed', 'stale'):
+            # A terminal local failure can outlive a failed ledger write. Replay
+            # retained FAILED outcomes through the ledger's idempotent event chain.
+            if not dry and record['state'] == 'failed':
+                for result in record.get('verdicts', []):
+                    if (result.get('verdict') != 'FAILED'
+                            or not result.get('reason', '').startswith('invalid repair result: ')):
+                        continue
+                    if result.get('job') not in record['jobs'] or result.get('item') != item['id']:
+                        raise ValueError('terminal repair outcome identity mismatch')
+                    expected = json.loads((c.STATE / 'repair/inbox' / (result['job'] + '.json')).read_text())
+                    if expected.get('job') != result['job'] or expected.get('item') != item['id']:
+                        raise ValueError('terminal repair job identity mismatch')
+                    if expected.get('canonical_finding_id'):
+                        c.save_queue(q)  # also retry any prior failed terminal save
+                        mark_finding_outcome(c, expected, result)
             if not dry and record.get('verdicts') and hasattr(c, 'WT_ROOT') and hasattr(c, 'CLONE'):
                 from crq_repair.retain import cleanup_harvested
                 for result in record['verdicts']:
@@ -364,7 +379,10 @@ def harvest(c, q, item, dry=False):
                 # A deterministic artifact defect can never pass on a later tick,
                 # so record it as a terminal failure instead of blocking the item.
                 if not dry:
-                    mark_finding_outcome(c, expected, {'verdict': 'FAILED', 'reason': 'invalid repair result: ' + str(exc)[:300]})
+                    failure = {'job': job_id, 'item': item['id'], 'verdict': 'FAILED',
+                               'reason': 'invalid repair result: ' + str(exc)[:300],
+                               'finding': expected['finding']}
+                    record['verdicts'] = verdicts + [failure]
                     record.update(state='failed', error=str(exc)[:300])
                     if item['kind'] == review_receipt.KIND:
                         item['state'] = 'done'
@@ -373,6 +391,8 @@ def harvest(c, q, item, dry=False):
                     else:
                         item['state'] = 'repair_failed'
                         item['last_error'] = 'repair_failed; needs human'
+                    c.save_queue(q)  # terminal identity before authoritative write-back
+                    mark_finding_outcome(c, expected, failure)
                 break
             if result.get('verdict') == 'FIXED':
                 # Later findings move the shared HEAD; validate each immutable
@@ -385,6 +405,27 @@ def harvest(c, q, item, dry=False):
                     module = util.module_from_spec(spec)
                     spec.loader.exec_module(module)
                     module.mechanical(c.CONFIG, check_wt, predecessor, commits, job_id, path.parent)
+                except ValueError as exc:
+                    # verify/mechanical defects (duplicate commits, hack detector)
+                    # are deterministic, so route them to terminal failure exactly
+                    # like a malformed result artifact above; git failures from
+                    # make_worktree stay outside this handler and retry.
+                    failure = {'job': job_id, 'item': item['id'], 'verdict': 'FAILED',
+                               'reason': 'invalid repair result: ' + str(exc)[:300],
+                               'finding': expected['finding']}
+                    if not dry:
+                        record['verdicts'] = verdicts + [failure]
+                        record.update(state='failed', error=str(exc)[:300])
+                        if item['kind'] == review_receipt.KIND:
+                            item['state'] = 'done'
+                            item['repair_outcome'] = record['state']
+                            item['last_error'] = None
+                        else:
+                            item['state'] = 'repair_failed'
+                            item['last_error'] = 'repair_failed; needs human'
+                        c.save_queue(q)  # terminal identity before authoritative write-back
+                        mark_finding_outcome(c, expected, failure)
+                    break
                 finally:
                     c.remove_worktree(check_wt, branch)
                 predecessor = commits[-1]
@@ -793,6 +834,94 @@ def merge_head_evidence(c, record, actual_head):
     return evidence
 
 
+def fixed_publication_evidence(c, item, run, record, info, evidence):
+    """Validate an explicit semantic finding disposition against current observations."""
+    fixed = [v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED']
+    if len(fixed) != 1 or record.get('state') != 'published' or record.get('fix_merged'):
+        raise ValueError('expected one unresolved published FIXED job')
+    job_id = fixed[0]
+    job = json.loads(job_path(c.ROOT, job_id).read_text())
+    if (job.get('job') != job_id or job.get('item') != item['id'] or job.get('run') != run
+            or job_id not in record.get('jobs', []) or job.get('canonical_finding_id')):
+        raise ValueError('legacy repair job identity mismatch')
+    publication = record.get('publication') or {}
+    published, actual = publication.get('head'), info.get('headRefOid')
+    merge = (info.get('mergeCommit') or {}).get('oid')
+    tip = c.git('rev-parse', DEFAULT_REF)
+    if (info.get('state') != 'MERGED' or info.get('number') != record.get('fix_pr', {}).get('number')
+            or not all(isinstance(x, str) and re.fullmatch(r'[0-9a-f]{40}', x)
+                       for x in (published, actual, merge, tip))):
+        raise ValueError('merged repair PR identity or lineage mismatch')
+    if not c.ensure_commit(info['number'], actual):
+        raise ValueError('merged repair PR head unavailable')
+    if not c.is_ancestor(published, actual) or not c.is_ancestor(merge, tip):
+        raise ValueError('merged repair PR identity or lineage mismatch')
+    commits = publication.get('commits')
+    if not isinstance(commits, list) or not commits:
+        raise ValueError('published repair commits unavailable')
+    paths = {source_path(job['finding'])}
+    for sha in commits:
+        if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha) or not c.is_ancestor(sha, published):
+            raise ValueError('published repair commit lineage unavailable')
+        paths.update(p for p in c.git('diff-tree', '--root', '--no-commit-id', '--name-only',
+                                      '--no-renames', '-r', '-z', sha).split('\0')
+                     if p and not repair_test_path(p))
+    sources = {}
+    for path in sorted(paths):
+        source_path({'path': path})
+        sources[path] = {'published': repair_source_entry(c, published, path),
+                         'actual': repair_source_entry(c, actual, path),
+                         'current': repair_source_entry(c, tip, path)}
+    # JSON round trip normalizes git entry tuples for journal comparison.
+    expected = json.loads(json.dumps({'job': job_id, 'item': item['id'], 'run': run,
+        'finding_sha256': identity(job['finding']), 'pr': info['number'], 'published_head': published,
+        'actual_head': actual, 'merge_commit': merge, 'source_sha': tip,
+        'sources': sources, 'verdict': 'fixed'}))
+    if not isinstance(evidence, dict) or any(evidence.get(k) != v for k, v in expected.items()):
+        raise ValueError('fixed revalidation binding changed')
+    if not all(isinstance(evidence.get(k), str) and evidence[k].strip() and len(evidence[k]) <= 4000
+               for k in ('reviewer', 'reason')):
+        raise ValueError('named revalidation reviewer and concrete reason required')
+    return expected
+
+
+def publication_journal(c, record):
+    publication = record.get('publication') or {}
+    journal = c.STATE / 'repair' / record['jobs'][0] / 'publication.json'
+    saved = json.loads(journal.read_text())
+    for key in ('head', 'commits', 'target', 'branch', 'open_pr'):
+        if saved.get(key) != publication.get(key):
+            raise ValueError('publication journal identity mismatch')
+    if publication.get('fixed_revalidation') is not None and not saved.get('fixed_revalidation'):
+        raise ValueError('publication revalidation missing from journal')
+    if not set(publication.get('source_resolutions', [])) <= set(saved.get('source_resolutions', [])):
+        raise ValueError('publication resolutions contradict journal')
+    return journal, saved
+
+
+def record_fixed_publication_evidence(c, q, job_id, evidence):
+    """Persist one explicit legacy fixed disposition under the tick lock; never dispatch."""
+    job = json.loads(job_path(c.ROOT, job_id).read_text())
+    matches = [i for i in q['items'] if i['id'] == job.get('item')]
+    if len(matches) != 1:
+        raise ValueError('repair item identity mismatch')
+    item = matches[0]
+    run = job.get('run')
+    record = item.get('repair_runs', {}).get(run)
+    if not record or job.get('job') != job_id or not isinstance(evidence, dict) or evidence.get('job') != job_id:
+        raise ValueError('repair run identity mismatch')
+    journal, saved = publication_journal(c, record)
+    info = c.pr_info(record['fix_pr']['number'])
+    fixed_publication_evidence(c, item, run, record, info, evidence)
+    if c.pr_info(record['fix_pr']['number']) != info:
+        raise ValueError('repair PR changed during revalidation')
+    fixed_publication_evidence(c, item, run, record, info, evidence)
+    saved['fixed_revalidation'] = evidence
+    atomic(journal, saved)
+    record['publication'] = saved
+    c.save_queue(q)
+
+
 def canonical_fixed_events(c, record, info):
     """Project existing terminal ledger truth; never create a disposition."""
     fixed = [v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED']
@@ -833,7 +962,7 @@ def reconcile_fix_prs(c, q):
                     item['remediation_state'] = 'pending-merged-evidence'
                 item['repair_error'] = str(exc)[:300]
             continue
-        for record in item.get('repair_runs', {}).values():
+        for run, record in item.get('repair_runs', {}).items():
             pr = record.get('fix_pr')
             if not pr or record.get('fix_merged'):
                 continue
@@ -851,12 +980,30 @@ def reconcile_fix_prs(c, q):
                     proof = canonical_fixed_events(c, record, info)
                     projected = proof is not None
                     if not projected:
-                        proof = merge_head_evidence(c, record, info.get('headRefOid'))
+                        journal = c.STATE / 'repair' / record['jobs'][0] / 'publication.json' if record.get('publication') else None
+                        saved = json.loads(journal.read_text()) if journal and journal.exists() else None
+                        evidence = saved.get('fixed_revalidation') if saved else None
+                        if evidence:
+                            _, saved = publication_journal(c, record)
+                            fixed_publication_evidence(c, item, run, record, info, evidence)
+                            record['publication'] = saved
+                            proof = {'fixed_revalidation': evidence}
+                        else:
+                            proof = merge_head_evidence(c, record, info.get('headRefOid'))
                     elif canonical_fixed_events(c, record, info) != proof:
                         raise ValueError('canonical fixed finding changed before source feedback')
                 except Exception as exc:
                     record['source_publication_error'] = str(exc)[:300]
                     continue
+                if proof and 'fixed_revalidation' in proof:
+                    try:
+                        _, latest = publication_journal(c, record)
+                        if latest.get('fixed_revalidation') != proof['fixed_revalidation']:
+                            raise ValueError('fixed revalidation changed')
+                        fixed_publication_evidence(c, item, run, record, c.pr_info(pr['number']), proof['fixed_revalidation'])
+                    except Exception as exc:
+                        record['source_publication_error'] = str(exc)[:300]
+                        continue
                 if proof is not None:
                     record['validated_merge_head'] = {**proof, 'merge_commit': merge}
                 fixed = {v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED'}
@@ -872,6 +1019,13 @@ def reconcile_fix_prs(c, q):
                 try:
                     if projected and canonical_fixed_events(c, record, info) != proof:
                         raise ValueError('canonical fixed finding changed before source feedback')
+                    if proof and 'fixed_revalidation' in proof:
+                        _, latest = publication_journal(c, record)
+                        if latest.get('fixed_revalidation') != proof['fixed_revalidation']:
+                            raise ValueError('fixed revalidation changed before source feedback')
+                        fresh = c.pr_info(pr['number'])
+                        fixed_publication_evidence(c, item, run, record, fresh, proof['fixed_revalidation'])
+                        record['publication'] = latest
                     publish_source_resolution(c, record, merge)
                 except Exception as exc:
                     record['source_publication_error'] = str(exc)[:300]

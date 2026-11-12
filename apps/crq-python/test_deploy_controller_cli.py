@@ -49,6 +49,17 @@ class CliTests(ControllerFixture):
     def test_switch_cli_with_matching_pinned_helper_digest_succeeds(self):
         self.switch_cli_fixture(pin_helper=True)
 
+    def test_switch_cli_creates_a_0600_lock_under_a_permissive_umask(self):
+        # The guest proof's umask is 002: a lock opened 0666 becomes 0664 and
+        # the live binding refuses group-writable locks.
+        previous = os.umask(0o002)
+        try:
+            self.switch_cli_fixture()
+        finally:
+            os.umask(previous)
+        lock = self.runner / "state" / dc.LOCK_NAME
+        self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
+
     def test_helper_digest_mismatch_refuses_before_import_lock_or_preflight(self):
         self.write_state("queue.json", {"items": [], "starts": []})
         lock = self.runner / "state" / dc.LOCK_NAME

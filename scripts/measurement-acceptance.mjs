@@ -172,6 +172,10 @@ export function importAcceptance(snapshot) {
     unknown.push(bad('snapshot', 'partial', `incomplete snapshot; failed_step ${step}`));
   }
   // Deterministic output whatever order the comments were recorded in.
-  unknown.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  unknown.sort((a, b) => {
+    const x = JSON.stringify(a);
+    const y = JSON.stringify(b);
+    return x < y ? -1 : x > y ? 1 : 0;
+  });
   return { acceptances, meta, unknown };
 }

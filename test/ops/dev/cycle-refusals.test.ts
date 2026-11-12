@@ -1,3 +1,5 @@
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { makeDevCycle } from '../../../src/ops/dev/cycle.js';
 import type { DevEffects } from '../../../src/ops/dev/effects.js';
@@ -27,6 +29,27 @@ afterEach(async () => {
 const effects: () => DevEffects = () => repoEffects(repo);
 
 describe('dev.cycle', () => {
+  test('an unreadable cq.json (EISDIR) refuses the policy read instead of default reviewers', async () => {
+    await mkdir(join(repo.root, 'cq.json')); // present-but-unreadable; only ENOENT means "no config"
+    const op = makeDevCycle({
+      effects: effects(),
+      check: async () => {
+        throw new Error('check must not run');
+      },
+      review: async () => {
+        throw new Error('review must not run');
+      },
+      address: async () => {
+        throw new Error('address must not run');
+      },
+      open: openFake([]),
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('dev.cycle: cq.json could not be read (EISDIR)');
+  });
+
   test('a red FIRST check stops verbatim before any review leg', async () => {
     const op = makeDevCycle({
       effects: effects(),

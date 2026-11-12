@@ -9,9 +9,50 @@ admission are not ported. A `runner-disabled` marker produces an empty plan.
 Incomplete plans exit 1 with an indeterminate result and must not be used as
 parity or C2 comparison evidence.
 
-Other commands and live execution refuse until their Python equivalents are
-ported. No heartbeat is emitted. Planners must not perform mutations themselves;
-later ports must preserve the shared locking contract.
+`watchdog` is the first live command. It is a parity port of
+`apps/crq-python/ops/crq-watchdog.py`: it reads
+`<XDG_STATE_HOME>/crq/heartbeat.json`, alerts through
+`paseo send --no-wait <agent> <text>`, and persists the sent, recovered and
+failed-retry state in the same state file. The live dispatcher rejects
+arguments, refuses undeclared commands, and converts a thrown handler into a
+failed artifact. A failed alert send is retryable and still exits 0, matching
+the Python command.
+
+The runner's live capabilities are declared at build time in
+`dist/queue-runner/capabilities.json` by
+`scripts/emit-queue-runner-capabilities.mjs`, from
+`src/queue-runner/capabilities.ts`. The declaration is
+`{schema_version: 1, commands: [...]}`. The unit adapter reads it from the
+verified, inventoried `node:` artifact tree and requires the selected command
+to appear there; an absent or malformed declaration declares no live commands.
+Every other live command still refuses for a Node target.
+
+`repair-prepare` is operator-only and deliberately outside the live unit
+capability set: it never appears in `capabilities.json`, and the unit adapters
+still declare only `watchdog`. Run it by hand:
+
+```
+crq repair-prepare <historical-job> --source-sha <sha> \
+  --revalidation <evidence.json> --runner-root <clone-config-dir> \
+  --state-root <state-dir> [--instructions-file <path>]
+```
+
+All roots are explicit; no environment variable and no working-directory
+default is consulted, so the command works from any directory. It holds the
+real `tick.lock`, writes the job and then the queue atomically, and hands a
+canonical finding to the finding inbox. Refusals and failed effects print one
+JSON artifact and exit 1, an unconfirmed effect exits 1 with an
+`indeterminate` artifact, a busy `tick.lock` prints `tick lock busy` and exits
+3 (Python parity), and usage errors exit 2. It does not dispatch, enqueue or
+harvest; those remain caller gates.
+
+Run it against a copied state root before the declared cutover, never live
+CRQ state: the queue write re-serializes the parsed `queue.json`, and the
+first production-shaped run is the observation that decides whether that
+rewrite is acceptable.
+
+Planners must not perform mutations themselves; later ports must preserve the
+shared locking contract.
 
 `apps/crq-python/ops/build-runner.py` is the locked build/staging route. It
 requires a clean checkout whose HEAD is the requested full commit SHA and whose

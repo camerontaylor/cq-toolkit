@@ -496,6 +496,113 @@ class BoundedRepairTest(unittest.TestCase):
                 self.assertIn('valid final attempt rung', record['error'])
                 self.assertEqual(item['state'], 'repair_failed')
 
+    def test_invalid_canonical_result_survives_ledger_and_queue_write_failures(self):
+        import finding_delivery
+        import review_ledger as ledger
+        job_id, job = self.prepare()
+        fid = 'd' * 64
+        job['canonical_finding_id'] = fid
+        atomic(bounded.job_path(self.root, job_id), job)
+        row_path = self.root / 'state/backfill/findings/triage' / (fid + '.json')
+        atomic(row_path, {'status': 'delivered', 'receipt': {'repair_task': job_id},
+                          'review_id': 'e' * 64, 'previous_event_id': None})
+        out = ledger.Outbox(self.root / 'outbox', ledger.ArtifactStore(self.root / 'durable'))
+        inbox = finding_delivery.Inbox(self.root / 'state/backfill/findings', out)
+        self.c.iso = lambda: '2026-11-12T00:00:00Z'
+        result = {'job': job_id, 'item': job['item'], 'verdict': 'FIXED',
+                  'commits': ['a' * 40], 'attempts': [],
+                  'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'],
+                  'origin_job': OLD}
+        path = self.root / 'state/repair' / job_id / 'result.json'
+        atomic(path, result)
+        self.c.save_queue(self.queue)
+        def reload():
+            self.queue = json.loads((self.root / 'state/queue.json').read_text())
+            return self.queue['items'][0]
+        with mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
+            with mock.patch.object(self.c, 'save_queue', side_effect=OSError('queue write')), mock.patch.object(out, 'spool') as spool:
+                with self.assertRaisesRegex(OSError, 'queue write'):
+                    repair_tick.harvest(self.c, self.queue, self.queue['items'][0])
+                spool.assert_not_called()
+            # Keep the in-memory terminal record after the failed save. Replay
+            # must persist it before touching the ledger, even without a reload.
+            with mock.patch.object(self.c, 'save_queue', side_effect=OSError('terminal queue write')), mock.patch.object(out, 'spool') as spool:
+                with self.assertRaisesRegex(OSError, 'terminal queue write'):
+                    repair_tick.harvest(self.c, self.queue, self.queue['items'][0])
+                spool.assert_not_called()
+            item = self.queue['items'][0]
+            def fail_spool(value):
+                durable = json.loads((self.root / 'state/queue.json').read_text())['items'][0]
+                self.assertEqual(durable['repair_runs'][job['run']]['state'], 'failed')
+                self.assertEqual(durable['state'], 'repair_failed')
+                raise OSError('ledger write')
+            with mock.patch.object(out, 'spool', side_effect=fail_spool):
+                with self.assertRaisesRegex(OSError, 'ledger write'):
+                    repair_tick.harvest(self.c, self.queue, item)
+            self.assertEqual(json.loads(row_path.read_text())['status'], 'delivered')
+            item = reload()
+            real_atomic = ledger.atomic
+            def fail_row(filename, data):
+                if filename == row_path:
+                    raise OSError('triage row write')
+                return real_atomic(filename, data)
+            with mock.patch.object(ledger, 'atomic', side_effect=fail_row):
+                with self.assertRaisesRegex(OSError, 'triage row write'):
+                    repair_tick.harvest(self.c, self.queue, item)
+            self.assertEqual(len(out.retained()), 1)
+            self.assertEqual(json.loads(row_path.read_text())['status'], 'delivered')
+            item = reload()
+            repair_tick.harvest(self.c, self.queue, item)
+            repair_tick.harvest(self.c, self.queue, item)
+            self.assertEqual(json.loads(row_path.read_text())['status'], 'needs-retriage')
+            self.assertEqual(len(out.retained()), 1)
+            row = json.loads(row_path.read_text())
+            row.update(status='needs-human', receipt={'repair_task': 'crq-new-owner-F1'})
+            atomic(row_path, row)
+            repair_tick.harvest(self.c, self.queue, item)
+            self.assertEqual(json.loads(row_path.read_text()), row)
+            self.assertEqual(len(out.retained()), 1)
+            retained = item['repair_runs'][job['run']]['verdicts'][0]
+            retained['item'] = 'wrong-item'
+            with self.assertRaisesRegex(ValueError, 'outcome identity mismatch'):
+                repair_tick.harvest(self.c, self.queue, item)
+        self.assertEqual(json.loads(path.read_text()), result)
+        with mock.patch.object(service, 'ROOT', self.root), mock.patch.object(service, 'dispatch') as paid:
+            service.process(self.config, job, self.root / 'wt')
+            service.process(self.config, job, self.root / 'wt')
+            paid.assert_not_called()
+
+    def test_terminal_canonical_failure_without_invalid_reason_is_not_replayed(self):
+        job_id, job = self.prepare()
+        job['canonical_finding_id'] = 'd' * 64
+        atomic(bounded.job_path(self.root, job_id), job)
+        item = self.queue['items'][0]
+        record = item['repair_runs'][job['run']]
+        record.update(state='failed', verdicts=[{
+            'job': job_id, 'item': item['id'], 'finding': job['finding'],
+            'verdict': 'FAILED', 'reason': 'repair ladder exhausted'}])
+        item['state'] = 'repair_failed'
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark:
+            repair_tick.harvest(self.c, self.queue, item)
+            mark.assert_not_called()
+
+    def test_invalid_later_result_preserves_prior_verdicts(self):
+        job_id, job = self.prepare()
+        second = {**job, 'job': job_id + '-second'}
+        atomic(bounded.job_path(self.root, second['job']), second)
+        item = self.queue['items'][0]
+        record = item['repair_runs'][job['run']]
+        record['jobs'].append(second['job'])
+        good = {'job': job_id, 'item': job['item'], 'verdict': 'NOT-FIXED',
+                'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'],
+                'origin_job': OLD}
+        atomic(self.root / 'state/repair' / job_id / 'result.json', good)
+        atomic(self.root / 'state/repair' / second['job'] / 'result.json',
+               {**good, 'job': second['job'], 'verdict': 'FIXED', 'commits': []})
+        repair_tick.harvest(self.c, self.queue, item)
+        self.assertEqual([v['job'] for v in record['verdicts']], record['jobs'])
+        self.assertEqual([v['verdict'] for v in record['verdicts']], ['NOT-FIXED', 'FAILED'])
+
     def test_valid_fixed_rungs_reach_git_verification(self):
         job_id, job = self.prepare()
         self.c.WT_ROOT = self.root / 'wt'
@@ -525,7 +632,7 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(item['repair_runs'][job['run']]['state'], 'failed')
         self.assertEqual(result.read_text(), '{broken')
 
-    def test_malformed_result_writes_canonical_failed_outcome_once(self):
+    def test_malformed_result_reconciles_canonical_failed_outcome(self):
         job_id, job = self.prepare()
         fid = 'd' * 64
         job['canonical_finding_id'] = fid
@@ -540,7 +647,7 @@ class BoundedRepairTest(unittest.TestCase):
             repair_tick.harvest(self.c, self.queue, item)
             repair_tick.harvest(self.c, self.queue, item)
             outcome = inbox.return_value.repair_outcome
-            outcome.assert_called_once()
+            self.assertEqual(outcome.call_count, 2)
             self.assertEqual(outcome.call_args.args[:3], (fid, job_id, 'needs-retriage'))
             self.assertEqual(outcome.call_args.kwargs['failure_class'], 'exhausted')
 

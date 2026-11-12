@@ -200,7 +200,10 @@ describe('dev.review cycle', () => {
       const runner = makeAgentReviewRunner({
         repoRoot: repo.root,
         readFile: async () => {
-          if (config === undefined) throw new Error('ENOENT');
+          if (config === undefined)
+            throw Object.assign(new Error("ENOENT: no such file, open 'cq.json'"), {
+              code: 'ENOENT',
+            });
           return config;
         },
         drivers: { resolve: vi.fn() } as unknown as DriverFactory,

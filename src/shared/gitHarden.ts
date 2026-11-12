@@ -41,4 +41,14 @@ export const HARDENED_DIFF_FLAGS: readonly string[] = [
   '--dst-prefix=b/',
   '--no-color',
   '--no-relative',
+  // review P2 tn4j: diff.ignoreSubmodules=all would otherwise omit an
+  // added gitlink entirely, so a credential-shaped submodule pathname
+  // would bypass the scan (the pathname is published even with push
+  // recursion off).
+  '--ignore-submodules=none',
+  // review P2 uVsr: diff.submodule=log replaces the unified header with a
+  // one-line `Submodule <path> ...` summary, so an added gitlink's pathname
+  // never reaches addedLineComponents. `short` keeps `+++ b/<path>` and the
+  // `Subproject commit` line that carries them.
+  '--submodule=short',
 ];

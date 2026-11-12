@@ -64,9 +64,18 @@ critical/major work before items with none, oldest first within each class. With
 critical/major findings precede minors. Minor jobs require a lowercase 64-character hexadecimal `canonical_finding_id`
 and a matching delivered triage receipt; ordinary minor, trivial, info and none jobs are skipped. It
 owns `state/repair/`, uses one worktree per item and serial findings within that
-item, and runs items serially: the drivers' `CQ_*` session correlation is
-process environment, so concurrent items would need per-dispatch environments
-first. It never writes the queue, pushes or calls the GitHub API; each drain
+item. `repair.max_concurrent_items` admits 1–10 process-isolated item workers
+(default 1 when absent, committed config 1). Findings within an item remain serial.
+The coordinator retains `service.lock` until all admitted children exit; each
+child has a private `CQ_*` process environment. Provider cooldown updates reuse
+the existing `tick.lock` only during the short read/modify/write. A pause stops
+new admission; paid in-flight work finishes naturally. No worker is killed to
+make a slot. This is independent of review `max_inflight`. Existing deployment
+overlays remain serial until explicitly setting `repair.max_concurrent_items`
+to 10 in a subsequent reviewed deployment using the matching updated
+`prepare-host.py` helper, which accepts this optional overlay leaf. The frozen
+d41/c6 helpers do not accept the leaf and remain unchanged.
+It never writes the queue, pushes or calls the GitHub API; each drain
 pass starts with `git fetch --prune origin` in the review clone (a failed fetch
 skips the pass). A job is drained only while its tick-owned repair run is
 `queued`. A job not yet started is skipped as `STALE` (terminal, no model call)
@@ -85,6 +94,20 @@ review reports them again. A closed PR whose branch still exists is not detected
 publication then discards the result. Prepared (`repair-prepare`) jobs keep the
 strict one-job selector, so a moved tip makes them `STALE`.
 `--job/--source-sha/--finding-sha256` still repairs exactly one prepared job.
+
+For an already merged, published legacy FIXED repair whose source changed after
+publication, `crq repair-revalidate-fixed JOB --revalidation FILE` records an
+explicit semantic review in the existing publication journal under the tick lock.
+It does not dispatch work or publish feedback; a later natural tick reconciles it.
+The JSON must include `reviewer`, `reason`, `verdict` (`fixed`), `job`, `item`,
+`run`, `finding_sha256` (the canonical JSON digest of the inbox finding), `pr`,
+`published_head`, `actual_head`, `merge_commit`, and `source_sha` (the observed
+current default-branch tip). `sources` maps the finding path and every non-test
+path in the published commits to objects with `published`, `actual`, and `current`
+entries: each is `[git mode, blob SHA]`, or null for a deleted path. All bindings
+are checked again before feedback; a changed tip or PR requires fresh evidence.
+This optional path applies to a single FIXED legacy job and does not replace the
+canonical finding disposition workflow.
 
 Repair dispatch tries the configured role, then `repair.fallback_models` in order:
 OpenCode Go DeepSeek V4.1 Flash, then direct DeepSeek Flash. Fixers and judges

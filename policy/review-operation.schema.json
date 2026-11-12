@@ -198,6 +198,33 @@
               "minLength": 1,
               "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"
             },
+            "task": {
+              "type": "string",
+              "minLength": 1
+            },
+            "branch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "predecessor": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"
+            },
+            "observed": {
+              "type": "object",
+              "required": ["ancestor"],
+              "properties": {
+                "ancestor": {
+                  "type": "boolean"
+                },
+                "commits_ahead": {
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false
+            },
             "notify": {
               "type": "object",
               "required": ["paseo_agent_id", "paseo_host"],
@@ -379,6 +406,33 @@
                   "type": "string",
                   "minLength": 1,
                   "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"
+                },
+                "task": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "branch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "predecessor": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"
+                },
+                "observed": {
+                  "type": "object",
+                  "required": ["ancestor"],
+                  "properties": {
+                    "ancestor": {
+                      "type": "boolean"
+                    },
+                    "commits_ahead": {
+                      "type": ["integer", "null"],
+                      "minimum": 0
+                    }
+                  },
+                  "additionalProperties": false
                 }
               },
               "additionalProperties": false
@@ -482,6 +536,84 @@
                 }
               },
               "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["v", "op", "limit", "cursor"],
+              "properties": {
+                "v": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "op": {
+                  "const": "review-history"
+                },
+                "request_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"
+                },
+                "repo": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+                },
+                "target": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "base_commit": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "base_tree": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "head_commit": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "head_tree": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "task": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "branch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "predecessor": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$"
+                },
+                "observed": {
+                  "type": "object",
+                  "required": ["ancestor"],
+                  "properties": {
+                    "ancestor": {
+                      "type": "boolean"
+                    },
+                    "commits_ahead": {
+                      "type": ["integer", "null"],
+                      "minimum": 0
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "cursor": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false
             }
           ]
         }
@@ -539,6 +671,32 @@
                   "type": "string",
                   "minLength": 1
                 },
+                "history": {
+                  "type": "object",
+                  "required": ["v", "digest", "status"],
+                  "properties": {
+                    "v": {
+                      "type": "integer",
+                      "const": 1
+                    },
+                    "digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "status": {
+                      "enum": ["ok", "degraded"]
+                    },
+                    "cue": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "reason": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "additionalProperties": false
+                },
                 "notify": {
                   "type": "object",
                   "required": ["state"],
@@ -576,7 +734,8 @@
                       "status",
                       "result",
                       "cancel",
-                      "notify-update"
+                      "notify-update",
+                      "review-history"
                     ]
                   }
                 },
@@ -586,7 +745,8 @@
                     "enum": [
                       "original-commit-snapshot-v1",
                       "chunked-result-v1",
-                      "repeat-generations-v1"
+                      "repeat-generations-v1",
+                      "review-history-v1"
                     ]
                   }
                 },
@@ -713,6 +873,347 @@
               "additionalProperties": false
             }
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "const": "history"
+        },
+        "value": {
+          "type": "object",
+          "required": [
+            "v",
+            "status",
+            "scope",
+            "relation",
+            "repeat",
+            "predecessor",
+            "delta",
+            "summary",
+            "cue",
+            "entries",
+            "cursor",
+            "next_cursor",
+            "digest"
+          ],
+          "properties": {
+            "v": {
+              "type": "integer",
+              "const": 1
+            },
+            "status": {
+              "enum": ["ok", "degraded"]
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            },
+            "scope": {
+              "enum": ["task", "branch", "none"]
+            },
+            "relation": {
+              "enum": ["none", "ancestral", "possible"]
+            },
+            "repeat": {
+              "type": "boolean"
+            },
+            "predecessor": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "required": [
+                    "request_id",
+                    "item",
+                    "generation",
+                    "state",
+                    "created_at",
+                    "head_commit",
+                    "head_tree",
+                    "same_task",
+                    "same_branch",
+                    "relationship",
+                    "ancestry",
+                    "commits_ahead"
+                  ],
+                  "properties": {
+                    "request_id": {
+                      "type": ["string", "null"],
+                      "minLength": 1
+                    },
+                    "item": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "state": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "created_at": {
+                      "type": ["string", "null"]
+                    },
+                    "head_commit": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{40}$"
+                    },
+                    "head_tree": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{40}$"
+                    },
+                    "same_task": {
+                      "type": "boolean"
+                    },
+                    "same_branch": {
+                      "type": "boolean"
+                    },
+                    "relationship": {
+                      "enum": ["ancestral", "possible", "unrelated"]
+                    },
+                    "ancestry": {
+                      "type": ["string", "null"],
+                      "enum": ["server", "client", null]
+                    },
+                    "commits_ahead": {
+                      "type": ["integer", "null"],
+                      "minimum": 0
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "delta": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "required": [
+                    "method",
+                    "files",
+                    "insertions",
+                    "deletions",
+                    "binary_files",
+                    "partial",
+                    "commits_ahead",
+                    "ancestry"
+                  ],
+                  "properties": {
+                    "method": {
+                      "const": "tree"
+                    },
+                    "files": {
+                      "type": ["integer", "null"],
+                      "minimum": 0
+                    },
+                    "insertions": {
+                      "type": ["integer", "null"],
+                      "minimum": 0
+                    },
+                    "deletions": {
+                      "type": ["integer", "null"],
+                      "minimum": 0
+                    },
+                    "binary_files": {
+                      "type": ["integer", "null"],
+                      "minimum": 0
+                    },
+                    "partial": {
+                      "type": "boolean"
+                    },
+                    "commits_ahead": {
+                      "type": ["integer", "null"],
+                      "minimum": 0
+                    },
+                    "ancestry": {
+                      "type": ["string", "null"],
+                      "enum": ["server", "client", null]
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "summary": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "required": ["requests", "invocations", "completed", "failed"],
+                  "properties": {
+                    "requests": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "invocations": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "completed": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "failed": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cue": {
+              "type": ["string", "null"],
+              "minLength": 1
+            },
+            "entries": {
+              "type": "array",
+              "maxItems": 50,
+              "items": {
+                "type": "object",
+                "required": [
+                  "item",
+                  "request_id",
+                  "generation",
+                  "state",
+                  "created_at",
+                  "head_commit",
+                  "head_tree",
+                  "task",
+                  "branch",
+                  "same_task",
+                  "same_branch",
+                  "relationship",
+                  "ancestry",
+                  "commits_ahead",
+                  "delta"
+                ],
+                "properties": {
+                  "item": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "request_id": {
+                    "type": ["string", "null"],
+                    "minLength": 1
+                  },
+                  "generation": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "state": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "created_at": {
+                    "type": ["string", "null"]
+                  },
+                  "head_commit": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{40}$"
+                  },
+                  "head_tree": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{40}$"
+                  },
+                  "task": {
+                    "type": ["string", "null"]
+                  },
+                  "branch": {
+                    "type": ["string", "null"]
+                  },
+                  "same_task": {
+                    "type": "boolean"
+                  },
+                  "same_branch": {
+                    "type": "boolean"
+                  },
+                  "relationship": {
+                    "enum": ["ancestral", "possible", "unrelated"]
+                  },
+                  "ancestry": {
+                    "type": ["string", "null"],
+                    "enum": ["server", "client", null]
+                  },
+                  "commits_ahead": {
+                    "type": ["integer", "null"],
+                    "minimum": 0
+                  },
+                  "delta": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "required": [
+                          "method",
+                          "files",
+                          "insertions",
+                          "deletions",
+                          "binary_files",
+                          "partial"
+                        ],
+                        "properties": {
+                          "method": {
+                            "const": "tree"
+                          },
+                          "files": {
+                            "type": ["integer", "null"],
+                            "minimum": 0
+                          },
+                          "insertions": {
+                            "type": ["integer", "null"],
+                            "minimum": 0
+                          },
+                          "deletions": {
+                            "type": ["integer", "null"],
+                            "minimum": 0
+                          },
+                          "binary_files": {
+                            "type": ["integer", "null"],
+                            "minimum": 0
+                          },
+                          "partial": {
+                            "type": "boolean"
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "cursor": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "next_cursor": {
+              "type": ["integer", "null"],
+              "minimum": 0
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
