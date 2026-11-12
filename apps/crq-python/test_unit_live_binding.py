@@ -90,6 +90,22 @@ class CommandTests(PortFixture):
         with self.assertRaises(live.LiveBindingRefused):
             port.run("stop", "crq-tick.service; rm -rf /")
 
+    def test_timeout_must_be_finite_positive_and_numeric(self):
+        invalid = (True, False, "5", 0, -1, float("nan"),
+                   float("inf"), float("-inf"), 10 ** 1000)
+        for value in invalid:
+            with self.subTest(value=repr(value)):
+                with self.assertRaises(live.LiveBindingRefused):
+                    live.SubprocessSystemd(timeout=value)
+                with self.assertRaises(live.LiveBindingRefused):
+                    self.port().run("stop", "crq-tick.service", timeout=value)
+        with self.assertRaises(live.LiveBindingRefused):
+            live.SubprocessSystemd(timeout=None)
+        self.assertEqual(
+            live.SubprocessSystemd(timeout=5).timeout, 5.0)
+        self.assertEqual(
+            live.SubprocessSystemd(timeout=0.2).timeout, 0.2)
+
     def test_run_refuses_an_unreadable_runner_result(self):
         port = self.port(lambda command: {"stdout": ""})
         with self.assertRaises(live.LiveBindingRefused):
@@ -335,6 +351,85 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["complete"], False)
         self.assertEqual(evidence["supported"], False)
         self.assertIn("scan bound", evidence["error"])
+
+    def test_foreign_unit_directives_are_unsupported(self):
+        declared = self.declare()
+        self.write("foreign.timer", "[Timer]\nUnit=crq-slot.service\n")
+        self.write("foreign.service", "[Unit]\nPartOf=crq-slot.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        foreign = " ".join(evidence["foreign"])
+        self.assertIn("Unit names crq-slot.service", foreign)
+        self.assertIn("PartOf names crq-slot.service", foreign)
+
+    def test_foreign_unit_targeting_the_declared_service_is_unsupported(self):
+        declared = self.declare()
+        self.write("evil.timer", "[Timer]\nUnit=crq-tick.service\n")
+        self.write("evil.service", "[Unit]\nPartOf=crq-tick.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        foreign = " ".join(evidence["foreign"])
+        self.assertIn("Unit names crq-tick.service", foreign)
+        self.assertIn("PartOf names crq-tick.service", foreign)
+
+    def test_declared_source_may_name_expected_units(self):
+        declared = self.declare()
+        self.write("crq-tick.timer",
+                   "[Timer]\nOnCalendar=*:0/12\nUnit=crq-tick.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+
+    def test_unreadable_directory_is_incomplete(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can read a mode-000 directory")
+        declared = self.declare()
+        hidden = self.unit_dir / "hidden.d"
+        hidden.mkdir()
+        hidden.chmod(0o000)
+        self.addCleanup(hidden.chmod, 0o700)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("unreadable", evidence["error"])
+
+    def test_dependency_scan_bound_is_incomplete(self):
+        declared = self.declare()
+        for index in range(3):
+            self.write("other%d.service" % index, "[Service]\n")
+        with mock.patch.object(live, "MAX_SCAN_ENTRIES", 1):
+            evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("dependency scan bound", evidence["error"])
+
+    def test_symlink_outside_the_unit_directory_is_incomplete(self):
+        declared = self.declare()
+        outside = self.base / "outside.service"
+        outside.write_text("[Unit]\nWants=crq-slot.service\n")
+        (self.unit_dir / "foreign.service").symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("symlink outside", evidence["error"])
+
+    def test_symlink_loop_is_incomplete(self):
+        declared = self.declare()
+        (self.unit_dir / "loop.service").symlink_to("loop.service")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("cannot resolve a symlink", evidence["error"])
+
+    def test_dev_null_mask_is_not_a_dependency_source(self):
+        declared = self.declare()
+        (self.unit_dir / "foreign.service").symlink_to(os.devnull)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], True)
 
     def test_malformed_job_line_is_incomplete(self):
         declared = self.declare()

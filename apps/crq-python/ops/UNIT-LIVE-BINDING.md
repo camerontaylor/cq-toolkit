@@ -66,8 +66,20 @@ shapes:
   and the service is the requested unit;
 * no unexpected prefix entry, enablement link, drop-in directory, extra
   installed or loaded manager unit, or job on an unexpected prefix unit;
-* no activation dependency directive in a scanned user unit names a CRQ unit
-  outside the declared set.
+* no dependency directive in a source file outside the declared set names a
+  CRQ unit, and no directive in a declared source names a CRQ unit outside the
+  expected units: `Wants`, `Requires`, `Requisite`, `BindsTo`, `PartOf`,
+  `Conflicts`, `WantedBy`, `RequiredBy`, `Also`, `Upholds`, `OnFailure`,
+  `OnSuccess`, `Triggers`, `TriggersBy` and `Unit` (the timer/path target).
+  A declared timer may name its own declared service; a foreign timer naming
+  that service is still foreign.
+
+The recursive dependency scan is bounded by visited entry count, does not
+follow symlinked directories, and reads a symlink file only when its resolved
+target stays inside the unit directory; a `/dev/null` mask is skipped. An
+unreadable directory, including an unreadable descendant, or a symlink
+escaping or unresolvable inside the unit directory makes `complete` false
+rather than silently skipping evidence.
 
 The examined scope is the user unit directory and the user manager's installed
 and loaded lists. The following are outside this scope and are not claimed by

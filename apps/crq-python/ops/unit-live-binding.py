@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import errno
 import importlib.util
+import math
 import os
 import re
 import stat
@@ -60,7 +61,7 @@ completion = _load("crq_unit_live_binding_completion",
 factory = _load("crq_unit_live_binding_factory", OPS / "unit-switch-factory.py")
 
 MAX_UNIT_ENTRIES = 4096
-MAX_SCAN_FILES = 512
+MAX_SCAN_ENTRIES = 512
 MAX_UNIT_BYTES = 1 << 20
 MAX_PIDS = 4096
 ARG_RE = re.compile(r"[A-Za-z0-9_.@:/-]+")
@@ -68,8 +69,9 @@ PROPERTY_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 PID_RE = re.compile(r"[0-9]+")
 CRQ_NAME_RE = re.compile(r"crq-[A-Za-z0-9_.@:-]+")
 DEPENDENCY_RE = re.compile(
-    r"(?P<directive>Wants|Requires|BindsTo|WantedBy|RequiredBy|Also|Upholds|"
-    r"OnFailure|OnSuccess|Triggers|TriggersBy)\s*=\s*(?P<value>.*)")
+    r"(?P<directive>Wants|Requires|Requisite|BindsTo|PartOf|Conflicts|"
+    r"WantedBy|RequiredBy|Also|Upholds|OnFailure|OnSuccess|Triggers|"
+    r"TriggersBy|Unit)\s*=\s*(?P<value>.*)")
 UNIT_SUFFIXES = {".service", ".timer", ".path"}
 
 
@@ -140,12 +142,15 @@ class SubprocessSystemd:
 
     @staticmethod
     def _duration(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise LiveBindingRefused("timeout must be a finite positive number")
         try:
             number = float(value)
-        except (TypeError, ValueError) as exc:
-            raise LiveBindingRefused("timeout is not a number") from exc
-        if not number > 0:
-            raise LiveBindingRefused("timeout must be positive")
+        except OverflowError as exc:
+            raise LiveBindingRefused(
+                "timeout must be a finite positive number") from exc
+        if not math.isfinite(number) or number <= 0:
+            raise LiveBindingRefused("timeout must be a finite positive number")
         return number
 
     def _unit(self, unit):
@@ -368,37 +373,83 @@ class SubprocessSystemd:
                 detail[:300] or "rc " + str(result["rc"]))
         return result["stdout"].splitlines(), None
 
-    def _scan_dependencies(self, base, expected, foreign):
-        count = 0
-        for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
-            dirnames.sort()
-            for filename in sorted(filenames):
-                path = Path(dirpath) / filename
-                count += 1
-                if count > MAX_SCAN_FILES:
-                    return "unit directory exceeds the dependency scan bound"
-                if path.suffix not in {".service", ".timer", ".path", ".socket",
-                                       ".target", ".conf"}:
-                    continue
-                if not path.is_file():
-                    continue
-                try:
-                    data = _read_file(path, max_bytes=MAX_UNIT_BYTES)
-                except LiveBindingRefused as exc:
-                    return str(exc)
-                text = _text(data, str(path))
-                for number, line in enumerate(text.splitlines(), 1):
-                    stripped = line.strip()
-                    if not stripped or stripped.startswith(("#", ";")):
-                        continue
-                    match = DEPENDENCY_RE.match(stripped)
-                    if match is None:
-                        continue
-                    for name in CRQ_NAME_RE.findall(match.group("value")):
-                        if name not in expected:
-                            foreign.append(
-                                "%s:%d: %s names %s"
-                                % (path, number, match.group("directive"), name))
+    def _scan_dependencies(self, base, expected, declared, foreign):
+        root = base.resolve()
+        declared_paths = {str(path) for path in declared}
+        declared_resolved = set()
+        for path in declared:
+            try:
+                declared_resolved.add(path.resolve())
+            except (OSError, RuntimeError):
+                declared_resolved.add(path)
+        stack = [Path(base)]
+        seen = 0
+        while stack:
+            current = stack.pop()
+            try:
+                with os.scandir(current) as scan:
+                    for entry in scan:
+                        seen += 1
+                        if seen > MAX_SCAN_ENTRIES:
+                            return "unit directory exceeds the dependency scan bound"
+                        path = Path(entry.path)
+                        if entry.is_symlink():
+                            try:
+                                target = path.resolve(strict=False)
+                            except (OSError, RuntimeError) as exc:
+                                return ("dependency scan cannot resolve a symlink: "
+                                        + str(path) + ": " + str(exc)[:120])
+                            if target == path:
+                                return ("dependency scan cannot resolve a symlink: "
+                                        + str(path))
+                            try:
+                                if target == Path(os.devnull):
+                                    continue
+                                target.relative_to(root)
+                            except ValueError:
+                                return ("dependency scan found a symlink outside "
+                                        "the unit directory: " + str(path))
+                            try:
+                                info = path.stat()
+                            except (OSError, RuntimeError) as exc:
+                                return ("dependency scan cannot resolve a symlink: "
+                                        + str(path) + ": " + str(exc)[:120])
+                            if not stat.S_ISREG(info.st_mode):
+                                continue
+                        elif entry.is_dir(follow_symlinks=False):
+                            stack.append(path)
+                            continue
+                        elif not entry.is_file(follow_symlinks=False):
+                            continue
+                        if path.suffix not in {".service", ".timer", ".path",
+                                               ".socket", ".target", ".conf"}:
+                            continue
+                        try:
+                            data = _read_file(path, max_bytes=MAX_UNIT_BYTES)
+                        except LiveBindingRefused as exc:
+                            return str(exc)
+                        source_declared = str(path) in declared_paths
+                        if not source_declared:
+                            try:
+                                source_declared = path.resolve() in declared_resolved
+                            except (OSError, RuntimeError):
+                                source_declared = False
+                        text = _text(data, str(path))
+                        for number, line in enumerate(text.splitlines(), 1):
+                            stripped = line.strip()
+                            if not stripped or stripped.startswith(("#", ";")):
+                                continue
+                            match = DEPENDENCY_RE.match(stripped)
+                            if match is None:
+                                continue
+                            for name in CRQ_NAME_RE.findall(match.group("value")):
+                                if name not in expected or not source_declared:
+                                    foreign.append(
+                                        "%s:%d: %s names %s"
+                                        % (path, number,
+                                           match.group("directive"), name))
+            except OSError as exc:
+                return "unit directory is unreadable: " + str(exc)[:160]
         return None
 
     def discover(self, unit, declared_paths):
@@ -475,10 +526,10 @@ class SubprocessSystemd:
             name = entry.name
             if name.startswith(prefix) and str(entry) not in declared_set:
                 foreign.append("unexpected installed entry: " + str(entry))
-            if entry.is_dir() and not entry.is_symlink() \
+            if entry.is_dir(follow_symlinks=False) \
                     and name.endswith(".d") and name[:-2] in units:
                 foreign.append("undeclared drop-in directory: " + str(entry))
-            if entry.is_dir() and not entry.is_symlink() \
+            if entry.is_dir(follow_symlinks=False) \
                     and name.endswith((".wants", ".requires")):
                 try:
                     children = list(entry.iterdir())
@@ -493,7 +544,7 @@ class SubprocessSystemd:
                                        + str(child))
 
         scan_error = self._scan_dependencies(
-            self.unit_dir, units, foreign)
+            self.unit_dir, units, declared, foreign)
         if scan_error is not None:
             error = error or scan_error
 
