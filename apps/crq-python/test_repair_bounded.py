@@ -519,7 +519,13 @@ class BoundedRepairTest(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, 'queue write'):
                     repair_tick.harvest(self.c, self.queue, self.queue['items'][0])
                 spool.assert_not_called()
-            item = reload()
+            # Keep the in-memory terminal record after the failed save. Replay
+            # must persist it before touching the ledger, even without a reload.
+            with mock.patch.object(self.c, 'save_queue', side_effect=OSError('terminal queue write')), mock.patch.object(out, 'spool') as spool:
+                with self.assertRaisesRegex(OSError, 'terminal queue write'):
+                    repair_tick.harvest(self.c, self.queue, self.queue['items'][0])
+                spool.assert_not_called()
+            item = self.queue['items'][0]
             def fail_spool(value):
                 durable = json.loads((self.root / 'state/queue.json').read_text())['items'][0]
                 self.assertEqual(durable['repair_runs'][job['run']]['state'], 'failed')
@@ -560,6 +566,20 @@ class BoundedRepairTest(unittest.TestCase):
             service.process(self.config, job, self.root / 'wt')
             service.process(self.config, job, self.root / 'wt')
             paid.assert_not_called()
+
+    def test_terminal_canonical_failure_without_invalid_reason_is_not_replayed(self):
+        job_id, job = self.prepare()
+        job['canonical_finding_id'] = 'd' * 64
+        atomic(bounded.job_path(self.root, job_id), job)
+        item = self.queue['items'][0]
+        record = item['repair_runs'][job['run']]
+        record.update(state='failed', verdicts=[{
+            'job': job_id, 'item': item['id'], 'finding': job['finding'],
+            'verdict': 'FAILED', 'reason': 'repair ladder exhausted'}])
+        item['state'] = 'repair_failed'
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark:
+            repair_tick.harvest(self.c, self.queue, item)
+            mark.assert_not_called()
 
     def test_invalid_later_result_preserves_prior_verdicts(self):
         job_id, job = self.prepare()
