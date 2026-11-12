@@ -295,7 +295,7 @@ def classify_vectors() -> Dict[str, Any]:
                   '{"type":"error","errorType":"network_error","recoverable":true}\n'
                   '{"type":"complete","status":"review_completed"}\n', 1),
         _classify("timeout-exit-is-transient", "", 124),
-        _classify("sighup-exit-is-transient", "", 129),
+        _classify("sighup-exit-is-not-transient", "", 129),
         _classify("empty-existing-stream-is-interrupted", "", 0),
         _classify("absent-stream-is-interrupted", None, 0),
         _classify("unknown-severity-is-counted-under-its-name",
