@@ -1,0 +1,70 @@
+{
+  "schema": "cq.crq-repair-prepare-live-vector/v1",
+  "source": "apps/crq-python/repair_tick.py prepare_current_job over a real scratch repository",
+  "note": "Recorded from production prepare_current_job with real git reads and the real finding Inbox/Outbox. Only the secret scanner and the clock are faked; neither contributes to these bytes.",
+  "repository": {
+    "message": "fixture: deterministic repair-prepare source",
+    "author_name": "crq fixture",
+    "author_email": "crq-fixture@example.invalid",
+    "date": "2026-11-11T00:00:00+0000",
+    "files": {
+      "src/lock.ts": "\nfirst\nsecond\n",
+      "policy/denylist/patterns.yml": "rules:\n  - id: class:fixture-marker\n    description: fixture marker (never present in the clean source)\n    regex: '\\bSECRET-[A-Z0-9]{4}\\b'\n    sample: 'SECRET-ABCD'\nclean_probes:\n  - 'nothing secret here'\n"
+    },
+    "source_sha": "bb5cf3e390fd3d3b32e58bb5095b9a239e79be7a",
+    "source_blob_sha": "f79bd4f84700d5fcdffafcc90c3597fba46a4a17"
+  },
+  "state": {
+    "old_job_id": "crq-historical-F1",
+    "item_id": "pr1-merged",
+    "old_run": "old-run",
+    "historical_repair_base": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "canonical_finding_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "finding_sha256": "6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096",
+    "handoff_at": "2026-11-11T00:00:00Z",
+    "clean_scan_report": {
+      "denylist_rules": 0,
+      "denylist_hits": 0,
+      "gitleaks": "clean",
+      "gitleaks_hits": 0
+    }
+  },
+  "cases": {
+    "canonical": {
+      "job_id": "crq-revalidated-bbf15bbb636f6c6fa3c1f049-F1",
+      "evidence": {
+        "source_sha": "bb5cf3e390fd3d3b32e58bb5095b9a239e79be7a",
+        "source_blob_sha": "f79bd4f84700d5fcdffafcc90c3597fba46a4a17",
+        "finding_sha256": "6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096",
+        "verdict": "still-valid",
+        "reviewer": "independent-test-reviewer",
+        "reason": "Pinned source retains the unstable initialization metadata comparison."
+      },
+      "old_job_canonical": "{\n  \"job\": \"crq-historical-F1\",\n  \"item\": \"pr1-merged\",\n  \"kind\": \"merged\",\n  \"pr\": 1,\n  \"run\": \"old-run\",\n  \"cycle\": 1,\n  \"repair_base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n  \"branch\": null,\n  \"finding\": {\n    \"path\": \"src/lock.ts\",\n    \"line\": 2,\n    \"severity\": \"major\",\n    \"body\": \"Finding data\",\n    \"id\": \"thread-1\"\n  },\n  \"repair_round\": 1,\n  \"prior\": null,\n  \"recurrence\": false,\n  \"review_diff\": \"diff --git a/src/lock.ts b/src/lock.ts\\n\",\n  \"source\": {\n    \"run\": \"old-run\",\n    \"id\": \"thread-1\",\n    \"thread_id\": \"th-1\"\n  },\n  \"canonical_finding_id\": \"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"\n}\n",
+      "queue_input_canonical": "{\n  \"items\": [\n    {\n      \"id\": \"pr1-merged\",\n      \"pr\": 1,\n      \"kind\": \"merged\",\n      \"state\": \"done\",\n      \"repair_runs\": {\n        \"old-run\": {\n          \"jobs\": [\n            \"crq-historical-F1\"\n          ],\n          \"base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"pin\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"state\": \"queued\"\n        }\n      }\n    }\n  ]\n}\n",
+      "triage_input_canonical": "{\n  \"review_id\": \"1111111111111111111111111111111111111111111111111111111111111111\",\n  \"finding\": {\n    \"id\": \"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\n    \"path\": \"src/lock.ts\"\n  },\n  \"canonical_id\": \"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\n  \"previous_event_id\": \"event-1\",\n  \"status\": \"delivered\",\n  \"receipt\": {\n    \"repair_task\": \"crq-historical-F1\"\n  }\n}\n",
+      "job_canonical": "{\n  \"job\": \"crq-revalidated-bbf15bbb636f6c6fa3c1f049-F1\",\n  \"item\": \"pr1-merged\",\n  \"kind\": \"merged\",\n  \"pr\": 1,\n  \"run\": \"revalidated-bbf15bbb636f6c6fa3c1f049\",\n  \"cycle\": null,\n  \"repair_base\": \"bb5cf3e390fd3d3b32e58bb5095b9a239e79be7a\",\n  \"branch\": null,\n  \"finding\": {\n    \"path\": \"src/lock.ts\",\n    \"line\": 2,\n    \"severity\": \"major\",\n    \"body\": \"Finding data\",\n    \"id\": \"thread-1\"\n  },\n  \"repair_round\": 1,\n  \"prior\": null,\n  \"recurrence\": false,\n  \"review_diff\": \"diff --git a/src/lock.ts b/src/lock.ts\\n\",\n  \"source\": {\n    \"run\": \"old-run\",\n    \"id\": \"thread-1\",\n    \"thread_id\": \"th-1\"\n  },\n  \"canonical_finding_id\": \"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\n  \"origin_job\": \"crq-historical-F1\",\n  \"source_sha\": \"bb5cf3e390fd3d3b32e58bb5095b9a239e79be7a\",\n  \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n  \"revalidation\": {\n    \"source_sha\": \"bb5cf3e390fd3d3b32e58bb5095b9a239e79be7a\",\n    \"source_blob_sha\": \"f79bd4f84700d5fcdffafcc90c3597fba46a4a17\",\n    \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n    \"verdict\": \"still-valid\",\n    \"reviewer\": \"independent-test-reviewer\",\n    \"reason\": \"Pinned source retains the unstable initialization metadata comparison.\"\n  }\n}\n",
+      "queue_canonical": "{\n  \"items\": [\n    {\n      \"id\": \"pr1-merged\",\n      \"pr\": 1,\n      \"kind\": \"merged\",\n      \"state\": \"done\",\n      \"repair_runs\": {\n        \"old-run\": {\n          \"jobs\": [\n            \"crq-historical-F1\"\n          ],\n          \"base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"pin\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"state\": \"stale\",\n          \"error\": \"superseded by prepared retry crq-revalidated-bbf15bbb636f6c6fa3c1f049-F1\"\n        },\n        \"revalidated-bbf15bbb636f6c6fa3c1f049\": {\n          \"jobs\": [\n            \"crq-revalidated-bbf15bbb636f6c6fa3c1f049-F1\"\n          ],\n          \"pin\": \"bb5cf3e390fd3d3b32e58bb5095b9a239e79be7a\",\n          \"base\": \"bb5cf3e390fd3d3b32e58bb5095b9a239e79be7a\",\n          \"branch\": null,\n          \"open_pr\": false,\n          \"round\": 1,\n          \"state\": \"queued\",\n          \"origin_job\": \"crq-historical-F1\",\n          \"revalidation_sha256\": \"f4e8ff24cfaaeb05492d0c13edc24284dbecdc01961f0c80a9678d372d30f8b6\",\n          \"canonical_finding_id\": \"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"\n        }\n      }\n    }\n  ]\n}\n",
+      "triage_canonical": "{\"canonical_id\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"finding\":{\"id\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"path\":\"src/lock.ts\"},\"previous_event_id\":\"1d575ca2ae47f66edc3ae15a55ff03245a5fac1422b78b04c2b19efab8788e92\",\"receipt\":{\"acknowledgement\":\"a64582d1ec36d3f2ce3b35370c83367d2116741af5efc1691c260ae682925be9\",\"repair_task\":\"crq-revalidated-bbf15bbb636f6c6fa3c1f049-F1\"},\"review_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"status\":\"delivered\"}",
+      "outbox_canonical": "{\"event_type\":\"finding-event\",\"id\":\"1d575ca2ae47f66edc3ae15a55ff03245a5fac1422b78b04c2b19efab8788e92\",\"occurred_at\":\"2026-11-11T00:00:00Z\",\"payload\":{\"action\":\"delivered\",\"actor\":\"crq-repair-preparation\",\"evidence\":{\"acknowledgement\":\"a64582d1ec36d3f2ce3b35370c83367d2116741af5efc1691c260ae682925be9\",\"repair_task\":\"crq-revalidated-bbf15bbb636f6c6fa3c1f049-F1\"},\"finding_id\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"previous_event_id\":\"event-1\",\"review_id\":\"1111111111111111111111111111111111111111111111111111111111111111\"},\"schema\":\"cq.review-ledger/v1\",\"source_key\":\"prepared-delivery:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff:crq-revalidated-bbf15bbb636f6c6fa3c1f049-F1\"}"
+    },
+    "non_canonical": {
+      "job_id": "crq-revalidated-bbf15bbb636f6c6fa3c1f049-F1",
+      "evidence": {
+        "source_sha": "bb5cf3e390fd3d3b32e58bb5095b9a239e79be7a",
+        "source_blob_sha": "f79bd4f84700d5fcdffafcc90c3597fba46a4a17",
+        "finding_sha256": "6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096",
+        "verdict": "still-valid",
+        "reviewer": "independent-test-reviewer",
+        "reason": "Pinned source retains the unstable initialization metadata comparison."
+      },
+      "old_job_canonical": "{\n  \"job\": \"crq-historical-F1\",\n  \"item\": \"pr1-merged\",\n  \"kind\": \"merged\",\n  \"pr\": 1,\n  \"run\": \"old-run\",\n  \"cycle\": 1,\n  \"repair_base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n  \"branch\": null,\n  \"finding\": {\n    \"path\": \"src/lock.ts\",\n    \"line\": 2,\n    \"severity\": \"major\",\n    \"body\": \"Finding data\",\n    \"id\": \"thread-1\"\n  },\n  \"repair_round\": 1,\n  \"prior\": null,\n  \"recurrence\": false,\n  \"review_diff\": \"diff --git a/src/lock.ts b/src/lock.ts\\n\",\n  \"source\": {\n    \"run\": \"old-run\",\n    \"id\": \"thread-1\",\n    \"thread_id\": \"th-1\"\n  }\n}\n",
+      "queue_input_canonical": "{\n  \"items\": [\n    {\n      \"id\": \"pr1-merged\",\n      \"pr\": 1,\n      \"kind\": \"merged\",\n      \"state\": \"done\",\n      \"repair_runs\": {\n        \"old-run\": {\n          \"jobs\": [\n            \"crq-historical-F1\"\n          ],\n          \"base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"pin\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"state\": \"queued\"\n        }\n      }\n    }\n  ]\n}\n",
+      "triage_input_canonical": null,
+      "job_canonical": "{\n  \"job\": \"crq-revalidated-bbf15bbb636f6c6fa3c1f049-F1\",\n  \"item\": \"pr1-merged\",\n  \"kind\": \"merged\",\n  \"pr\": 1,\n  \"run\": \"revalidated-bbf15bbb636f6c6fa3c1f049\",\n  \"cycle\": null,\n  \"repair_base\": \"bb5cf3e390fd3d3b32e58bb5095b9a239e79be7a\",\n  \"branch\": null,\n  \"finding\": {\n    \"path\": \"src/lock.ts\",\n    \"line\": 2,\n    \"severity\": \"major\",\n    \"body\": \"Finding data\",\n    \"id\": \"thread-1\"\n  },\n  \"repair_round\": 1,\n  \"prior\": null,\n  \"recurrence\": false,\n  \"review_diff\": \"diff --git a/src/lock.ts b/src/lock.ts\\n\",\n  \"source\": {\n    \"run\": \"old-run\",\n    \"id\": \"thread-1\",\n    \"thread_id\": \"th-1\"\n  },\n  \"origin_job\": \"crq-historical-F1\",\n  \"source_sha\": \"bb5cf3e390fd3d3b32e58bb5095b9a239e79be7a\",\n  \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n  \"revalidation\": {\n    \"source_sha\": \"bb5cf3e390fd3d3b32e58bb5095b9a239e79be7a\",\n    \"source_blob_sha\": \"f79bd4f84700d5fcdffafcc90c3597fba46a4a17\",\n    \"finding_sha256\": \"6b4e7b3f540256eada167cf6980e4dad34cfa6d815983d0c7e3a99d09d9a8096\",\n    \"verdict\": \"still-valid\",\n    \"reviewer\": \"independent-test-reviewer\",\n    \"reason\": \"Pinned source retains the unstable initialization metadata comparison.\"\n  }\n}\n",
+      "queue_canonical": "{\n  \"items\": [\n    {\n      \"id\": \"pr1-merged\",\n      \"pr\": 1,\n      \"kind\": \"merged\",\n      \"state\": \"done\",\n      \"repair_runs\": {\n        \"old-run\": {\n          \"jobs\": [\n            \"crq-historical-F1\"\n          ],\n          \"base\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"pin\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n          \"state\": \"queued\"\n        },\n        \"revalidated-bbf15bbb636f6c6fa3c1f049\": {\n          \"jobs\": [\n            \"crq-revalidated-bbf15bbb636f6c6fa3c1f049-F1\"\n          ],\n          \"pin\": \"bb5cf3e390fd3d3b32e58bb5095b9a239e79be7a\",\n          \"base\": \"bb5cf3e390fd3d3b32e58bb5095b9a239e79be7a\",\n          \"branch\": null,\n          \"open_pr\": false,\n          \"round\": 1,\n          \"state\": \"queued\",\n          \"origin_job\": \"crq-historical-F1\",\n          \"revalidation_sha256\": \"f4e8ff24cfaaeb05492d0c13edc24284dbecdc01961f0c80a9678d372d30f8b6\"\n        }\n      }\n    }\n  ]\n}\n",
+      "triage_canonical": null,
+      "outbox_canonical": null
+    }
+  }
+}

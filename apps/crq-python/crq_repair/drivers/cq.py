@@ -22,13 +22,16 @@ from crq_repair import command
 # option that runs a program or leaves the repository, including git's
 # abbreviated long options: `-O`/`--open-files-in-pager` (alone or in a
 # short-option bundle) runs a pager command, `--no-index` searches outside
-# the repo, `--textconv` and `--ext-*` run configured filters. `git show`
-# is not granted (diff output runs textconv/external diff by default).
+# the repo, `--textconv` and `--ext-*` run configured filters, and the
+# file-input options `-f`/`--file` (grep) and `-X`/`--exclude-from` or
+# `--exclude-per-directory` (ls-files) read pattern files from anywhere.
+# `git show` is not granted (diff output runs textconv/external diff by
+# default).
 # Git config cannot add an execution path: the harness refuses read/edit of
 # `.git`, so config stays operator-owned. Plain grep/rg/find stay denied:
 # they read outside the worktree (rg --pre and find -exec also run programs).
 _TOKEN = r'[A-Za-z0-9_./:=@%+,^-]+'
-_NO_EXEC = (r'(?!.* (?:-[A-Za-z0-9_./:=@%+,^]*O|--op|--no-i|--tex|--ext|--ou))')
+_NO_EXEC = (r'(?!.* (?:-[A-Za-z0-9_./:=@%+,^]*[OfX]|--op|--no-i|--tex|--ex|--ou|--file))')
 SEARCH_PATTERNS = [
     're:^git (?:grep|ls-files|ls-tree)' + _NO_EXEC + '(?: ' + _TOKEN + ')*$',
 ]
@@ -47,6 +50,26 @@ HARNESS = {
 MAX_OUTPUT_TOKENS = 500_000
 MAX_CONTEXT_TOKENS = 200_000
 MAX_ITEM_BODY_CHARS = 8_000  # review.fixItem uses JavaScript string length (UTF-16 units).
+
+# The CLI dispatches review.fixItem directly with no governor, and the
+# in-process ai-sdk lane ignores the payload's wallClockMs (I8: the governor
+# ladder owns wall-clock; a driver deadline would race it). On these direct
+# paths NO timer inside cq enforces the budget, so the only run-level
+# wall-clock owner is this Python kill timer, at budget + WALL_CLOCK_GRACE_S.
+# When it fires, the caller gets the runner's typed budget stop with what the
+# run's session files recorded — never a false claim that cq itself returned
+# budget-exhausted.
+WALL_CLOCK_GRACE_S = 60
+
+
+def wall_clock_summary(sessions_dir, created):
+    """Summary for a run the Python wall clock killed. Reports the runner's
+    own deadline: this invocation's budget-stop session line if one exists
+    (cq can emit it for its token/context caps mid-run), else the explicit
+    no-cq-wall-clock fallback."""
+    detail = budget_stop(sessions_dir, created)
+    return 'wall clock: Python deadline at budget+60s' + (
+        ' (' + detail + ')' if detail else ' (cq never returned budget-exhausted)')
 
 
 def fixer_body(job):
@@ -184,10 +207,15 @@ def invoke(config, role, job, wt, directory):
     argv += ['--' + k + '=' + json.dumps(v) for k, v in payload.items()]
     before = session_files(sessions_dir)
     try:
-        p = command(argv, cwd=wt, env=env, timeout=config['repair']['budget']['wall_clock_min'] * 60)
+        p = command(argv, cwd=wt, env=env,
+                    timeout=config['repair']['budget']['wall_clock_min'] * 60 + WALL_CLOCK_GRACE_S)
     except subprocess.TimeoutExpired as exc:
+        # The only run-level wall-clock owner on this direct path (cq arms
+        # none): classify truthfully as the runner's budget stop instead of
+        # a raw TimeoutExpired, keeping the partial output in driver.log.
         _log_invocation(directory, str(exc.stdout or ''), str(exc.stderr or ''))
-        raise
+        return {'stop': 'budget', 'changed': False, 'commits': [],
+                'summary': wall_clock_summary(sessions_dir, session_files(sessions_dir) - before)}
     created = session_files(sessions_dir) - before
     _log_invocation(directory, p.stdout, p.stderr)
     try:
@@ -287,10 +315,13 @@ def judge(config, role, job, wt, directory):
     bridge = Path(__file__).parents[1] / 'judge-cq.mjs'
     try:
         p = command(['node', str(bridge), str(path)], cwd=wt,
-                    timeout=config['repair']['budget']['wall_clock_min'] * 60)
+                    timeout=config['repair']['budget']['wall_clock_min'] * 60 + WALL_CLOCK_GRACE_S)
     except subprocess.TimeoutExpired as exc:
+        # Same direct-path wall-clock ownership as invoke(): report the
+        # runner's budget stop without inventing a verdict.
         _log_invocation(directory, str(exc.stdout or ''), str(exc.stderr or ''))
-        raise
+        return {'stop': 'budget', 'verdict': 'unsure',
+                'reason': wall_clock_summary(None, [])}
     _log_invocation(directory, p.stdout, p.stderr)
     if p.returncode:
         return {'stop': 'error', 'verdict': 'unsure', 'reason': 'cq read-only judge failed'}

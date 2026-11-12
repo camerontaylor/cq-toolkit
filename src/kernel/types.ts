@@ -117,7 +117,7 @@ export interface RunOptions {
   stopOnError: boolean;
   /** Directory for the NDJSON journal, when persistence is enabled. */
   journalDir?: string;
-  /** Run-level USD cap (advisory here: USD is derived, callers govern). */
+  /** Run-level USD cap: the governor enforces it against observed cost (reportUsage/reportCost); never kernel-derived. */
   maxUsd?: number;
   /** Run-level token rollup cap (DD-9): enforced by the governor against the
    * folded WorkerResult usage rollup, independently of maxUsd — a cap that
@@ -146,7 +146,7 @@ export interface JobOutcome {
   result: OpResultArtifact<unknown>;
   /** Token usage rolled up for this job, when its driver reported usage. */
   usage?: Usage;
-  /** Derived-only USD cost for this job (caller-side price map); never driver-trusted. */
+  /** Observed USD cost for this job (caller-side price map); never driver-trusted. */
   costUSD?: number;
 }
 

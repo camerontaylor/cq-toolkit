@@ -544,9 +544,9 @@ export interface ReviewLoopOutcome {
   plan: Plan;
   /**
    * The governed fix-run report. Absent ONLY when the loop refused before
-   * the fix stage (the step-2 truncated-classification refusal) — no fix
-   * run existed to report on, and a fabricated zero-report would pretend
-   * one did.
+   * the fix stage (the `headRefused` expected-head refusal, or the step-2
+   * truncated-classification refusal) — no fix run existed to report on,
+   * and a fabricated zero-report would pretend one did.
    */
   fixReport?: RunReport;
   /**
@@ -867,7 +867,7 @@ export const evidenceFailure = async (
  *     verbatim in the commit subject ('attribution-missing').
  *
  * EXPORTED for the unit lane's stage pins: `not-40-hex` is unreachable
- * through the loop (parseFixOutput already rejects non-40-hex claims), so
+ * through the loop (parseFixContract already rejects non-40-hex claims), so
  * the stage taxonomy is pinned by calling this gate directly.
  */
 export const commitVerificationFailure = async (

@@ -1,3 +1,4 @@
+import { managedBlocked, managedTerminal } from '../dev/reviewTestKit.js';
 import { expect, it } from 'vitest';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import { createEscalationState } from '../../../src/ops/fix/escalation.js';
@@ -14,37 +15,20 @@ it.each(['deadline', 'parent'] as const)(
     try {
       await configureAgentRepo(repo);
       const controller = new AbortController();
-      const effects = repoEffects(repo, (command) => {
-        if (command !== 'coderabbit') return undefined;
-        if (mode === 'deadline') clock += 10_001;
-        else controller.abort(new Error('parent stopped reviewer'));
-        return {
-          exitCode: 0,
-          stdout: [
-            JSON.stringify({
-              type: 'finding',
-              severity: 'major',
-              fileName: 'src/a.ts',
-              comment: 'partial finding',
-            }),
-            JSON.stringify({ type: 'complete', status: 'review_completed' }),
-          ].join('\n'),
-          stderr: '',
-          timedOut: false,
-        };
-      });
-      const originalRun = effects.runCommand;
-      effects.runCommand = async (command, args, opts) => {
-        if (command === 'coderabbit') {
-          expect(opts.timeoutMs).toBe(10_000);
-          expect(opts.signal).toBeDefined();
-        }
-        return originalRun(command, args, opts);
-      };
+      const effects = repoEffects(repo);
       const drivers = scriptedDrivers();
       let persisted: unknown;
       Date.now = () => clock;
       const result = await makeReviewRun({
+        managedSubmit: async (input) => {
+          expect(input.remainingWallMs?.()).toBe(10_000);
+          expect(input.signal).toBeDefined();
+          if (mode === 'deadline') clock += 10_001;
+          else controller.abort(new Error('parent stopped reviewer'));
+          return managedTerminal([
+            { severity: 'major', fileName: 'src/a.ts', excerpt: 'partial finding' },
+          ])(input);
+        },
         drivers,
         parentSignal: controller.signal,
         effectsFactory: () => effects,
@@ -144,8 +128,8 @@ it.each([
   ],
   ['clean', { type: 'heartbeat', status: 'reviewing' }, 'wall budget exhausted'],
 ] as const)(
-  '#532: killed %s CLI at deadline preserves refusal through review.run and address',
-  async (mode, event, reason) => {
+  '#532: queued %s verdict at deadline preserves refusal through review.run and address',
+  async (mode, _event, reason) => {
     const repo = await makeTestRepo();
     const originalNow = Date.now;
     let clock = originalNow();
@@ -154,12 +138,11 @@ it.each([
       Date.now = () => clock;
       const result = await makeReviewRun({
         drivers: scriptedDrivers(),
-        effectsFactory: () =>
-          repoEffects(repo, (command) => {
-            if (command !== 'coderabbit') return undefined;
-            clock += 1001;
-            return { exitCode: null, stdout: JSON.stringify(event), stderr: '', timedOut: true };
-          }),
+        effectsFactory: () => repoEffects(repo),
+        managedSubmit: async (input) => {
+          clock += 1001;
+          return (mode === 'clean' ? managedTerminal([]) : managedBlocked(reason))(input);
+        },
         scannerFactory: () => async (components) =>
           components.map((component) => ({ component: component.component, hits: [] })),
       })({ repoRoot: repo.root, wallMs: 1000, reviewers: ['coderabbit'] });
@@ -243,17 +226,11 @@ it.each(['auth', 'mixed', 'coverage', 'drift', 'scan', 'thrown'] as const)(
             throw new Error('unexpected reviewer fault');
           }
         }),
-        effectsFactory: () =>
-          repoEffects(repo, (command) => {
-            if (command !== 'coderabbit') return undefined;
-            if (mode === 'auth') clock += 1001;
-            return {
-              exitCode: 1,
-              stdout: 'Review failed: auth_required',
-              stderr: '',
-              timedOut: false,
-            };
-          }),
+        effectsFactory: () => repoEffects(repo),
+        managedSubmit: async (input) => {
+          if (mode === 'auth') clock += 1001;
+          return managedBlocked('Review failed: auth_required')(input);
+        },
         scannerFactory: () => async (components) => {
           if (mode === 'scan') {
             clock += 1001;

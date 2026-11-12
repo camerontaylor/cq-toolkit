@@ -528,7 +528,7 @@ cost figure would bypass the derived-only rule.
 
 ## First-party driver: `acp` (T1.8)
 
-`src/driver/acp/` — the FOURTH lane: speak the Agent Client Protocol
+`src/driver/acp/` — the THIRD lane: speak the Agent Client Protocol
 (newline-delimited JSON-RPC 2.0 over stdio) to a vendor HARNESS binary
 (`zcode-acp-server` by default; `dsh-acp` as the fast-follow endpoint) as
 a governed worker on the frozen seam. One spawn per run, no daemon, no
