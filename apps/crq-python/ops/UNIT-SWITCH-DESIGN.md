@@ -1,10 +1,11 @@
 # Per-unit switch and recovery: design for review
 
-Status: proposed, not a production adapter or cutover authorization. The
-current controller exposes an injected adapter seam and retains its snapshot in
-a private fsynced journal, but its CLI provides no unit-switch or unit-recovery
-adapter. The recovery snapshot's structure and host operations still need an
-independent design review and disposable-VM proof.
+Status: proposed, not a cutover authorization. The controller CLI now composes
+the injected switch path (`switch --unit ... --runtime ...`), and the adapter
+reads a machine-readable capability declaration from the verified artifact.
+There is still no unit-recovery adapter. The recovery snapshot's structure and
+host operations still need an independent design review and disposable-VM
+proof.
 
 A bounded proof vehicle now exercises the actual ``switch_unit``/``recover_unit``
 seam against two declared harmless fixtures in a disposable KVM guest. The
@@ -82,23 +83,24 @@ ability to render a `node:` unit before its artifact is installed. The new
 wrapper's stricter artifact checks do not become a prerequisite for the old
 renderer.
 
-This does not implement a production adapter, host CLI, unit capability check
-or enablement path. Rendering a `node:` unit for a runner command that has not
-been implemented does not make that command available. Production adapter
-class/CLI/capability wiring, real per-unit runtime-bound completion,
-exhaustive activation discovery, shared root/lock coverage, drain races, and
-restart/reboot/power-loss behavior remain separate acceptance work.
+The CLI switch path is wired (see below), the capability check reads the
+declaration this wrapper binds by inventory, and `watchdog` is the first
+declared Node command. Rendering a `node:` unit for any other command does not
+make that command available. Real per-unit runtime-bound completion on a live
+host, exhaustive activation discovery, shared root/lock coverage, drain races,
+and restart/reboot/power-loss behavior remain separate acceptance work.
 
-## Unwired production adapter slice
+## Production adapter slice
 
-`ops/unit-adapter.py` now implements the injected seam with an injected
+`ops/unit-adapter.py` implements the injected seam with an injected
 `SystemdPort`, `IdentityPort`, `CapabilityPort`, `CompletionPort` and
 queue-drain observation. It reuses `render_service`, derives its declared
 six-unit inventory from the pinned template blobs, and reuses the guest
-snapshot payload's schema-version-1 top-level keys and state shapes. It is not
-wired to the CLI, has no production factory or live systemd binding, and
-refuses Node by default because no machine-readable artifact capability
-declaration exists.
+snapshot payload's schema-version-1 top-level keys and state shapes. It is
+composed by `unit-switch-factory.py` and reached through the controller CLI's
+`switch` verb. It has no live systemd binding in these offline tests. Node
+refuses unless the verified artifact's declaration lists the selected command;
+`watchdog` is currently the only such command.
 
 The slice remains fail-closed: discovery must enumerate the exact declared
 paths and units and report no foreign activators; unknown entries, missing
@@ -119,7 +121,9 @@ declared bound exceeds the supported maximum or the caller's deadline is below
 it. An inactive timer has no bounded second invocation and refuses before
 snapshot or mutation; the 6-hour backfill and 45-minute publisher shapes exceed
 the default supported maximum, and an oneshot without a declared start timeout
-(the watchdog template) has no bounded completion and refuses. A
+has no bounded completion and refuses. The watchdog template now declares
+`TimeoutStartSec=5min`, so its 300 s start bound and 720 s timer period fit the
+1,800 s supported maximum. A
 `Type=simple` service has no declared invocation execution bound either, so
 preflight refuses that topology rather than treating its startup timeout as a
 completion bound; restore still rejects a failed simple service if a recovery
@@ -155,12 +159,16 @@ in preflight, so a port exception cannot bypass the adapter's error type.
 
 ## Offline factory composition
 
-`ops/unit-switch-factory.py` is the first internal composition of the merged
-pieces: it renders the selected target once through `render_service`, binds a
+`ops/unit-switch-factory.py` is the internal composition of the merged pieces:
+it renders the selected target once through `render_service`, binds a
 `SystemdJournalCompletionPort` to that exact selected identity, and constructs
 `ProductionUnitAdapter` with `DeclaredCapabilities` and injected systemd,
-identity, journal-source and queue-drain ports. It is not a CLI and has no live
-systemd or journal binding.
+identity, journal-source and queue-drain ports. The controller CLI calls it
+through the live binding for `switch --unit ... --runtime ...`; it still has no
+live systemd or journal binding in tests. The factory reads the verified
+artifact's declared live commands and passes them to `DeclaredCapabilities`, so
+the existing capability check decides whether the selected command is
+available.
 
 The lifecycle is the controller's, unchanged: preflight reads the completion
 baseline while the prior runtime is installed; the controller drains and masks;
@@ -177,9 +185,11 @@ and the real renderer through the actual `switch_unit`/`recover_unit` seams over
 real temporary unit files, with a structured systemd port and a journal source
 that returns systemd invocation and record fields. It covers a completed
 Node-to-Python switch with two advancing invocations, a pre-activation rollback
-followed by `recover_unit`, a reboot refusal, changed installed bytes, and
-fail-closed refusal of a Node target and the simple, long-schedule and
-unbounded oneshot topologies. It is not live-host evidence.
+followed by `recover_unit`, a reboot refusal, changed installed bytes, a
+Python-to-Node watchdog switch whose artifact declares `watchdog`, and
+fail-closed refusal of a Node target whose declaration is empty or names
+another command, plus the simple, long-schedule and unbounded oneshot
+topologies. It is not live-host evidence.
 
 The interface gap is explicit: the completion provider requires its selected
 identity at construction, and the adapter has no public typed accessor for the
@@ -188,7 +198,7 @@ before constructing the adapter, and the adapter re-renders at preflight and
 install. A minimal follow-up seam would expose the adapter's selected identity
 and let the provider bind or update that identity, plus cross-check returned
 evidence against the adapter's cached render. No such change is made here; no
-journal schema, store, lock, capability claim or CLI wiring is introduced.
+journal schema, store, lock or new capability mechanism is introduced.
 
 ## Proposed stable-manager sequence
 

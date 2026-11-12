@@ -9,9 +9,26 @@ admission are not ported. A `runner-disabled` marker produces an empty plan.
 Incomplete plans exit 1 with an indeterminate result and must not be used as
 parity or C2 comparison evidence.
 
-Other commands and live execution refuse until their Python equivalents are
-ported. No heartbeat is emitted. Planners must not perform mutations themselves;
-later ports must preserve the shared locking contract.
+`watchdog` is the first live command. It is a parity port of
+`apps/crq-python/ops/crq-watchdog.py`: it reads
+`<XDG_STATE_HOME>/crq/heartbeat.json`, alerts through
+`paseo send --no-wait <agent> <text>`, and persists the sent, recovered and
+failed-retry state in the same state file. The live dispatcher rejects
+arguments, refuses undeclared commands, and converts a thrown handler into a
+failed artifact. A failed alert send is retryable and still exits 0, matching
+the Python command.
+
+The runner's live capabilities are declared at build time in
+`dist/queue-runner/capabilities.json` by
+`scripts/emit-queue-runner-capabilities.mjs`, from
+`src/queue-runner/capabilities.ts`. The declaration is
+`{schema_version: 1, commands: [...]}`. The unit adapter reads it from the
+verified, inventoried `node:` artifact tree and requires the selected command
+to appear there; an absent or malformed declaration declares no live commands.
+Every other live command still refuses for a Node target.
+
+Planners must not perform mutations themselves; later ports must preserve the
+shared locking contract.
 
 `apps/crq-python/ops/build-runner.py` is the locked build/staging route. It
 requires a clean checkout whose HEAD is the requested full commit SHA and whose

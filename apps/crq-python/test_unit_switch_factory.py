@@ -24,6 +24,7 @@ from test_unit_adapter import (
     LiveIdentity,
     NODE_RUNTIME,
     Ticker,
+    _node_artifact,
     _tree,
     _write,
 )
@@ -235,6 +236,41 @@ class FactorySelectionTests(FactoryFixture):
             factory.select(root=self.root, unit=UNIT, runtime="node:short",
                            source_sha=self.before)
 
+    def test_artifact_capability_flows_into_the_existing_check(self):
+        sha = "c" * 40
+        _node_artifact(self.base, sha, capabilities=["tick"])
+        runtime = "node:" + sha
+        adapter, selection = self.compose(runtime=runtime)
+        self.assertEqual(selection.render["artifact"]["capabilities"], ["tick"])
+        prior = adapter.preflight(UNIT, runtime)
+        self.assertEqual(prior["capability"]["command"], "tick")
+        self.assertEqual(prior["capability"]["commands"], ["tick"])
+
+    def test_empty_artifact_declaration_refuses_the_node_target(self):
+        sha = "d" * 40
+        _node_artifact(self.base, sha, capabilities=[])
+        runtime = "node:" + sha
+        adapter, selection = self.compose(runtime=runtime)
+        self.assertEqual(selection.render["artifact"]["capabilities"], [])
+        with self.assertRaisesRegex(dc.Refused, "does not implement"):
+            adapter.preflight(UNIT, runtime)
+
+    def test_other_artifact_declaration_refuses_the_node_target(self):
+        sha = "e" * 40
+        _node_artifact(self.base, sha, capabilities=["slot"])
+        runtime = "node:" + sha
+        adapter, _selection = self.compose(runtime=runtime)
+        with self.assertRaisesRegex(dc.Refused, "does not implement"):
+            adapter.preflight(UNIT, runtime)
+
+    def test_select_refuses_a_tampered_capability_declaration(self):
+        sha = "f" * 40
+        artifact = _node_artifact(self.base, sha, capabilities=["tick"])
+        (artifact / "dist/queue-runner/capabilities.json").write_text("{")
+        with self.assertRaisesRegex(factory.FactoryRefused, "inventory"):
+            factory.select(root=self.root, unit=UNIT, runtime="node:" + sha,
+                           source_sha=self.before)
+
     def test_build_refuses_an_identity_that_does_not_bind_the_render(self):
         selection = factory.select(root=self.root, unit=UNIT,
                                    runtime="python", source_sha=self.before)
@@ -374,17 +410,16 @@ class FactorySwitchTests(FactoryFixture):
         self.assertEqual(self.records(), [])
         self.assertEqual(_tree(self.unit_dir), before)
 
-    def test_unbounded_oneshot_refuses_before_journal(self):
+    def test_watchdog_declared_timeout_bounds_completion(self):
         unit = "crq-watchdog.service"
+        self.assertEqual(self.inventory[unit]["service_timeout_seconds"], 300)
+        self.assertEqual(self.inventory[unit]["timer_bound_seconds"], 720)
         _write(self.unit_dir / unit, self.node_service(unit)["bytes"], 0o644)
         self.systemd.active["crq-watchdog.timer"] = "active"
-        before = _tree(self.unit_dir)
+        self.systemd.prior(unit, "c" * 32, 900)
         adapter, _selection = self.compose(unit=unit)
-        with self.assertRaises(dc.Refused) as failure:
-            dc.switch_unit(self.effects, adapter, unit, "python")
-        self.assertIn("not bounded", str(failure.exception))
-        self.assertEqual(self.records(), [])
-        self.assertEqual(_tree(self.unit_dir), before)
+        prior = adapter.preflight(unit, "python")
+        self.assertEqual(prior["completion_window"], 1080)
 
     def test_changed_installed_bytes_refuse_completion(self):
         alternate = self.python_service("crq-slot.service")

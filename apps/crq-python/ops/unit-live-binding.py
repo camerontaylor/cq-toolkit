@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Unwired live host binding for one per-unit switch transaction.
+"""Live host binding for one per-unit switch transaction.
 
 This module is the mechanical host side of the composition in
-``unit-switch-factory.py``. It is deliberately not a CLI, not imported by
-``deploy-controller.py`` at import time, and not a production enablement path.
-The controller loads it lazily only for ``switch --unit --runtime`` so a
-checkout or release switch never depends on host observation:
+``unit-switch-factory.py``. It is deliberately not a CLI and not a production
+enablement path. The controller loads it lazily only for
+``switch --unit --runtime`` so a checkout or release switch never depends on
+host observation:
 
 * ``SubprocessSystemd`` implements the adapter's injected ``SystemdPort`` with
   bounded, read-only commands. Its command runner can be injected for tests.
@@ -27,7 +27,7 @@ the user manager's installed and loaded lists. A non-CRQ unit that names a CRQ
 unit only in memory, transient or generated state, another namespace, or an
 activation created between the scan and the fence is outside this scope and
 is not claimed by ``supported``. Production enablement still requires actual
-topology evidence; the module stays unwired until then.
+topology evidence; until then this module is an offline-tested seam.
 """
 from __future__ import annotations
 

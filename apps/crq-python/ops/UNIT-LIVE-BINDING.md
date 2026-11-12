@@ -1,10 +1,10 @@
-# Unwired live unit-switch binding
+# Live unit-switch binding
 
-Status: internal composition only. `ops/unit-live-binding.py` is not imported
-by `deploy-controller.py`, `unit-switch.py` or `prepare-host.py`, is not a CLI,
-and does not enable a production switch. Every host observation is read-only.
-The module exists so the mechanical port, root binding, record binding and lock
-observation can be tested while the companion factory PR is reviewed.
+Status: CLI composition. `deploy-controller.py` loads
+`ops/unit-live-binding.py` lazily for `switch --unit ... --runtime ...`; it is
+not a CLI and does not enable a production switch. Every host observation is
+read-only. The module exists so the mechanical port, root binding, record
+binding and lock observation can be tested without a live host.
 
 ## Composition
 
@@ -12,7 +12,8 @@ observation can be tested while the companion factory PR is reviewed.
 existing factory with:
 
 * `prepare-host.render_service` through `unit-switch-factory.select`;
-* `ProductionUnitAdapter` with the real static `DeclaredCapabilities`;
+* `ProductionUnitAdapter` with `DeclaredCapabilities` fed from the verified
+  artifact's declared live commands;
 * `SystemdJournalCompletionPort` over the real `SystemdJournalSource`;
 * `SubprocessSystemd` and `ProcessIdentity`;
 * the caller's existing `runner_queue_drain(effects)`.
@@ -118,6 +119,8 @@ files. Only the systemctl process runner is injected. The final test composes
 the real adapter and drives the real `deploy_controller.switch_unit` seam; an
 unsupported discovery topology refuses before any journal or unit mutation.
 
-The module remains unwired until actual topology evidence and the companion
-review are complete. It makes no Node capability claim: `DeclaredCapabilities`
-still refuses every Node target.
+The binding is reached through the controller CLI's switch path. `watchdog` is
+the only Node command the verified artifact currently declares; `tick`, `slot`,
+`publisher`, `backfill` and `repair` still refuse for a Node target. The binding
+does not call `switch_unit` or `recover_unit` itself; the controller owns that
+seam.
