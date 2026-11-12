@@ -41,4 +41,9 @@ export const HARDENED_DIFF_FLAGS: readonly string[] = [
   '--dst-prefix=b/',
   '--no-color',
   '--no-relative',
+  // review P2 tn4j: diff.ignoreSubmodules=all would otherwise omit an
+  // added gitlink entirely, so a credential-shaped submodule pathname
+  // would bypass the scan (the pathname is published even with push
+  // recursion off).
+  '--ignore-submodules=none',
 ];

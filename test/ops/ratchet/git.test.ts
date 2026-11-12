@@ -148,6 +148,7 @@ describe('constants', { timeout: 30_000 }, () => {
       '--no-renames',
       '--src-prefix=a/',
       '--dst-prefix=b/',
+      '--ignore-submodules=none',
     ]) {
       expect(HARDENED_DIFF_FLAGS).toContain(flag);
     }

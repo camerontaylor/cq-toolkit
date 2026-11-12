@@ -704,6 +704,22 @@ describe('addedLineComponents — one component per changed path of ADDED lines'
     ]);
   });
 
+  test('a NONEMPTY new file with a SPACE in its name is not refused (new file mode precedes ---/+++)', () => {
+    const patch = [
+      'diff --git a/new file.txt b/new file.txt',
+      'new file mode 100644',
+      'index 0000000..ce01362',
+      '--- /dev/null',
+      '+++ b/new file.txt',
+      '@@ -0,0 +1 @@',
+      '+hello',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([
+      { component: 'new file.txt', text: 'hello', path: 'new file.txt' },
+      { component: 'path new file.txt', text: 'new file.txt', path: 'new file.txt' },
+    ]);
+  });
+
   test('an empty patch yields zero components (nothing to scan is clean)', () => {
     expect(addedLineComponents('', 'gate')).toEqual([]);
   });
