@@ -111,6 +111,25 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
     expectAuthorUntouched(r);
   });
 
+  test('a denylist hit on the probe findings-section compose refuses and publishes no body edit', async () => {
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      probePublicationHits: [{ component: 'pr-body', ruleId: 'probe-secret' }],
+    });
+    // The draft was created (the PR exists) but the findings section was
+    // refused by the probe root's rules: the reason names the draft and
+    // carries the scanner's hit evidence.
+    expect(r.result.status).toBe('needs-human');
+    if (r.result.status === 'needs-human')
+      expect(r.result.reason).toBe(
+        `dev.cycle (pr body): draft PR #77 is open at ${r.commits[0]!} but the findings section could not be composed — PR publication refused by denylist scan: probe-secret at line 1`,
+      );
+    // No body edit reached the forge: the refusal fired before editPrBody.
+    expect(r.bodies).toEqual([]);
+    expectAuthorUntouched(r);
+  });
+
   test('a publication that throws after the push attempt keeps the branch and says the remote may carry it', async () => {
     const r = await run({
       greens: [true, false],

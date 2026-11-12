@@ -1,3 +1,4 @@
+import { expectOpaqueIncomplete } from './slotOwnership.helpers.js';
 // Split provenance: test/ops/review/address.test.ts was split into this file
 // plus address.{helpers.ts,composition,reviewRounds,blockedRereview,vendorBoundary,lock,m5b3Correlation}.test.ts.
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -281,7 +282,7 @@ test('re-review keeps the original full comparison when a mutable target ref mov
         };
       },
     })(f.input);
-    expect(result.status).toBe('ok');
+    await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
     expect(reviewedBase).toBe(originalBase);
     expect(f.repo.git('merge-base', 'origin/main', 'HEAD').trim()).not.toBe(originalBase);
   } finally {
@@ -352,7 +353,7 @@ test('admission pins a local run to its captured base when the target ref moves'
         };
       },
     })(f.input);
-    expect(result.status).toBe('ok');
+    await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
     expect(f.repo.git('merge-base', 'origin/main', 'HEAD').trim()).not.toBe(originalBase);
     const ledger = JSON.parse(await readFile(devLedgerPath(f.repo.root, 'feature/x'), 'utf8')) as {
       records: Array<{ kind: string; base?: string }>;

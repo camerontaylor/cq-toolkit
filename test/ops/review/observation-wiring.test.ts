@@ -1,3 +1,4 @@
+import { expectOpaqueIncomplete } from './slotOwnership.helpers.js';
 import { ReportV2Schema } from '../../../src/kernel/schema.js';
 // ADR-0008 T31 — address composition observation writer wiring
 // (measurement slice M0-address-writer).
@@ -29,7 +30,7 @@ import {
   type ObservationWriter,
 } from '../../../src/kernel/observation.js';
 import { makeReviewAddress, type ReviewAddressReport } from '../../../src/ops/review/address.js';
-import { makeAddressOwnership } from '../../../src/ops/review/internal/addressOwnership.js';
+import { withAddressOwnership } from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 import {
   makeAddressWorker,
   type AddressWorkerDeps,
@@ -344,7 +345,7 @@ describe('T31 round-trip through the address composition', () => {
     vi.stubEnv('CQ_PRODUCER_VERSION', '  ');
     try {
       const result = await invoke(f);
-      expect(result.status, JSON.stringify(result)).toBe('ok');
+      await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
       const report = reportOf(result);
       expect(report?.observation).toBeDefined();
       expect(ReportV2Schema.safeParse(report?.reportV2).success).toBe(true);
@@ -400,10 +401,19 @@ describe('T31 round-trip through the address composition', () => {
       expect(new Set(links.map((link) => link.payload.kernelRunId))).toEqual(new Set(returned));
       // The report surface lists the same kernel runs, and the persisted
       // artifact is a DTO: no writer instance ever serialized.
-      // T04's kernel v3 header writer has not landed: kernel runs are still
-      // v1/v2-era, so every descriptor stays unknown/empty (links recorded,
-      // headers unresolvable) — never a guessed descriptor.
-      expect(report?.observation?.kernelRuns).toEqual([]);
+      // T04: the composition runs GOVERNED, so every returned kernel run
+      // yields its truthful v2 descriptor (the runner writes no v3 header);
+      // the fold's workId join stays unknown for them (versioned reason),
+      // but the descriptor itself is real evidence, never a guess.
+      const kernelRuns = report?.observation?.kernelRuns ?? [];
+      expect(kernelRuns.map((descriptor) => descriptor.journalVersion)).toEqual(
+        returned.map(() => 2),
+      );
+      expect(new Set(kernelRuns.map((descriptor) => descriptor.runId))).toEqual(new Set(returned));
+      for (const descriptor of kernelRuns) {
+        // The descriptor is the header AS WRITTEN: no invented correlation.
+        expect('correlation' in descriptor.header).toBe(false);
+      }
       const persisted = JSON.parse(
         await readFile(report!.reportPath, 'utf8'),
       ) as ReviewAddressReport;
@@ -439,7 +449,7 @@ describe('T31 round-trip through the address composition', () => {
         repoRoot: f.repo.root,
         source: 'local' as const,
       });
-      expect(result.status).toBe('ok');
+      await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
       const report = reportOf(result);
       expect(report?.observation?.persistence).toBe('unavailable');
       expect(report?.observation?.kernelRuns).toEqual([]);
@@ -465,7 +475,7 @@ describe('T31 round-trip through the address composition', () => {
         initialRecord: f.record,
         review: f.review,
       })({ repoRoot: f.repo.root, source: 'local' as const, journalDir: fresh });
-      expect(result.status, JSON.stringify(result)).toBe('ok');
+      await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
       const report = reportOf(result);
       expect(report?.observation?.persistence).toBe('durable');
       expect(report?.observation?.status).toBe('durable');
@@ -486,34 +496,36 @@ describe('T31 round-trip through the address composition', () => {
     // create it (mkdir -p), so its continued absence is the ordering witness.
     const fresh = join(dirname(f.repo.root), 'refused-fresh-journal');
     const git = makeGhRunner({ bin: 'git', cwd: f.repo.root, timeoutMs: 10_000 });
-    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git });
     try {
       await expect(lstat(fresh)).rejects.toMatchObject({ code: 'ENOENT' });
-      await owner.withLock(async () => {
-        // Another owner holds the guard, so this run is refused in admission
-        // BEFORE it enters the owned action.
-        const result = await makeReviewAddress({
-          drivers: f.drivers,
-          initialRecord: f.record,
-          review: f.review,
-        })({ repoRoot: f.repo.root, source: 'local' as const, journalDir: fresh });
-        expect(result.status).toBe('needs-human');
-        // No ownership, no journal IO: neither the journal dir nor the stream
-        // location may appear.
-        await expect(lstat(fresh)).rejects.toMatchObject({ code: 'ENOENT' });
-        await expect(lstat(join(fresh, 'observations'))).rejects.toMatchObject({
-          code: 'ENOENT',
-        });
-        // The no-stream surface is EXPLICIT, not an accidental omission: a
-        // future change that starts writing before ownership must change this
-        // report shape to pass.
-        const report = reportOf(result);
-        expect(report?.observation).toBeDefined();
-        expect(report?.observation?.persistence).toBe('unavailable');
-        expect(report?.observation?.status).toBe('indeterminate');
-        expect(report?.observation?.failure).toContain('ownership not held');
-        expect(report?.observation?.kernelRuns).toEqual([]);
-      });
+      await withAddressOwnership(
+        { repoRoot: f.repo.root, git, source: 'local', production: false },
+        async () => {
+          // Another owner holds the guard, so this run is refused in admission
+          // BEFORE it enters the owned action.
+          const result = await makeReviewAddress({
+            drivers: f.drivers,
+            initialRecord: f.record,
+            review: f.review,
+          })({ repoRoot: f.repo.root, source: 'local' as const, journalDir: fresh });
+          expect(result.status).toBe('needs-human');
+          // No ownership, no journal IO: neither the journal dir nor the stream
+          // location may appear.
+          await expect(lstat(fresh)).rejects.toMatchObject({ code: 'ENOENT' });
+          await expect(lstat(join(fresh, 'observations'))).rejects.toMatchObject({
+            code: 'ENOENT',
+          });
+          // The no-stream surface is EXPLICIT, not an accidental omission: a
+          // future change that starts writing before ownership must change this
+          // report shape to pass.
+          const report = reportOf(result);
+          expect(report?.observation).toBeDefined();
+          expect(report?.observation?.persistence).toBe('unavailable');
+          expect(report?.observation?.status).toBe('indeterminate');
+          expect(report?.observation?.failure).toContain('ownership not held');
+          expect(report?.observation?.kernelRuns).toEqual([]);
+        },
+      );
     } finally {
       await f.cleanup();
       await rm(fresh, { recursive: true, force: true });
@@ -545,7 +557,7 @@ describe('T31 round-trip through the address composition', () => {
         review: f.review,
         observationWriter: writer,
       })({ repoRoot: f.repo.root, source: 'local' as const, journalDir: f.journalDir });
-      expect(result.status, JSON.stringify(result)).toBe('ok');
+      await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
       const report = reportOf(result);
       // P3-8: the composition adopts BOTH identities from the injected writer.
       expect(report?.observation?.compositionRunId).toBe(compositionRunId);
@@ -592,7 +604,7 @@ describe('T31 round-trip through the address composition', () => {
         review: f.review,
       })({ repoRoot: f.repo.root, source: 'local' as const, journalDir: f.journalDir });
       // P3-5: an observation PRE-FLIGHT failure never changes the verdict.
-      expect(result.status, JSON.stringify(result)).toBe('ok');
+      await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
       expect(probeFailed).toBe(true);
       const report = reportOf(result);
       expect(report?.observation?.baseSha).toBeNull();
@@ -600,8 +612,12 @@ describe('T31 round-trip through the address composition', () => {
       expect(report?.observation?.persistence).toBe('unavailable');
       expect(report?.observation?.failure).toContain('base witness unavailable');
       // No base, no schema-valid header: no stream file is written at all.
-      expect(await readObservations(f.journalDir)).toHaveLength(0);
-      expect(report?.observation?.kernelRuns).toEqual([]);
+      // The runPlan leg still ran GOVERNED, so its returned run yields a
+      // truthful v2 descriptor (evidence of the run, not of this broken
+      // stream) — never an invented v3 record.
+      const unwitnessed = report?.observation?.kernelRuns ?? [];
+      expect(unwitnessed.map((descriptor) => descriptor.journalVersion)).toEqual([2]);
+      expect('correlation' in (unwitnessed[0]?.header ?? {})).toBe(false);
     } finally {
       await f.cleanup();
     }
@@ -642,7 +658,7 @@ describe('T31 round-trip through the address composition', () => {
           return makeAddressWorker(deps);
         },
       })({ repoRoot: f.repo.root, source: 'local' as const, journalDir: f.journalDir });
-      expect(result.status, JSON.stringify(result)).toBe('ok');
+      await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
       expect(probeFailed).toBe(true);
       const report = reportOf(result);
       expect(report?.observation?.baseSha).toBeNull();
@@ -762,7 +778,7 @@ describe('T31 failure boundary', () => {
         });
         // The writer NEVER changes the verdict: the run still settles on
         // its own outcome (ok on the fixture's clean fix cycle).
-        expect(result.status).toBe('ok');
+        await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
         const report = reportOf(result);
         expect(ReportV2Schema.safeParse(report?.reportV2).success).toBe(true);
         expect(report?.reportV2?.availability['']?.state).toBe(
@@ -803,12 +819,17 @@ describe('T31 failure boundary', () => {
       // turn the run into needs-human.
       await writeFile(join(f.journalDir, 'observations'), 'not a directory\n');
       const result = await invoke(f);
-      expect(result.status, JSON.stringify(result)).toBe('ok');
+      await expectOpaqueIncomplete(result, join(f.repo.root, '.git'));
       const report = reportOf(result);
       expect(report?.observation?.status).toBe('indeterminate');
       expect(report?.observation?.persistence).toBe('unavailable');
       expect(report?.observation?.failure).toContain('ENOTDIR');
-      expect(report?.observation?.kernelRuns).toEqual([]);
+      // The open failed, but the runPlan leg still ran GOVERNED and was
+      // linked: its returned run yields a truthful v2 descriptor even on a
+      // stream-less surface — evidence of the run, not of the stream.
+      const openFailed = report?.observation?.kernelRuns ?? [];
+      expect(openFailed.map((descriptor) => descriptor.journalVersion)).toEqual([2]);
+      expect('correlation' in (openFailed[0]?.header ?? {})).toBe(false);
       // No writer existed, so nothing was handed to the worker.
       expect(f.boundDeps.length).toBeGreaterThan(0);
       expect(f.boundDeps.every((deps) => deps.observationWriter === undefined)).toBe(true);

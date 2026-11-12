@@ -179,7 +179,7 @@ const UNIT_RE = /"unit"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 // A property KEY containing any escape: JSON.parse decodes `"val\u0075e"` to
 // `value`, invisible to every literal-key regex above (and the last duplicate
 // key wins). Rendered baselines never escape keys — fail closed.
-const ESCAPED_KEY_RE = /(?:^|[,{])\s*"(?:[^"\\]|\\.)*\\(?:[^"\\]|\\.)*"\s*:/;
+const ESCAPED_KEY_RE = /(?:^|[,{])\s*"(?:[^"\\]|\\.)*\\(?:[^"\\]|\\.)*"\s*:/m;
 
 /**
  * Decode one captured JSON string body (the capture EXCLUDES the quotes):
@@ -307,7 +307,8 @@ function contentLines(lines: string[]): { minus: string[]; plus: string[]; conte
  */
 function carriesMalformedStringField(minus: string[], plus: string[], context: string[]): boolean {
   for (const lines of [minus, plus, context]) {
-    if (lines.some((l) => ESCAPED_KEY_RE.test(l))) return true;
+    // JSON whitespace may put the colon on a later line than its escaped key.
+    if (ESCAPED_KEY_RE.test(lines.join('\n'))) return true;
   }
   const fields: Array<[RegExp, RegExp]> = [
     [DIRECTION_KEY_RE, DIRECTION_RE],
@@ -781,7 +782,18 @@ export function checkDiffMonotonicity(diff: string): DiffVerdict {
       violations.push({ path, why: 'unparsable baseline diff' });
       continue;
     }
-    if (carriesMalformedStringField(minus, plus, context)) {
+    const sides = [
+      section.filter(
+        (line) => line.startsWith(' ') || (line.startsWith('-') && !line.startsWith('---')),
+      ),
+      section.filter(
+        (line) => line.startsWith(' ') || (line.startsWith('+') && !line.startsWith('+++')),
+      ),
+    ];
+    if (
+      sides.some((side) => ESCAPED_KEY_RE.test(side.map((line) => line.slice(1)).join('\n'))) ||
+      carriesMalformedStringField(minus, plus, context)
+    ) {
       violations.push({ path, why: 'unparsable baseline diff' });
       continue;
     }

@@ -178,7 +178,14 @@ describe('claude-code driver, CLI transport specifics (fake agent CLI)', () => {
           `
           const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
           const before = signals.map(s => process.listenerCount(s));
-          await import(${JSON.stringify(processUrl)});
+          const beforeHandles = process._getActiveHandles().length;
+          const proc = await import(${JSON.stringify(processUrl)});
+          const signalsModule = await import(${JSON.stringify(new URL('../../../src/shared/process-signals.ts', import.meta.url).href)});
+          let kills = 0;
+          process.kill = () => { kills++; return true; };
+          proc.terminateActiveChildrenOnExit();
+          const force = signalsModule.prepareProcessSignalCleanup();
+          if (kills !== 0 || force.length !== 0 || process._getActiveHandles().length !== beforeHandles) throw new Error('import or empty cleanup started work');
           await import(${JSON.stringify(cliUrl)});
           console.log(JSON.stringify({before, after: signals.map(s => process.listenerCount(s))}));
         `,

@@ -81,9 +81,11 @@ export function hashInputs(op: string, input: unknown): string {
  * `Infinity`) survives the `structuredClone` snapshot but hashes as `null`,
  * so a resume could reuse a result for a different input; non-plain objects
  * (Date, Map, class instances) are outside the op-input contract and would
- * hash by their enumerable members alone. `undefined` object values (dropped)
- * and sparse-array holes (read as `undefined`) stay allowed — both are
- * documented canonical forms.
+ * hash by their enumerable members alone. Arrays are positional data whose hash
+ * covers only indices `0..length-1`, so an array carrying any other enumerable
+ * member is rejected too — that member would not be part of the hash. `undefined`
+ * object values (dropped) and sparse-array holes (read as `undefined`) stay
+ * allowed — both are documented canonical forms.
  */
 function snapshotHashableInput(
   jobId: string,
@@ -104,6 +106,16 @@ function snapshotHashableInput(
     const snapshot: unknown[] = new Array(value.length);
     seen.set(value, snapshot);
     for (const [key, member] of Object.entries(value)) {
+      // Only indices carry meaning in an array's canonical form; `canonicalJson`
+      // covers `0..length-1` and nothing else, so an extra enumerable member (the
+      // clone would keep it) would escape the hash. Array index properties are
+      // exactly the canonical spellings `0..length-1`.
+      const index = Number(key);
+      if (!Number.isInteger(index) || index < 0 || index >= value.length || String(index) !== key) {
+        throw new Error(
+          `manifest: job '${jobId}' ${path} array property '${key}' is not an index the input hash covers`,
+        );
+      }
       Object.defineProperty(snapshot, key, {
         value: snapshotHashableInput(jobId, member, `${path}[${key}]`, seen),
         enumerable: true,

@@ -3,6 +3,8 @@ import copy
 import datetime as dt
 import importlib.util
 from pathlib import Path
+import subprocess
+import sys
 import unittest
 
 spec = importlib.util.spec_from_file_location("coverage_policy", Path(__file__).with_name("coverage.py"))
@@ -236,6 +238,18 @@ class CoverageRepairDebtTest(unittest.TestCase):
         result = candidate(q, min_age_hours=0, max_paths=1)
         self.assertEqual(result["coverage_paths"], [other])
         self.assertNotIn(AFFECTED, result["measure"]["synthetic_paths"])
+
+
+class CoverageUtilizationFixtureTest(unittest.TestCase):
+    def test_a1_status_fixtures_are_current(self):
+        emit = Path(__file__).with_name("fixtures") / "a1-status" / "emit.py"
+        result = subprocess.run(
+            [sys.executable, str(emit), "--check"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

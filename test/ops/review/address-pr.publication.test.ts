@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+import { expectOpaqueIncomplete } from './slotOwnership.helpers.js';
 // Split provenance: test/ops/review/address-pr.test.ts was split by subject;
 // this file holds its publication-ordering and publication-opt-out tests.
 // The shared phase-one orchestration world lives in address-pr.helpers.ts.
@@ -9,13 +11,12 @@ describe('review.address PR phase-one orchestration', () => {
     const w = await world();
     try {
       const result = await w.run();
-      expect(result.status, JSON.stringify(result)).toBe('ok');
+      await expectOpaqueIncomplete(result, join(w.root, 'git'));
       expect(w.actions[0]).toBe('push');
       expect(w.actions.filter((a) => a !== 'push')).toEqual(['reply', 'resolve:T1', 'rerequest']);
-      if (result.status === 'ok') {
-        expect(result.value.fixesPerRun).toBe(1);
-        expect(result.value.openBlocking).toEqual([]);
-      }
+      const report = result.status === 'ok' ? result.value : result.report!;
+      expect(report.fixesPerRun).toBe(1);
+      expect(report.openBlocking).toEqual([]);
     } finally {
       await w.cleanup();
     }

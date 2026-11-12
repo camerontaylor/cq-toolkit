@@ -68,7 +68,12 @@ def invoke(config, role, job, wt, directory):
                 return _budget_stop()
             if status.returncode:
                 raise RuntimeError('judge status unavailable; outcome unknown')
-            info = json.loads(status.stdout[status.stdout.index('{'):])
+            try:
+                info, _ = json.JSONDecoder().raw_decode(status.stdout[status.stdout.index('{'):])
+                if not isinstance(info, dict):
+                    raise ValueError('status is not an object')
+            except ValueError:
+                raise RuntimeError('judge status unavailable; outcome unknown') from None
             if info.get('Status', info.get('status')) in ('idle', 'error', 'closed'):
                 try:
                     logs = command(['paseo', '--host', endpoint, 'logs', agent, '--filter',
@@ -92,13 +97,13 @@ def invoke(config, role, job, wt, directory):
         # spend. A failed stop must be visible and must not archive the agent
         # out of the normal listing, and neither call may replace the verdict.
         try:
-            stopped = command(['paseo', '--host', endpoint, 'stop', agent]).returncode == 0
+            stopped = command(['paseo', '--host', endpoint, 'stop', agent], timeout=60).returncode == 0
         except Exception as exc:
             stopped = False
             print('paseo stop failed for ' + str(agent) + ': ' + str(exc), file=sys.stderr)
         if stopped:
             try:
-                if command(['paseo', '--host', endpoint, 'archive', agent]).returncode:
+                if command(['paseo', '--host', endpoint, 'archive', agent], timeout=60).returncode:
                     print('paseo archive failed for ' + str(agent), file=sys.stderr)
             except Exception as exc:
                 print('paseo archive failed for ' + str(agent) + ': ' + str(exc), file=sys.stderr)

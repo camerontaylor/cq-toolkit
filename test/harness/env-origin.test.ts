@@ -192,6 +192,51 @@ describe('manifest env name origin', () => {
     await expect(codeManifest([])).rejects.toThrow(/SSH_AUTH_SOCK/);
   });
 
+  test('snapshot CQ_RUN_ENV_PASSTHROUGH parsed names land in the manifest envNames', async () => {
+    const { readCqEnv } = await import('../../src/config/env.js');
+    const { runWithCqEnv } = await import('../../src/config/run-env.js');
+    // The snapshot stores the value PARSED (a name array), not the raw string.
+    // CQ_SANDBOX=off/CQ_RUN_TOOL=on keep the run tool enabled; without them a
+    // knob-expressing snapshot gets the fail-closed policy (no bash, no manifest).
+    const snapshot = readCqEnv({
+      CQ_SANDBOX: 'off',
+      CQ_RUN_TOOL: 'on',
+      CQ_RUN_ENV_PASSTHROUGH: 'FOO,BAZ',
+    });
+    expect(snapshot.values['CQ_RUN_ENV_PASSTHROUGH']).toEqual(['FOO', 'BAZ']);
+    await runWithCqEnv(snapshot, async () => {
+      const manifest = await codeManifest([]);
+      expect(manifest.envNames).toContain('FOO');
+      expect(manifest.envNames).toContain('BAZ');
+    });
+  });
+
+  test('an ambient CQ_RUN_ENV_PASSTHROUGH flip after entry does not widen the manifest', async () => {
+    const { readCqEnv } = await import('../../src/config/env.js');
+    const { runWithCqEnv } = await import('../../src/config/run-env.js');
+    const snapshot = readCqEnv({});
+    await runWithCqEnv(snapshot, async () => {
+      vi.stubEnv('CQ_RUN_ENV_PASSTHROUGH', 'FOO');
+      const manifest = await codeManifest([]);
+      expect(manifest.envNames).not.toContain('FOO');
+    });
+  });
+
+  test('snapshot passthrough names still get the declared (untrusted) origin', async () => {
+    const { readCqEnv } = await import('../../src/config/env.js');
+    const { runWithCqEnv } = await import('../../src/config/run-env.js');
+    const snapshot = readCqEnv({
+      CQ_SANDBOX: 'off',
+      CQ_RUN_TOOL: 'on',
+      CQ_RUN_ENV_PASSTHROUGH: 'SSH_AUTH_SOCK',
+    });
+    await runWithCqEnv(snapshot, async () => {
+      // The snapshot path is an OPERATOR origin: a credential-shaped name is
+      // refused there exactly as the raw env path above does.
+      await expect(codeManifest([])).rejects.toThrow(/SSH_AUTH_SOCK/);
+    });
+  });
+
   test('a manifest or plan carrying a code-origin field is rejected by the strict schema', async () => {
     const built = JSON.parse(JSON.stringify(await codeManifest([]))) as Record<string, unknown>;
     for (const field of ['trustedEnvNames', 'codeEnvNames', 'trusted', 'origin']) {

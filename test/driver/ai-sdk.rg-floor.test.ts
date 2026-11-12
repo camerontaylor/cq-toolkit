@@ -2,7 +2,7 @@
 // (versionAtLeast/parseRgVersion), the default resolver driven through a fake
 // rg executable, and the CI guard (the former ai-sdk.test.ts floor describe).
 import { spawn as childSpawn } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -62,6 +62,8 @@ describe('rg runtime floor boundary — PRODUCTION comparator', () => {
       // the duration of the run and restore after (vi.stubEnv restores too).
       process.env.PATH = `${binDir}:${originalPath ?? ''}`;
       const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-fake-'));
+      const workspace = join(root, 'workspace');
+      await mkdir(workspace);
       try {
         const driver = new AiSdkDriver({
           providers: { mock: (modelId) => modelFor(undefined, modelId) },
@@ -71,7 +73,7 @@ describe('rg runtime floor boundary — PRODUCTION comparator', () => {
         });
         return await driver.run(
           invocation({
-            workspace: { path: root },
+            workspace: { path: workspace },
             toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
             sandboxPolicy: { level: 'read-only' },
           }),

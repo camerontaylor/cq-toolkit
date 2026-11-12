@@ -32,4 +32,36 @@ describe('area review runtime fallback', () => {
     expect(result.coverage).toEqual(normal.coverage);
     expect(result.advisories).toContain('area review fallback: contract descriptors truncated');
   });
+  it('merges area advisories only when area sessions are returned', () => {
+    const components = [
+      tracked('src/a.ts', ['a', 'b', 'c']),
+      tracked('docs/b.md', ['d', 'e', 'f']),
+    ];
+    const input = {
+      head: 'head',
+      base: 'base',
+      scope: 'full' as const,
+      components,
+      partitionTools: false as const,
+      size: {
+        small: { maxChangedLines: 0, maxFiles: 0 },
+        medium: { maxChangedLines: 1, maxFiles: 1 },
+      },
+    };
+    const areaAdvisories = components.flatMap(
+      (component) => createReviewPlan({ ...input, components: [component] }).advisories,
+    );
+    expect(areaAdvisories.length).toBeGreaterThan(0);
+    const normal = createAreaReviewPlan({ ...input, session: { maxInputChars: 1_000_000 } });
+    for (const advisory of areaAdvisories) expect(normal.advisories).toContain(advisory);
+
+    const bounded = { ...input, session: { maxInputChars: 500 } };
+    const original = createReviewPlan(bounded);
+    const fallback = createAreaReviewPlan(bounded);
+    expect(fallback.sessions).toEqual(original.sessions);
+    expect(fallback.advisories).toEqual([
+      ...original.advisories,
+      'area review fallback: cross-area context exceeds session prompt bound',
+    ]);
+  });
 });

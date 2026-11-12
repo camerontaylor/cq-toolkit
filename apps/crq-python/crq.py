@@ -2703,7 +2703,14 @@ def rank(item: Dict[str, Any]) -> int:
     if item["kind"] == "delta" and item.get("followup") != "merged":
         return 1
     if item["kind"] == local_review_runtime.KIND:
-        if item.get("generation", 1) == 1 and item.get("repeat_requested") is not True:
+        # First review unless generation, explicit repeat, or a verified/observed
+        # ancestral predecessor in the same task/branch classifies it a repeat
+        # (S3a; branch/task continuity without ancestry never counts).
+        if (
+            item.get("generation", 1) == 1
+            and item.get("repeat_requested") is not True
+            and item.get("ancestry_repeat") is not True
+        ):
             return 0
         created = parse_utc(item.get("created_at"))
         aged = created is not None and (now() - created).total_seconds() >= CONFIG.get("local_review_aging_minutes", 60) * 60
@@ -3712,6 +3719,10 @@ def main() -> int:
     p.add_argument("job")
     p.add_argument("--source-sha", required=True)
     p.add_argument("--revalidation", required=True, help="JSON evidence binding finding digest, source SHA/blob and named reviewer")
+    p.add_argument("--instructions-file", help="UTF-8 fix guidance, at most 2000 characters; retained with revalidation")
+    p = sub.add_parser("repair-revalidate-fixed", help="record explicit evidence for one merged legacy repair; never dispatch")
+    p.add_argument("job")
+    p.add_argument("--revalidation", required=True)
     p = sub.add_parser("tick")
     p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("start", help="tick restricted to one item (still honours cap/cooldown/secret scan)")
@@ -3812,11 +3823,23 @@ def main() -> int:
     elif args.cmd == "repair-prepare":
         def prepare():
             evidence = json.loads(Path(args.revalidation).read_text())
+            if args.instructions_file:
+                evidence["fix_instructions"] = Path(args.instructions_file).read_text(encoding="utf-8")
             job_id = repair_tick.prepare_current_job(sys.modules[__name__], load_queue(),
                                                     args.job, args.source_sha, evidence)
             event("repair_prepared", origin_job=args.job, job=job_id, source_sha=args.source_sha)
             print(job_id)
         if not ran_locked(prepare):
+            return 3
+    elif args.cmd == "repair-revalidate-fixed":
+        def revalidate_fixed():
+            evidence = json.loads(Path(args.revalidation).read_text())
+            repair_tick.record_fixed_publication_evidence(sys.modules[__name__], load_queue(), args.job, evidence)
+        try:
+            if not ran_locked(revalidate_fixed):
+                return 3
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(f"repair-revalidate-fixed refused: {exc}", file=sys.stderr)
             return 3
     elif args.cmd in ("tick", "start"):
         only = getattr(args, "item", None)

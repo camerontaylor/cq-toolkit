@@ -58,6 +58,7 @@
 // referenced-module rule.)
 import { z } from 'zod';
 import {
+  HistoryInputSchema,
   ReferenceSchema,
   StatusInputSchema,
   SubmitInputSchema,
@@ -70,6 +71,7 @@ import { messageOf } from '../../shared/messageOf.js';
 import type { ClassifyConfig } from './classify.config.js';
 import type { ClassifiedItem, Classification } from './classifyThreads.js';
 import type { FixableReviewItem, ReviewFixInput } from './fixReviewItem.js';
+import type { FixFindingBinding, FixFindingInput } from './fixFinding.js';
 import type { FetchedReviewState } from '../../adapters/forge-github/fetchReviewState.js';
 import type { PlanBatchConfig } from './planReviewBatch.js';
 import type { ReviewAction } from './replyAndResolve.js';
@@ -81,11 +83,22 @@ import { FindingSchema } from './findings.js';
 import {
   QueueEnqueueInputSchema,
   QueueRetryInputSchema,
-  QueueDrainInputSchema,
-  QueueReferenceSchema,
   QueueHealthReferenceSchema,
-  QueueReportInputSchema,
 } from './internal/queueProtocol.js';
+
+// ---------------------------------------------------------------------------
+// QUEUE SNAPSHOT WIRING — the two `review.*` queue importers below (retry,
+// queueHealth) pass the host's resolved
+// CQ_* snapshot into `makeQueueOps` so every alias read is entry-time
+// (ADR-0009 resolve once): the ops are constructed with the run's snapshot,
+// and a later ambient env change cannot alter queue configuration. The
+// explicit `undefined` keeps the transport unbound while the default-parameter
+// rule applies the run's snapshot when the wiring carries none (library
+// behavior preserved). Among the other importers, the five driver-factory
+// sites (addressMany, address, run, fixItem, fixFinding) also forward
+// `wiring.cqEnv` into `createDriverFactory` (driver PR #1568); the rest do
+// NOT pass snapshots — their ops read `currentCqEnv()` themselves.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Adapter helpers — the one fold every library op rides (module doc)
@@ -493,6 +506,60 @@ const FixableReviewItemSchema: z.ZodType<FixableReviewItem> = z
   .strict();
 
 /**
+ * The SHARED review-fix request vocabulary: review.fixItem and
+ * review.fixFinding carry the same repo/pr/item/worktree/driver/harness/
+ * promptOverride/budget fields. Declared once so a new field cannot drift
+ * between the two JSON boundaries.
+ */
+const reviewFixCommonFields = {
+  repo: z.string().min(1).exactOptional(),
+  pr: z.number().int().positive().exactOptional(),
+  item: z.union([
+    FixableReviewItemSchema,
+    z.object({ kind: z.literal('finding'), finding: FindingSchema }).strict(),
+  ]),
+  worktree: z.object({ path: z.string().min(1), branch: z.string().min(1) }).strict(),
+  driver: z.object({ model: z.string().min(1), provider: z.string().min(1) }).strict(),
+  harness: HarnessConfigSchema.exactOptional(),
+  promptOverride: z.string().min(1).exactOptional(),
+  budget: z
+    .object({
+      maxUsd: z.number().positive().exactOptional(),
+      maxTokens: z.number().int().positive().exactOptional(),
+      wallClockMs: z.number().int().positive().exactOptional(),
+      maxAttempts: z.number().int().positive().exactOptional(),
+      // Output-only cap and per-request context ceiling (ai-sdk lane).
+      maxOutputTokens: z.number().int().safe().positive().exactOptional(),
+      maxContextTokens: z.number().int().safe().positive().exactOptional(),
+      // The strict pre-request ceiling (opt-in). The review.fixItem lane is
+      // the in-process ai-sdk driver for the default providers, so it can
+      // carry the capability; both binds are required and positive — an
+      // absent capability keeps the legacy soft maxTokens semantics.
+      //
+      // JUDGE / CLASSIFIER PATH: the capability is injected on the ai-sdk
+      // LANE (DriverFactoryConfig.lanes.aiSdk.strictTokenCapability), so it
+      // reaches every role that resolves to that lane — fixer, classifier
+      // and judge alike. The durable reservation hook
+      // (lanes.aiSdk.strictTokenReservationHook) rides the same lane. Strict
+      // enforcement is still PER-INVOCATION: an op must carry
+      // `budget.strictTokenBudget` to opt in, and today only review.fixItem
+      // mirrors that field. A classify/judge op opts in by gaining the same
+      // mirror and the operator injecting a capability for its model; with
+      // no injection the lane refuses pre-dispatch rather than guessing.
+      // This slice wires the fixer only.
+      strictTokenBudget: z
+        .object({
+          maxInputTokens: z.number().int().safe().positive(),
+          reserveOutputTokens: z.number().int().safe().positive(),
+        })
+        .strict()
+        .exactOptional(),
+    })
+    .strict()
+    .exactOptional(),
+};
+
+/**
  * Registry-time mirror of {@link FixReviewItemInput}: the full input, and
  * only it. `pr` is a positive integer (PR numbers start at 1); worktree
  * path/branch and the driver's model/provider handles are non-empty. The
@@ -503,52 +570,38 @@ const FixableReviewItemSchema: z.ZodType<FixableReviewItem> = z
  * typo'd field) must fail loudly, never be silently stripped.
  */
 export const FixReviewItemInputSchema: z.ZodType<ReviewFixInput> = z
+  .object(reviewFixCommonFields)
+  .strict();
+
+/**
+ * Registry-time mirror of {@link FixFindingBinding}: identity data crq
+ * carries and echoes. The op NEVER verifies these values (it spawns no
+ * git); crq revalidates before enqueue and harvest.
+ */
+export const FixFindingBindingSchema: z.ZodType<FixFindingBinding> = z
   .object({
-    repo: z.string().min(1).exactOptional(),
-    pr: z.number().int().positive().exactOptional(),
-    item: z.union([
-      FixableReviewItemSchema,
-      z.object({ kind: z.literal('finding'), finding: FindingSchema }).strict(),
-    ]),
-    worktree: z.object({ path: z.string().min(1), branch: z.string().min(1) }).strict(),
-    driver: z.object({ model: z.string().min(1), provider: z.string().min(1) }).strict(),
-    harness: HarnessConfigSchema.exactOptional(),
-    promptOverride: z.string().min(1).exactOptional(),
-    budget: z
-      .object({
-        maxUsd: z.number().positive().exactOptional(),
-        maxTokens: z.number().int().positive().exactOptional(),
-        wallClockMs: z.number().int().positive().exactOptional(),
-        maxAttempts: z.number().int().positive().exactOptional(),
-        // Output-only cap and per-request context ceiling (ai-sdk lane).
-        maxOutputTokens: z.number().int().safe().positive().exactOptional(),
-        maxContextTokens: z.number().int().safe().positive().exactOptional(),
-        // The strict pre-request ceiling (opt-in). The review.fixItem lane is
-        // the in-process ai-sdk driver for the default providers, so it can
-        // carry the capability; both binds are required and positive — an
-        // absent capability keeps the legacy soft maxTokens semantics.
-        //
-        // JUDGE / CLASSIFIER PATH: the capability is injected on the ai-sdk
-        // LANE (DriverFactoryConfig.lanes.aiSdk.strictTokenCapability), so it
-        // reaches every role that resolves to that lane — fixer, classifier
-        // and judge alike. The durable reservation hook
-        // (lanes.aiSdk.strictTokenReservationHook) rides the same lane. Strict
-        // enforcement is still PER-INVOCATION: an op must carry
-        // `budget.strictTokenBudget` to opt in, and today only review.fixItem
-        // mirrors that field. A classify/judge op opts in by gaining the same
-        // mirror and the operator injecting a capability for its model; with
-        // no injection the lane refuses pre-dispatch rather than guessing.
-        // This slice wires the fixer only.
-        strictTokenBudget: z
-          .object({
-            maxInputTokens: z.number().int().safe().positive(),
-            reserveOutputTokens: z.number().int().safe().positive(),
-          })
-          .strict()
-          .exactOptional(),
-      })
-      .strict()
-      .exactOptional(),
+    job: z.string().min(1),
+    sourceSha: z.string().regex(/^[0-9a-f]{40}$/),
+    sourceBlobSha: z.string().regex(/^[0-9a-f]{40}$/),
+    findingSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    repairBase: z.string().regex(/^[0-9a-f]{40}$/),
+  })
+  .strict();
+
+/**
+ * Registry-time mirror of {@link FixFindingInput}: the shared fix request
+ * plus the carried binding and optional instructions. The op-only UTF-16
+ * bounds (body 8000; instructions 1..2000 and no NUL; whole request 32768)
+ * are deliberately NOT mirrored here: the op measures them and returns the
+ * typed `failed` + `report: { failureClass: 'evidence' }` refusal, so the
+ * JSON boundary must not preempt that contract with an input-validation
+ * error. The binding's hex shapes ARE structural and live here.
+ */
+export const FixFindingInputSchema: z.ZodType<FixFindingInput> = z
+  .object({
+    ...reviewFixCommonFields,
+    binding: FixFindingBindingSchema,
+    instructions: z.string().exactOptional(),
   })
   .strict();
 
@@ -620,14 +673,18 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'review.addressMany',
     inputSchema: ReviewAddressManyInputSchema,
-    importer: async (wiring) =>
-      (await import('./addressMany.js')).makeReviewAddressMany({
-        drivers: createDriverFactory(
-          wiring?.onDeprecatedAlias !== undefined
+    importer: async (wiring) => {
+      const managed = await import('../dev/managedReview.js');
+      return (await import('./addressMany.js')).makeReviewAddressMany({
+        managedSubmit: managed.makeConfiguredManagedReviewSubmit(wiring?.cqEnv),
+        drivers: createDriverFactory({
+          ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-            : {},
-        ),
-      }) as Op<unknown, unknown>,
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        }),
+      }) as Op<unknown, unknown>;
+    },
   },
   {
     name: 'review.submit',
@@ -654,67 +711,66 @@ export const registry: OpRegistryEntry[] = [
     inputSchema: ReferenceSchema,
     importer: async () => (await import('./cancel.js')).makeCancel() as Op<unknown, unknown>,
   },
+  {
+    name: 'review.history',
+    inputSchema: HistoryInputSchema,
+    importer: async () => (await import('./history.js')).makeHistory() as Op<unknown, unknown>,
+  },
   // ./queue.js owns queue-v1; ./internal/queueEvidence.js is isolated from findings v1.
   {
     name: 'review.retry',
     inputSchema: QueueRetryInputSchema,
-    importer: async () => (await import('./queue.js')).makeQueueOps().retry as Op<unknown, unknown>,
-  },
-  {
-    name: 'review.drain',
-    inputSchema: QueueDrainInputSchema,
-    importer: async () => (await import('./queue.js')).makeQueueOps().drain as Op<unknown, unknown>,
-  },
-  {
-    name: 'review.enqueue',
-    inputSchema: QueueEnqueueInputSchema,
-    importer: async () =>
-      (await import('./queue.js')).makeQueueOps().enqueue as Op<unknown, unknown>,
+    importer: async (wiring) =>
+      (await import('./queue.js')).makeQueueOps(undefined, wiring?.cqEnv).retry as Op<
+        unknown,
+        unknown
+      >,
   },
   {
     name: 'review.queueHealth',
     inputSchema: QueueHealthReferenceSchema,
-    importer: async () =>
-      (await import('./queue.js')).makeQueueOps().queueHealth as Op<unknown, unknown>,
-  },
-  {
-    name: 'review.queueStatus',
-    inputSchema: QueueReferenceSchema,
-    importer: async () =>
-      (await import('./queue.js')).makeQueueOps().queueStatus as Op<unknown, unknown>,
-  },
-  {
-    name: 'review.report',
-    inputSchema: QueueReportInputSchema,
-    importer: async () =>
-      (await import('./queue.js')).makeQueueOps().report as Op<unknown, unknown>,
+    importer: async (wiring) =>
+      (await import('./queue.js')).makeQueueOps(undefined, wiring?.cqEnv).queueHealth as Op<
+        unknown,
+        unknown
+      >,
   },
   {
     name: 'review.address',
     inputSchema: ReviewAddressInputSchema,
     importer: async (wiring) => {
-      const { makeReviewAddress } = await import('./address.js');
-      return makeReviewAddress({
-        drivers: createDriverFactory(
-          wiring?.onDeprecatedAlias !== undefined
+      const managed = await import('../dev/managedReview.js');
+      return (await import('./address.js')).makeReviewAddress({
+        managedSubmit: managed.makeConfiguredManagedReviewSubmit(wiring?.cqEnv),
+        drivers: createDriverFactory({
+          ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-            : {},
-        ),
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        }),
       }) as Op<unknown, unknown>;
     },
   },
   {
     name: 'review.run',
     inputSchema: ReviewRunInputSchema,
+    // S2b-i: the op's CodeRabbit leg rides the managed queue route
+    // (review-v1 on the queue identity) via run.ts's `managedSubmit` dep.
+    // The binding is inert at construction (closures only — no spawn, no
+    // env read), so resolving the entry still touches nothing. `gh` resolves
+    // the forge repo itself from the input repoRoot; the server re-derives
+    // every hashed fact and refuses a mismatch (plan D2).
     importer: (wiring) =>
-      import('./run.js').then(
-        (m) =>
+      Promise.all([import('./run.js'), import('../dev/managedReview.js')]).then(
+        ([m, managed]) =>
           m.makeReviewRun({
-            drivers: createDriverFactory(
-              wiring?.onDeprecatedAlias !== undefined
+            drivers: createDriverFactory({
+              ...(wiring?.onDeprecatedAlias !== undefined
                 ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-                : {},
-            ),
+                : {}),
+              ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+            }),
+            managedSubmit: managed.makeConfiguredManagedReviewSubmit(wiring?.cqEnv),
           }) as Op<unknown, unknown>,
       ),
   },
@@ -746,14 +802,33 @@ export const registry: OpRegistryEntry[] = [
     // lane through the factory.
     importer: async (wiring) =>
       (await import('./fixReviewItem.js')).makeFixReviewItem({
-        drivers: createDriverFactory(
+        drivers: createDriverFactory({
           // Dispatch wiring (PR #238 review P2): the host's alias-notice
           // sink rides the factory config; absent (every library caller),
           // the library default — one stderr line — is unchanged.
-          wiring?.onDeprecatedAlias !== undefined
+          ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
-            : {},
-        ),
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        }),
+      }) as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.fixFinding',
+    inputSchema: FixFindingInputSchema,
+    // The C1 finding-fix entry: the same DriverFactory wiring as
+    // review.fixItem (ADR-0002 §2.5 — the factory owns lane construction and
+    // the served-model assertion; no eager lane is built here). The op adds
+    // the carried binding/instructions and the fixed whole-request bound;
+    // it never spawns git (crq verifies the binding around the call).
+    importer: async (wiring) =>
+      (await import('./fixFinding.js')).makeFixFinding({
+        drivers: createDriverFactory({
+          ...(wiring?.onDeprecatedAlias !== undefined
+            ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+            : {}),
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        }),
       }) as Op<unknown, unknown>,
   },
   {

@@ -66,17 +66,13 @@ describe('path canonicalization — symlink-proof ownership', () => {
       // never left blocking the create with a phantom branch hold.
       expect(result).toEqual({ path: aliasPath, reused: false, branch: LABEL, foreign: [] });
       expect(calls).toContainEqual(['-C', repoRoot, 'worktree', 'remove', stalePath]);
-      expect(calls[calls.length - 1]).toEqual([
-        '-C',
-        repoRoot,
-        'worktree',
-        'add',
-        '-B',
-        LABEL,
-        aliasPath,
-        SHA_B,
+      const canonicalPath = await realpath(aliasPath);
+      expect(calls.slice(-3)).toEqual([
+        ['-C', repoRoot, 'worktree', 'add', '-B', LABEL, aliasPath, SHA_B],
+        ['-C', canonicalPath, 'rev-parse', '--absolute-git-dir'],
+        ['-C', canonicalPath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
       ]);
-      expect(registry.current()['7']?.path).toBe(aliasPath);
+      expect(registry.current()['7']?.path).toBe(await realpath(aliasPath));
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
     }

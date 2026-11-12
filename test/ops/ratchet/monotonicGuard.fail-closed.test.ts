@@ -54,6 +54,49 @@ describe('checkDiffMonotonicity', () => {
     expect(checkDiffMonotonicity(diff)).toMatchObject({ ok: false });
   });
 
+  test.each(['\n', '\n\t', '\r\n'])(
+    'an escaped key split from its colon by %j fails closed',
+    (whitespace) => {
+      const old = body('higher-is-better', 80);
+      const injected = old.replace('"value": 80', `"value": 80, "val\\u0075e"${whitespace}: 50`);
+      const parsed = JSON.parse(injected) as { value: unknown };
+      expect(parsed.value).toBe(50);
+      const diff = modifiedSection(REL, old.trimEnd().split('\n'), injected.trimEnd().split('\n'));
+      expect(checkDiffMonotonicity(diff)).toEqual({
+        ok: false,
+        violations: [{ path: REL, why: 'unparsable baseline diff' }],
+        filesChecked: 1,
+      });
+    },
+  );
+
+  test('an escaped key after a separator in context retains line-start detection', () => {
+    const injected = '  "val\\u0075e": 50, "capturedAt": "2026-09-15T00:00:00.000Z"';
+    const parsed = JSON.parse(`{"value": 81, ${injected}}`) as { value: unknown };
+    expect(parsed.value).toBe(50);
+    const diff = [
+      `diff --git a/${REL} b/${REL}`,
+      `--- a/${REL}`,
+      `+++ b/${REL}`,
+      '@@ -1,9 +1,9 @@',
+      ' {',
+      '   "direction": "higher-is-better",',
+      '-  "value": 80',
+      '+  "value": 81',
+      '   ,',
+      '   "unit": "errors"',
+      '   ,',
+      '-  "capturedAt": "2026-09-15T00:00:00.000Z"',
+      `+${injected}`,
+      ' }',
+    ].join('\n');
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [{ path: REL, why: 'unparsable baseline diff' }],
+      filesChecked: 1,
+    });
+  });
+
   test('an escaped property key on the delete+add path fails closed', () => {
     const old = body('higher-is-better', 80);
     const injected = body('higher-is-better', 80).replace(

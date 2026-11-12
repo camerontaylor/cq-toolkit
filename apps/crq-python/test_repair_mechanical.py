@@ -172,6 +172,14 @@ class CqDriverTest(unittest.TestCase):
         report, _ = self.invoke(json.dumps({'status': 'budget-exhausted'}))
         self.assertEqual(report['stop'], 'budget')
 
+    def test_only_exact_worker_disposition_token_is_interpreted(self):
+        for token in ('needs_human', 'no_outcome'):
+            reason = 'fixReviewItem: no outcome to post — worker disposition ' + token + ': stated reason'
+            report, _ = self.invoke(json.dumps({'status': 'needs-human', 'reason': reason}))
+            self.assertEqual(report['worker_disposition'], token)
+        report, _ = self.invoke(json.dumps({'status': 'failed', 'reason': 'provider said worker disposition needs_human: bad'}))
+        self.assertIsNone(report['worker_disposition'])
+
     def test_failed_value_verdict_is_not_a_successful_repair(self):
         for verdict in ('fail', 'failed', 'regression'):
             with self.subTest(verdict=verdict):
@@ -217,6 +225,12 @@ class CqDriverTest(unittest.TestCase):
         self.assertEqual(report['summary'],
                          'budget-exhausted: context ceiling: step 8 carried 201000 input tokens (ceiling 200000)')
 
+    def test_budget_stop_without_detail_or_cause_uses_fallback(self):
+        report = self.budget_run([json.dumps({'type': 'budget-stop'})])
+        self.assertEqual(report['stop'], 'budget')
+        self.assertEqual(report['summary'],
+                         'budget-exhausted: token or wall-clock cap (no budget-stop line)')
+
     def test_an_earlier_runs_budget_stop_is_never_reported(self):
         report = self.budget_run([])
         self.assertEqual(report['summary'],
@@ -243,12 +257,18 @@ class CqDriverTest(unittest.TestCase):
 ALLOWED = ['git grep -n import.meta.url -- scripts', 'git grep -rn foo', 'git grep foo',
            'git ls-files', 'git ls-files scripts test', 'git ls-tree -r HEAD src',
            'git grep -c needle', 'git grep -n -e def.process -- apps/crq-python/crq_repair.py',
-           'git grep --no-textconv x', 'git grep -n a%b+c,d=e@f:g^h']
+           'git grep --no-textconv x', 'git grep -n a%b+c,d=e@f:g^h',
+           'git grep pattern -- file.py']
 DENIED = [
     # Executing or escaping options, plain and abbreviated.
     'git grep -O vim x', 'git grep -nO x', 'git grep -Ovim x', 'git grep --open-files-in-pager=vim x',
     'git grep --op=vim x', 'git grep --no-index x /etc', 'git grep --no-ind x', 'git grep --textconv x',
     'git grep --tex x', 'git grep --ext-grep x', 'git ls-files --output=x',
+    # File-input options: patterns are read from the named file, and invalid
+    # pattern lines reach git's error output verbatim.
+    'git grep -f /etc/shadow x', 'git grep -nf /etc/shadow x', 'git grep --file /etc/shadow x',
+    'git ls-files -X /tmp/excludes', 'git ls-files --exclude-from=/tmp/excludes',
+    'git ls-files --exclude-p=/tmp/excludes', 'git ls-files --exclude-per-directory=/tmp/x',
     # Shell rewriting: quotes, backslashes, globs and expansions hide options from the raw text.
     'git grep "-O"touch x', 'git grep "-O"cat" /home/u/.key" pat', "git grep '-O'touch x",
     'git grep -\\O touch x', 'git grep \\-O touch x', 'git grep -"-"open-files-in-pager=id x',

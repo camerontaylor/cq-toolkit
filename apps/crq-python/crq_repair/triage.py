@@ -6,11 +6,47 @@ import subprocess
 import re
 
 import review_ledger as ledger
+from finding_delivery import RepairRoundCeiling
 
 
 PENDING = ('untriaged', 'needs-retriage')
 CONTRACT_PATH = 'docs/current-contract-and-backlog.md'
 CONTRACT_MAX_CHARS = 24000
+
+
+def error_reason(exc, limit=300):
+    """One bounded line naming a failure cause, never the scanned content."""
+    return ' '.join(str(exc).split())[:limit] or type(exc).__name__
+
+
+class ContextScanError(RuntimeError):
+    """The judge could not read its scan policy; defer without losing plans."""
+
+    def __init__(self, cause):
+        self.reason = error_reason(cause)
+        super().__init__(self.reason)
+
+
+def source_excerpt(content, path, body, primary=False):
+    """Spend the existing 8k allowance on cited lines before a file prefix."""
+    citations = re.findall(re.escape(path) + r':(\d+)', body)
+    if primary:
+        citations += re.findall(r'(?i)lines?\s+(\d+)', body)
+    lines = content.splitlines(keepends=True)
+    starts = list(dict.fromkeys(max(0, int(n) - 21) for n in citations))[:4]
+    if not starts or len(content) <= 8000:
+        return {'text': content[:8000], 'truncated': len(content) > 8000}
+    regions = []
+    remaining = 8000
+    for start in starts:
+        if start >= len(lines):
+            continue
+        text = ''.join(lines[start:start + 41])[:min(2000, remaining)]
+        regions.append({'start_line': start + 1, 'text': text})
+        remaining -= len(text)
+    if not regions:
+        return {'text': content[:8000], 'truncated': True}
+    return {'text': '', 'regions': regions, 'truncated': True}
 
 
 def context(repo, row, tip):
@@ -30,7 +66,7 @@ def context(repo, row, tip):
         original = '\n'.join(old[i - 1] for i in indices if 1 <= i <= len(old))[:16000]
         needle = next((line.strip() for line in original.splitlines() if len(line.strip()) >= 12), '')
         if needle and not lines:
-            search = repo.git('grep', '-n', '-F', '-e', needle[:200], tip, '--', finding['path'], check=False).decode(errors='replace')[:16000]
+            search = repo.git('grep', '-n', '-F', '-e', needle[:200], tip, '--', name, check=False).decode(errors='replace')[:16000]
     contract_entry = entries.get(CONTRACT_PATH)
     contract_text = repo.git('cat-file', 'blob', contract_entry['blob']).decode(errors='replace') if contract_entry else ''
     contract = {'path': CONTRACT_PATH, 'tip': tip, 'blob': contract_entry['blob'] if contract_entry else None,
@@ -48,15 +84,15 @@ def context(repo, row, tip):
             if path not in entries or len(extra) >= 3:
                 continue
             content = repo.git('cat-file', 'blob', entries[path]['blob']).decode(errors='replace')
-            extra.append({'path': path, 'blob': entries[path]['blob'], 'text': content[:8000],
-                          'truncated': len(content) > 8000})
+            extra.append({'path': path, 'blob': entries[path]['blob'],
+                          **source_excerpt(content, path, body, primary=path == name)})
     return {'current_contract': contract, 'original_region': original, 'content_search': search, 'finding': finding, 'target': row['target'], 'tip': tip, 'current_path': name, 'additional_sources': extra,
             'region': [{'line': i + 1, 'text': text[i]} for i in range(start, end)],
             'history': repo.git('log', '-n', '40', '--format=%H %s', row['target'] + '..' + tip, '--', finding['path']).decode(errors='replace')[:16000]}
 
 
 def missing_evidence(reason):
-    """Legacy unsure reasons only; operational failures must never enter repair."""
+    """Recognize legacy missing-evidence judgments for existing recovery paths."""
     return (isinstance(reason, str)
             and not reason.startswith('fixer investigation:')
             and not re.search(r'secret|scan|dispatch|invalid|budget|timeout|timed out|provider|rate.limit', reason, re.I)
@@ -66,12 +102,16 @@ def missing_evidence(reason):
 def decision(repo, row, tip, report):
     reason = report.get('reason')
     if not isinstance(reason, str) or not reason.strip():
-        return 'needs-human', 'judge supplied no reason', {}
+        return 'needs-human', 'judge supplied no reason', {'failure_class': 'exhausted'}
     verdict = report.get('verdict')
-    if verdict == 'unsure' and missing_evidence(reason):
+    if report.get('context_scan_refused'):
+        return 'confirmed', 'fixer investigation: ' + reason, {'failure_class': 'evidence'}
+    if verdict == 'unsure':
+        # The current bridge has no typed owner-decision field. Its free text
+        # cannot establish that class; let the fixer investigate and decide.
         # Admission to investigation, not a substantive validity judgment.
         # Inbox.triage still verifies the carried anchor before delivery.
-        return 'confirmed', 'fixer investigation: ' + reason, {}
+        return 'confirmed', 'fixer investigation: ' + reason, {'failure_class': 'evidence'}
     if verdict in ('fixed', 'superseded'):
         commit = report.get('fixing_commit')
         try:
@@ -82,7 +122,7 @@ def decision(repo, row, tip, report):
             if verdict == 'fixed' and fixing_path not in repo.git('diff-tree', '--root', '--no-commit-id', '--name-only', '--first-parent', '-m', '-r', commit).decode().splitlines():
                 raise ValueError('fix does not touch path')
         except (TypeError, ValueError, ledger.IntegrityError, subprocess.CalledProcessError):
-            return 'needs-human', 'unverified fixing/superseding commit: ' + reason, {}
+            return 'needs-human', 'unverified fixing/superseding commit: ' + reason, {'failure_class': 'evidence'}
         return ('already-fixed' if verdict == 'fixed' else 'superseded'), reason, {'fixing_commit': commit}
     if verdict == 'valid':
         try:
@@ -90,16 +130,25 @@ def decision(repo, row, tip, report):
             blob = repo.entries(tip)[path]['blob']
             text = repo.git('cat-file', 'blob', blob).decode().splitlines()
             quote = report.get('quoted_text')
+            if not isinstance(quote, str) or not quote.strip():
+                raise ValueError('quote missing')
             if (not selected or min(selected) < 1 or max(selected) > len(text)
-                    or not isinstance(quote, str) or not quote.strip()
                     or '\n'.join(text[i - 1] for i in sorted(selected)) != quote):
-                raise ValueError('quote mismatch')
+                # Recover line-number drift only from an exact, unique whole-line
+                # match in the pinned blob. Ambiguous/edited quotes still fail.
+                quoted = quote.split('\n')
+                matches = [i for i in range(len(text) - len(quoted) + 1)
+                           if text[i:i + len(quoted)] == quoted]
+                if len(matches) != 1:
+                    raise ValueError('quote mismatch')
+                start = matches[0] + 1
+                report = {**report, 'current_lines': [[start, start + len(quoted) - 1]]}
         except (KeyError, TypeError, ValueError, UnicodeError, ledger.IntegrityError):
-            return 'needs-human', 'judge current anchor failed verification: ' + reason, {}
+            return 'confirmed', 'fixer investigation: judge current anchor failed verification: ' + reason, {'failure_class': 'evidence'}
         return 'confirmed', reason, {k: report.get(k) for k in ('current_path', 'current_lines', 'quoted_text')}
     if verdict == 'duplicate-of':
         return 'duplicate', reason, {'canonical_id': report.get('canonical_of')}
-    return ('dismissed' if verdict == 'invalid' else 'needs-human'), reason, {}
+    return ('dismissed' if verdict == 'invalid' else 'needs-human'), reason, {'failure_class': 'exhausted'}
 
 
 def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry_run=False):
@@ -137,21 +186,23 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
         prior = events.get(row.get('previous_event_id'), {}).get('payload', {})
         investigate = (row['status'] == 'needs-human'
                        and str(prior.get('actor', '')).startswith('crq-triage/')
+                       and not prior.get('evidence', {}).get('failure_class')
                        and missing_evidence(prior.get('evidence', {}).get('reason')))
         if investigate and (len(plans) >= maximum or time.monotonic() >= deadline):
             continue
         if investigate and len(plans) < maximum and time.monotonic() < deadline:
-            plans.append((row, 'confirmed', 'fixer investigation: ' + prior['evidence']['reason'], {}))
+            plans.append((row, 'confirmed', 'fixer investigation: ' + prior['evidence']['reason'], {'failure_class': 'evidence'}))
             continue
         escalation = (row['status'] == 'needs-human'
                       and str(prior.get('actor', '')).startswith('crq-triage/')
+                      and prior.get('actor') != 'crq-triage/delivery'
                       and not str(prior.get('actor', '')).startswith('crq-triage/escalation/'))
         if row['status'] not in PENDING and not escalation and not (row['status'] == 'confirmed' and row.get('target_current') != tip):
             continue
         if escalation:
             row['_escalate'] = True
         if not isinstance(f.get('path'), str) or not f['path']:
-            plans.append((row, 'needs-human', 'finding has no repository path', {}))
+            plans.append((row, 'needs-human', 'finding has no repository path', {'failure_class': 'evidence'}))
             continue
         if time.monotonic() >= deadline:
             candidates.append(row)
@@ -199,26 +250,41 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
             if remaining <= 0:
                 stopped = 'deadline'; break
             report = judge(row, packed, remaining)
-        except (subprocess.TimeoutExpired, OSError):
-            stopped = 'deferred'; break
+        except subprocess.TimeoutExpired:
+            stopped = 'deferred'
+            stopped_report = {'stop': 'deferred', 'errorClass': 'timeout'}
+            break
+        except ContextScanError as exc:
+            # A judge-side secret scan that could not read its policy still defers
+            # before the model runs, so deterministic plans are persisted; name the
+            # cause so operators can tell it apart from a judge timeout.
+            stopped = 'deferred'
+            stopped_report = {'stop': 'deferred', 'errorClass': 'context-scan', 'reason': exc.reason}
+            break
+        except (OSError, RuntimeError) as exc:
+            # Other judge failures defer too, but keep their sanitized cause.
+            stopped = 'deferred'
+            stopped_report = {'stop': 'deferred', 'errorClass': 'judge-error', 'reason': error_reason(exc)}
+            break
         if report.get('stop') != 'ok':
             if report.get('stop') == 'error' and report.get('errorClass') == 'output-invalid':
                 row['_triage_model'] = report.get('model', 'judge')
                 stage = 'escalation' if row.get('_escalate') else 'judge'
-                plans.append((row, 'needs-human', stage + ' returned invalid structured output', {}))
+                plans.append((row, 'needs-human', stage + ' returned invalid structured output', {'failure_class': 'exhausted'}))
                 judged += 1
                 continue
             stopped = report.get('stop', 'error'); stopped_report = report; break
         row['_triage_model'] = report.get('model', 'judge')
         action, reason, kwargs = decision(repo, row, tip, report)
         if action == 'duplicate' and (kwargs.get('canonical_id') == row['finding']['id'] or not any(r['finding']['id'] == kwargs.get('canonical_id') and r['status'] != 'duplicate' for r in rows)):
-            action, reason, kwargs = 'needs-human', 'judge supplied invalid canonical finding', {}
+            action, reason, kwargs = 'needs-human', 'judge supplied invalid canonical finding', {'failure_class': 'evidence'}
         plans.append((row, action, reason, kwargs)); judged += 1
     outcomes = []
     for row, action, reason, kwargs in plans:
         fid = row['finding']['id']
         if not dry_run:
             actor = 'crq-triage/' + ('escalation/' if row.get('_escalate') else '') + row.get('_triage_model', 'deterministic')
+            kwargs.setdefault('failure_class', 'evidence')
             event = inbox.triage(fid, repo, tip, action, actor, reason, at, expected_previous_event_id=row['previous_event_id'], **kwargs)
             if event is None:
                 continue  # Operator/recovery changed the row during model judgment.
@@ -233,7 +299,10 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
                     and row['finding']['severity'] in ('critical', 'major', 'minor')):
                 try:
                     inbox.deliver(row['finding']['id'], transport, at); delivered += 1
-                except (RuntimeError, OSError):
+                except RepairRoundCeiling as exc:
+                    inbox.triage(row['finding']['id'], repo, tip, 'needs-human', 'crq-triage/delivery', str(exc), at,
+                                 failure_class='exhausted', expected_previous_event_id=row['previous_event_id'])
+                except (RuntimeError, OSError, ValueError):
                     delivery_deferred += 1
     return {'total': len(rows), 'judged': judged, 'unjudged': len(candidates) - judged,
             'counts': dict(collections.Counter(o['action'] for o in outcomes)),

@@ -101,7 +101,7 @@ test('a spawn fault on the first read resolves through every public op as needs-
         owner: 'test',
         evidence: [],
       }),
-    () => makePrOpen(effects, {} as PrEffects)({ repoRoot: '/missing' }),
+    () => makePrOpen(effects, {} as PrEffects, stubScanner())({ repoRoot: '/missing' }),
   ];
   for (const run of operations) {
     const result = await run();
@@ -168,6 +168,21 @@ test('a numeric command failure has no abort provenance even if the caller later
   );
   controller.abort({ cancelled: 'after ordinary failure' });
   expect(result.exitCode).toBe(7);
+  expect(result.timedOut).toBe(false);
+  expect(result).not.toHaveProperty('interruption');
+});
+
+test('a command killed by an external signal is a verdict (exitCode null), not a spawn fault', async () => {
+  const effects = makeSubprocessDevEffects(dir);
+  // The child dies from a signal this runner did NOT send: Node reports
+  // code null, killed false and signal 'SIGKILL'. The command RAN, so it
+  // must resolve for the caller to classify red — never "could not be spawned".
+  const result = await effects.runCommand(
+    process.execPath,
+    ['-e', "process.kill(process.pid, 'SIGKILL')"],
+    { timeoutMs: 10_000 },
+  );
+  expect(result.exitCode).toBeNull();
   expect(result.timedOut).toBe(false);
   expect(result).not.toHaveProperty('interruption');
 });

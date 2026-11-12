@@ -8,7 +8,7 @@ from crq_repair import atomic
 from crq_repair.bounded import drain_job
 import finding_delivery as delivery
 import review_ledger as ledger
-from crq_repair.triage import phase
+from crq_repair.triage import ContextScanError, context, phase
 from test_finding_delivery import FindingTest, AT
 from test_review_ledger import rehash
 
@@ -16,17 +16,140 @@ from test_review_ledger import rehash
 class PhaseTest(FindingTest):
     def run_phase(self, report=None, dry=False, maximum=6):
         queue = {'items': []}
-        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True)
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True, scan_finding=lambda *_: True)
         judge = mock.Mock(return_value=report or {'stop': 'ok', 'verdict': 'valid', 'reason': 'source confirms',
                         'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'one'})
         result = phase(self.inbox, self.f.repo, self.t, judge, transport, AT, dry_run=dry, maximum=maximum)
         return result, queue, judge
+
+    def legacy_escalation(self):
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'needs-human',
+                          'crq-triage/judge', 'owner requirements ambiguous', AT)
+
+    def test_content_search_uses_renamed_path_after_blame_loss(self):
+        target = self.f.commit({'a': b'unique-long-needle-text\nsecond line\n'})
+        self.f.git('mv', 'a', 'renamed')
+        self.f.git('commit', '-qm', 'rename')
+        filler = b''.join(('filler line %03d\n' % i).encode() for i in range(1, 60))
+        tip = self.f.commit({'renamed': filler + b'prefix unique-long-needle-text suffix\n'})
+        row = {'target': target, 'finding': {'path': 'a', 'intervals': [[1, 2]],
+                                              'anchor_status': 'verified'}}
+        self.assertEqual(self.f.repo.carry(target, tip, 'a', {1, 2}), ('renamed', set()))
+        result = context(self.f.repo, row, tip)
+        self.assertEqual(result['current_path'], 'renamed')
+        self.assertIn(':renamed:60:prefix unique-long-needle-text suffix', result['content_search'])
+        self.assertNotIn('unique-long-needle-text', str(result['region']))
 
     def test_missing_evidence_enters_fixer_queue_once(self):
         result, queue, _ = self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'missing source evidence'})
         self.assertEqual(result['delivered'], 1)
         self.assertEqual(len(queue['items']), 1)
         self.assertEqual(self.run_phase()[0]['delivered'], 0)
+
+    def test_untyped_unsure_investigates_without_owner_escalation(self):
+        result, queue, _ = self.run_phase({'stop': 'ok', 'verdict': 'unsure',
+                                           'reason': 'Several implementation choices seem plausible'})
+        self.assertEqual(result['delivered'], 1)
+        event = next(e for e in self.out.retained() if e['payload'].get('action') == 'confirmed')
+        self.assertEqual(event['payload']['evidence']['failure_class'], 'evidence')
+        self.assertEqual(len(queue['items']), 1)
+
+    def test_typed_context_scan_refusal_routes_only_safe_finding(self):
+        result, queue, _ = self.run_phase({'stop': 'ok', 'verdict': 'unsure',
+            'context_scan_refused': True, 'reason': 'scan rejected'})
+        self.assertEqual(result['delivered'], 1)
+        job_path = next((self.root / 'state/repair/inbox').glob('*.json'))
+        self.assertNotIn('triage_context', ledger.loads(job_path.read_bytes()))
+        event = next(e for e in self.out.retained() if e['payload'].get('action') == 'confirmed')
+        self.assertEqual(event['payload']['evidence']['failure_class'], 'evidence')
+
+    def test_refused_context_cannot_upload_rejected_finding_text(self):
+        queue = {'items': []}
+        calls = []
+        def scan_diff(patch, *args, **kwargs):
+            calls.append(patch)
+            return (False, {})
+        c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', CONFIG={'repair': {}},
+                            save_queue=lambda q: None, secret_scan=mock.Mock(return_value=(True, {})),
+                            secret_scan_diff=scan_diff)
+        runtime = SimpleNamespace(subjects=SimpleNamespace(projection=lambda *args: ('base', 'head')))
+        transport = delivery.configured_repair_transport(c, self.f.repo, queue, runtime)
+        judge = mock.Mock(return_value={'stop': 'ok', 'verdict': 'unsure',
+                                        'context_scan_refused': True, 'reason': 'scan rejected'})
+        result = phase(self.inbox, self.f.repo, self.t, judge, transport, AT)
+        self.assertEqual(result['delivery_deferred'], 1)
+        self.assertEqual(result['delivered'], 0)
+        self.assertEqual(queue['items'], [])
+        self.assertFalse(list((self.root / 'state/repair/inbox').glob('*.json')))
+        self.assertEqual(len(calls), 1)
+        self.assertIn('+Issue\n+Details', calls[0])
+
+    def test_delivery_integrity_failure_does_not_block_other_confirmed_finding(self):
+        self.add_pending_candidate()
+        for fid in (self.fid, 'f' * 64):
+            self.inbox.triage(fid, self.f.repo, self.t, 'confirmed', 'judge', 'verified', AT)
+        queue = {'items': []}
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True,
+                                              scan_finding=lambda *_: True)
+        actual = self.inbox.deliver
+        def deliver(fid, *args):
+            if fid == self.fid:
+                raise ValueError('instruction scanner refused')
+            return actual(fid, *args)
+        judge = mock.Mock()
+        with mock.patch.object(self.inbox, 'deliver', side_effect=deliver):
+            result = phase(self.inbox, self.f.repo, self.t, judge, transport, AT)
+            repeated = phase(self.inbox, self.f.repo, self.t, judge, transport, AT)
+        self.assertEqual((result['delivery_deferred'], result['delivered']), (1, 1))
+        self.assertEqual((repeated['delivery_deferred'], repeated['delivered']), (1, 0))
+        judge.assert_not_called()
+        self.assertEqual(len(queue['items']), 1)
+
+    def test_unbound_legacy_manifest_does_not_block_another_finding(self):
+        from crq_repair.retain import retain
+        self.inbox = delivery.Inbox(self.root / 'state/backfill/findings', self.out)
+        self.inbox.ingest(self.value)
+        queue = {'items': []}
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True,
+                         scan_finding=lambda *_: True, scan_instructions=lambda *_: True)
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'confirmed', 'judge', 'valid', AT)
+        first = self.inbox.deliver(self.fid, transport, AT)
+        job_id = first['repair_task']
+        retain(self.f.repo.root, self.t, self.root / 'state/repair' / job_id / 'final', include_clean=True)
+        self.inbox.repair_outcome(self.fid, job_id, 'needs-retriage', 'legacy failure', AT)
+        job_path = self.root / 'state/repair/inbox' / (job_id + '.json')
+        old = ledger.loads(job_path.read_bytes()); old['repair_base'] = 'f' * 40
+        ledger.atomic(job_path, ledger.canonical(old))
+        self.inbox.triage(self.fid, self.f.repo, self.t, 'confirmed', 'judge', 'valid again', AT)
+        self.add_pending_candidate()
+        other_path = self.inbox.root / 'triage' / ('f' * 64 + '.json')
+        other = ledger.loads(other_path.read_bytes()); other.pop('receipt', None)
+        ledger.atomic(other_path, ledger.canonical(other))
+        self.inbox.triage('f' * 64, self.f.repo, self.t, 'confirmed', 'judge', 'valid', AT)
+        judge = mock.Mock()
+        result = phase(self.inbox, self.f.repo, self.t, judge, transport, AT)
+        repeated = phase(self.inbox, self.f.repo, self.t, judge, transport, AT)
+        self.assertEqual((result['delivery_deferred'], result['delivered']), (1, 1))
+        self.assertEqual((repeated['delivery_deferred'], repeated['delivered']), (1, 0))
+        judge.assert_not_called()
+        self.assertEqual(len(queue['items']), 2)
+
+    def test_pin_ceiling_terminates_and_does_not_rejudge(self):
+        queue = {'items': []}
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True, scan_finding=lambda *_: True,
+                                              max_rounds_per_pin=1, scan_instructions=lambda *_: True)
+        judge = mock.Mock(return_value={'stop': 'ok', 'verdict': 'valid', 'reason': 'verified',
+                            'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'one'})
+        phase(self.inbox, self.f.repo, self.t, judge, transport, AT)
+        job = next((self.root / 'state/repair/inbox').glob('*.json')).stem
+        self.inbox.repair_outcome(self.fid, job, 'needs-retriage', 'failed', AT, failure_class='exhausted')
+        phase(self.inbox, self.f.repo, self.t, judge, transport, AT)
+        row = ledger.loads((self.inbox.root / 'triage' / (self.fid + '.json')).read_bytes())
+        self.assertEqual((row['status'], row['failure_class']), ('needs-human', 'exhausted'))
+        judge.reset_mock()
+        phase(self.inbox, self.f.repo, self.t, judge, transport, AT)
+        judge.assert_not_called()
+        self.assertEqual(len(queue['items']), 1)
 
     def test_legacy_missing_evidence_is_routed_once_with_history_intact(self):
         old = self.inbox.triage(self.fid, self.f.repo, self.t, 'needs-human',
@@ -162,34 +285,38 @@ class PhaseTest(FindingTest):
         self.assertEqual(result['unjudged'], 1)
         self.assertEqual(result['counts'], {})
 
-    def test_bad_quote_cannot_confirm(self):
-        result, _, _ = self.run_phase({'stop': 'ok', 'verdict': 'valid', 'reason': 'asserted',
+    def test_bad_quote_uses_verified_carried_anchor_for_investigation(self):
+        result, queue, _ = self.run_phase({'stop': 'ok', 'verdict': 'valid', 'reason': 'asserted',
                                      'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'wrong'})
-        self.assertEqual(result['counts'], {'needs-human': 1})
+        self.assertEqual(result['counts'], {'confirmed': 1})
+        event = next(e for e in self.out.retained() if e['payload'].get('action') == 'confirmed')
+        self.assertEqual(event['payload']['evidence']['failure_class'], 'evidence')
+        self.assertTrue(event['payload']['evidence']['anchor_verified'])
+        self.assertEqual(len(queue['items']), 1)
 
     def test_escalates_once_with_pinned_extra_source_and_keeps_validation(self):
-        first, _, _ = self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'owner requirements ambiguous'})
-        self.assertEqual(first['counts'], {'needs-human': 1})
+        self.legacy_escalation()
         second, _, judge = self.run_phase({'stop': 'ok', 'verdict': 'valid', 'reason': 'asserted',
                                           'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'wrong'})
-        self.assertEqual(second['counts'], {'needs-human': 1})
+        self.assertEqual(second['counts'], {'confirmed': 1})
+        self.assertEqual(second['delivered'], 1)
         self.assertEqual(judge.call_args.args[1]['additional_sources'][0]['text'], 'one\ntwo\n')
         third, _, judge = self.run_phase()
         judge.assert_not_called()
         self.assertEqual(third['judged'], 0)
         events = [e for e in self.out.retained() if e['event_type'] == 'finding-event']
-        self.assertEqual(len(events), 2)
+        self.assertEqual(len(events), 3)
         self.assertEqual(sum(e['payload']['actor'].startswith('crq-triage/escalation/') for e in events), 1)
 
     def test_escalation_can_confirm_and_deliver(self):
-        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'owner requirements ambiguous'})
+        self.legacy_escalation()
         result, queue, _ = self.run_phase()
         self.assertEqual(result['counts'], {'confirmed': 1})
         self.assertEqual(result['delivered'], 1)
         self.assertEqual(len(queue['items']), 1)
 
     def test_transient_escalation_failures_defer_until_service_recovers(self):
-        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'owner requirements ambiguous'})
+        self.legacy_escalation()
         for stop in ('configuration', 'budget', 'error', 'rate-limit'):
             with self.subTest(stop=stop):
                 result, _, judge = self.run_phase({'stop': stop})
@@ -201,7 +328,7 @@ class PhaseTest(FindingTest):
 
     def test_timed_out_escalation_remains_eligible(self):
         import subprocess
-        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'owner requirements ambiguous'})
+        self.legacy_escalation()
         judge = mock.Mock(side_effect=subprocess.TimeoutExpired('judge', 1))
         result = phase(self.inbox, self.f.repo, self.t, judge, mock.Mock(), AT)
         self.assertEqual(result['counts'], {})
@@ -211,7 +338,7 @@ class PhaseTest(FindingTest):
 
     def test_outage_does_not_consume_other_escalation_rows(self):
         import copy
-        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'owner requirements ambiguous'})
+        self.legacy_escalation()
         path = self.inbox.root / 'triage' / (self.fid + '.json')
         row = copy.deepcopy(ledger.loads(path.read_bytes()))
         row['finding'].update(id='f' * 64, title='Another finding')
@@ -225,7 +352,7 @@ class PhaseTest(FindingTest):
 
     def test_invalid_completed_output_is_terminal_and_later_rows_progress(self):
         import copy
-        self.run_phase({'stop': 'ok', 'verdict': 'unsure', 'reason': 'owner requirements ambiguous'})
+        self.legacy_escalation()
         path = self.inbox.root / 'triage' / (self.fid + '.json')
         row = copy.deepcopy(ledger.loads(path.read_bytes()))
         row['finding'].update(id='f' * 64, title='Another finding', severity='minor')
@@ -248,6 +375,42 @@ class PhaseTest(FindingTest):
         row['finding']['body'] = 'See docs/other.md.'
         packed = context(self.f.repo, row, tip)
         self.assertIn('docs/other.md', [v['path'] for v in packed['additional_sources']])
+
+    def test_escalation_includes_late_cited_source_with_line_numbers(self):
+        from crq_repair.triage import source_excerpt
+        content = 'prefix padding\n' * 1000 + 'important evidence\n'
+        packed = source_excerpt(content, 'src/a.ts', 'See src/a.ts:1001')
+        self.assertEqual(packed['text'], '')
+        self.assertTrue(packed['truncated'])
+        self.assertIn('important evidence', packed['regions'][0]['text'])
+        self.assertEqual(packed['regions'][0]['start_line'], 981)
+        self.assertLessEqual(sum(len(r['text']) for r in packed['regions']), 8000)
+
+    def test_citation_past_end_of_file_falls_back_to_prefix(self):
+        from crq_repair.triage import source_excerpt
+        content = 'x\n' * 5000
+        packed = source_excerpt(content, 'src/a.ts', 'See src/a.ts:9999')
+        self.assertEqual(packed['text'], content[:8000])
+        self.assertIs(packed['truncated'], True)
+        self.assertEqual(packed.get('regions', []), [])
+
+    def test_unique_exact_quote_recovers_wrong_line_number(self):
+        result, queue, _ = self.run_phase({'stop': 'ok', 'verdict': 'valid',
+            'reason': 'source confirms', 'current_path': 'a',
+            'current_lines': [[999, 999]], 'quoted_text': 'two'})
+        self.assertEqual(result['delivered'], 1)
+        row = ledger.loads((self.inbox.root / 'triage' / (self.fid + '.json')).read_bytes())
+        self.assertEqual(row['mapped_intervals'], [[2, 2]])
+
+    def test_repeated_exact_quote_does_not_recover_wrong_line_number(self):
+        self.t = self.f.commit({'a': b'one\none\ntwo\n'})
+        result, queue, _ = self.run_phase({'stop': 'ok', 'verdict': 'valid',
+            'reason': 'source confirms', 'current_path': 'a',
+            'current_lines': [[999, 999]], 'quoted_text': 'one'})
+        self.assertEqual(result['counts'], {'confirmed': 1})
+        event = next(e for e in self.out.retained() if e['payload'].get('action') == 'confirmed')
+        self.assertEqual(event['payload']['evidence']['failure_class'], 'evidence')
+        self.assertEqual(len(queue['items']), 1)
 
     def test_zero_limit_leaves_unjudged(self):
         result, _, judge = self.run_phase(maximum=0)
@@ -297,11 +460,11 @@ class PhaseTest(FindingTest):
             return result
         with mock.patch.object(service, 'ROOT', self.root), mock.patch.object(service, 'process', side_effect=process), mock.patch.object(service, 'dispatch_paused', return_value=None):
             service.process_item(config, [job])
-        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: AT)
+        c = SimpleNamespace(STATE=self.root / 'state', CONFIG=config, iso=lambda: AT)
         with mock.patch.object(repair_tick, 'finding_inbox', return_value=self.inbox):
             messages = repair_tick.harvest(c, queue, item)
         row = ledger.loads((self.inbox.root / 'triage' / (self.fid + '.json')).read_bytes())
-        self.assertEqual(row['status'], 'dismissed')
+        self.assertEqual(row['status'], 'needs-retriage')
         self.assertTrue(messages)
         self.assertEqual(item['repair_runs'][run]['state'], 'done')
         self.assertEqual(item['state'], 'done')
@@ -369,7 +532,40 @@ class PhaseTest(FindingTest):
         judge = mock.Mock(side_effect=subprocess.TimeoutExpired('judge', 1))
         result = phase(self.inbox, self.f.repo, self.t, judge, None, AT)
         self.assertEqual(result['stopped'], 'deferred')
+        self.assertEqual(result['stop_report'], {'stop': 'deferred', 'errorClass': 'timeout'})
         self.assertEqual(result['unjudged'], 1)
+
+    def test_judge_context_scan_failure_reports_reason_and_keeps_row(self):
+        judge = mock.Mock(side_effect=ContextScanError('denylist parse failed (fail closed)\nsecond line'))
+        result = phase(self.inbox, self.f.repo, self.t, judge, None, AT)
+        self.assertEqual(result['stopped'], 'deferred')
+        self.assertEqual(result['stop_report'], {'stop': 'deferred', 'errorClass': 'context-scan',
+                                                 'reason': 'denylist parse failed (fail closed) second line'})
+        self.assertEqual(result['unjudged'], 1)
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        self.assertEqual(ledger.loads(path.read_bytes())['status'], 'untriaged')
+
+    def test_context_scan_deferral_keeps_deterministic_plans(self):
+        import copy
+        path = self.inbox.root / 'triage' / (self.fid + '.json')
+        duplicate_id = 'd' * 64
+        duplicate = copy.deepcopy(ledger.loads(path.read_bytes()))
+        duplicate['finding']['id'] = duplicate_id
+        ledger.atomic(path.parent / (duplicate_id + '.json'), ledger.canonical(duplicate))
+        judge = mock.Mock(side_effect=ContextScanError('denylist parse failed (fail closed)'))
+        result = phase(self.inbox, self.f.repo, self.t, judge, None, AT)
+        self.assertEqual(result['stopped'], 'deferred')
+        self.assertEqual(result['counts'], {'duplicate': 1})
+        statuses = {fid: ledger.loads((self.inbox.root / 'triage' / (fid + '.json')).read_bytes())['status']
+                    for fid in (self.fid, duplicate_id)}
+        self.assertEqual(sorted(statuses.values()), ['duplicate', 'untriaged'])
+
+    def test_unclassified_judge_failure_reports_sanitized_cause(self):
+        judge = mock.Mock(side_effect=RuntimeError('dispatch unavailable\nretry later'))
+        result = phase(self.inbox, self.f.repo, self.t, judge, None, AT)
+        self.assertEqual(result['stopped'], 'deferred')
+        self.assertEqual(result['stop_report'], {'stop': 'deferred', 'errorClass': 'judge-error',
+                                                 'reason': 'dispatch unavailable retry later'})
 
     def test_info_confirmed_finding_is_not_delivered(self):
         path = self.inbox.root / 'triage' / (self.fid + '.json')
@@ -445,6 +641,16 @@ class PhaseTest(FindingTest):
             self.assertNotIn(marker, output.read_text())
             context['region'] = [{'text': 'ordinary source line'}]
             self.assertTrue(service.triage_context_safe(crq, context, output))
+
+    def test_context_scan_policy_failure_becomes_typed_deferral(self):
+        path = Path(__file__).parent / 'crq_repair.py'
+        spec = importlib.util.spec_from_file_location('triage_scan_failure_test', path)
+        service = importlib.util.module_from_spec(spec); spec.loader.exec_module(service)
+        c = SimpleNamespace(secret_scan_diff=mock.Mock(side_effect=RuntimeError('denylist parse failed (fail closed)')))
+        context = {'finding': {'path': 'src/a.py'}, 'region': [{'text': 'ordinary source line'}]}
+        with self.assertRaises(ContextScanError) as caught:
+            service.triage_context_scan(c, context, self.root / 'scan.json')
+        self.assertEqual(caught.exception.reason, 'denylist parse failed (fail closed)')
 
     def test_duplicate_with_different_severity_remains_independently_judgeable(self):
         import copy

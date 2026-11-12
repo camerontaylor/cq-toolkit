@@ -244,8 +244,9 @@ interface ReviewContext {
  * anything to the table: a non-author (a null reviewer login is not the
  * author — external, counts, mirroring countUnresolvedThreads' exact
  * comparison), membership in the resolved trust policy when one is active,
- * a head-SHA binding when headRefOid is supplied, an automation-only skip
- * marker under resolved policy, and the TEMPORAL QUALIFIER — submitted
+ * a head-SHA binding (an absent headRefOid is treated like null and fails
+ * closed, never as "any head counts"), an automation-only skip marker under
+ * resolved policy, and the TEMPORAL QUALIFIER — submitted
  * STRICTLY AFTER the last commit (evidence covering an earlier commit never
  * qualifies; a null/unparseable submittedAt never qualifies — fail toward
  * awaiting). `lastCommitMs` is typed nullable only so the
@@ -260,11 +261,10 @@ const isReviewableEvidence = (review: ReviewSummary, ctx: ReviewContext): boolea
     (ctx.config.automationLogin === undefined || review.authorLogin === ctx.config.automationLogin)
   )
     return false;
-  if (
-    ctx.headRefOid !== undefined &&
-    (ctx.headRefOid === null || review.commitOid !== ctx.headRefOid)
-  )
-    return false;
+  // Absent and null heads both fail closed: a caller that omits headRefOid
+  // cannot prove the review covers the current head, so it must not be
+  // accepted on a post-commit verdict alone (#1213).
+  if (ctx.headRefOid == null || review.commitOid !== ctx.headRefOid) return false;
   const submittedMs = parseMs(review.submittedAt);
   return submittedMs !== null && ctx.lastCommitMs !== null && submittedMs > ctx.lastCommitMs;
 };
@@ -452,9 +452,9 @@ export function classifyPr(
       (config.automationLogin === undefined || review.authorLogin === config.automationLogin)
     )
       return false;
-    if (candidate.headRefOid !== undefined)
-      return candidate.headRefOid !== null && review.commitOid === candidate.headRefOid;
-    return true;
+    // Same fail-closed rule as isReviewableEvidence: an absent head is not a
+    // wildcard. Only an explicit, matching head binds the review.
+    return candidate.headRefOid != null && review.commitOid === candidate.headRefOid;
   };
   const foldInput = candidate.reviews.filter((review) => {
     // COMMENTED/DISMISSED are transparent: they must not mask a standing
@@ -478,8 +478,9 @@ export function classifyPr(
   }
   // Row 7 — nobody has looked AT THIS CODE: no acceptable review of the
   // last commit's exact head state exists (trusted non-author under the
-  // resolved policy, current-head SHA when supplied, configured verdict
-  // state, and submitted STRICTLY AFTER the last commit). Quiet is not
+  // resolved policy, an explicit current-head SHA — an absent head fails
+  // closed like null — configured verdict state, and submitted STRICTLY
+  // AFTER the last commit). Quiet is not
   // acceptance until someone qualified has spoken about the head state at
   // least once — and no amount of settle time cures evidence that predates
   // the commit.

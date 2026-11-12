@@ -442,9 +442,11 @@ class CqTimeoutLogTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             with mock.patch.object(cqd, 'command', side_effect=self._timeout()):
-                with self.assertRaises(subprocess.TimeoutExpired):
-                    cqd.invoke(self._config(), {'model': 'p/m', 'budget': {}}, job,
-                               directory, directory)
+                # The deadline kill is the runner's typed budget stop (PR #1507);
+                # the log-preservation guarantee is unchanged.
+                report = cqd.invoke(self._config(), {'model': 'p/m', 'budget': {}}, job,
+                                    directory, directory)
+            self.assertEqual(report['stop'], 'budget')
             log = (directory / 'driver.log').read_text()
             self.assertIn('# invocation', log)
             self.assertIn('partial-out', log)
@@ -455,8 +457,9 @@ class CqTimeoutLogTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             with mock.patch.object(cqd, 'command', side_effect=self._timeout()):
-                with self.assertRaises(subprocess.TimeoutExpired):
-                    cqd.judge(self._config(), {'model': 'p/m'}, {}, directory, directory)
+                report = cqd.judge(self._config(), {'model': 'p/m'}, {}, directory, directory)
+            self.assertEqual(report['stop'], 'budget')
+            self.assertEqual(report['verdict'], 'unsure')
             log = (directory / 'driver.log').read_text()
             self.assertIn('partial-out', log)
             self.assertIn('partial-err', log)

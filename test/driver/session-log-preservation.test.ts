@@ -28,8 +28,108 @@ import {
   applyCorrelationEnv,
   correlationEnvRemovals,
   inboundParentWorkId,
+  inboundParentWorkIdFromSnapshot,
 } from '../../src/driver/correlation-env.js';
 import { sessionsOfResult } from '../../src/kernel/runner.js';
+import { readCqEnv } from '../../src/config/env.js';
+import { runWithCqEnv } from '../../src/config/run-env.js';
+import { AiSdkDriver } from '../../src/driver/ai-sdk/index.js';
+import { SessionBoundError } from '../../src/driver/errors.js';
+import { createDriverFactory } from '../../src/driver/factory.js';
+import { SessionStore } from '../../src/harness/session.js';
+
+describe('session log switch snapshot', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  test('uses a supplied snapshot and preserves dynamic bare-factory reads', async () => {
+    vi.spyOn(AiSdkDriver.prototype, 'run').mockRejectedValue(new SessionBoundError('stop', 's'));
+    const remove = vi.spyOn(SessionStore.prototype, 'remove').mockResolvedValue(undefined);
+    const request = { role: 'fixer', modelSpec: { provider: 'openai', model: 'm' } };
+    const invocation = {
+      prompt: 'test',
+      modelSpec: request.modelSpec,
+      toolPolicy: { allow: [], mode: 'none' as const },
+      sandboxPolicy: { level: 'none' as const },
+      budget: {},
+    };
+    const unset = createDriverFactory({ cqEnv: readCqEnv({}) });
+    const off = createDriverFactory({ cqEnv: readCqEnv({ CQ_SESSION_LOGS: 'off' }) });
+    const forced = createDriverFactory({
+      cqEnv: readCqEnv({ CQ_SESSION_LOGS: 'on' }),
+      sessionLogs: { enabled: false },
+    });
+    const bare = createDriverFactory();
+    const check = async (factory: typeof bare, expected: number) => {
+      remove.mockClear();
+      await expect(factory.resolve(request).driver.run(invocation)).rejects.toThrow('stop');
+      expect(remove).toHaveBeenCalledTimes(expected);
+    };
+    vi.stubEnv('CQ_SESSION_LOGS', 'off');
+    await check(unset, 0);
+    await check(bare, 1);
+    vi.stubEnv('CQ_SESSION_LOGS', 'on');
+    await check(off, 1);
+    await check(forced, 1);
+    await check(bare, 0);
+  });
+
+  test('the factory binds CQ_SESSIONS_DIR from its snapshot; ambient drift is invisible', async () => {
+    vi.spyOn(AiSdkDriver.prototype, 'run').mockRejectedValue(new SessionBoundError('stop', 's'));
+    const seen: string[] = [];
+    vi.spyOn(SessionStore.prototype, 'remove').mockImplementation(function (this: SessionStore) {
+      seen.push(this.sessionsDir);
+      return Promise.resolve();
+    });
+    const request = { role: 'fixer', modelSpec: { provider: 'openai', model: 'm' } };
+    const invocation = {
+      prompt: 'test',
+      modelSpec: request.modelSpec,
+      toolPolicy: { allow: [], mode: 'none' as const },
+      sandboxPolicy: { level: 'none' as const },
+      budget: {},
+    };
+    const snapshot = readCqEnv({
+      CQ_SESSIONS_DIR: '/from-snapshot',
+      CQ_SESSION_LOGS: 'off',
+    });
+    vi.stubEnv('CQ_SESSIONS_DIR', '/ambient');
+    const bound = createDriverFactory({ cqEnv: snapshot });
+    await expect(bound.resolve(request).driver.run(invocation)).rejects.toThrow('stop');
+    expect(seen).toEqual(['/from-snapshot']);
+    // Negative control: a bare factory outside a run reads the ambient value.
+    seen.length = 0;
+    const bare = createDriverFactory({ sessionLogs: { enabled: false } });
+    await expect(bare.resolve(request).driver.run(invocation)).rejects.toThrow('stop');
+    expect(seen).toEqual(['/ambient']);
+  });
+
+  test('a factory resolved in a run context uses the run snapshot without explicit wiring', async () => {
+    vi.spyOn(AiSdkDriver.prototype, 'run').mockRejectedValue(new SessionBoundError('stop', 's'));
+    const seen: string[] = [];
+    vi.spyOn(SessionStore.prototype, 'remove').mockImplementation(function (this: SessionStore) {
+      seen.push(this.sessionsDir);
+      return Promise.resolve();
+    });
+    const request = { role: 'fixer', modelSpec: { provider: 'openai', model: 'm' } };
+    const invocation = {
+      prompt: 'test',
+      modelSpec: request.modelSpec,
+      toolPolicy: { allow: [], mode: 'none' as const },
+      sandboxPolicy: { level: 'none' as const },
+      budget: {},
+    };
+    const snapshot = readCqEnv({ CQ_SESSIONS_DIR: '/entry', CQ_SESSION_LOGS: 'off' });
+    vi.stubEnv('CQ_SESSIONS_DIR', '/ambient');
+    const factory = createDriverFactory();
+    await expect(
+      runWithCqEnv(snapshot, () => factory.resolve(request).driver.run(invocation)),
+    ).rejects.toThrow('stop');
+    expect(seen).toEqual(['/entry']);
+  });
+});
 
 describe('1.1 defaultSessionsDir', () => {
   // The production helper, driven through vi.stubEnv (restored after each
@@ -56,6 +156,26 @@ describe('1.1 defaultSessionsDir', () => {
     expect(defaultSessionsDir()).toBe('/elsewhere');
     vi.stubEnv('CQ_SESSIONS_DIR', '  ');
     expect(defaultSessionsDir()).toBe(join('/state', 'cq', 'sessions'));
+  });
+
+  test('a snapshot binds CQ_SESSIONS_DIR while XDG_STATE_HOME stays a live foreign read', () => {
+    vi.stubEnv('CQ_SESSIONS_DIR', '/ambient');
+    const snapshot = readCqEnv({ CQ_SESSIONS_DIR: '/snapshot' });
+    vi.stubEnv('CQ_SESSIONS_DIR', '/drifted');
+    expect(defaultSessionsDir(snapshot)).toBe('/snapshot');
+    // Negative control: no snapshot outside a run reads the ambient value.
+    expect(defaultSessionsDir()).toBe('/drifted');
+    // The snapshot leaves CQ_SESSIONS_DIR unset, so the FOREIGN XDG value is
+    // still read live (it is never snapshotted).
+    vi.stubEnv('CQ_SESSIONS_DIR', '');
+    vi.stubEnv('XDG_STATE_HOME', '/state');
+    expect(defaultSessionsDir(readCqEnv({}))).toBe(join('/state', 'cq', 'sessions'));
+  });
+
+  test('the enclosing run snapshot binds defaultSessionsDir without an argument', () => {
+    const snapshot = readCqEnv({ CQ_SESSIONS_DIR: '/entry' });
+    vi.stubEnv('CQ_SESSIONS_DIR', '/ambient');
+    expect(runWithCqEnv(snapshot, () => defaultSessionsDir())).toBe('/entry');
   });
 });
 
@@ -132,6 +252,36 @@ describe('1.4 CQ_* correlation env', () => {
       inboundParentWorkId({ CQ_WORK_ID: ' ', CQ_PARENT_WORK_ID: '', PASEO_AGENT_ID: 'a1' }),
     ).toBe('paseo:a1');
     expect(inboundParentWorkId({ PASEO_AGENT_ID: '  ' })).toBeUndefined();
+  });
+
+  test('inboundParentWorkIdFromSnapshot: CQ_* is snapshot-only, PASEO stays live', () => {
+    const empty = readCqEnv({});
+    const both = readCqEnv({ CQ_WORK_ID: 'snapshot-work', CQ_PARENT_WORK_ID: 'snapshot-parent' });
+    const parentOnly = readCqEnv({ CQ_PARENT_WORK_ID: 'snapshot-parent' });
+    // The explicit tiers come from the snapshot; an ambient CQ_* identity is
+    // never consulted (foreignEnv's CQ_WORK_ID is ignored).
+    expect(
+      inboundParentWorkIdFromSnapshot(both, {
+        CQ_WORK_ID: 'ambient-work',
+        PASEO_AGENT_ID: 'a1',
+      }),
+    ).toBe('snapshot-work');
+    expect(
+      inboundParentWorkIdFromSnapshot(parentOnly, {
+        CQ_WORK_ID: 'ambient-work',
+        PASEO_AGENT_ID: 'a1',
+      }),
+    ).toBe('snapshot-parent');
+    // With no explicit snapshot identity the foreign Paseo fallback is still
+    // a LIVE read of the supplied foreign environment.
+    expect(inboundParentWorkIdFromSnapshot(empty, { CQ_WORK_ID: 'ambient-work' })).toBeUndefined();
+    expect(inboundParentWorkIdFromSnapshot(empty, { PASEO_AGENT_ID: 'a1' })).toBe('paseo:a1');
+    // Blank snapshot values count as absent (readCqEnv drops them).
+    expect(
+      inboundParentWorkIdFromSnapshot(readCqEnv({ CQ_WORK_ID: ' ', CQ_PARENT_WORK_ID: ' ' }), {
+        PASEO_AGENT_ID: 'a1',
+      }),
+    ).toBe('paseo:a1');
   });
 
   test('PASEO_AGENT_ID itself is not forwarded to children', () => {

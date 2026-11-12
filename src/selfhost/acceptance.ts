@@ -25,9 +25,10 @@
 // mergeability row would be circular.
 //
 // TRUST (P7: built-in default → project env). The trust set comes from
-// three comma-list keys. Blank (absent, empty or whitespace-only) values
-// use the conservative default: no bots, APPROVED only, and
-// OWNER/MEMBER/COLLABORATOR users. Values map through trustPolicyFromConfig
+// three comma-list keys, resolved once through the entry's CqEnv snapshot
+// (a later process.env change cannot alter it). Blank (absent, empty or
+// whitespace-only) values use the conservative default: no bots, APPROVED
+// only, and OWNER/MEMBER/COLLABORATOR users. Values map through trustPolicyFromConfig
 // to narrow ordinary review trust. An unrecognised entry fails loudly with
 // the key name; a typo must never silently narrow or widen that trust.
 // An exact-head SHA + PASS comment counts without an opt-in, including for
@@ -38,7 +39,8 @@
 // NEVER THROWS (judgeAcceptance): every throw becomes verdict 'fail' with a
 // one-line, capped, log-safe reason. Report lines carry counts, actor keys
 // and reasons — never review bodies or tokens.
-import { enterWithCqEnv } from '../config/entry.js';
+import { assertCqEnvName, enterWithCqEnv } from '../config/entry.js';
+import type { CqEnv } from '../config/env.js';
 import { pathToFileURL } from 'node:url';
 import { ACCEPT_STATES, ASSOCIATIONS, BOT_ENTRY_RE } from '../config/values.js';
 import { GhError, ghNameOk, makeGhRunner } from '../adapters/forge-github/gh.js';
@@ -57,7 +59,6 @@ import type {
   SnapshotThread,
   TrustPolicy,
 } from './merge-recheck.js';
-import { processEnv } from '../config/process-env.js';
 
 /** The check-run name the verdict posts under. */
 export const ACCEPTANCE_CHECK_NAME = 'cq/acceptance';
@@ -88,6 +89,12 @@ export interface AcceptanceTrustConfig {
   report: string[];
 }
 
+/** One P7 key resolved from a source: its entries and the layer they came from. */
+interface ResolvedListKey {
+  entries: string[];
+  layer: ConfigLayer;
+}
+
 /**
  * One P7 comma-list key: entries trimmed, empties dropped, every entry
  * checked by `valid` (a throw naming the key on the first bad one). A key
@@ -99,7 +106,7 @@ const readListKey = (
   key: string,
   valid: (entry: string) => boolean,
   expected: string,
-): { entries: string[]; layer: ConfigLayer } => {
+): ResolvedListKey => {
   const entries = (env[key] ?? '')
     .split(',')
     .map((entry) => entry.trim())
@@ -115,6 +122,32 @@ const readListKey = (
 
 /** A resolved set for a log line: sorted, comma-joined; '(none)' when empty. */
 const listed = (values: Iterable<string>): string => [...values].sort().join(',') || '(none)';
+
+/** Map resolved P7 lists to the trust policy and the log-safe report. */
+const assembleAcceptanceTrust = (
+  bots: ResolvedListKey,
+  states: ResolvedListKey,
+  associations: ResolvedListKey,
+): AcceptanceTrustConfig => {
+  const policy = trustPolicyFromConfig({
+    trustedBots: bots.entries,
+    acceptReviewStates: states.entries,
+    trustedAssociations: associations.entries,
+  });
+  return {
+    policy,
+    layers: {
+      trustedBots: bots.layer,
+      acceptReviewStates: states.layer,
+      trustedAssociations: associations.layer,
+    },
+    report: [
+      `${TRUSTED_BOTS_ENV}=${listed(policy.trustedBots)} (${bots.layer})`,
+      `${ACCEPT_REVIEW_STATES_ENV}=${listed(policy.acceptStates)} (${states.layer})`,
+      `${TRUSTED_ASSOCIATIONS_ENV}=${listed(policy.trustedAssociations)} (${associations.layer})`,
+    ],
+  };
+};
 
 /**
  * Resolve the acceptance trust set from the P7 keys in `env` (built-in
@@ -147,24 +180,30 @@ export function resolveAcceptanceTrust(
     (entry) => ASSOCIATIONS.includes(entry.toUpperCase()),
     ASSOCIATIONS.join(', '),
   );
-  const policy = trustPolicyFromConfig({
-    trustedBots: bots.entries,
-    acceptReviewStates: states.entries,
-    trustedAssociations: associations.entries,
-  });
-  return {
-    policy,
-    layers: {
-      trustedBots: bots.layer,
-      acceptReviewStates: states.layer,
-      trustedAssociations: associations.layer,
-    },
-    report: [
-      `${TRUSTED_BOTS_ENV}=${listed(policy.trustedBots)} (${bots.layer})`,
-      `${ACCEPT_REVIEW_STATES_ENV}=${listed(policy.acceptStates)} (${states.layer})`,
-      `${TRUSTED_ASSOCIATIONS_ENV}=${listed(policy.trustedAssociations)} (${associations.layer})`,
-    ],
+  return assembleAcceptanceTrust(bots, states, associations);
+}
+
+/**
+ * Resolve the acceptance trust set from an entry's resolved `CqEnv`
+ * snapshot. The P7 keys are already parsed as string lists; a value the
+ * registry rejected is absent from `values` and is refused here by name
+ * (`assertCqEnvName`), never silently narrowed to the conservative default.
+ * Nothing ambient is read: a `process.env` change after the entry snapshot
+ * cannot alter this resolution. THROWS, naming the key, on an invalid
+ * snapshot value.
+ */
+export function resolveAcceptanceTrustFromCqEnv(cqEnv: CqEnv): AcceptanceTrustConfig {
+  const readSnapshotKey = (key: string): ResolvedListKey => {
+    assertCqEnvName(cqEnv, 'acceptance', key);
+    // The registry's list parser stores `string[]`; absent/blank is undefined.
+    const entries = [...((cqEnv.values[key] as readonly string[] | undefined) ?? [])];
+    return { entries, layer: entries.length === 0 ? 'default' : 'env' };
   };
+  return assembleAcceptanceTrust(
+    readSnapshotKey(TRUSTED_BOTS_ENV),
+    readSnapshotKey(ACCEPT_REVIEW_STATES_ENV),
+    readSnapshotKey(TRUSTED_ASSOCIATIONS_ENV),
+  );
 }
 
 /** What one acceptance judgment is asked. */
@@ -438,7 +477,7 @@ async function main(): Promise<void> {
   let line: string;
   try {
     const args = parseAcceptanceArgs(process.argv.slice(2));
-    const trust = resolveAcceptanceTrust(processEnv());
+    const trust = resolveAcceptanceTrustFromCqEnv(cqEnv);
     const result = await judgeAcceptance(
       { gh: makeGhRunner({ cqEnv }), owner: args.owner, repo: args.repo, policy: trust.policy },
       args.input,

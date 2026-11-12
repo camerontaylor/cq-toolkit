@@ -1,9 +1,11 @@
 import type { z } from 'zod';
 import { execFile } from 'node:child_process';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { SnapshotConfigError } from '../../dev/internal/snapshot.js';
 import type { Op } from '../../../kernel/types.js';
 import { messageOf } from '../../../shared/messageOf.js';
+import { pathOnlyChildEnv } from '../../../shared/proc.js';
 import {
   makeReviewClient,
   QueueUnsupported,
@@ -22,6 +24,7 @@ export const git = async (cwd: string, ...args: string[]) =>
       timeout: 30000,
       maxBuffer: 6 * 1024 * 1024,
       env: {
+        ...pathOnlyChildEnv(),
         GIT_CONFIG_NOSYSTEM: '1',
         GIT_CONFIG_GLOBAL: '/dev/null',
         GIT_NO_REPLACE_OBJECTS: '1',
@@ -76,3 +79,21 @@ export async function headMessage(cwd: string, reviewed: string) {
 }
 
 export const evidenceRoot = async (cwd: string) => git(cwd, 'rev-parse', '--show-toplevel');
+
+/** Per-request evidence file; a non-repository cwd simply has no cache. */
+export async function evidenceRequestPath(
+  cwd: string,
+  requestId: string,
+): Promise<string | undefined> {
+  try {
+    return join(await evidenceRoot(cwd), '.cq/queue-evidence/requests', requestId + '.json');
+  } catch {
+    return undefined;
+  }
+}
+
+/** "Once per material change": identical digests carry no repeat cue. */
+export function withoutHistoryCue<T extends { cue?: unknown }>(history: T): Omit<T, 'cue'> {
+  const { cue: _cue, ...rest } = history;
+  return rest;
+}

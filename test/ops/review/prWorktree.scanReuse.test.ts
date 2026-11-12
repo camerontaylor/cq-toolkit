@@ -1,3 +1,4 @@
+import { REPO } from './prWorktree.helpers.js';
 // Split provenance: test/ops/review/prWorktree.test.ts was split into
 // prWorktree.helpers.ts (shared fixtures) and prWorktree.fetchFirst.test.ts,
 // prWorktree.registryConsult.test.ts, prWorktree.scanReuse.test.ts,
@@ -34,9 +35,9 @@ describe('existing-worktree scan reuse (LABEL match AND SHA match, INSIDE the ro
   test('an OWN worktree already checked out on the PR branch AT THE FETCHED SHA is registered and returned — zero adds (add would refuse anyway)', async () => {
     const calls: string[][] = [];
     const registry = memRegistry();
-    const ownPath = '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix';
+    const ownPath = `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`;
     const model = mkModel([
-      { path: '/repo', branch: 'main', head: SHA_MAIN },
+      { path: `${REPO}`, branch: 'main', head: SHA_MAIN },
       { path: ownPath, branch: LABEL, head: SHA_B },
       { path: '/other/thing', branch: 'unrelated', head: SHA_MAIN },
     ]);
@@ -51,9 +52,22 @@ describe('existing-worktree scan reuse (LABEL match AND SHA match, INSIDE the ro
       'rev-parse',
       'worktree',
       'rev-parse',
+      'rev-parse',
+      'symbolic-ref',
+      'rev-parse',
+      'rev-parse',
+      'rev-parse',
+      'diff',
+      'diff',
+      'ls-files',
     ]);
-    expect(calls[3]).toEqual(['-C', '/repo', 'worktree', 'list', '--porcelain']);
-    expect(calls[4]).toEqual(['-C', ownPath, 'rev-parse', 'HEAD']);
+    expect(calls[3]).toEqual(['-C', `${REPO}`, 'worktree', 'list', '--porcelain']);
+    expect(calls.slice(4, 8)).toEqual([
+      ['-C', ownPath, 'rev-parse', '--absolute-git-dir'],
+      ['-C', ownPath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+      ['-C', ownPath, 'symbolic-ref', 'HEAD'],
+      ['-C', ownPath, 'rev-parse', 'HEAD'],
+    ]);
     expect(calls.some((args) => args.includes('add'))).toBe(false);
     expect(registry.current()).toEqual({
       '7': { path: ownPath, branch: LABEL, createdAt: NOW },
@@ -73,18 +87,18 @@ describe('existing-worktree scan reuse (LABEL match AND SHA match, INSIDE the ro
         '7': { path: targetPath, branch: 'old-pr-7-branch', createdAt: NOW - 1000 },
       });
       const model = mkModel([
-        { path: '/repo', branch: 'main', head: SHA_MAIN },
+        { path: `${REPO}`, branch: 'main', head: SHA_MAIN },
         { path: targetPath, branch: 'old-pr-7-branch', head: SHA_A },
       ]);
       const result = await resolvePrWorktree(
         baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }),
       );
       expect(result).toEqual({ path: targetPath, reused: false, branch: LABEL, foreign: [] });
-      expect(registry.calls).toEqual(['load', 'update:7']);
+      expect(registry.calls).toEqual(['load', 'update:7', 'update:7:null', 'update:7']);
       // The squatter was removed NON-FORCED and the create landed at the
       // same pr-keyed slot, at the fetched sha.
       expect(calls).toContainEqual(['-C', repoRoot, 'worktree', 'remove', targetPath]);
-      expect(calls[calls.length - 1]).toEqual([
+      expect(calls[calls.length - 3]).toEqual([
         '-C',
         repoRoot,
         'worktree',
@@ -96,7 +110,7 @@ describe('existing-worktree scan reuse (LABEL match AND SHA match, INSIDE the ro
       ]);
       expect(calls.some((args) => args.includes('--force'))).toBe(false);
       expect(model.worktrees).toEqual([
-        { path: '/repo', branch: 'main', head: SHA_MAIN },
+        { path: `${REPO}`, branch: 'main', head: SHA_MAIN },
         { path: targetPath, branch: LABEL, head: SHA_B },
       ]);
     } finally {
@@ -110,7 +124,7 @@ describe('existing-worktree scan reuse (LABEL match AND SHA match, INSIDE the ro
       const calls: string[][] = [];
       const registry = memRegistry();
       const model = mkModel([
-        { path: '/repo', branch: 'main', head: SHA_MAIN },
+        { path: `${REPO}`, branch: 'main', head: SHA_MAIN },
         { path: '/elsewhere/pr-7-fix', branch: LABEL, head: SHA_A },
       ]);
       // The out-of-root stale tree is skipped (not at the sha, not ours to

@@ -117,10 +117,7 @@ def execute(c, args):
         return inbox.triage(args.finding, repo, tip, args.action, args.operator, args.reason, c.iso(),
                             fixing_commit=args.fixing_commit, canonical_id=args.canonical_id, reviews=publisher.fetch()[1])
     if args.command == "deliver":
-        def scan(target, name):
-            base, head = runtime.subjects.projection(repo, target, [name])
-            return c.secret_scan(base, head, c.STATE / "backfill/repair-scan.json")[0]
-        transport = finding_delivery.repair_transport(c.ROOT, queue, c.save_queue, scan)
+        transport = finding_delivery.configured_repair_transport(c, repo, queue, runtime)
         return inbox.deliver(args.finding, transport, c.iso())
     raise ledger.IntegrityError("unknown command")
 

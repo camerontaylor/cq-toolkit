@@ -337,6 +337,10 @@ describe('dev.cycle', () => {
       expect(result.reason).toContain('draft PR #42');
       // No '(pr body)' fault: the composition never touched a forge.
       expect(result.reason).not.toContain('pr body');
+      // The report IS present (the cap leg attaches its envelope), but with
+      // no gh the compose never ran — the reason must NOT claim the attempt
+      // log was published (the findingsComposed gate).
+      expect(result.reason).not.toContain('and the attempt log');
     }
   });
 });
