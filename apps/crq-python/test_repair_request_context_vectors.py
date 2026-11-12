@@ -74,6 +74,14 @@ class RepairRequestContextVectorsTest(unittest.TestCase):
                     )
                     self.assertTrue(case["error"]["type"])
 
+    def test_escalation_records_the_dispatched_a2_worktree(self) -> None:
+        cases = {case["name"]: case for case in emitter.build()["cases"]}
+        escalation = cases["escalation-role"]
+        self.assertEqual(escalation["worktree"], escalation["base_worktree"] + "-A2")
+        self.assertEqual(escalation["context"]["worktree"]["path"], escalation["worktree"])
+        fixer = cases["canonical-fixer"]
+        self.assertEqual(fixer["worktree"], fixer["base_worktree"])
+
     def test_no_temp_paths_leak(self) -> None:
         text = emitter.render(emitter.build())
         self.assertNotIn("/tmp/", text)
