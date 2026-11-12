@@ -249,6 +249,7 @@ class RepairDrainTest(unittest.TestCase):
         info = {'number': 99, 'state': 'MERGED', 'headRefOid': self.tip, 'mergeCommit': {'oid': self.tip}}
         c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', iso=lambda: 'now',
                             git=self.git, pr_info=mock.Mock(return_value=info),
+                            ensure_commit=mock.Mock(return_value=True),
                             is_ancestor=lambda a, b: subprocess.run(['git', '-C', str(self.clone),
                                 'merge-base', '--is-ancestor', a, b]).returncode == 0,
                             save_queue=mock.Mock())
@@ -269,7 +270,29 @@ class RepairDrainTest(unittest.TestCase):
                 repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, bad)
         with self.assertRaisesRegex(ValueError, 'source changed'):
             repair_tick.merge_head_evidence(c, record, self.tip)
+        c.ensure_commit.return_value = False
+        with self.assertRaisesRegex(ValueError, 'head unavailable'):
+            repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, evidence)
+        c.ensure_commit.return_value = True
         repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, evidence)
+        old_publication = copy.deepcopy(record['publication'])
+        replacement = {**evidence, 'reason': 'reviewed replacement'}
+        c.save_queue.side_effect = OSError('crash before queue save')
+        with self.assertRaisesRegex(OSError, 'crash'):
+            repair_tick.record_fixed_publication_evidence(c, self.queue, job_id, replacement)
+        c.save_queue.side_effect = None
+        record['publication'] = copy.deepcopy(old_publication)  # restart from old persisted queue
+        saved = json.loads(journal.read_text())
+        stale = {**replacement, 'source_sha': self.pin}
+        atomic(journal, {**saved, 'fixed_revalidation': stale})
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
+             mock.patch.object(repair_tick, 'publish_source_resolution') as publish:
+            repair_tick.reconcile_fix_prs(c, self.queue)
+            mark.assert_not_called()
+            publish.assert_not_called()
+            self.assertIn('binding changed', record['source_publication_error'])
+        atomic(journal, saved)
+        evidence = replacement
         changed_info = {**info, 'headRefOid': self.pin}
         c.pr_info.return_value = changed_info
         with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
@@ -282,7 +305,7 @@ class RepairDrainTest(unittest.TestCase):
         record['publication']['source_resolutions'] = ['unexpected']
         with self.assertRaisesRegex(ValueError, 'resolutions contradict'):
             repair_tick.publication_journal(c, record)
-        record['publication'] = copy.deepcopy(publication)  # crash before queue save
+        record['publication'] = copy.deepcopy(old_publication)  # restart from old persisted queue
         with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
              mock.patch.object(repair_tick, 'publish_source_resolution', side_effect=[RuntimeError('offline'), None]) as publish:
             repair_tick.reconcile_fix_prs(c, self.queue)

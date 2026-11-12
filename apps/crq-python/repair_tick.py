@@ -827,8 +827,11 @@ def fixed_publication_evidence(c, item, run, record, info, evidence):
     tip = c.git('rev-parse', DEFAULT_REF)
     if (info.get('state') != 'MERGED' or info.get('number') != record.get('fix_pr', {}).get('number')
             or not all(isinstance(x, str) and re.fullmatch(r'[0-9a-f]{40}', x)
-                       for x in (published, actual, merge, tip))
-            or not c.is_ancestor(published, actual) or not c.is_ancestor(merge, tip)):
+                       for x in (published, actual, merge, tip))):
+        raise ValueError('merged repair PR identity or lineage mismatch')
+    if not c.ensure_commit(info['number'], actual):
+        raise ValueError('merged repair PR head unavailable')
+    if not c.is_ancestor(published, actual) or not c.is_ancestor(merge, tip):
         raise ValueError('merged repair PR identity or lineage mismatch')
     commits = publication.get('commits')
     if not isinstance(commits, list) or not commits:
@@ -866,9 +869,8 @@ def publication_journal(c, record):
     for key in ('head', 'commits', 'target', 'branch', 'open_pr'):
         if saved.get(key) != publication.get(key):
             raise ValueError('publication journal identity mismatch')
-    if (publication.get('fixed_revalidation') is not None
-            and publication['fixed_revalidation'] != saved.get('fixed_revalidation')):
-        raise ValueError('publication revalidation contradicts journal')
+    if publication.get('fixed_revalidation') is not None and not saved.get('fixed_revalidation'):
+        raise ValueError('publication revalidation missing from journal')
     if not set(publication.get('source_resolutions', [])) <= set(saved.get('source_resolutions', [])):
         raise ValueError('publication resolutions contradict journal')
     return journal, saved

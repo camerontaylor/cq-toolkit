@@ -3828,7 +3828,11 @@ def main() -> int:
         def revalidate_fixed():
             evidence = json.loads(Path(args.revalidation).read_text())
             repair_tick.record_fixed_publication_evidence(sys.modules[__name__], load_queue(), args.job, evidence)
-        if not ran_locked(revalidate_fixed):
+        try:
+            if not ran_locked(revalidate_fixed):
+                return 3
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(f"repair-revalidate-fixed refused: {exc}", file=sys.stderr)
             return 3
     elif args.cmd in ("tick", "start"):
         only = getattr(args, "item", None)
