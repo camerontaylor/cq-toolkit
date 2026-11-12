@@ -35,6 +35,8 @@ describe('makeForge (the one Forge binding)', () => {
       expectTypeOf(merge).toEqualTypeOf<MergeEffects>();
       expect(Object.keys(merge).sort()).toEqual(
         [
+          'commitParents',
+          'diffPatch',
           'fetchRef',
           'mergePr',
           'pushRef',

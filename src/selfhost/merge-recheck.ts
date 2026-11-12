@@ -1412,6 +1412,7 @@ export function gateMergeEffects(
     retargetBase: (pr, newBase) => effects.retargetBase(pr, newBase),
     pushRef: (ref, fromPath) => effects.pushRef(ref, fromPath),
     diffPatch: (from, to) => effects.diffPatch(from, to),
+    commitParents: (sha) => effects.commitParents(sha),
     mergePr: async (pr, opts): Promise<GhResult> => {
       const base = pinnedBase.get(pr);
       pinnedBase.delete(pr);

@@ -167,10 +167,16 @@ export class FakeMergeEffects implements MergeEffects {
   /** The unified patch body diffPatch answers with (default: empty —
    * nothing changed, nothing to scan). */
   diffPatchText = '';
-  /** Nonzero exit for the publication push (gate rung 5). */
+  /** Nonzero exit for the publication push (gate rung 6). */
   pushCode = 0;
   pushStderr = '';
   pushThrows: Error | null = null;
+  /** The topology the gate reads on the resolution commit (rung 3):
+   * null (the default) models a VALID single commit whose parent is the
+   * baseline; an explicit array is returned verbatim (merge commits list
+   * two parents, a wrong-parent commit the wrong sha); `false` models an
+   * unreadable topology. */
+  resolutionParents: string[] | null | false = null;
   private validateCalls = 0;
   private fetchCalls = 0;
 
@@ -233,6 +239,15 @@ export class FakeMergeEffects implements MergeEffects {
     this.calls.push(`diff:${from}..${to}`);
     if (this.diffThrows !== null) throw this.diffThrows;
     return { code: this.diffCode, stdout: this.diffPatchText, stderr: this.diffStderr };
+  }
+
+  async commitParents(sha: string): Promise<{ ok: boolean; parents?: string[] }> {
+    this.calls.push(`parents:${sha}`);
+    if (this.resolutionParents === false) return { ok: false };
+    return {
+      ok: true,
+      parents: this.resolutionParents ?? [this.baselineSha ?? 'b'.repeat(40)],
+    };
   }
 }
 

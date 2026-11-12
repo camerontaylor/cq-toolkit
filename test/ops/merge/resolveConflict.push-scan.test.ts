@@ -69,6 +69,7 @@ describe('the publication gate (issue #1193): scan BEFORE any push, fail closed'
       `validate:refs/pull/44/head`,
       'prepare:44@refs/pull/44/head',
       `validate:${mergeWorktreeBranchFor(44)}`,
+      `parents:${String(effects.resolutionSha)}`,
       `diff:${String(effects.baselineSha)}..${String(effects.resolutionSha)}`,
       `push:${String(effects.resolutionSha)}:refs/heads/feat/topic@/wt/pr-44`,
       'remove:/wt/pr-44',

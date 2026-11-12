@@ -515,3 +515,53 @@ describe('safeArgs round-1193: the read-only diff shape (the resolver pre-push s
     expect(gitCalls).toEqual([['-C', '/repo', 'diff', ...FLAGS, from, to]]);
   });
 });
+
+describe('safeArgs round-1193-r2: the topology read shape (rev-list --parents)', () => {
+  const resolved = sha('c');
+
+  test('the EXACT shape passes — --parents -n 1 plus one full 40-hex sha', () => {
+    expect(safeArgs(['-C', '/repo', 'rev-list', '--parents', '-n', '1', resolved])).toEqual([
+      '-C',
+      '/repo',
+      'rev-list',
+      '--parents',
+      '-n',
+      '1',
+      resolved,
+    ]);
+  });
+
+  test('every deviation is an unknown shape', () => {
+    expect(() => safeArgs(['rev-list', '--parents', '-n', '1', 'abc123'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['rev-list', '-n', '1', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['rev-list', '--parents', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['rev-list', '--parents', '-n', '2', resolved])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['rev-list', '--parents', '-n', '1', resolved, 'HEAD'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['rev-list', '--parents', '-n', '1'])).toThrow(UnsafeMergeArgsError);
+  });
+
+  test('realMergeEffects.commitParents routes the exact argv and excludes the queried sha (injected runner)', async () => {
+    const gitCalls: string[][] = [];
+    const effects = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async (args: string[]) => {
+        gitCalls.push(args);
+        return { code: 0, stdout: `${resolved} ${sha('a')} ${sha('b')}\n`, stderr: '' };
+      },
+    });
+    const answer = await effects.commitParents(resolved);
+    expect(answer).toEqual({ ok: true, parents: [sha('a'), sha('b')] });
+    expect(gitCalls).toEqual([['-C', '/repo', 'rev-list', '--parents', '-n', '1', resolved]]);
+    const missing = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async () => ({ code: 128, stdout: '', stderr: 'bad object' }),
+    });
+    expect(await missing.commitParents(resolved)).toEqual({ ok: false });
+  });
+});

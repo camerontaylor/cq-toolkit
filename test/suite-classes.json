@@ -421,6 +421,7 @@
   "test/ops/merge/resolveConflict.op-failures.test.ts": "process",
   "test/ops/merge/resolveConflict.op-outcomes.test.ts": "process",
   "test/ops/merge/resolveConflict.parse-decision.test.ts": "process",
+  "test/ops/merge/resolveConflict.publicationGate.test.ts": "process",
   "test/ops/merge/resolveConflict.push-scan.test.ts": "process",
   "test/ops/merge/resolveConflict.refname-gate.test.ts": "process",
   "test/ops/merge/resolveConflict.render-prompt.test.ts": "process",

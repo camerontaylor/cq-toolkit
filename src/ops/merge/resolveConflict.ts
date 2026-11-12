@@ -127,7 +127,7 @@
 //           (matched content is never quoted); a scanner FAULT →
 //           'needs-human' (the human arranges the scanner). NOTHING is
 //           pushed on either path — refuse, not document;
-//        5. clean → the op publishes: effects.pushRef('<resolvedSha>:
+//        6. clean → the op publishes: effects.pushRef('<resolvedSha>:
 //           refs/heads/<headBranch>') from the worktree, through the
 //           I3-guarded seam (no force, no deletion, never the protected
 //           branch). Exit 0 IS the publication fact — git push exits 0
@@ -827,7 +827,41 @@ export function makeResolveConflictOp(
               detail: `conflict agent reported acted but ${branchRef} still names the pre-dispatch head (${baselineSha}) — no resolution commit was created; NOTHING was pushed${sessionSuffix(result)}`,
             };
           }
-          // Gate rung 3: read the resolved change — the zero-context
+          // Gate rung 3: prove the publication TOPOLOGY before the
+          // payload scan means anything (review P1, PR #1628 round 2):
+          // the endpoint diff baseline..resolution covers ALL pushed
+          // content ONLY IF the resolution commit is EXACTLY ONE commit
+          // whose sole parent IS the baseline. A merge commit's second
+          // parent, or an intermediate commit that adds a credential and
+          // a tip commit that removes it, ride the push while leaving the
+          // endpoint diff clean — unscannable history. A worker that
+          // reports acted is believed about the TIP commit only; the
+          // prompt's single-commit requirement is ENFORCED here, not
+          // assumed. Unreadable topology, two parents, zero parents, or
+          // a parent that is not the validated baseline → refuse,
+          // fail-closed, nothing pushed.
+          let topology: { ok: boolean; parents?: string[] };
+          try {
+            topology = await effects.commitParents(resolution.sha);
+          } catch (err) {
+            return {
+              status: 'failed',
+              error: `resolveConflict: reading the topology of the resolution commit ${resolution.sha} for pr ${input.pr} threw: ${errorMessage(err)}${sessionSuffix(result)}`,
+            };
+          }
+          if (!topology.ok || topology.parents === undefined) {
+            return {
+              status: 'needs-human',
+              reason: `conflict agent reported acted but the resolution commit's topology could not be read for pr ${input.pr} — refusing to publish unscanned history; NOTHING was pushed${sessionSuffix(result)}`,
+            };
+          }
+          if (topology.parents.length !== 1 || (topology.parents[0] as string) !== baselineSha) {
+            return {
+              status: 'needs-human',
+              reason: `resolution is not a single commit on the prepared baseline (parents: ${topology.parents.join(', ') || 'none'}; expected exactly one equal to ${baselineSha}) for pr ${input.pr} — refusing to publish unscanned history; NOTHING was pushed${sessionSuffix(result)}`,
+            };
+          }
+          // Gate rung 4: read the resolved change — the zero-context
           // patch of exactly what the publication push would add beyond
           // the head's current public state. Nonzero or throwing → the
           // change is UNSCANNABLE: a partial patch is never scanned, and
@@ -848,7 +882,7 @@ export function makeResolveConflictOp(
               error: `resolveConflict: the resolved change ${baselineSha}..${resolution.sha} for pr ${input.pr} is unreadable (exit ${patch.code})${stderrSuffix(patch.stderr)} — refusing to publish an unscannable change${sessionSuffix(result)}`,
             };
           }
-          // Gate rung 4: scan the patch's ADDED lines through the
+          // Gate rung 5: scan the patch's ADDED lines through the
           // denylist seam. ANY hit refuses; so does a scanner FAULT (a
           // gate that cannot run cannot clear — the human arranges the
           // scanner). Matched content is never quoted (the denylist
@@ -876,7 +910,7 @@ export function makeResolveConflictOp(
               reason: `the resolved change for pr ${input.pr} carries denylist hits (rules: ${ruleIds}; files: ${files}) — the branch was NOT pushed; scrub or review the findings before publishing${sessionSuffix(result)}`,
             };
           }
-          // Gate rung 5: the publication — the OP pushes the resolution
+          // Gate rung 6: the publication — the OP pushes the resolution
           // commit to the head branch through the I3-guarded seam (no
           // force, no deletion, never the protected branch — the guard
           // refuses all three shapes regardless of this call site). Exit

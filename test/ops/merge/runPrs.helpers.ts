@@ -211,6 +211,12 @@ export class FakeMergeEffects implements MergeEffects {
     this.calls.push(`diff:${from}..${to}`);
     return OK;
   }
+  async commitParents(): Promise<{ ok: boolean; parents?: string[] }> {
+    // The valid topology the publication gate expects (review P1 round 2):
+    // exactly one parent, and that parent is the baseline validateRef
+    // answers with — a resolution stacked directly on the prepared head.
+    return { ok: true, parents: ['b'.repeat(40)] };
+  }
   async pushRef(ref: string, fromPath: string): Promise<GhResult> {
     this.calls.push(`push:${ref}@${fromPath}`);
     return OK;

@@ -138,13 +138,31 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
   const unknown = (): UnsafeMergeArgsError =>
     new UnsafeMergeArgsError(
       args,
-      'refused: unknown argv shape — the merge family executes only its nine documented shapes (rev-parse, fetch, worktree add/list/remove, push, gh pr merge, gh pr edit, gh pr view, diff)',
+      'refused: unknown argv shape — the merge family executes only its ten documented shapes (rev-parse, rev-list, fetch, worktree add/list/remove, push, gh pr merge, gh pr edit, gh pr view, diff)',
     );
   const sub = rest[0];
   switch (sub) {
     case 'rev-parse':
       if (rest.length < 2) throw unknown();
       return args;
+    case 'rev-list': {
+      // The topology read (review P1, PR #1628 round 2): the publication
+      // gate must prove the resolution is EXACTLY ONE commit whose sole
+      // parent is the validated baseline before the endpoint diff means
+      // anything. EXACT shape: `rev-list --parents -n 1 <40hex>` — the
+      // one queried sha is validateRef-derived, read-only, arity-pinned.
+      const tail = rest.slice(1);
+      if (
+        tail.length !== 4 ||
+        tail[0] !== '--parents' ||
+        tail[1] !== '-n' ||
+        tail[2] !== '1' ||
+        !/^[0-9a-f]{40}$/i.test(tail[3] ?? '')
+      ) {
+        throw unknown();
+      }
+      return args;
+    }
     case 'fetch': {
       const tail = rest.slice(1);
       if (tail.length < 2) throw unknown(); // remote + ≥1 refspec
@@ -412,6 +430,19 @@ export interface MergeEffects {
    * everything else), so no refname or range expression can reach git.
    */
   diffPatch(from: string, to: string): Promise<GhResult>;
+  /**
+   * The parent shas of one FULL commit sha (review P1, PR #1628 round 2 —
+   * the publication gate's topology proof): `git -C <repoRoot> rev-list
+   * --parents -n 1 <sha>`, the queried sha and its parents on stdout.
+   * Resolves `{ ok: true, parents }` (the QUERIED sha excluded) when git
+   * answered; `{ ok: false }` when the commit is unknown or the read
+   * failed — never throws for a failed read (the caller decides its own
+   * fail-closed policy). The gate requires exactly one parent equal to
+   * the pre-dispatch baseline: a merge commit, a stacked intermediate
+   * commit, or a root carries content the baseline..tip endpoint diff
+   * never shows.
+   */
+  commitParents(sha: string): Promise<{ ok: boolean; parents?: string[] }>;
 }
 
 /**
@@ -535,6 +566,9 @@ export interface RealMergeEffectsOpts {
  *                   --unified=0 <from> <to>` (both full 40-hex shas — the
  *                   hardened read-only patch read behind the resolver's
  *                   pre-push scan, #1193)
+ *   - commitParents: `git -C <repoRoot> rev-list --parents -n 1 <sha>`
+ *                   (the gate's topology proof — exactly one parent on
+ *                   the validated baseline, review P1 round 2)
  */
 export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   // Absolute everywhere (prWorktree doctrine): mkdir resolves from the
@@ -686,6 +720,19 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   const diffPatch = (from: string, to: string): Promise<GhResult> =>
     git(['-C', repoRoot, 'diff', ...HARDENED_DIFF_FLAGS, '--unified=0', from, to]);
 
+  // The gate's topology read (review P1 round 2): the argv shape is
+  // pinned by safeArgs to `--parents -n 1` plus one 40-hex sha. Nonzero →
+  // { ok: false } — the caller refuses, it never guesses a topology.
+  const commitParents = async (sha: string): Promise<{ ok: boolean; parents?: string[] }> => {
+    const result = await git(['-C', repoRoot, 'rev-list', '--parents', '-n', '1', sha]);
+    if (result.code !== 0) return { ok: false };
+    const tokens = result.stdout
+      .trim()
+      .split(/\s+/)
+      .filter((token) => token !== '');
+    return { ok: true, parents: tokens.slice(1) };
+  };
+
   return {
     validateRef,
     fetchRef,
@@ -696,5 +743,6 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     retargetBase,
     pushRef,
     diffPatch,
+    commitParents,
   };
 }

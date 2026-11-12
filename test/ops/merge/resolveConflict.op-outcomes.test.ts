@@ -68,6 +68,7 @@ describe('resolveConflict op', () => {
       `validate:${headRefFor(44)}`,
       `prepare:44@${headRefFor(44)}`,
       `validate:${mergeWorktreeBranchFor(44)}`,
+      `parents:${String(effects.resolutionSha)}`,
       `diff:${String(effects.baselineSha)}..${String(effects.resolutionSha)}`,
       `push:${String(effects.resolutionSha)}:refs/heads/feat/topic@/wt/pr-44`,
       'remove:/wt/pr-44',
