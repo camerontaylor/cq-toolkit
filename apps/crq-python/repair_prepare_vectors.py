@@ -392,7 +392,7 @@ def _prepare_case(spec):
             )
             job_bytes = bounded.job_path(root, job_id).read_bytes().decode()
             run = job_id[len("crq-"):-len("-F1")]
-            record = queue["items"][0]["repair_runs"][run]
+            record = copy.deepcopy(queue["items"][0]["repair_runs"][run])
             record_bytes = _dump(record)
             job = json.loads(job_bytes)
             first_calls = copy.deepcopy(calls)
