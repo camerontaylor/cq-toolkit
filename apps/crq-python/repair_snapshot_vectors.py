@@ -46,7 +46,9 @@ GIT_ENV = {
 
 # The oracle must not inherit the host's line-ending policy: the CRLF case
 # intentionally commits CRLF bytes, and `core.autocrlf=input` would otherwise
-# normalize them and change the blob/commit ids across environments.
+# normalize them and change the blob/commit ids across environments. Global
+# and system gitattributes files must stay inert too: a host `*.ts text`
+# attribute would still normalize the CRLF case despite `core.autocrlf=false`.
 GIT_CONFIG = (
     "-c",
     "core.autocrlf=false",
@@ -54,6 +56,8 @@ GIT_CONFIG = (
     "core.eol=lf",
     "-c",
     "core.safecrlf=false",
+    "-c",
+    f"core.attributesFile={os.devnull}",
 )
 
 # A fixture generator must never inherit the caller's repository routing or
@@ -96,6 +100,9 @@ def _git_environment() -> dict[str, str]:
     # overrides above are the only config the oracle accepts.
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_SYSTEM"] = os.devnull
+    # Disable the system-wide gitattributes file as well; global attributes
+    # are already inert via the `core.attributesFile` override in GIT_CONFIG.
+    env["GIT_ATTR_NOSYSTEM"] = "1"
     return env
 
 
@@ -114,6 +121,7 @@ def _clean_git_environment():
         os.environ.update(GIT_ENV)
         os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
         os.environ["GIT_CONFIG_SYSTEM"] = os.devnull
+        os.environ["GIT_ATTR_NOSYSTEM"] = "1"
         yield
     finally:
         os.environ.clear()
