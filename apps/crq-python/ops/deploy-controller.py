@@ -135,6 +135,24 @@ class RecoveryRequired(Exception):
         self.recovery = recovery
 
 
+def absolute_record_dir(path: Path) -> Path:
+    """Absolute, ancestors resolved, FINAL component left as spelled.
+
+    ``Path.resolve()`` follows a symlinked final component, hiding it from
+    ``record_preflight()``'s refusal; ``os.path.abspath()`` collapses ``..``
+    lexically, BEFORE the symlinks in the prefix are followed, which can name
+    a different directory than the one the kernel would open. Resolving only
+    the parent keeps both properties: a final symlink stays visible, and
+    ``link/../records`` means what the filesystem says it means.
+    """
+    name = path.name
+    if not name:
+        # '.'/'..' and the root have no final component to preserve, so there
+        # is no final symlink to hide: resolve fully.
+        return Path(os.path.realpath(path))
+    return path.parent.resolve() / name
+
+
 class Effects:
     """Host effects seam. Tests substitute fakes; production uses real paths.
 
@@ -1614,9 +1632,11 @@ def main(argv=None) -> int:
 
     root = args.root.resolve()
     helper_path = args.helper or (root / "apps/crq-python/ops/prepare-host.py")
-    # Absolute without resolving: record_preflight() must still see a symlinked
-    # --record-dir and refuse it instead of writing journals to its target.
-    effects = Effects(root, Path(os.path.abspath(args.record_dir)))
+    # Absolute without following the FINAL component: record_preflight() must
+    # still see a symlinked --record-dir and refuse it instead of writing
+    # journals to its target — while any `..` in the spelling keeps its
+    # filesystem meaning (ancestors resolved, not collapsed lexically).
+    effects = Effects(root, absolute_record_dir(args.record_dir))
 
     try:
         # Identity first, then the controller lock, then preflight (#549).
