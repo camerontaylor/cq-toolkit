@@ -506,7 +506,10 @@ async function dispatchCli(
       planNames = await listPlanNames(opts?.plansRoot);
     } catch (err) {
       if (rawMode !== 'json') {
-        narrate(io, `plan registry scan failed — help lists op subcommands only: ${messageOf(err)}`);
+        narrate(
+          io,
+          `plan registry scan failed — help lists op subcommands only: ${messageOf(err)}`,
+        );
       }
     }
     io.stdout(renderGlobalHelp(subcommandNames(opEntries, planNames)));
