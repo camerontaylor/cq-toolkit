@@ -122,7 +122,9 @@ def summary(repo, ranked, queue, original=None, *, findings_root=None):
             group["unresolved_objects"].append({"path": row["path"], "reason": row["reason"], "countable_lines": row["lines"]})
         group["empty_files"] += row["disposition"] == "empty"
     baseline_result = None
-    if original:
+    # An empty {} baseline is provided evidence too: validate its digest rather
+    # than silently omitting baseline accounting (falsy-but-present values).
+    if original is not None:
         if original["id"] != ledger.digest({k: v for k, v in original.items() if k != "id"}):
             raise ledger.IntegrityError("baseline hash mismatch")
         baseline_result = {"id": original["id"], "target": original["target"], "surviving_T1_debt": 0,
