@@ -311,6 +311,7 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
       try {
         const stats = await lstat(resolved);
         if (stats.isSymbolicLink()) return { ok: false, reason: `symlink (not followed): ${path}` };
+        if (!stats.isFile()) return { ok: false, reason: `not a regular file: ${path}` };
         if (stats.size > capBytes) {
           return {
             ok: false,
