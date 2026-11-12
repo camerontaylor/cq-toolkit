@@ -403,6 +403,27 @@ def harvest(c, q, item, dry=False):
                     module = util.module_from_spec(spec)
                     spec.loader.exec_module(module)
                     module.mechanical(c.CONFIG, check_wt, predecessor, commits, job_id, path.parent)
+                except ValueError as exc:
+                    # verify/mechanical defects (duplicate commits, hack detector)
+                    # are deterministic, so route them to terminal failure exactly
+                    # like a malformed result artifact above; git failures from
+                    # make_worktree stay outside this handler and retry.
+                    failure = {'job': job_id, 'item': item['id'], 'verdict': 'FAILED',
+                               'reason': 'invalid repair result: ' + str(exc)[:300],
+                               'finding': expected['finding']}
+                    if not dry:
+                        record['verdicts'] = verdicts + [failure]
+                        record.update(state='failed', error=str(exc)[:300])
+                        if item['kind'] == review_receipt.KIND:
+                            item['state'] = 'done'
+                            item['repair_outcome'] = record['state']
+                            item['last_error'] = None
+                        else:
+                            item['state'] = 'repair_failed'
+                            item['last_error'] = 'repair_failed; needs human'
+                        c.save_queue(q)  # terminal identity before authoritative write-back
+                        mark_finding_outcome(c, expected, failure)
+                    break
                 finally:
                     c.remove_worktree(check_wt, branch)
                 predecessor = commits[-1]
