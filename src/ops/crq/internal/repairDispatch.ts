@@ -191,6 +191,7 @@ export type RepairDispatchRefusal =
   | 'scan-source-blob-mismatch'
   | 'scan-source-hash-mismatch'
   | 'scan-guidance-mismatch'
+  | 'scan-failed'
   | 'source-content-unreadable'
   | 'journal-unreadable'
   | 'retained-artifact-missing'
@@ -329,6 +330,7 @@ function refusal(refusal: RepairDispatchRefusal): {
 }
 
 const encoder = new TextEncoder();
+const GUARD_PREFIX = 'repair-dispatch-guard:';
 
 function utf8Sha256(text: string): string {
   return sha256Hex(encoder.encode(text));
@@ -627,6 +629,19 @@ function scanState(input: {
   return { ok: true, value: sourceClean && guidanceClean ? 'clean' : 'unverified' };
 }
 
+/**
+ * `unverified` is retryable for a resumed attempt by design; an explicitly
+ * failed scan is not evidence that a retry may dispatch. Retained-ok replay
+ * never invokes the op, so it stays scan-free.
+ */
+function failedScanRefusal(
+  context: RepairDispatchCallerContext,
+): RepairDispatchRefusal | undefined {
+  if (context.scans.source.verdict === 'failed') return 'scan-failed';
+  if (context.scans.guidance.verdict === 'failed') return 'scan-failed';
+  return undefined;
+}
+
 function gatesFor(attempt: RepairAttempt, scans: 'clean' | 'unverified'): RepairDispatchGate[] {
   const gates: RepairDispatchGate[] = [
     'queue-selection',
@@ -686,8 +701,12 @@ async function findPriorArtifact(input: {
     const replay = new Map<string, Extract<JournalEvent, { type: 'job-finished' }>>();
     for (const run of ordered) {
       for (const event of run.events) {
-        if (event.type === 'job-finished') replay.set(event.jobId, event);
-        else if (event.type === 'quarantine-released') replay.delete(event.jobId);
+        if (event.type === 'job-finished') {
+          // A bridge invocation-guard refusal means the repair op never ran.
+          // It is journal evidence of a refused dispatch, not a terminal
+          // attempt that makes a later resume eligible.
+          if (!isInvocationGuardResult(event.result)) replay.set(event.jobId, event);
+        } else if (event.type === 'quarantine-released') replay.delete(event.jobId);
       }
     }
     const prior = replay.get(input.jobId);
@@ -786,6 +805,10 @@ export async function planRepairDispatch(
       : 'fresh';
 
   const atTip = currentTip === prepared.binding.sourceSha;
+  if (attempt !== 'retained-ok') {
+    const failedScan = failedScanRefusal(input.context);
+    if (failedScan !== undefined) return refusal(failedScan);
+  }
   if (attempt === 'fresh') {
     if (!atTip) return refusal('source-not-current-tip');
     if (scans.value !== 'clean') return refusal('scan-unverified');
@@ -1129,8 +1152,6 @@ async function preflightBeforeRun(
   return undefined;
 }
 
-const GUARD_PREFIX = 'repair-dispatch-guard:';
-
 /**
  * The attempt class is a journal fold, not a plan promise. Re-fold inside
  * the kernel's own plan lease (this runs from the registry `op.run` wrapper,
@@ -1228,11 +1249,18 @@ function withInvocationGuard(
  * values from `RepairDispatchRefusal`; the cast is the trust boundary at
  * which the kernel's plain failed result is mapped back to the typed union.
  */
+function isInvocationGuardResult(
+  result: OpResultArtifact<unknown> | undefined,
+): result is Extract<OpResultArtifact<unknown>, { status: 'failed' }> {
+  return (
+    result !== undefined && result.status === 'failed' && result.error.startsWith(GUARD_PREFIX)
+  );
+}
+
 function guardRefusalOf(
   result: OpResultArtifact<unknown> | undefined,
 ): RepairDispatchRefusal | undefined {
-  if (result === undefined || result.status !== 'failed') return undefined;
-  if (!result.error.startsWith(GUARD_PREFIX)) return undefined;
+  if (!isInvocationGuardResult(result)) return undefined;
   const value = result.error.slice(GUARD_PREFIX.length);
   return value.length === 0 ? 'attempt-inconsistent' : (value as RepairDispatchRefusal);
 }

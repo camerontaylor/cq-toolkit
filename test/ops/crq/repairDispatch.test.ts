@@ -796,6 +796,18 @@ describe('repair dispatch bridge', () => {
       }
     }
     expect(second.invocations).toHaveLength(0);
+
+    const resumed = await planRepairDispatch(
+      {
+        context: context({
+          scans: { source: { verdict: 'unverified', reason: 'scan not rerun' } },
+        }),
+        attempt: { journalDir, resume: true },
+      },
+      effects({ tip: OTHER }),
+    );
+    expect(resumed.ok).toBe(false);
+    if (!resumed.ok) expect(resumed.refusal).toBe('source-not-current-tip');
   });
 
   test('resume re-dispatches a matching retained non-ok artifact', async () => {
@@ -830,6 +842,80 @@ describe('repair dispatch bridge', () => {
     expect(run.value.harvest.ok).toBe(true);
     if (!run.value.harvest.ok) return;
     expect(run.value.harvest.value.harvest.status).toBe('ok');
+  });
+
+  test('failed scans refuse fresh and resumed dispatches but keep retained replay scan-free', async () => {
+    const freshFailed = await planRepairDispatch(
+      {
+        context: context({
+          scans: { source: { verdict: 'failed', reason: 'secret scan failed' } },
+        }),
+        attempt: { journalDir: await tempJournal(), resume: false },
+      },
+      effects(),
+    );
+    expect(freshFailed.ok).toBe(false);
+    if (!freshFailed.ok) expect(freshFailed.refusal).toBe('scan-failed');
+
+    const journalDir = await tempJournal();
+    const first = await freshRun({
+      journalDir,
+      opResults: [completeWorker(undefined, { stopReason: 'aborted' })],
+    });
+    runOk(first.run);
+
+    const sourceFailed = await planRepairDispatch(
+      {
+        context: context({
+          scans: { source: { verdict: 'failed', reason: 'secret scan failed' } },
+        }),
+        attempt: { journalDir, resume: true },
+      },
+      effects({ tip: OTHER }),
+    );
+    expect(sourceFailed.ok).toBe(false);
+    if (!sourceFailed.ok) expect(sourceFailed.refusal).toBe('scan-failed');
+
+    const guided = withPreparedJob((job) => {
+      const revalidation = job['revalidation'] as Record<string, unknown>;
+      revalidation['fix_instructions'] = 'Retry guidance from the previous attempt.';
+    });
+    const guidedDocument = parseJsonValue(guided);
+    if (!(guidedDocument instanceof JsonObject)) throw new Error('guided job is not an object');
+    const guidedRevalidation = guidedDocument.get('revalidation');
+    if (!(guidedRevalidation instanceof JsonObject)) {
+      throw new Error('guided revalidation is not an object');
+    }
+    const guidanceFailed = await planRepairDispatch(
+      {
+        context: context({
+          scans: { guidance: { verdict: 'failed', reason: 'guidance secret scan failed' } },
+          selection: { revalidationSha256: receiptJsonDigest(toPlainJson(guidedRevalidation)) },
+        }),
+        attempt: { journalDir, resume: true },
+      },
+      effects({ tip: OTHER, preparedJobText: guided }),
+    );
+    expect(guidanceFailed.ok).toBe(false);
+    if (!guidanceFailed.ok) expect(guidanceFailed.refusal).toBe('scan-failed');
+
+    const retainedJournal = await tempJournal();
+    const retained = await freshRun({
+      journalDir: retainedJournal,
+      opResults: [completeWorker(FIXED)],
+    });
+    runOk(retained.run);
+    const retainedPlan = await planRepairDispatch(
+      {
+        context: context({
+          scans: { source: { verdict: 'failed', reason: 'secret scan failed' } },
+        }),
+        attempt: { journalDir: retainedJournal, resume: true },
+      },
+      effects(),
+    );
+    planOk(retainedPlan);
+    expect(retainedPlan.value.attempt).toBe('retained-ok');
   });
 
   test('resume: true without a matching retained artifact is fresh and refuses a moved tip', async () => {
