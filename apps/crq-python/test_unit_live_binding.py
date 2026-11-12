@@ -341,6 +341,38 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["complete"], False)
         self.assertIn("cannot resolve a symlink", evidence["error"])
 
+    def test_unreadable_enablement_entry_is_incomplete(self):
+        declared = self.declare()
+        wants = self.unit_dir / "timers.target.wants"
+        real_stat = os.stat
+
+        def failing_stat(path, *args, **kwargs):
+            if path == wants:
+                raise OSError("injected stat failure")
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(live.os, "stat", failing_stat):
+            evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertIn("unreadable", evidence["error"])
+        self.assertIn(str(wants), evidence["error"])
+
+    def test_unreadable_unrelated_entry_is_not_reported(self):
+        declared = self.declare()
+        unrelated = self.write("other.service", "[Service]\n")
+        real_stat = os.stat
+
+        def failing_stat(path, *args, **kwargs):
+            if path == unrelated:
+                raise OSError("injected stat failure")
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(live.os, "stat", failing_stat):
+            evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertIsNone(evidence["error"])
+        self.assertEqual(evidence["foreign"], [])
+
     def test_extra_prefix_entry_is_unsupported(self):
         declared = self.declare()
         self.write("crq-tick.socket", "[Socket]\n")

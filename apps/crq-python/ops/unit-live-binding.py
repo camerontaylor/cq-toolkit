@@ -101,18 +101,20 @@ def _read_file(path: Path, *, max_bytes: int) -> bytes:
     return data
 
 
-def _is_dir_without_following(path: Path) -> bool:
-    """Return true only for an entry that is a directory and not a symlink.
+def _directory_probe(path: Path) -> tuple[bool, str | None]:
+    """Probe whether an entry is a directory without following a symlink.
 
     ``Path.is_dir(follow_symlinks=False)`` needs Python 3.13; this module uses
-    ``os.stat(..., follow_symlinks=False)`` as its portable idiom. As pathlib
-    does, an entry that cannot be observed counts as absent rather than raising.
+    ``os.stat(..., follow_symlinks=False)`` as its portable idiom. A failure to
+    observe the entry is reported to the caller rather than counted as absent,
+    because the callers record topology observations from the answer.
     """
     try:
         info = os.stat(path, follow_symlinks=False)
-    except (OSError, ValueError):
-        return False
-    return stat.S_ISDIR(info.st_mode)
+    except (OSError, ValueError) as exc:
+        return False, ("unit directory entry is unreadable: " + str(path)
+                       + ": " + str(exc)[:120])
+    return stat.S_ISDIR(info.st_mode), None
 
 
 def _controller_module(effects):
@@ -543,11 +545,14 @@ class SubprocessSystemd:
             name = entry.name
             if name.startswith(prefix) and str(entry) not in declared_set:
                 foreign.append("unexpected installed entry: " + str(entry))
-            if _is_dir_without_following(entry) \
-                    and name.endswith(".d") and name[:-2] in units:
+            is_dir, probe_failure = _directory_probe(entry)
+            if probe_failure is not None \
+                    and name.endswith((".d", ".wants", ".requires")):
+                error = error or probe_failure
+                continue
+            if is_dir and name.endswith(".d") and name[:-2] in units:
                 foreign.append("undeclared drop-in directory: " + str(entry))
-            if _is_dir_without_following(entry) \
-                    and name.endswith((".wants", ".requires")):
+            if is_dir and name.endswith((".wants", ".requires")):
                 try:
                     children = list(entry.iterdir())
                 except OSError as exc:
