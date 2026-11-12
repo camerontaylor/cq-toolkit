@@ -255,6 +255,8 @@ REQUIRED = {
         "local-review-head-moved-before-post",
         "reviews-array-page-crashes",
         "reviews-row-not-object",
+        "reviews-two-page-stream",
+        "reviews-page-two-row-error",
         "reviews-row-id-float",
         "reviews-row-id-bool",
         "reviews-paginated",

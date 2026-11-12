@@ -875,13 +875,31 @@ function bodyCap(body: string, limit: number): string {
     }
     budget = reserved;
   }
-  // Degenerate contents (a fence run longer than the budget): emit the
-  // longest bounded result observed; if none exists, cut to the trailer
-  // floor with no closure so the output is still within `limit`.
+  // Degenerate contents (a fence opener longer than any budget can
+  // carry its closure): re-emit with the prefix cut BEFORE the first
+  // fence opener line, so nothing opens and the output stays closed.
+  // 59900/60000-tilde summaries land here (iteration oscillates or the
+  // best emission leaves an open fence) and keep the marker + prose head
+  // instead of losing everything to an unterminated run.
+  const floor = limit - pythonLength(trailer);
+  let offset = 0;
+  for (const line of body.split('\n')) {
+    if (offset > floor) {
+      break;
+    }
+    if (matchFenceOpen(line) !== null) {
+      const prefix = pythonSlice(body, 0, offset);
+      if (prefix.length > 0) {
+        return `${pythonRstrip(prefix)}${trailer}`;
+      }
+      return pythonStrip(trailer);
+    }
+    offset += [...line].length + 1;
+  }
   if (best !== null) {
     return best.text;
   }
-  return `${pythonSlice(body, 0, limit - pythonLength(trailer))}${trailer}`;
+  return `${pythonSlice(body, 0, floor)}${trailer}`;
 }
 
 /** Python `str.rstrip()` (default whitespace) over a JavaScript string. */

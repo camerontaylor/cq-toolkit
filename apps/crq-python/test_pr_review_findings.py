@@ -413,6 +413,43 @@ elif '--paginate' not in args:
         self.assertIsNone(prf._fence_state(body.split("\n")),
                           "final body must not end inside an open fence")
 
+    def test_body_cap_degenerate_opener_cut_before_fence(self):
+        """R4b critic P3: a fence opener whose closure cannot fit any budget
+        (59900/60000-tilde summary) must not leave the body open and must
+        not lose everything: the cap cuts BEFORE the first fence opener and
+        keeps marker + prose head, bounded and closed."""
+        for tilde_count in (59900, 60000):
+            with self.subTest(tildes=tilde_count):
+                body = prf.build_review(
+                    {"head": HEAD, "base": BASE, "run_id": "r-ok",
+                     "summary": "~" * tilde_count}, [], None)["body"]
+                self.assertLessEqual(len(body), prf.MAX_BODY)
+                self.assertLessEqual(len(body), 65536)
+                self.assertTrue(body.startswith(prf.marker("r-ok")))
+                self.assertTrue(body.endswith("… (truncated; full text in the crq run artifacts)\n"))
+                self.assertIsNone(prf._fence_state(body.split("\n")),
+                                  "degenerate opener must leave the body closed")
+
+    def test_body_cap_boundaries_stay_bounded(self):
+        """Boundary neighbours: near-budget openers, backtick degenerate,
+        prose-head + huge run, and the untruncated under-limit shape all
+        stay within MAX_BODY and never end inside an open fence."""
+        metas = {
+            "tilde-59950": {"summary": "~" * 59950},
+            "backtick-60000": {"summary": "`" * 60000},
+            "prose-then-huge-run": {"summary": "prose " + "~" * 58000 + " tail"},
+            "open-near-budget": {"summary": "ok\n```py\n" + "~" * 58000},
+            "just-under-limit": {"summary": "~" * 57000},
+        }
+        for name, extra in metas.items():
+            with self.subTest(name=name):
+                meta = {"head": HEAD, "base": BASE, "run_id": "r-ok", **extra}
+                body = prf.build_review(meta, [], None)["body"]
+                self.assertLessEqual(len(body), prf.MAX_BODY, name)
+                self.assertTrue(body.startswith(prf.marker("r-ok")), name)
+                self.assertIsNone(prf._fence_state(body.split("\n")),
+                                  f"{name}: body must not end inside an open fence")
+
     def test_body_cap_no_fence_keeps_previous_shape(self):
         """Without an open fence the cap keeps the historical shape: prefix
         then trailer, bounded by MAX_BODY, no closure bytes."""

@@ -221,15 +221,19 @@ class EndpointGh:
 
 
 def _apply_reviews_jq(argv, raw):
-    """Model real `gh api --jq` over the recorded raw API page.
+    """Model real `gh api --jq` over the recorded raw API response.
 
-    Real gh hands the JSON response (an array page) to jq and emits one
-    compact projected object per matching row. Modelled here:
+    Real `gh --paginate` feeds jq ONE STREAM of concatenated pages, each a
+    JSON array on its own line (`[page1]\n[page2]`); jq processes documents
+    in sequence and reports the 1-based document line where an error hit.
+    Modelled here:
 
-    - non-array or unparsable input -> jq parse failure (returncode 2),
+    - each line of the input is one JSON document (a page); unparsable
+      input -> jq parse failure naming the failing line (returncode 2),
+    - a non-array page -> `Cannot iterate over null` naming its line (rc 2),
     - a non-object row -> jq's runtime error (returncode 5) after emitting
       any earlier matches to stdout (real jq streams results as it goes;
-      the message names the row's actual JSON type),
+      the message names the row's actual JSON type and the document line),
     - rows are filtered by the selector's `user.login` and marker predicate
       (`startswith`/`contains`) and projected to `{id, url: .html_url}`.
 
@@ -251,30 +255,36 @@ def _apply_reviews_jq(argv, raw):
     login = json.loads('"' + login_match.group(1) + '"')
     predicate = literal_match.group(1)
     wanted = json.loads('"' + literal_match.group(2) + '"')
-    try:
-        page = json.loads(raw)
-    except ValueError:
-        return _fail(2, "jq: error (at <stdin>:0): parse error")
-    if not isinstance(page, list):
-        return _fail(2, 'jq: error (at <stdin>:0): Cannot iterate over null')
     row_type = {list: "array", str: "string", bool: "boolean", int: "number",
                 float: "number", type(None): "null"}
     out_lines = []
-    for row in page:
-        if not isinstance(row, dict):
-            noun = row_type[type(row)]
-            return _fail(5,
-                         'jq: error (at <stdin>:0): Cannot index %s with string ("user")'
-                         % noun,
-                         keep="".join(line + "\n" for line in out_lines))
-        if (row.get("user") or {}).get("login") != login:
+    for line_index, line in enumerate(raw.splitlines(), start=1):
+        if not line.strip():
             continue
-        body = row.get("body") or ""
-        if predicate == "startswith" and not body.startswith(wanted):
-            continue
-        if predicate == "contains" and wanted not in body:
-            continue
-        out_lines.append(json.dumps({"id": row.get("id"), "url": row.get("html_url")}))
+        try:
+            page = json.loads(line)
+        except ValueError:
+            return _fail(2, f"jq: parse error: Invalid literal at line {line_index}",
+                         keep="".join(l + "\n" for l in out_lines))
+        if not isinstance(page, list):
+            return _fail(2,
+                         f"jq: error (at <stdin>:{line_index - 1}): Cannot iterate over null",
+                         keep="".join(l + "\n" for l in out_lines))
+        for row in page:
+            if not isinstance(row, dict):
+                noun = row_type[type(row)]
+                return _fail(5,
+                             'jq: error (at <stdin>:%d): Cannot index %s with string ("user")'
+                             % (line_index - 1, noun),
+                             keep="".join(l + "\n" for l in out_lines))
+            if (row.get("user") or {}).get("login") != login:
+                continue
+            body = row.get("body") or ""
+            if predicate == "startswith" and not body.startswith(wanted):
+                continue
+            if predicate == "contains" and wanted not in body:
+                continue
+            out_lines.append(json.dumps({"id": row.get("id"), "url": row.get("html_url")}))
     return SimpleNamespace(returncode=0, stdout="".join(line + "\n" for line in out_lines), stderr="")
 
 def timeout_step(argv: List[str]) -> Dict[str, Any]:
@@ -849,6 +859,15 @@ def deliver_cases() -> List[Dict[str, Any]]:
         gh=EndpointGh(reviews=reviews_page(
             {"id": 1, "user": {"login": "crq-host"}, "body": marker_body},
             ["row"])))
+    add("reviews-two-page-stream", REPO, 77, META, nd,
+        gh=EndpointGh(reviews=
+            json.dumps([{"id": 5, "user": {"login": "crq-host"}, "body": "other"}]) + "\n"
+            + json.dumps([{"id": 7, "user": {"login": "crq-host"}, "body": marker_body,
+                           "html_url": "https://github.com/x/r/pull/77#review-7"}]) + "\n"))
+    add("reviews-page-two-row-error", REPO, 77, META, nd,
+        gh=EndpointGh(reviews=
+            json.dumps([{"id": 1, "user": {"login": "crq-host"}, "body": marker_body}]) + "\n"
+            + json.dumps([["row"]]) + "\n"))
     add("reviews-row-id-float", REPO, 77, META, nd,
         gh=EndpointGh(reviews=reviews_page(
             {"id": 7.5, "user": {"login": "crq-host"}, "body": marker_body})))

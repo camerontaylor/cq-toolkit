@@ -249,12 +249,26 @@ def _body_cap(body: str, limit: int) -> str:
         if reserved <= 0:
             break
         budget = reserved
-    # Degenerate contents (a fence run longer than the budget): emit the
-    # longest bounded result observed; if none exists, cut to the trailer
-    # floor with no closure so the output is still within `limit`.
+    # Degenerate contents (a fence opener longer than any budget can
+    # carry its closure): re-emit with the prefix cut BEFORE the first
+    # fence opener line, so nothing opens and the output stays closed.
+    # 59900/60000-tilde summaries land here (iteration oscillates or the
+    # best emission leaves an open fence) and keep the marker + prose head
+    # instead of losing everything to an unterminated run.
+    floor = limit - len(trailer)
+    offset = 0
+    for line in body.split("\n"):
+        if offset > floor:
+            break
+        if FENCE_OPEN.match(line):
+            prefix = body[:offset]
+            if prefix:
+                return prefix.rstrip("\n") + trailer
+            return trailer.lstrip("\n")
+        offset += len(line) + 1
     if best is not None:
         return best[1]
-    return body[:limit - len(trailer)] + trailer
+    return body[:floor] + trailer
 
 
 def _clip(text: str, limit: int) -> str:

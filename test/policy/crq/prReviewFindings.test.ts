@@ -152,59 +152,66 @@ function applyReviewsJq(argv: readonly string[], raw: string): GhResult | string
   const login = JSON.parse(`"${loginMatch[1] as string}"`) as string;
   const predicate = literalMatch[1];
   const wanted = JSON.parse(`"${literalMatch[2] as string}"`) as string;
-  let page: unknown;
-  try {
-    page = JSON.parse(raw);
-  } catch {
-    return {
-      returncode: processCode(2),
-      stdout: '',
-      stderr: 'jq: error (at <stdin>:0): parse error',
-    };
-  }
-  if (!Array.isArray(page)) {
-    return {
-      returncode: processCode(2),
-      stdout: '',
-      stderr: 'jq: error (at <stdin>:0): Cannot iterate over null',
-    };
-  }
+  const nounOf = (row: unknown): string =>
+    row === null
+      ? 'null'
+      : Array.isArray(row)
+        ? 'array'
+        : typeof row === 'string'
+          ? 'string'
+          : typeof row === 'number'
+            ? 'number'
+            : typeof row === 'boolean'
+              ? 'boolean'
+              : 'object';
+  const keep = () => outLines.map((line) => `${line}\n`).join('');
+  // Real `gh --paginate` feeds jq one stream of concatenated pages, each a
+  // JSON array on its own line; jq processes documents in sequence and
+  // reports the 0-based document line where an error hit.
   const outLines: string[] = [];
-  for (const row of page) {
-    if (row === null || typeof row !== 'object' || Array.isArray(row)) {
-      // Real jq streams results as it goes: earlier matches stay on stdout
-      // and the message names the row's actual JSON type.
-      const noun =
-        row === null
-          ? 'null'
-          : Array.isArray(row)
-            ? 'array'
-            : typeof row === 'string'
-              ? 'string'
-              : typeof row === 'number'
-                ? 'number'
-                : typeof row === 'boolean'
-                  ? 'boolean'
-                  : 'object';
+  for (const [pageIndex, pageLine] of raw.split('\n').entries()) {
+    if (pageLine.trim() === '') continue;
+    let page: unknown;
+    try {
+      page = JSON.parse(pageLine);
+    } catch {
       return {
-        returncode: processCode(5),
-        stdout: outLines.map((line) => `${line}\n`).join(''),
-        stderr: `jq: error (at <stdin>:0): Cannot index ${noun} with string ("user")`,
+        returncode: processCode(2),
+        stdout: keep(),
+        stderr: `jq: parse error: Invalid literal at line ${pageIndex + 1}`,
       };
     }
-    const record = row as unknown as Record<string, JsonValue>;
-    const user = record['user'];
-    const loginValue =
-      user !== null && typeof user === 'object' && !Array.isArray(user)
-        ? (user as unknown as Record<string, JsonValue>)['login']
-        : undefined;
-    if (loginValue !== login) continue;
-    const body = typeof record['body'] === 'string' ? (record['body'] as string) : '';
-    if (predicate === 'startswith' && !body.startsWith(wanted)) continue;
-    if (predicate === 'contains' && !body.includes(wanted)) continue;
-    outLines.push(JSON.stringify({ id: record['id'] ?? null, url: record['html_url'] ?? null }));
+    if (!Array.isArray(page)) {
+      return {
+        returncode: processCode(2),
+        stdout: keep(),
+        stderr: `jq: error (at <stdin>:${pageIndex}): Cannot iterate over null`,
+      };
+    }
+    for (const row of page) {
+      if (row === null || typeof row !== 'object' || Array.isArray(row)) {
+        // Real jq streams results as it goes: earlier matches stay on stdout
+        // and the message names the row's actual JSON type.
+        return {
+          returncode: processCode(5),
+          stdout: keep(),
+          stderr: `jq: error (at <stdin>:${pageIndex}): Cannot index ${nounOf(row)} with string ("user")`,
+        };
+      }
+      const record = row as unknown as Record<string, JsonValue>;
+      const user = record['user'];
+      const loginValue =
+        user !== null && typeof user === 'object' && !Array.isArray(user)
+          ? (user as unknown as Record<string, JsonValue>)['login']
+          : undefined;
+      if (loginValue !== login) continue;
+      const body = typeof record['body'] === 'string' ? (record['body'] as string) : '';
+      if (predicate === 'startswith' && !body.startsWith(wanted)) continue;
+      if (predicate === 'contains' && !body.includes(wanted)) continue;
+      outLines.push(JSON.stringify({ id: record['id'] ?? null, url: record['html_url'] ?? null }));
+    }
   }
-  return outLines.map((line) => `${line}\n`).join('');
+  return keep();
 }
 
 function asArrayValue(value: JsonValue | undefined): readonly JsonValue[] {
