@@ -269,12 +269,19 @@ class Effects:
 
         self.state_dir().mkdir(parents=True, exist_ok=True)
         path = self.state_dir() / LOCK_NAME
-        with path.open("a") as handle:
+        # An explicit mode, never the ambient umask: the live binding refuses
+        # a group- or world-writable lock, so a writer that trusts a 002 umask
+        # can create a lock its own reader rejects.
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(descriptor, "a") as handle:
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as exc:
                 raise Refused("controller lock busy: another controller run holds "
                               + LOCK_NAME + " (" + str(exc) + ")") from None
+            # O_CREAT never narrows an existing file: normalise a lock this
+            # controller owns (a former 0664 umask artefact) to 0600.
+            os.chmod(path, 0o600)
             yield
 
     # -- journal ----------------------------------------------------------

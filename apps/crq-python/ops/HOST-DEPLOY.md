@@ -190,7 +190,10 @@ recorded as `refused_no_change`), 3 `recovery_required` (mutation occurred or
 cannot be excluded).
 Exit 3 emits structured recovery evidence on stdout and narration on stderr; it
 never claims the switch was undone. The controller lock
-is `state/controller.lock`, distinct from the runner's tick lock.
+is `state/controller.lock`, distinct from the runner's tick lock. The
+controller creates it mode 0600 and normalises an existing lock it owns to
+0600, never trusting the ambient umask; the live binding refuses a group- or
+world-writable lock.
 
 Helper identity: the controller reads `--helper` (default
 `<root>/apps/crq-python/ops/prepare-host.py`) once, computes its sha256 and
