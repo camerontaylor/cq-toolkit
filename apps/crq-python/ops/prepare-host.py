@@ -17,6 +17,7 @@ import plistlib
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import uuid
 
@@ -791,7 +792,6 @@ def main(argv=None):
     legacy = sub.add_parser('legacy-check')
     legacy.add_argument('--legacy-root', required=True, type=Path)
     if argv is None:
-        import sys
         argv = sys.argv[1:]
     args = parser.parse_args(['live-config' if arg == '--live-config' else arg for arg in argv])
     overlay, raw = load_overlay(args.overlay)
@@ -818,7 +818,8 @@ def main(argv=None):
         render_plists(root, args.output / 'launchd', args.overlay)
     else:
         live_render(root, overlay, raw)
-    print('completed ' + args.operation + '; no units started')
+    print(json.dumps({'operation': args.operation, 'status': 'ok'}, indent=2, sort_keys=True))
+    print('completed ' + args.operation + '; no units started', file=sys.stderr)
 
 
 if __name__ == '__main__':
