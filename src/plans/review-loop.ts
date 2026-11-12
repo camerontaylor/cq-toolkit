@@ -867,7 +867,7 @@ export const evidenceFailure = async (
  *     verbatim in the commit subject ('attribution-missing').
  *
  * EXPORTED for the unit lane's stage pins: `not-40-hex` is unreachable
- * through the loop (parseFixOutput already rejects non-40-hex claims), so
+ * through the loop (parseFixContract already rejects non-40-hex claims), so
  * the stage taxonomy is pinned by calling this gate directly.
  */
 export const commitVerificationFailure = async (

@@ -1,5 +1,6 @@
 """review-v1 on the queue identity. No author environment or inline dispatch."""
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ import author_snapshot
 import queue_transport
 import review_admission as admission
 import review_operation as operation
+import review_history
 import review_notify
 import review_receipt
 import repo_registry
@@ -18,7 +20,8 @@ import repo_registry
 MAX_BYTES = 6 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024
 DEADLINE_S = 120
-OPERATIONS = ["capabilities", "submit", "status", "result", "cancel", "notify-update"]
+OPERATIONS = ["capabilities", "submit", "status", "result", "cancel", "notify-update",
+              "review-history"]
 
 
 def decode(raw):
@@ -33,7 +36,8 @@ def decode(raw):
 
 def capabilities():
     return dict(v=1, command="review-v1", operations=OPERATIONS,
-                features=["original-commit-snapshot-v1", "chunked-result-v1", "repeat-generations-v1"],
+                features=["original-commit-snapshot-v1", "chunked-result-v1", "repeat-generations-v1",
+                          "review-history-v1"],
                 limits=dict(max_request_bytes=MAX_BYTES, max_snapshot_bytes=MAX_SNAPSHOT_BYTES,
                             max_content_bytes=author_snapshot.MAX_ORIGINAL_CONTENT,
                             max_objects=author_snapshot.MAX_OBJECTS, chunk_bytes=review_receipt.CHUNK_BYTES))
@@ -56,6 +60,52 @@ def clone_for(runner, repo):
     if cfg is None:
         raise ValueError("unconfigured review repository")
     return Path(cfg["clone"])
+
+
+def history_git(clone):
+    """Advisory Git adapter: an unreadable object is unknown, never zero."""
+    def run(*args):
+        try:
+            return author_snapshot.git(clone, *args)
+        except author_snapshot.AuthorRefused as exc:
+            raise review_history.GitUnavailable(str(exc)) from exc
+    return run
+
+
+def history_projection(q, runner, *, repo, target, head_commit=None, head_tree=None,
+                       task=None, branch=None, predecessor=None, observed=None,
+                       limit=review_history.DEFAULT_LIMIT, cursor=0, exclude_item=None):
+    """Resolve advisory history; any failure is degraded, never admission-blocking."""
+    try:
+        clone = clone_for(runner, repo)
+        return review_history.project(q, repo=repo, target=target, head_commit=head_commit,
+                                      head_tree=head_tree, task=task, branch=branch,
+                                      predecessor=predecessor, observed=observed,
+                                      limit=limit, cursor=cursor, git=history_git(clone),
+                                      exclude_item=exclude_item)
+    except Exception as exc:  # advisory index only: exact reuse stays unaffected
+        return review_history.degraded(str(exc) or exc.__class__.__name__)
+
+
+def history_query(q, binding):
+    """Stored request/item facts are the only query a status poll may use."""
+    item = next(i for i in q["items"] if i["id"] == binding["item"])
+    inputs = item["identity_inputs"]
+    task = binding.get("task") or item.get("task")
+    branch = binding.get("branch") or item.get("branch")
+    return dict(repo=inputs["repo"], target=item.get("target"),
+                head_commit=inputs["head_commit"], head_tree=inputs["head_tree"],
+                task=task, branch=branch, predecessor=binding.get("predecessor"),
+                observed=binding.get("observed"), exclude_item=item["id"])
+
+
+def history_cue(projection):
+    """Compact cue carried by submit/status; material dedupe is the caller's."""
+    result = dict(v=1, digest=projection["digest"], status=projection["status"])
+    for key in ("cue", "reason"):
+        if projection.get(key) is not None:
+            result[key] = projection[key]
+    return result
 
 
 def resolve(runner, inputs, stored):
@@ -112,13 +162,13 @@ def handle(raw, runner, *, principal, policy):
         result = admission.retry(q, req["request_id"], key)
         if result is None:
             clone = clone_for(runner, inputs["repo"])
-            if not repo_registry.same_repo(inputs["repo"], runner.REPO):
-                needed = [inputs["base_commit"]] if "snapshot" in req else [inputs["base_commit"], inputs["head_commit"]]
-                try:
-                    for commit in needed:
-                        author_snapshot.git(clone, "cat-file", "-e", commit + "^{commit}")
-                except author_snapshot.AuthorRefused:
-                    runner.fetch(clone=clone)
+            # Snapshot bundles supply the unpublished head; only the base must be fetched.
+            needed = [inputs["base_commit"]] if "snapshot" in req else [inputs["base_commit"], inputs["head_commit"]]
+            try:
+                for commit in needed:
+                    author_snapshot.git(clone, "cat-file", "-e", commit + "^{commit}")
+            except author_snapshot.AuthorRefused:
+                runner.fetch(clone=clone)
             if "snapshot" in req:
                 if req["snapshot"]["tree"] != inputs["head_tree"]:
                     raise ValueError("snapshot tree mismatch")
@@ -129,13 +179,36 @@ def handle(raw, runner, *, principal, policy):
                                         runner, original=True, clone=clone, classes=classes)
             stored = profile(runner.CONFIG, inputs["base_commit"])
             facts = resolve(runner, inputs, stored)
+            repeat_history = history_projection(
+                q, runner, repo=inputs["repo"], target=inputs["target"],
+                head_commit=inputs["head_commit"], head_tree=inputs["head_tree"],
+                task=req.get("task"), branch=req.get("branch"),
+                predecessor=req.get("predecessor"), observed=req.get("observed"))
             import local_review_runtime
             result = admission.admit(q, request_id=req["request_id"], inputs=inputs,
                                      resolved=facts, profile=stored, at=runner.iso(),
                                      repeat=req.get("repeat", False), supersedes=req.get("supersedes"),
+                                     ancestry_repeat=repeat_history["repeat"],
                                      notify=review_notify.destination(req.get("notify"), runner.CONFIG), verify_receipt=lambda item: retained(runner, item))
             binding = q["review_requests"][req["request_id"]]
+            # Admission may reuse/join an item with this exact head. The response
+            # cue describes the queue without that matched item: exact reuse is
+            # not a repeat and must not claim it will wait behind first reviews.
+            history = history_projection(
+                q, runner, repo=inputs["repo"], target=inputs["target"],
+                head_commit=inputs["head_commit"], head_tree=inputs["head_tree"],
+                task=req.get("task"), branch=req.get("branch"),
+                predecessor=req.get("predecessor"), observed=req.get("observed"),
+                exclude_item=binding["item"])
             binding["principal"] = principal
+            for key in ("task", "branch", "predecessor", "observed"):
+                if key in req:
+                    binding[key] = copy.deepcopy(req[key])
+            if result.get("action") == "created":
+                item = next(i for i in q["items"] if i["id"] == binding["item"])
+                for key in ("task", "branch"):
+                    if key in req:
+                        item[key] = copy.deepcopy(req[key])
             if "notify" in req:
                 binding["notify_status"] = review_notify.validation(req["notify"], runner.CONFIG,
                     required=any(req["request_id"] in i.get("observers", []) for i in q["items"]))
@@ -150,6 +223,11 @@ def handle(raw, runner, *, principal, policy):
                     reused = False
                 if reused:
                     result = {**admission.status(q, req["request_id"]), "action": "reused"}
+            result["history"] = history_cue(history)
+        else:
+            binding = q["review_requests"][req["request_id"]]
+            result["history"] = history_cue(history_projection(
+                q, runner, **history_query(q, binding)))
     elif op == "notify-update":
         binding = q.get("review_requests", {}).get(req["request_id"])
         if binding is None or binding.get("principal") != principal:
@@ -160,6 +238,22 @@ def handle(raw, runner, *, principal, policy):
     elif op == "cancel":
         result = admission.cancel(q, req["request_id"])
         runner.save_queue(q)
+    elif op == "review-history":
+        if req.get("request_id"):
+            binding = q.get("review_requests", {}).get(req["request_id"])
+            if binding is None:
+                raise ValueError("unknown review request")
+            query = history_query(q, binding)
+        else:
+            if not req.get("repo") or not req.get("target"):
+                raise ValueError("review-history requires repo and target")
+            query = dict(repo=req["repo"], target=req["target"],
+                         head_commit=req.get("head_commit"), head_tree=req.get("head_tree"),
+                         task=req.get("task"), branch=req.get("branch"),
+                         predecessor=req.get("predecessor"), observed=req.get("observed"))
+        result = history_projection(
+            q, runner, limit=req.get("limit", review_history.DEFAULT_LIMIT),
+            cursor=req.get("cursor", 0), **query)
     else:
         result = admission.status(q, req["request_id"])
         if op == "result" and result.get("receipt_id"):
@@ -173,7 +267,11 @@ def handle(raw, runner, *, principal, policy):
                           bytes=len(snap.data), sha256=receipt_id, encoding="base64-utf8-json",
                           data=base64.b64encode(data).decode(), chunk_sha256=hashlib.sha256(data).hexdigest(),
                           next_index=index + 1 if index + 1 < snap.count else None)
-    operation.validate("response", result)
+        elif op == "status":
+            binding = q["review_requests"][req["request_id"]]
+            result["history"] = history_cue(history_projection(
+                q, runner, **history_query(q, binding)))
+    operation.validate("history" if op == "review-history" else "response", result)
     return review_receipt.canonical(result)
 
 
@@ -198,6 +296,7 @@ def safe_handle(raw, runner, *, principal, policy):
 
 def main():
     from author_transport import supervised
+    from author_quota import AuthorRefused
     def expired(signum, frame):
         raise ValueError("review snapshot/install deadline")
     signal.signal(signal.SIGALRM, expired)
@@ -213,7 +312,13 @@ def main():
         principal = os.environ["CRQ_QUEUE_PRINCIPAL"]
         import crq
         work = lambda runner: safe_handle(raw, runner, principal=principal, policy=policy)
-        result = work(crq) if req["op"] in ("capabilities", "status", "result") else supervised(work, crq, lock_wait=2)
+        try:
+            read_only = ("capabilities", "status", "result", "review-history")
+            result = work(crq) if req["op"] in read_only else supervised(work, crq, lock_wait=2)
+        except (AuthorRefused, ValueError):
+            # Supervision failures do not prove whether a write committed.
+            # Keep the request id so retry can recover its durable receipt.
+            result = error("unavailable", "review worker outcome unavailable; retry the same request id", True)
         if result is None:
             result = error("busy", "review queue lock busy; retry the same request id", True)
         sys.stdout.buffer.write(result)

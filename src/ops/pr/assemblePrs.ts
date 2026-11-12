@@ -451,8 +451,11 @@ export async function scanPublicationForUpload(
   let scans: ComponentScan[];
   try {
     scans = await scanner(components);
-  } catch {
-    throw new Error('PR publication refused: denylist scan failed');
+  } catch (err) {
+    // The underlying fault rides the refusal: a dead gitleaks binary is
+    // diagnosable, not a bare gate trip.
+    const cause = err instanceof Error ? err.message : String(err);
+    throw new Error(`PR publication refused: denylist scan failed — ${cause}`);
   }
   if (
     !Array.isArray(scans) ||

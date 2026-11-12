@@ -2,7 +2,7 @@
 // executor-provenance normalization on the upload scan (under the
 // "ai-sdk driver specifics" describe) and the raw-scan vs persisted-display
 // stripping contract.
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -18,7 +18,12 @@ const rgUsable = (await probeRgVersion()).ok === true;
 describe('ai-sdk driver specifics (mock model)', () => {
   test('read upload scanning uses normalized executor provenance for file_path', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-read-provenance-'));
-    await writeFile(join(scratchDir, 'secret.ts'), 'api_key = "fixture-secret"\n', 'utf8');
+    // The session binding file lives OUTSIDE the model-editable workspace
+    // (Annex A, issue #1197): sessions stay at the scratch root, the bound
+    // workspace is the child holding the model-visible fixture.
+    const workspace = join(scratchDir, 'workspace');
+    await mkdir(workspace);
+    await writeFile(join(workspace, 'secret.ts'), 'api_key = "fixture-secret"\n', 'utf8');
     let calls = 0;
     const mock = new MockLanguageModelV4({
       modelId: 'mock-1',
@@ -41,7 +46,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       });
       const result = await driver.run(
         invocation({
-          workspace: { path: scratchDir },
+          workspace: { path: workspace },
           toolPolicy: { mode: 'allowlist', allow: ['read'] },
           sandboxPolicy: { level: 'read-only' },
         }),
@@ -57,7 +62,9 @@ describe('ai-sdk driver specifics (mock model)', () => {
 
   test('grep upload scanning uses normalized executor provenance for matched files', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-grep-provenance-'));
-    await writeFile(join(scratchDir, 'secret.ts'), 'api_key = "fixture-secret"\n', 'utf8');
+    const workspace = join(scratchDir, 'workspace');
+    await mkdir(workspace);
+    await writeFile(join(workspace, 'secret.ts'), 'api_key = "fixture-secret"\n', 'utf8');
     let calls = 0;
     const mock = new MockLanguageModelV4({
       modelId: 'mock-1',
@@ -83,7 +90,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       });
       const result = await driver.run(
         invocation({
-          workspace: { path: scratchDir },
+          workspace: { path: workspace },
           toolPolicy: { mode: 'allowlist', allow: ['grep'] },
           sandboxPolicy: { level: 'read-only' },
         }),
@@ -101,10 +108,12 @@ describe('ai-sdk driver specifics (mock model)', () => {
 describe('read/grep raw scan provenance + persist stripping', () => {
   test('read: guard receives RAW unformatted lines under the real path (line-anchored rules match)', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidrv-rawread-'));
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace);
     try {
       // The numbered display shifts the line: '^CONFIDENTIAL:' anchors on the
       // RAW source line, which the display '     1: CONFIDENTIAL: x' breaks.
-      await writeFile(join(root, 'secret.txt'), 'CONFIDENTIAL: top-secret-value\n', 'utf8');
+      await writeFile(join(workspace, 'secret.txt'), 'CONFIDENTIAL: top-secret-value\n', 'utf8');
       const guarded: { text: string; path?: string }[] = [];
       let modelCalls = 0;
       const model = new MockLanguageModelV4({
@@ -126,7 +135,7 @@ describe('read/grep raw scan provenance + persist stripping', () => {
       });
       const result = await driver.run(
         invocation({
-          workspace: { path: root },
+          workspace: { path: workspace },
           toolPolicy: { allow: ['read'], mode: 'allowlist' },
           sandboxPolicy: { level: 'read-only' },
         }),
@@ -144,8 +153,10 @@ describe('read/grep raw scan provenance + persist stripping', () => {
 
   test('read: sourceContents are scan-only — NOT persisted into the session transcript', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidrv-nopersist-'));
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace);
     try {
-      await writeFile(join(root, 'secret.txt'), 'CONFIDENTIAL: top-secret-value\n', 'utf8');
+      await writeFile(join(workspace, 'secret.txt'), 'CONFIDENTIAL: top-secret-value\n', 'utf8');
       let modelCalls = 0;
       const model = new MockLanguageModelV4({
         modelId: 'mock-1',
@@ -164,7 +175,7 @@ describe('read/grep raw scan provenance + persist stripping', () => {
       });
       await driver.run(
         invocation({
-          workspace: { path: root },
+          workspace: { path: workspace },
           toolPolicy: { allow: ['read'], mode: 'allowlist' },
           sandboxPolicy: { level: 'read-only' },
         }),
@@ -193,8 +204,10 @@ describe('read/grep raw scan provenance + persist stripping', () => {
     'grep: guard receives RAW matched lines (anchors intact), display stays numbered',
     async () => {
       const root = await mkdtemp(join(tmpdir(), 'aidrv-rawgrep-'));
+      const workspace = join(root, 'workspace');
+      await mkdir(workspace);
       try {
-        await writeFile(join(root, 'secret.txt'), 'CONFIDENTIAL: grep-secret-value\n', 'utf8');
+        await writeFile(join(workspace, 'secret.txt'), 'CONFIDENTIAL: grep-secret-value\n', 'utf8');
         const guarded: { text: string; path?: string }[] = [];
         let modelCalls = 0;
         const model = new MockLanguageModelV4({
@@ -216,7 +229,7 @@ describe('read/grep raw scan provenance + persist stripping', () => {
         });
         const result = await driver.run(
           invocation({
-            workspace: { path: root },
+            workspace: { path: workspace },
             toolPolicy: { allow: ['grep'], mode: 'allowlist' },
             sandboxPolicy: { level: 'read-only' },
           }),

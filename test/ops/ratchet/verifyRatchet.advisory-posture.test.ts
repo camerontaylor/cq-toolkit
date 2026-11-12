@@ -2,6 +2,7 @@
 // verifyRatchet.{clean-pr,measurement-artifact,trust-definitions,guard-range,faults,subject-baseline,d11-authorization,advisory-posture}.test.ts
 // plus verifyRatchet.helpers.ts (shared fixtures and the original header).
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { bindD11Authorization } from '../../../src/ops/gates/d11Authorization.js';
 import { createVerifyRatchet } from '../../../src/ops/ratchet/verifyRatchet.js';
 import {
   HOOK_MS,
@@ -58,13 +59,75 @@ describe('trusted advisory posture', SLOW, () => {
     const head = prBranch('advisory-source', trust, () => write('src/b.ts', 'export const b = 2;'));
     expect((await verify(head, { typecheckCount: 2 }, advisory)).verdict).toBe('fail');
   });
-  test('privileged ranges still require authorization', async () => {
+  test('privileged ranges keep numeric dependency regressions blocking', async () => {
     const head = prBranch('advisory-privileged', trust, () => {
       write('policy/guard.ts', 'changed');
       write('tsconfig.json', '{}');
       write('package.json', '{}');
     });
-    expect((await verify(head, { typecheckCount: 2 }, advisory)).verdict).toBe('needs-human');
+    expect((await verify(head, { typecheckCount: 2 }, advisory)).verdict).toBe('fail');
+  });
+  test('an unrelated privileged change does not make graph definitions require D11', async () => {
+    const head = prBranch('advisory-mixed-ordinary', trust, () => {
+      write('policy/guard.ts', 'changed');
+      write('tsconfig.json', '{}');
+    });
+    const v = await verify(head, {}, advisory);
+    expect(v.verdict).toBe('pass');
+    expect(v.reasons.join(' ')).toContain('advisory (D11): definition changes — tsconfig.json');
+  });
+  test('mixed definitions authorize only privileged paths', async () => {
+    const protectedTrust = prBranch('advisory-protected-trust', trust, () => {
+      write(
+        'policy/protected-paths.json',
+        JSON.stringify({
+          schemaVersion: 1,
+          protectedPaths: ['^policy/', '^vitest\\.config\\.ts$'],
+          requiredChecks: [],
+        }),
+      );
+    });
+    const head = prBranch('advisory-mixed-definitions', protectedTrust, () => {
+      write('vitest.config.ts', 'export default {};');
+      write('tsconfig.json', '{}');
+    });
+    const authorization = bindD11Authorization({
+      ownerId: 1001,
+      attestation: {
+        state: 'present',
+        text: JSON.stringify({
+          schemaVersion: 1,
+          attests: 'C3',
+          attestedAt: '2026-09-20T00:00:00Z',
+        }),
+      },
+      prs: [
+        {
+          pr: 7,
+          merge: 'c'.repeat(40),
+          head,
+          paths: ['vitest.config.ts'],
+          events: [
+            {
+              event: 'labeled',
+              label: { name: 'cq-override' },
+              actor: { login: 'owner', id: 1001, type: 'User' },
+              created_at: '2026-09-20T11:00:00Z',
+              performed_via_github_app: null,
+            },
+          ],
+          headObservedAt: '2026-09-20T10:00:00Z',
+        },
+      ],
+    });
+    const v = await verify(head, { trustRef: protectedTrust, authorization }, advisory);
+    expect(v.verdict).toBe('pass');
+    expect(v.d11).toMatchObject({ authorized: true });
+    expect(v.reasons).toContain('d11: vitest.config.ts authorized by PR #7');
+    expect(v.reasons.join(' ')).toContain('advisory (D11): definition changes — tsconfig.json');
+    expect((await verify(head, { trustRef: protectedTrust }, advisory)).verdict).toBe(
+      'needs-human',
+    );
   });
   test('ordinary advisory definitions cannot loosen baselines', async () => {
     const head = prBranch('advisory-loosen', trust, () => {

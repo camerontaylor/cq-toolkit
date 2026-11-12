@@ -302,7 +302,10 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
     // Baseline rows are admitted by unitId: identical duplicates count once;
     // disagreeing ones conflict. A unit counts only when its probe completed
     // with a known count — a placeholder, uncompleted or conflicting unit
-    // makes the denominator unknown, subtotal withheld.
+    // makes the denominator unknown, subtotal withheld. Known means a
+    // non-negative safe integer: an undefined, string or fractional count is
+    // corrupt, so it makes the denominator unknown rather than summing to NaN
+    // or a concatenated string.
     const units = [];
     const byUnit = new Map();
     const conflictedUnits = new Set();
@@ -323,7 +326,9 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
       run.baselineFailures != null &&
       conflictedUnits.size === 0 &&
       units.length === distinctUnits &&
-      units.every((unit) => unit.completed === true && unit.count !== null);
+      units.every(
+        (unit) => unit.completed === true && Number.isSafeInteger(unit.count) && unit.count >= 0,
+      );
     return {
       repo: run.repo,
       runId: run.runId,

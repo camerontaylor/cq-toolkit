@@ -91,6 +91,10 @@ export const PENDING_MS = SETTLED_MS - 1;
 /** Half a second after the commit: postdates it, well inside the window. */
 export const AFTER_COMMIT = '2026-01-01T00:00:00.500Z';
 export const BEFORE_COMMIT = '2025-12-31T23:59:59Z';
+/** The reviewed head SHA — shared by `candidate()` and `approved()` so the
+ * default fixture is a valid head-bound pair. Tests that exercise the
+ * fail-closed missing/null head override `headRefOid` explicitly. */
+export const HEAD = 'a'.repeat(40);
 
 /** An acceptable review that is NOT an all-clear, by a human non-author. */
 export const approved = (extra?: Partial<ReviewSummary>): ReviewSummary => ({
@@ -98,6 +102,7 @@ export const approved = (extra?: Partial<ReviewSummary>): ReviewSummary => ({
   authorLogin: 'alice',
   state: 'APPROVED',
   body: 'approving the cache changes',
+  commitOid: HEAD,
   submittedAt: AFTER_COMMIT,
   ...extra,
 });
@@ -141,6 +146,7 @@ export const candidate = (extra?: Partial<PrCandidate>): PrCandidate => ({
   reviews: [],
   issueComments: [],
   lastCommitAt: LAST_COMMIT,
+  headRefOid: HEAD,
   ...extra,
 });
 

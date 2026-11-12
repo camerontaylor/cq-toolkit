@@ -10,6 +10,7 @@ try {
   for (const [command, args] of [
     ['tsc', ['-p', 'tsconfig.build.json']],
     [process.execPath, ['scripts/copy-prompt-assets.mjs']],
+    [process.execPath, ['scripts/emit-queue-runner-capabilities.mjs']],
   ]) {
     const child = spawn(command, args, { stdio: 'inherit', shell: process.platform === 'win32' });
     for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => child.kill(signal));

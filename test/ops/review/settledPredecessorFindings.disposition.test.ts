@@ -1,3 +1,4 @@
+import { managedTerminal } from '../dev/reviewTestKit.js';
 // Split provenance: test/ops/review/settledPredecessorFindings.test.ts was split into the
 // settledPredecessorFindings.*.test.ts siblings in this directory; shared fixtures live in
 // settledPredecessorFindings.helpers.ts.
@@ -38,6 +39,7 @@ test.each(['fixed', 'rejected'] as const)(
     );
     f.effects.openLedger(f.state.branch).save(ledger);
     const result = await makeReviewRun({
+      managedSubmit: managedTerminal([]),
       drivers: cleanDrivers(),
       queueClient: terminal.client,
       effectsFactory: () => f.effects,

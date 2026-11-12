@@ -40,7 +40,8 @@
 import { realpath, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import { ENV_NAME_PATTERN, parsePassthrough } from '../config/parsers.js';
+import { ENV_NAME_PATTERN } from '../config/parsers.js';
+import { currentCqEnv } from '../config/run-env.js';
 import type { SandboxLevel, ToolPolicy } from '../driver/types.js';
 import { TOOL_FAILURE_KINDS } from './failures.js';
 import { HarnessConfigSchema } from './config.js';
@@ -54,7 +55,6 @@ import type {
   ToolkitToolName,
   ToolkitToolResult,
 } from './tools.js';
-import { processEnv } from '../config/process-env.js';
 
 // ---------------------------------------------------------------------------
 // Naming
@@ -193,13 +193,23 @@ export interface ManifestInputs {
  * pre-dispatch failures.
  */
 export async function buildManifest(inputs: ManifestInputs): Promise<HarnessManifest | undefined> {
+  // The passthrough names come from the RUN'S SNAPSHOT, not the live ambient
+  // environment: an ambient CQ_RUN_ENV_PASSTHROUGH change after entry cannot
+  // widen a manifest mid-run. The snapshot stores the value PARSED (a name
+  // array), so read the parsed names directly; the raw-string parse path
+  // stays for an explicit raw env (the foreign-environment injection seam).
+  const cqEnv = currentCqEnv();
+  const snapshotPassthrough = cqEnv.values['CQ_RUN_ENV_PASSTHROUGH'];
+  const snapshotPassthroughNames = Array.isArray(snapshotPassthrough)
+    ? snapshotPassthrough.filter((name): name is string => typeof name === 'string')
+    : [];
   // The gate decides the surface the SAME way execution will: a withheld run
   // tool is absent from both, so a manifest never names a tool the surface
   // cannot serve.
   const tools = selectHarnessSurface(
     inputs.harness,
     inputs.toolPolicy,
-    harnessRunGate(),
+    harnessRunGate({ cqEnv }),
     inputs.sandbox,
   );
   if (tools.length === 0) return undefined;
@@ -218,15 +228,11 @@ export async function buildManifest(inputs: ManifestInputs): Promise<HarnessMani
     tools,
     harness: inputs.harness,
     // Preserve deployment opt-in names across both transports. The stdio
-    // startup scrub consumes CQ_RUN_ENV_PASSTHROUGH itself; retaining names
-    // in the manifest lets the shared run core perform its own scrub too.
-    // Strict manifest validation below accepts names only, never values.
-    envNames: [
-      ...new Set([
-        ...(inputs.envNames ?? []),
-        ...parsePassthrough(processEnv()['CQ_RUN_ENV_PASSTHROUGH']),
-      ]),
-    ],
+    // startup scrub deletes the ambient CQ_RUN_ENV_PASSTHROUGH knob and uses
+    // only names resolved and validated above; retaining them in the manifest
+    // lets the shared run core perform its own scrub too. Strict manifest
+    // validation below accepts names only, never values.
+    envNames: [...new Set([...(inputs.envNames ?? []), ...snapshotPassthroughNames])],
   });
   // The caller's own code-level names are a TRUSTED origin (see below).
   TRUSTED_ENV_NAMES.set(manifest, Object.freeze([...(inputs.envNames ?? [])]));

@@ -1,9 +1,9 @@
 import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test } from 'vitest';
-import { withAddressOwnership } from '../../../src/ops/review/internal/addressOwnership.js';
+import { withAddressOwnership } from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 
-import * as ownershipModule from '../../../src/ops/review/internal/addressOwnership.js';
+import * as ownershipModule from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 
 import { fixture, terminalInput, terminalReport } from './addressManyWorktree.helpers.js';
 

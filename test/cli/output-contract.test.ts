@@ -2,8 +2,14 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { narrate, type CliIo } from '../../src/cli/output.js';
-import { RunReportSchema } from '../../src/kernel/schema.js';
+import {
+  narrate,
+  reportError,
+  usageSummaryOfThrown,
+  type CliIo,
+  type CliErrorArtifact,
+} from '../../src/cli/output.js';
+import { KnownUsageSummarySchema, RunReportSchema } from '../../src/kernel/schema.js';
 import { capture, makeTmpOpsRoot, opsRoot, writePlanFile } from './i1-helpers.js';
 
 // Lossless PARITY PIN (r3 F3): src/cli/output.ts's assertJsonLossless and the
@@ -65,6 +71,15 @@ describe('lossless parity pin: the CLI walk and the kernel walk reject the same 
         name: 'losshiddenmember',
         expr: "(() => { const o = { x: 1 }; Object.defineProperty(o, 'hidden', { value: 3, enumerable: false }); return o; })()",
         pattern: "non-enumerable own member 'hidden'",
+      },
+      // -0 is finite, so the stringify probe passes it, but JSON.stringify
+      // writes it as `0` — the artifact/journal would silently drop the sign
+      // (review finding 1ed17a53, ceres backfill). Both walks must reject it
+      // identically or the two dispatch paths would disagree about -0.
+      {
+        name: 'lossnegzero',
+        expr: '{ x: Math.round(-0.4) }',
+        pattern: "negative zero — JSON.stringify writes it as '0'",
       },
     ];
     const tmp = await makeTmpOpsRoot('cq-i1-parity-');
@@ -136,5 +151,92 @@ describe('line-based narration (embedded newlines flatten to the literal escape)
     expect(lines[0]).toBe(
       'cq: boom: failed — boom: deliberate fixture failure\\nsecond line of the failure',
     );
+  });
+});
+
+// #1195: spend on every exit where it is known — the machine-mode ERROR
+// artifact carries a THROWN value's validated usage carrier inside `error`,
+// and `usageSummaryOfThrown` is the one validator every thrown site funnels.
+describe('error artifact usage envelope (#1195)', () => {
+  const CARRIER = {
+    usage: { input: 120, output: 40, cacheRead: 8, cacheWrite: 0 },
+    knownCount: 1,
+    unknownCount: 0,
+    unpricedCount: 1,
+  };
+
+  test('reportError json mode: a validated usageSummary rides INSIDE error, kind and exitCode unchanged', () => {
+    const chunks: string[] = [];
+    const io: CliIo = { stdout: (chunk) => chunks.push(chunk), stderr: () => {} };
+    const code = reportError(io, 'json', 'thrown', 'spendthrow', 'boom', 1, CARRIER);
+    expect(code).toBe(1);
+    const artifact = JSON.parse(chunks.join('')) as CliErrorArtifact;
+    // The envelope is schema-valid (the kernel's own validator) and exact.
+    const summary = KnownUsageSummarySchema.parse(artifact.error.usageSummary);
+    expect(summary).toEqual(CARRIER);
+    // The four contract keys are untouched; the artifact stays single-keyed.
+    expect(artifact.error).toMatchObject({
+      kind: 'thrown',
+      subcommand: 'spendthrow',
+      message: 'boom',
+      exitCode: 1,
+    });
+    expect(Object.hasOwn(artifact, 'status')).toBe(false);
+  });
+
+  test('reportError json mode: no usageSummary → the key is ABSENT, the artifact byte-shaped as before', () => {
+    const chunks: string[] = [];
+    const io: CliIo = { stdout: (chunk) => chunks.push(chunk), stderr: () => {} };
+    reportError(io, 'json', 'usage', null, 'no such subcommand', 2);
+    const artifact = JSON.parse(chunks.join('')) as CliErrorArtifact;
+    expect(Object.hasOwn(artifact.error, 'usageSummary')).toBe(false);
+    expect(artifact.error).toEqual({
+      kind: 'usage',
+      subcommand: null,
+      message: 'no such subcommand',
+      exitCode: 2,
+    });
+  });
+
+  test('reportError human mode: a usage carrier changes NOTHING (narration only, stdout empty)', () => {
+    const outChunks: string[] = [];
+    const errChunks: string[] = [];
+    const io: CliIo = {
+      stdout: (chunk) => outChunks.push(chunk),
+      stderr: (chunk) => errChunks.push(chunk),
+    };
+    const code = reportError(io, 'human', 'thrown', 'op', 'it threw', 1, CARRIER);
+    expect(code).toBe(1);
+    expect(outChunks).toEqual([]);
+    expect(errChunks.join('')).toBe('cq: it threw\n');
+  });
+
+  test('usageSummaryOfThrown: a valid carrier passes; every corrupt shape contributes nothing', () => {
+    const err = new Error('threw');
+    expect(usageSummaryOfThrown(Object.assign(err, { usageSummary: CARRIER }))).toEqual(CARRIER);
+    // A frozen error still reads (assignment failure is attach-side, not read-side).
+    const frozen = Object.freeze(Object.assign(new Error('frozen'), { usageSummary: CARRIER }));
+    expect(usageSummaryOfThrown(frozen)).toEqual(CARRIER);
+    // Schema-rejected carriers are omitted whole, never trusted in part.
+    expect(
+      usageSummaryOfThrown(
+        Object.assign(new Error('neg'), {
+          usageSummary: { ...CARRIER, knownCount: -1 },
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      usageSummaryOfThrown(
+        Object.assign(new Error('extra'), { usageSummary: { ...CARRIER, extra: true } }),
+      ),
+    ).toBeUndefined();
+    // No carrier, a non-object carrier, or a thrown primitive: undefined.
+    expect(usageSummaryOfThrown(new Error('bare'))).toBeUndefined();
+    expect(
+      usageSummaryOfThrown(Object.assign(new Error('wrongtype'), { usageSummary: 7 })),
+    ).toBeUndefined();
+    expect(usageSummaryOfThrown('a thrown string')).toBeUndefined();
+    expect(usageSummaryOfThrown(null)).toBeUndefined();
+    expect(usageSummaryOfThrown(undefined)).toBeUndefined();
   });
 });
