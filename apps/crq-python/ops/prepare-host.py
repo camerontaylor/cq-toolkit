@@ -817,11 +817,12 @@ def main(argv=None):
         require_outside_git(args.output)
         if not outside(args.output, root):
             raise ValueError('preview output must be outside checkout')
-        data = render(root, overlay)
-        record(root, overlay, raw, data, 'preview')
-        atomic_bytes(args.output / 'config.json', data)
-        render_units(root, args.output / 'systemd')
-        render_plists(root, args.output / 'launchd', args.overlay)
+        with tick_lock(root):
+            data = render(root, overlay)
+            record(root, overlay, raw, data, 'preview')
+            atomic_bytes(args.output / 'config.json', data)
+            render_units(root, args.output / 'systemd')
+            render_plists(root, args.output / 'launchd', args.overlay)
     else:
         live_render(root, overlay, raw)
     print(json.dumps({'operation': args.operation, 'status': 'ok'}, indent=2, sort_keys=True))
