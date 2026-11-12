@@ -1,10 +1,11 @@
 # Live unit-switch binding
 
 Status: CLI composition. `deploy-controller.py` loads
-`ops/unit-live-binding.py` lazily for `switch --unit ... --runtime ...`; it is
-not a CLI and does not enable a production switch. Every host observation is
-read-only. The module exists so the mechanical port, root binding, record
-binding and lock observation can be tested without a live host.
+`ops/unit-live-binding.py` lazily for `switch --unit ... --runtime ...` and
+`recover --record ...`; it is not a CLI and does not enable a production
+switch or recovery. Every host observation is read-only. The module exists so
+the mechanical port, root binding, record binding and lock observation can be
+tested without a live host.
 
 ## Composition
 
@@ -20,6 +21,18 @@ existing factory with:
 
 It returns the adapter and its selected identity. It never calls
 `switch_unit`, `recover_unit`, the controller CLI or a unit command.
+
+Recovery composes the same adapter through
+`production_adapter(effects, overlay, unit=record.unit,
+runtime=record.prior_runtime)`. The controller supplies the unit and prior
+runtime from the one retained record it has already validated, under its lock,
+and calls the composition callback after the read-only queue-drain gate and
+before snapshot validation. The record's snapshot is authoritative for the
+bytes, modes, ownership and activation that are restored, so a checkout `HEAD`
+advance between the failed switch and the recovery changes the composed
+selection but not what recovery restores, and the composed render is not
+consumed by the recovery path. Composing for the abandoned target instead
+would make recovery depend on an artifact that may no longer be installed.
 
 The adapter's `error_type` and default queue drain come from the loaded
 controller module that owns the supplied `Effects` object, not from a second
@@ -119,8 +132,12 @@ files. Only the systemctl process runner is injected. The final test composes
 the real adapter and drives the real `deploy_controller.switch_unit` seam; an
 unsupported discovery topology refuses before any journal or unit mutation.
 
-The binding is reached through the controller CLI's switch path. `watchdog` is
-the only Node command the verified artifact currently declares; `tick`, `slot`,
-`publisher`, `backfill` and `repair` still refuse for a Node target. The binding
-does not call `switch_unit` or `recover_unit` itself; the controller owns that
-seam.
+The binding is reached through the controller CLI's switch and recover paths.
+The recovery wiring tests drive `recover --record` with the real production
+adapter and injected systemd and journal ports over a real temporary unit
+directory and record directory; an `activation_pending` record still stops and
+drains owned work, then refuses with rc 3 and unchanged record bytes. `watchdog`
+is the only Node command the verified artifact currently declares; `tick`,
+`slot`, `publisher`, `backfill` and `repair` still refuse for a Node target. The
+binding does not call `switch_unit` or `recover_unit` itself; the controller
+owns that seam.
