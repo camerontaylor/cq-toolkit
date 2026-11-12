@@ -228,9 +228,10 @@ export async function buildManifest(inputs: ManifestInputs): Promise<HarnessMani
     tools,
     harness: inputs.harness,
     // Preserve deployment opt-in names across both transports. The stdio
-    // startup scrub consumes CQ_RUN_ENV_PASSTHROUGH itself; retaining names
-    // in the manifest lets the shared run core perform its own scrub too.
-    // Strict manifest validation below accepts names only, never values.
+    // startup scrub deletes the ambient CQ_RUN_ENV_PASSTHROUGH knob and uses
+    // only names resolved and validated above; retaining them in the manifest
+    // lets the shared run core perform its own scrub too. Strict manifest
+    // validation below accepts names only, never values.
     envNames: [...new Set([...(inputs.envNames ?? []), ...snapshotPassthroughNames])],
   });
   // The caller's own code-level names are a TRUSTED origin (see below).

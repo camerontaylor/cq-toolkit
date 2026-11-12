@@ -65,18 +65,18 @@ export interface SandboxConfig {
 export interface ResolveSandboxOptions {
   /**
    * The entry point's CQ_* snapshot. Preferred: its already-parsed values form
-   * the env layer. Without it (and without `env`) the process environment is
-   * parsed directly, as before.
+   * the env layer. When neither `cqEnv` nor `env` is passed, the resolver reads
+   * the run's registered snapshot (`currentCqEnv()`), falling back to a fresh
+   * snapshot of the process environment outside a run. An ambient `CQ_SANDBOX`
+   * change after entry therefore cannot be observed here mid-run.
    */
   cqEnv?: CqEnv;
+  /**
+   * An explicit raw environment: the deliberate foreign-environment injection
+   * path. When passed it REPLACES the env layer entirely (no snapshot merge).
+   */
   env?: Readonly<Record<string, string | undefined>>;
   optIn?: SandboxOptIn;
-  /**
-   * When neither `cqEnv` nor `env` is passed, the resolver reads the run's
-   * registered snapshot (`currentCqEnv()`), falling back to a fresh snapshot
-   * of the process environment outside a run. An ambient `CQ_SANDBOX` change
-   * after entry therefore cannot be observed here mid-run.
-   */
   /** Registry consulted for the `trust` flag; default the shipped registry (a test seam). */
   registry?: CqEnvRegistry;
   platform?: NodeJS.Platform;
