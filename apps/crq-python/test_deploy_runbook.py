@@ -479,6 +479,12 @@ class ManifestSchemaTests(RunbookFixture):
         self.assertIn("config", problem)
         self.assertIn("unknown extra", problem)
 
+    def test_unknown_range_note_key_refuses(self):
+        problem = self.validate(
+            lambda doc: doc["range_note"].update({"typo_unknown": True}))
+        self.assertIsNotNone(problem)
+        self.assertIn("range_note", problem)
+
     def test_wrong_type_refuses_with_path(self):
         problem = self.validate(
             lambda doc: doc["quiescence"].update({"poll_interval_s": "15"}))
@@ -531,12 +537,39 @@ class PinnedRevisionTests(RunbookFixture):
 
     def test_pinned_revision_accepts_real_digest(self):
         args = self.args()
-        # Inventory runs against the fake unit provider only after the pins
-        # pass; a refusal later in the sequence proves the pins passed.
-        try:
-            rb.execute(args)
-        except Exception as exc:  # noqa: B902 - any failure is after the pins
-            self.assertNotIn("digest mismatch", str(exc))
+        # A correct pin must carry execution past every digest check into
+        # the candidate imports. The sentinel failure proves the pins
+        # passed: a digest refusal, or any entry-point crash before the
+        # sentinel, fails this test, so it cannot accept a broken entry
+        # point (the old broad-except version swallowed exactly that).
+        with mock.patch.object(rb, "load_module",
+                               side_effect=RuntimeError(
+                                   "counterfactual: pins passed")):
+            with self.assertRaisesRegex(RuntimeError,
+                                        "counterfactual: pins passed"):
+                rb.execute(args)
+
+    def test_module_digest_mismatch_refuses_before_import(self):
+        # An import is arbitrary code execution: a stale/substituted
+        # candidate module must be refused by digest BEFORE load_module
+        # runs it. The sentinel records any import attempt.
+        document = rb.load_json(Path(self.args().manifest))
+        document["identity"]["helper_sha256"] = "2" * 64
+        document["identity"]["controller_file_sha256"] = "2" * 64
+        manifest_path = self.write_manifest(document)
+        args = self.args(manifest_path=manifest_path)
+        imported = []
+        real_load = rb.load_module
+
+        def recording_load(name, path):
+            imported.append(name)
+            return real_load(name, path)
+
+        with mock.patch.object(rb, "load_module", side_effect=recording_load):
+            with self.assertRaisesRegex(rb.Refused, "digest mismatch"):
+                rb.execute(args)
+        self.assertEqual(imported, [],
+                         "modules imported before their digest pins passed")
 
 
 class PreflightSplitTests(RunbookFixture):
@@ -597,6 +630,46 @@ class PreflightSplitTests(RunbookFixture):
                          {"crq-backfill.timer": "active",
                           "crq-repair.path": "active"})
         self.assertNotIn("crq-repair.timer", run.stopped_pre)
+
+    def test_pre_hold_failure_restarts_the_split(self):
+        # A preflight refusal after the split must not leave the host with
+        # the long triggers stopped and no hold: run() restores exactly the
+        # units this run stopped, then re-raises.
+        units = FakeUnits(self.marker_path)
+        run = self.run_to_preflight(units)
+        with mock.patch.object(run, "preflight",
+                               side_effect=rb.Refused("preflight boom")):
+            with self.assertRaisesRegex(rb.Refused, "preflight boom"):
+                run.run()
+        self.assertTrue(run.pre_hold_restored)
+        self.assertIsNone(run.pre_hold_restore_error)
+        self.assertEqual(sorted(units.stopped),
+                         sorted(run.stopped_pre))
+        for unit in run.stopped_pre:
+            self.assertEqual(units.state(unit), "active")
+            self.assertIn(unit, units.started)
+        self.assertFalse(self.marker_path.exists())
+        phase = rb.load_json(run.output_dir / "phase.json")
+        self.assertEqual(phase["phase"], "recovery_required")
+        self.assertTrue(phase["pre_hold_restored"])
+
+    def test_pre_hold_failure_restore_failure_is_recorded(self):
+        # If even the pre-hold restore fails, the error is recorded in the
+        # recovery phase record; the original refusal still propagates.
+        units = FakeUnits(self.marker_path)
+        run = self.run_to_preflight(units)
+        with mock.patch.object(run, "preflight",
+                               side_effect=rb.Refused("preflight boom")), \
+                mock.patch.object(units, "start",
+                                  side_effect=RuntimeError("start failed")):
+            with self.assertRaisesRegex(rb.Refused, "preflight boom"):
+                run.run()
+        self.assertFalse(run.pre_hold_restored)
+        self.assertIn("start failed", run.pre_hold_restore_error)
+        phase = rb.load_json(run.output_dir / "phase.json")
+        self.assertEqual(phase["phase"], "recovery_required")
+        self.assertFalse(phase["pre_hold_restored"])
+        self.assertIn("start failed", phase["pre_hold_restore_error"])
 
     def test_restore_starts_exactly_the_original_active_set(self):
         states = {unit: "active" for unit in TRIGGERS}
@@ -765,6 +838,65 @@ class F4RegressionTests(RunbookFixture):
         self.assertEqual(release["final_triggers"], run.original)
         self.assertEqual(release["runbook_sha256"], run.args.runbook_sha256)
         self.assertIn("released_at", release)
+
+    def test_final_triggers_verified_and_durable_before_unlink(self):
+        # The final map is observed twice; both reads must equal original
+        # before the marker is removed, and the verified map plus the
+        # original must be durable in phase.json BEFORE the unlink.
+        units = FakeUnits(self.marker_path)
+        run = self.run_runbook(self.args(), units)
+        run.triggers = list(TRIGGERS)
+        run.original = {unit: "active" for unit in TRIGGERS}
+        run.split_map = {**run.original,
+                         **{unit: "inactive" for unit in LONG}}
+        run.output_dir.mkdir(parents=True, exist_ok=True)
+        durable_write_marker_record(run)
+        run.acquire()
+        real_state = units.state
+        mode = {"name": "normal"}
+        calls = {"n": 0}
+
+        def observed(unit):
+            calls["n"] += 1
+            value = real_state(unit)
+            n = len(TRIGGERS)
+            first = calls["n"] <= n
+            if mode["name"] == "first_read_bad" and first \
+                    and unit == LONG[0]:
+                return "inactive"
+            if mode["name"] == "second_read_bad" and not first \
+                    and unit == LONG[0]:
+                return "inactive"
+            return value
+
+        # Attempt 1: the first full observation disagrees with original.
+        # Refusal BEFORE the second read; the hold is retained.
+        mode["name"] = "first_read_bad"
+        calls["n"] = 0
+        with mock.patch.object(units, "state", side_effect=observed):
+            with self.assertRaisesRegex(rb.Refused, "trigger restore mismatch"):
+                run.restore()
+        self.assertTrue(self.marker_path.exists(),
+                        "failed restore must retain the hold")
+        # Attempt 2: the first observation passes but the verification read
+        # disagrees; release refuses before the marker is removed.
+        mode["name"] = "second_read_bad"
+        calls["n"] = 0
+        with mock.patch.object(units, "state", side_effect=observed):
+            with self.assertRaisesRegex(
+                    rb.Refused, "trigger restore verification mismatch"):
+                run.restore()
+        self.assertTrue(self.marker_path.exists())
+        # Attempt 3: both reads agree; the phase record with the verified
+        # final map lands before the unlink, marker gone at the end.
+        mode["name"] = "normal"
+        calls["n"] = 0
+        run.restore()
+        self.assertFalse(self.marker_path.exists())
+        phase = rb.load_json(run.output_dir / "phase.json")
+        self.assertEqual(phase["phase"], "final_triggers")
+        self.assertEqual(phase["final_triggers"], run.original)
+        self.assertEqual(phase["original"], run.original)
 
 
 class ReleasedFlagGateTests(RunbookFixture):

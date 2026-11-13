@@ -435,9 +435,14 @@ validate before any host read, observe then split the long triggers, hold
 controller `drain_check` poll (15 s interval, 900 s deadline, fail safe on
 expiry: hold retained, nothing killed), the controller `switch` subprocess,
 pointer render, F4 restore (start exactly the triggers `self.original`
-recorded active, assert the full pre-run map, record `final_triggers`,
-remove the marker last), then `range-note.json` with digest-pinned
-annotations.
+recorded active, assert the full pre-run map, verify the map with a second
+read, persist `final_triggers` durably, remove the marker last), then
+`range-note.json` with digest-pinned annotations. Failures before the hold
+acquire restart exactly the triggers the split stopped (no hold, no stopped
+triggers left behind; a failed restart is recorded in the recovery phase
+record). The candidate helper and controller are digest-checked against the
+manifest before either is imported: an import is arbitrary code execution
+and must never run ahead of the reviewed pins.
 
 A production GO names one exact file revision: `--runbook-sha256` must equal
 the digest of the executing file, refusing before any host read, and the

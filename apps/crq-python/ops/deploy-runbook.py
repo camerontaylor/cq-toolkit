@@ -381,6 +381,8 @@ class Run:
         self.released = False
         self.final_triggers = None
         self.journal = None
+        self.pre_hold_restored = False
+        self.pre_hold_restore_error = None
         self._current_phase = "started"
         self.run_id = uuid.uuid4().hex
         self.marker = Path(units.marker)
@@ -453,8 +455,32 @@ class Run:
         try:
             return self._run_body()
         except BaseException as exc:
+            self._pre_hold_restore(exc)
             self._fail_stop(exc)
             raise
+
+    def _pre_hold_restore(self, exc):
+        """Pre-hold failure path: restart what split_long_triggers stopped.
+
+        Before the hold is acquired there is no admission marker, so the
+        host must not be left with the long triggers stopped and no hold.
+        Best effort, never masks the original failure: any exception here
+        is recorded in the phase record as a recovery error.
+        """
+        if self.acquired or not self.stopped_pre:
+            return
+        try:
+            self.units.start(sorted(self.stopped_pre))
+            observed = {unit: self.units.state(unit)
+                        for unit in self.stopped_pre}
+            require(observed == {unit: "active"
+                                 for unit in self.stopped_pre},
+                    "pre-hold split restore mismatch: observed "
+                    + repr(observed))
+            self.pre_hold_restored = True
+            self.phase("pre_hold_restored", stopped_pre=sorted(self.stopped_pre))
+        except BaseException as failure:
+            self.pre_hold_restore_error = repr(failure)
 
     def _run_body(self):
         durable_write(self.output_dir / "marker.path",
@@ -835,8 +861,11 @@ class Run:
         F4 rule: the post-split map is an intermediate, never a restore
         target. Start exactly the units self.original recorded active; a
         long trigger already inactive at observation is never started.
-        Assert the full original map, record final_triggers durably, then
-        remove the marker last.
+        Assert the full original map, verify the recorded final observation
+        against it, persist final_triggers durably, then remove the marker
+        last. A second observation that disagrees with the first refuses
+        before the hold is released: an unstable restore is never waved
+        through on one read.
         """
         require(self.owns_marker(), "marker ownership lost before restore")
         active = sorted(unit for unit, state in self.original.items()
@@ -846,8 +875,17 @@ class Run:
         require(observed == self.original,
                 "trigger restore mismatch: observed " + repr(observed)
                 + " expected original " + repr(self.original))
-        self.final_triggers = {unit: self.units.state(unit)
-                               for unit in self.triggers}
+        # Second, independent read: the map recorded as final must equal
+        # original too, or the release refuses before the marker is removed.
+        verified = {unit: self.units.state(unit) for unit in self.triggers}
+        require(verified == self.original,
+                "trigger restore verification mismatch: second read "
+                + repr(verified) + " expected original "
+                + repr(self.original))
+        self.final_triggers = verified
+        self.phase("final_triggers", triggers=self.split_map,
+                   original=self.original,
+                   final_triggers=self.final_triggers)
         require(self.owns_marker(), "marker ownership lost during restore")
         self.release_marker()
 
@@ -901,7 +939,9 @@ class Run:
             self.phase("released_report_failed" if self.released
                        else "recovery_required",
                        error=repr(exc),
-                       fail_stop_error=stop_error)
+                       fail_stop_error=stop_error,
+                       pre_hold_restored=self.pre_hold_restored,
+                       pre_hold_restore_error=self.pre_hold_restore_error)
         except BaseException:
             pass
 
@@ -1005,10 +1045,9 @@ def execute(args, effects_factory=None) -> int:
     manifest = validate_manifest_document(load_json(args.manifest),
                                           args.manifest, args.manifest_sha256)
     candidate_ops = Path(args.candidate_root) / "apps/crq-python/ops"
-    host = load_module("runbook_prepare_host",
-                       candidate_ops / "prepare-host.py")
-    controller = load_module("runbook_deploy_controller",
-                             candidate_ops / "deploy-controller.py")
+    # Digest-pin the candidate modules BEFORE importing them: an import is
+    # arbitrary code execution, so a stale or substituted helper or
+    # controller must never run ahead of the reviewed pins.
     require(digests.file_digest(candidate_ops / "prepare-host.py")
             == manifest["identity"]["helper_sha256"],
             "helper digest mismatch (candidate prepare-host.py)")
@@ -1016,6 +1055,10 @@ def execute(args, effects_factory=None) -> int:
     require(digests.file_digest(controller_path)
             == manifest["identity"]["controller_file_sha256"],
             "controller digest mismatch")
+    host = load_module("runbook_prepare_host",
+                       candidate_ops / "prepare-host.py")
+    controller = load_module("runbook_deploy_controller",
+                             controller_path)
     # Finding 5: the CLI target is the manifest's target before any host
     # observation, mutation or effect construction; a different tagged commit
     # with compatible config must not inherit the manifest's reviewed
