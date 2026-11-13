@@ -196,7 +196,11 @@ def import_record(submitted, at, existing):
     """
     try:
         value, digest_hex = normalize_record(submitted, at)
-    except RecordRefused as exc:
+    except (RecordRefused, ledger.IntegrityError) as exc:
+        # Wire-valid reports with semantically malformed content (reversed
+        # scope intervals, schema-variant mismatches) fail in ledger.event
+        # validation; they quarantine individually like any other malformed
+        # import instead of surfacing as invalid-input errors.
         reason = str(exc)
         # The quarantine source vocabulary is the ledger's producer enum; an
         # unknown claimed producer is preserved in the reason, and the typed

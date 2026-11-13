@@ -276,6 +276,32 @@ class ImportIdempotencyTests(unittest.TestCase):
         with self.assertRaises(ledger.IntegrityError):
             ledger.validate_provenance(value)
 
+    def test_semantically_malformed_scope_quarantines_instead_of_raising(self):
+        # Wire-valid reports with semantically malformed scope content
+        # (reversed intervals, duplicate rows, traversal paths) fail inside
+        # ledger validation; they quarantine individually with a readable
+        # reason rather than surfacing as invalid-input errors.
+        reversed_rows = submission(claimed_scope=[
+            {"path": "a.ts", "blob": "c" * 64, "intervals": [[2, 1]]}])
+        events, action = review_record.import_record(reversed_rows, AT, [])
+        self.assertTrue(action.startswith("quarantined:"))
+        self.assertIn("intervals", action)
+        ledger.validate_sequence(events)
+        duplicates = submission(claimed_scope=[
+            {"path": "a.ts", "blob": "c" * 64, "intervals": [[1, 2]]},
+            {"path": "a.ts", "blob": "c" * 64, "intervals": [[1, 2]]}])
+        events, action = review_record.import_record(duplicates, AT, [])
+        self.assertTrue(action.startswith("quarantined:"))
+        ledger.validate_sequence(events)
+        traversal = submission(claimed_scope=[
+            {"path": "../file.ts", "blob": "c" * 64, "intervals": [[1, 2]]}])
+        events, action = review_record.import_record(traversal, AT, [])
+        self.assertTrue(action.startswith("quarantined:"))
+        ledger.validate_sequence(events)
+        # A following good record is unaffected.
+        _, action = review_record.import_record(submission(), AT, [])
+        self.assertTrue(action.startswith("record:"))
+
 
 class HistoricalAdapterTests(unittest.TestCase):
     def a22_receipt(self):
