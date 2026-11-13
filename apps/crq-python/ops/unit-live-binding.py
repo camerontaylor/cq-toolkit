@@ -457,11 +457,35 @@ class SubprocessSystemd:
                             except (OSError, RuntimeError):
                                 source_declared = False
                         text = _text(data, str(path))
+                        # Systemd joins physical lines that end with a
+                        # backslash, so ``Wants=\`` followed by an indented
+                        # unit name still declares a dependency. Accumulate
+                        # continuations into one logical line before matching
+                        # and report the first physical line of that logical
+                        # line.
+                        logical = []
+                        pending = None
                         for number, line in enumerate(text.splitlines(), 1):
                             stripped = line.strip()
                             if not stripped or stripped.startswith(("#", ";")):
                                 continue
-                            match = DEPENDENCY_RE.match(stripped)
+                            if stripped.endswith("\\"):
+                                piece = stripped[:-1].rstrip()
+                                if pending is None:
+                                    pending = [number, piece]
+                                else:
+                                    pending[1] = pending[1] + " " + piece
+                                continue
+                            if pending is None:
+                                logical.append((number, stripped))
+                            else:
+                                logical.append(
+                                    (pending[0], pending[1] + " " + stripped))
+                                pending = None
+                        if pending is not None:
+                            logical.append((pending[0], pending[1]))
+                        for number, line in logical:
+                            match = DEPENDENCY_RE.match(line)
                             if match is None:
                                 continue
                             for name in CRQ_NAME_RE.findall(match.group("value")):
