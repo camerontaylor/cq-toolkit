@@ -309,12 +309,62 @@ class DeployTests(DeployFixture, unittest.TestCase):
                      "apps/crq-python/ops/systemd/crq-tick.timer")
         target = self.head()
         self.command("update-ref", "refs/remotes/origin/main", target)
+        # Point origin/main at the template-changing commit but leave the
+        # checkout on the prior SHA: if HEAD were also the target, the earlier
+        # "already the checked-out HEAD" refusal would fire and the template
+        # gate this test exists to exercise would never be reached.
+        self.command("checkout", "-q", "--detach", self.prior)
         run = self.build(target_sha=target)
         with self.assertRaisesRegex(rb.Refused, "unit templates"):
             run.run()
         self.assertEqual(self.units.stopped, [])
         self.assertFalse(self.marker().exists())
         self.assertEqual(self.head(), self.prior)
+
+    def test_relative_and_symlinked_roots_are_resolved_before_effects(self):
+        # The controller compares the literal effects.root against the
+        # resolved root crq.py writes into the heartbeat, so an unresolved
+        # --root would pass root_check and then fail health after the switch.
+        link = self.base / "checkout-link"
+        link.symlink_to(self.root)
+        self.assertEqual(self.build(root=link).root, self.root.resolve())
+        previous = os.getcwd()
+        os.chdir(self.base)
+        try:
+            self.assertEqual(self.build(root=Path("deploy")).root,
+                             self.root.resolve())
+        finally:
+            os.chdir(previous)
+
+    def test_restore_before_switch_revalidates_the_runtime_entry(self):
+        # The checkout never moved, but the measured runtime entry was
+        # replaced while the host drained. The config and queue checks still
+        # pass; restarting the triggers would resume admission on unverified
+        # bytes, so the restore must fail-stop with the hold retained.
+        fixture = self
+
+        class BrokenSwitch:
+            def load_overlay(self, path):
+                return host.load_overlay(path)
+
+            def root_check(self, root, overlay):
+                return host.root_check(root, overlay)
+
+            def switch(self, *args, **kwargs):
+                (fixture.runtime / "dist/cli.js").write_text("// replaced\n")
+                raise ValueError("helper refused the switch")
+
+        run = self.build(helper=BrokenSwitch())
+        with self.assertRaises(rb.RecoveryRequired) as caught:
+            run.run()
+        self.assertIn("pre-switch restore failed", str(caught.exception))
+        self.assertIn("not the measured entry", str(caught.exception))
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.head(), self.prior)
+        self.assertEqual(self.units.started, [])
+        self.assertTrue(all(self.units.state(unit) in ("inactive", "failed")
+                            for unit in TRIGGERS))
+        self.assertEqual(self.record(run)["outcome"], "recovery_required")
 
     def test_queue_that_loses_rollback_permission_during_drain_refuses(self):
         # Preflight measured a compatible queue; a tick wrote a schema marker
@@ -617,21 +667,62 @@ class DeployTests(DeployFixture, unittest.TestCase):
 
     def test_argument_errors_are_one_json_document(self):
         with contextlib.redirect_stdout(io.StringIO()) as output, \
-                contextlib.redirect_stderr(io.StringIO()):
+                contextlib.redirect_stderr(io.StringIO()) as errors:
             with self.assertRaises(SystemExit) as caught:
                 rb.main(["deploy"])
         self.assertEqual(caught.exception.code, 2)
         document = json.loads(output.getvalue())
-        self.assertEqual(document["error"]["kind"], "argument_error")
+        self.assertEqual(document["error"]["kind"], "usage")
+        self.assertEqual(document["error"]["subcommand"], "deploy")
+        self.assertEqual(document["error"]["exitCode"], 2)
         self.assertIn("--root", document["error"]["message"])
+        # Without --json the usage narration still goes to stderr.
+        self.assertIn("usage:", errors.getvalue())
         with contextlib.redirect_stdout(io.StringIO()) as output, \
                 contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as caught:
                 rb.main(["status", "--run-dir", "/tmp/x"])
         self.assertEqual(caught.exception.code, 2)
         document = json.loads(output.getvalue())
-        self.assertEqual(document["error"]["kind"], "argument_error")
-        self.assertEqual(document["error"]["operation"], "status")
+        self.assertEqual(document["error"]["kind"], "usage")
+        self.assertEqual(document["error"]["subcommand"], "status")
+        self.assertEqual(document["error"]["exitCode"], 2)
+
+    def test_machine_mode_usage_errors_keep_stderr_empty(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output, \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            with self.assertRaises(SystemExit) as caught:
+                rb.main(["--json", "deploy"])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertEqual(errors.getvalue(), "")
+        document = json.loads(output.getvalue())
+        self.assertEqual(document["error"]["kind"], "usage")
+        self.assertEqual(document["error"]["subcommand"], "deploy")
+        self.assertEqual(document["error"]["exitCode"], 2)
+        self.assertIn("--root", document["error"]["message"])
+
+    def test_machine_mode_deploy_writes_no_stderr(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output, \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            code = rb.main([
+                "--json",
+                "deploy", "--root", str(self.root),
+                "--overlay", str(self.overlay_path),
+                "--record-dir", str(self.record_dir),
+                "--target-sha", self.target, "--no-fetch",
+                "--service-drain-deadline-s", "5",
+                "--drain-interval-s", "5", "--drain-deadline-s", "10",
+                "--health-timeout-s", "5", "--health-interval-s", "5"],
+                run_factory=lambda args: rb.Run(
+                    args, units=self.units, helper=host, controller=dc,
+                    health=lambda: {"healthy": True, "observations": ["m"]},
+                    drain=lambda: {"drained": True, "blocked": []},
+                    clock=self.clock, sleep=self.sleep))
+        self.assertEqual(code, 0)
+        self.assertEqual(errors.getvalue(), "")
+        self.assertEqual(json.loads(output.getvalue())["outcome"],
+                         "completed")
+        self.assertEqual(self.head(), self.target)
 
     def test_main_maps_rolled_back_to_exit_one(self):
         with contextlib.redirect_stdout(io.StringIO()) as output:

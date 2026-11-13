@@ -461,6 +461,10 @@ The sequence:
    the hold cannot leave the switch with no fallback. A separate advisory
    lock (`state/deploy.lock`, held from before the first measurement) serializes
    whole deploys, including the released health window.
+   Before the hold, a target that changes any rendered `crq-*` unit template
+   is refused with the host untouched: this flow installs and verifies no
+   unit files, and a rollback could not restore the prior definitions. The
+   owner installs and verifies the changed unit definitions first.
 4. **Switch** through the audited helper fence (`prepare-host.switch`:
    root/overlay binding, merged-main ancestry, clean checkout, tick lock,
    atomic config render).
@@ -494,6 +498,10 @@ helper/controller it executed. `deploy.json` carries `original_triggers` as
 well as `final_triggers`, so a recovery record still names the measured
 pre-deploy map; an interrupted run is routed through recovery (rollback or
 restore) before the deployment lock is released.
+
+`--json` is machine mode: narration is suppressed, stderr stays empty, and a
+usage error is one `{"error": {"kind": "usage", "subcommand": "<name>",
+"message": "<text>", "exitCode": 2}}` artifact on stdout.
 
 `status` answers whether the host still matches a run's record:
 

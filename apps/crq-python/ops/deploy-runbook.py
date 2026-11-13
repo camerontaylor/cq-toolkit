@@ -60,9 +60,12 @@ stay with the controller.
 
 Every invocation writes exactly one JSON document to stdout, including
 argument errors and refusals (the machine-mode contract R1/R5 carried before
-this simplification). Narration goes to stderr. Exit codes: 0 completed,
-1 deploy failed but rolled back cleanly, 2 refused with the host unchanged,
-3 recovery required (rollback failed or the drain expired; hold retained).
+this simplification). Narration goes to stderr. Under ``--json`` (machine
+mode) narration is suppressed, stderr stays empty, and a usage error is one
+``{"error": {"kind": "usage", "subcommand": ..., "message": ..., "exitCode":
+2}}`` artifact. Exit codes: 0 completed, 1 deploy failed but rolled back
+cleanly, 2 refused with the host unchanged, 3 recovery required (rollback
+failed or the drain expired; hold retained).
 
 Python stdlib only.
 """
@@ -436,7 +439,13 @@ class Run:
                  health=None, drain=None, clock=time.monotonic,
                  sleep=time.sleep):
         self.args = args
-        self.root = Path(args.root)
+        # Resolve once, before anything constructs Effects. The controller's
+        # heartbeat check compares ``str(effects.root / "apps/crq-python")``
+        # literally against the root crq.py writes via
+        # ``Path(__file__).resolve().parent``; root_check resolves both sides,
+        # so an unresolved relative or symlinked --root would pass preflight
+        # and then deterministically fail health after the switch.
+        self.root = Path(args.root).resolve()
         self.units = units
         self.helper = helper
         self.controller = controller
@@ -462,6 +471,11 @@ class Run:
     # -- records -------------------------------------------------------
     def git(self, *args, **kwargs):
         return git(self.root, *args, **kwargs)
+
+    def narrate(self, message):
+        """Narration is stderr-only, and silent in machine mode (--json)."""
+        if not getattr(self.args, "json", False):
+            narrate(message)
 
     def phase(self, name, **extra):
         durable_write(Path(self.run_dir) / "phase.json",
@@ -627,7 +641,7 @@ class Run:
         self.hold = Hold(self.root)
         self.hold.acquire()
         self.phase("held")
-        narrate("hold acquired; stopping triggers")
+        self.narrate("hold acquired; stopping triggers")
         self.stop_triggers()
         self.phase("stopped", triggers=self.original)
         self.drain_services()
@@ -635,7 +649,7 @@ class Run:
         self.recheck_baseline()
         self.phase("drained")
 
-        narrate("switching to " + self.target)
+        self.narrate("switching to " + self.target)
         self.switch_attempted = True
         self.helper.switch(self.root, self.overlay, self.overlay_raw,
                            self.target, self.args.tag)
@@ -874,8 +888,8 @@ class Run:
         }
         self.write_record("completed", released=True)
         self.phase("released", triggers=self.final_triggers)
-        narrate("deployed " + self.target[:12] + " (was "
-                + self.prior_sha[:12] + "); health ok")
+        self.narrate("deployed " + self.target[:12] + " (was "
+                     + self.prior_sha[:12] + "); health ok")
 
     def rollback_to_prior(self, reason):
         """Automatic rollback after a failed switch, verification or health
@@ -910,7 +924,7 @@ class Run:
                 "automatic rollback is disabled by the queue's current shape: "
                 + compatibility_reason(compatibility) + "; the hold is retained"
                 + " (after: " + reason[:200] + ")")
-        narrate("rolling back to " + self.prior_sha[:12] + ": " + reason)
+        self.narrate("rolling back to " + self.prior_sha[:12] + ": " + reason)
         self.units.stop(sorted(self.triggers))
         observed = {unit: self.units.state(unit) for unit in self.triggers}
         require(all(state in DEAD_STATES for state in observed.values()),
@@ -970,7 +984,8 @@ class Run:
             self.released = True
         self.write_record("rolled_back", released=True, reason=reason[:400])
         self.phase("rolled_back", triggers=self.final_triggers)
-        narrate("rolled back to " + self.prior_sha[:12] + "; triggers restored")
+        self.narrate("rolled back to " + self.prior_sha[:12]
+                     + "; triggers restored")
 
     def document(self, outcome, **extra):
         return {
@@ -1002,7 +1017,7 @@ class Run:
             try:
                 self.units.stop(sorted(self.triggers))
             except Exception as exc:  # the hold is what matters
-                narrate("fail-stop could not stop triggers: " + repr(exc))
+                self.narrate("fail-stop could not stop triggers: " + repr(exc))
         record = self.document("recovery_required", reason=str(reason)[:400])
         record["written_at"] = now_iso()
         if self.run_dir is not None:
@@ -1039,6 +1054,12 @@ class Run:
                     == self.preserved,
                     "preserved queue identity no longer matches the "
                     "pre-switch measurement")
+            # The checkout never moved, but the runtime entry these triggers
+            # would execute could have been deleted or replaced during the
+            # drain. The config and queue checks cannot see that, and
+            # rollback_to_prior revalidates before its restart: this path
+            # must match or a restore resumes admission on unverified bytes.
+            self.runtime_pointer_check()
             active = sorted(unit for unit, state in (self.original or {}).items()
                             if state == "active")
             if self.original:
@@ -1207,25 +1228,40 @@ def cmd_status(args, units=None):
 # ------------------------------------------------------------------------ CLI
 
 
-class JsonArgumentParser(argparse.ArgumentParser):
-    """Every argument error is one JSON document on stdout (exit 2)."""
+def error_artifact(kind, subcommand, message, exit_code):
+    """The one JSON artifact for an error with no result (doctrine I1)."""
+    return {"error": {"kind": kind, "subcommand": subcommand,
+                      "message": message, "exitCode": exit_code}}
 
-    json_mode = True
-    operation = None
+
+class JsonArgumentParser(argparse.ArgumentParser):
+    """argparse parser that answers argument failures with the I1 artifact.
+
+    Machine mode (--json) is shared with the subparsers argparse derives from
+    this class, so every usage error -- on this parser or a subparser --
+    writes one error object to stdout with exit code 2 and keeps stderr
+    empty. Without --json, the same artifact still goes to stdout (I1:
+    stdout is always one JSON artifact) and the usage narration goes to
+    stderr.
+    """
+
+    json_mode = False
+    subcommand = None
 
     def error(self, message):
-        print(json.dumps({"error": {"kind": "argument_error",
-                                    "operation": self.operation,
-                                    "message": str(message)[:400]}},
+        print(json.dumps(error_artifact("usage", self.subcommand,
+                                        str(message)[:400], 2),
                          indent=2, sort_keys=True))
-        print("usage: " + str(message), file=sys.stderr)
+        if not self.json_mode:
+            print("usage: " + str(message), file=sys.stderr)
         raise SystemExit(2)
 
 
 def build_parser():
     parser = JsonArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true",
-                        help="accepted for interface parity; output is JSON")
+                        help="machine mode: narration stays off stderr; every "
+                             "error is one JSON artifact on stdout")
     sub = parser.add_subparsers(dest="operation", required=True)
 
     deploy = sub.add_parser("deploy", help="merged main SHA in, health-checked")
@@ -1253,17 +1289,21 @@ def build_parser():
                             help="does the host still match a run's record?")
     status.add_argument("--run-dir", required=True, type=Path)
     status.add_argument("--root", required=True, type=Path)
-    deploy.operation = "deploy"
-    status.operation = "status"
     return parser
 
 
 def main(argv=None, run_factory=Run) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
     parser = build_parser()
-    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    parser.operation = args.operation
+    # Machine mode is needed before the parse, because a usage error is the
+    # one failure that never produces a namespace to read --json from.
+    parser.json_mode = "--json" in argv
     for name, child in parser._subparsers._group_actions[0].choices.items():
-        child.operation = "status" if name == "status" else "deploy"
+        child.json_mode = parser.json_mode
+        child.subcommand = name
+    args = parser.parse_args(argv)
+    parser.subcommand = args.operation
     try:
         if args.operation == "status":
             return cmd_status(args)
