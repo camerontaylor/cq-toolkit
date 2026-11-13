@@ -994,7 +994,7 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
         before_runs = (before_snapshot or {}).get("runs")
         after_runs = (after_snapshot or {}).get("runs")
         if isinstance(before_runs, list) and isinstance(after_runs, list):
-            observed = len(after_runs) >= len(before_runs)
+            observed = after_runs[:len(before_runs)] == before_runs
             new_runs = after_runs[len(before_runs):] if observed else after_runs
             checks["run_log_observed_after_" + label] = observed
             checks["no_new_service_after_" + label] = not any(
