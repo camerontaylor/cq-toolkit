@@ -1161,24 +1161,31 @@ class AncestryRehearsalTests(RunbookFixture):
         phase = json.loads((self.output_dir / "phase.json").read_text())
         self.assertEqual(phase["phase"], "recovery_required")
 
-    def test_must_not_mode_passes_when_main_moved_past_target(self):
+    def test_must_not_mode_refuses_before_the_hold(self):
+        # The helper's verify_target requires the target on origin/main, so
+        # a must_not manifest cannot complete a real deploy: refuse before
+        # the hold; the pre-hold restore puts the split triggers back.
+        document = self.manifest()
+        document["ancestry"]["target_on_origin_main"] = "must_not"
+        args = self.args(manifest_path=self.write_manifest(document))
+        run = self.run_runbook(args, self.units)
+        with self.assertRaisesRegex(rb.Refused, "must_not is not deployable"):
+            run.run()
+        for unit in self.units.states:
+            self.assertEqual(self.units.state(unit), "active",
+                             "split must be restored after the refusal")
+        self.assertFalse(self.marker_path.exists())
+
+    def test_must_not_mode_refuses_even_when_main_moved_past_target(self):
         self.move_main_under_target()
         document = self.manifest()
         document["ancestry"]["target_on_origin_main"] = "must_not"
         args = self.args(manifest_path=self.write_manifest(document))
         run = self.run_runbook(args, self.units)
-        code = run.run()
-        self.assertEqual(code, 0)
-        phase = json.loads((self.output_dir / "phase.json").read_text())
-        self.assertEqual(phase["phase"], "completed")
-
-    def test_must_not_mode_refuses_with_target_on_main(self):
-        document = self.manifest()
-        document["ancestry"]["target_on_origin_main"] = "must_not"
-        args = self.args(manifest_path=self.write_manifest(document))
-        run = self.run_runbook(args, self.units)
-        with self.assertRaisesRegex(rb.Refused, "must not be on origin/main"):
+        with self.assertRaisesRegex(rb.Refused, "must_not is not deployable"):
             run.run()
+        for unit in self.units.states:
+            self.assertEqual(self.units.state(unit), "active")
 
     def test_rehearsal_pins_the_script_revision(self):
         # The rehearsal pins the same digest the operator names: a different
@@ -1252,6 +1259,23 @@ class CLITests(RunbookFixture):
         rb.Run.run = patched_run
         self.addCleanup(setattr, rb.Run, "run", original)
         return factory
+
+    def test_hostname_argument_is_enforced(self):
+        # The operator's --hostname restricts the deploy to one host: the
+        # wrong host refuses before any unit mutation, the right host runs.
+        args = self.args(hostname="some-other-host")
+        run = self.run_runbook(args, self.units)
+        with self.assertRaisesRegex(rb.Refused, "wrong host"):
+            run.run()
+        self.assertEqual(self.units.stopped, [])
+        self.assertFalse(self.marker_path.exists())
+        run2 = self.run_runbook(self.args(hostname=self.observed_hostname()),
+                                self.units)
+        self.assertEqual(run2.run(), 0)
+
+    @staticmethod
+    def observed_hostname():
+        return subprocess.check_output(["hostname"], text=True).strip()
 
     def test_deploy_invocation_reaches_execute_with_default_flag(self):
         # Finding 1: a normal deploy invocation must not raise AttributeError
@@ -1648,11 +1672,90 @@ def io_string():
     return io.StringIO()
 
 
+class CqBinPointerTests(RunbookFixture):
+    """The pointer policy compares RENDERED cq_bin values: an ordinary host
+    overlay resolving @HOST_CQ_BIN@ identically in prior and target is not
+    a move and must not require authorization."""
+
+    def setUp(self):
+        super().setUp()
+        self.build_repo()
+        self.host_mod = _load(
+            "cqbin_host_" + str(id(self)),
+            self.candidate / "apps/crq-python/ops/prepare-host.py")
+
+    def pointer_run(self, pointer_may_move):
+        overlay, _raw = self.host_mod.load_overlay(self.overlay_path)
+        document = self.manifest()
+        document["config"]["cq_bin_pointer_may_move"] = pointer_may_move
+        args = self.args(manifest_path=self.write_manifest(document))
+        units = FakeUnits(self.marker_path)
+        run = self.run_runbook(args, units)
+        run.triggers = list(TRIGGERS)
+        run.original = {unit: "active" for unit in run.triggers}
+        run.split_map = dict(run.original)
+        run.output_dir.mkdir(parents=True, exist_ok=True)
+        return run
+
+    def test_placeholder_candidate_with_unchanged_render_passes(self):
+        # The candidate config carries the committed placeholder form; the
+        # rendered prior and target pointers are equal, so no authorization
+        # is required and the policy check passes.
+        run = self.pointer_run(False)
+        run.assert_cq_bin_policy(self.candidate)
+
+    def test_rendered_move_requires_authorization(self):
+        # A real rendered pointer move (the live pointer resolved to a
+        # different host path than the approved target render) must refuse
+        # at release when unauthorized and pass when authorized: the check
+        # compares the RELEASED live pointer against the approved target
+        # pointer, not committed text.
+        moved_render = lambda run: mock.patch.object(
+            run.host, "live_render",
+            side_effect=lambda root, ov, raw: (
+                Path(root) / "apps/crq-python/config.json").write_bytes(
+                    self.host_mod.encode(self._moved_config(root))))
+        run = self.pointer_run(False)
+        with moved_render(run):
+            with self.assertRaisesRegex(
+                    rb.Refused,
+                    "pointer moved the cq_bin without authorization"):
+                run.point()
+        run2 = self.pointer_run(True)
+        with moved_render(run2):
+            run2.point()
+
+    def _moved_config(self, root):
+        """The approved target render, with the pointer resolved elsewhere:
+        what a stray writer would leave in the live bytes."""
+        overlay, _raw = self.host_mod.load_overlay(self.overlay_path)
+        config = json.loads(self.host_mod.render(
+            Path(root), overlay,
+            self.manifest()["identity"]["target_sha"]))
+        config["repair"]["cq_bin"] = "/opt/cq/bin.other"
+        return config
+
+    def test_point_releases_only_the_approved_pointer(self):
+        # After live_render, the released live pointer must equal the
+        # rendered target's approved pointer; a divergence refuses.
+        run = self.pointer_run(False)
+        run.point()
+        overlay, _raw = self.host_mod.load_overlay(self.overlay_path)
+        approved = json.loads(self.host_mod.render(
+            Path(run.args.root), overlay,
+            run.manifest["identity"]["target_sha"]))
+        live = json.loads(
+            (Path(run.args.root) / "apps/crq-python/config.json").read_text())
+        self.assertEqual(live.get("repair", {}).get("cq_bin"),
+                         approved.get("repair", {}).get("cq_bin"))
+
+
 def durable_write_marker_record(run):
     """The marker.path record the run writes at start (Run._run_body does
-    this; direct-step tests call this helper instead)."""
+    this; direct-step tests call this helper instead). Absolute, matching
+    the run: the status gate reads it from any working directory."""
     rb.durable_write(Path(run.output_dir) / "marker.path",
-                     {"path": str(run.marker)})
+                     {"path": str(Path(run.marker).resolve())})
 
 
 if __name__ == "__main__":

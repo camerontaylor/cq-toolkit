@@ -484,7 +484,7 @@ class Run:
 
     def _run_body(self):
         durable_write(self.output_dir / "marker.path",
-                      {"path": str(self.marker)})
+                      {"path": str(self.marker.resolve())})
         inventory = self.observe_inventory()
         self.assert_inventory(inventory)
         self.split_long_triggers()
@@ -531,7 +531,7 @@ class Run:
                 "unexpected service inventory")
         self.triggers = inventory["triggers"]
         self.services = inventory["services"]
-        hostname = self.manifest.get("hostname")
+        hostname = self.args.hostname or self.manifest.get("hostname")
         if hostname:
             observed = subprocess.check_output(["hostname"], text=True).strip()
             require(observed == hostname, "wrong host: " + observed)
@@ -679,12 +679,28 @@ class Run:
         if mode == "must":
             require(on_main, "target must be on origin/main")
         elif mode == "must_not":
-            require(not on_main, "target must not be on origin/main")
+            # The deployment contract cannot serve an off-main target: the
+            # helper's verify_target (invoked by the controller's precheck)
+            # unconditionally requires the target inside origin/main
+            # history. Accepting the mode here would acquire the hold and
+            # stop every trigger before the switch inevitably fails. Refuse
+            # before any unit mutation until that contract changes.
+            require(False,
+                    "target_on_origin_main must_not is not deployable: the "
+                    "helper's verify_target requires the target on "
+                    "origin/main; refusing before the hold")
 
     def assert_cq_bin_policy(self, candidate):
         config = self.manifest["config"]
-        left = json.loads((Path(self.args.root) / "apps/crq-python/config.json").read_text())
-        right = json.loads((candidate / "apps/crq-python/config.json").read_text())
+        overlay, _raw = self.host.load_overlay(self.args.overlay)
+        # Compare RENDERED pointers, not committed text: the candidate bytes
+        # normally carry the @HOST_CQ_BIN@ placeholder, which the overlay
+        # resolves on the host. Comparing placeholder against live would
+        # refuse every ordinary overlay without an actual pointer move.
+        left = json.loads(self.host.render(Path(self.args.root), overlay,
+                                           self.manifest["identity"]["prior_sha"]))
+        right = json.loads(self.host.render(Path(self.args.root), overlay,
+                                            self.manifest["identity"]["target_sha"]))
         moved = (left.get("repair", {}).get("cq_bin")
                  != right.get("repair", {}).get("cq_bin"))
         require(not moved or config["cq_bin_pointer_may_move"],
@@ -770,7 +786,12 @@ class Run:
         observed = {unit: self.units.state(unit) for unit in self.triggers}
         require(all(state in DEAD_STATES for state in observed.values()),
                 "hold lost: triggers not inactive: " + repr(observed))
-        self.host.inactive(Path(self.args.root))
+        if not getattr(self.args, "rehearsal", False):
+            # Production only: the helper's real-unit inventory check talks
+            # to the actual systemd user manager. A rehearsal binds this
+            # verification to the injected provider above and must finish
+            # host-free even where no user bus exists.
+            self.host.inactive(Path(self.args.root))
 
     # -- step 6: switch -----------------------------------------------------
     def switch(self):
@@ -844,13 +865,16 @@ class Run:
         config = self.manifest["config"]
         overlay, raw = self.host.load_overlay(self.args.overlay)
         self.host.live_render(Path(self.args.root), overlay, raw)
-        candidate_config = json.loads(
-            (Path(self.args.candidate_root)
-             / "apps/crq-python/config.json").read_text())
+        # The released pointer must equal the approved target-state pointer:
+        # compare against the rendered target from the pinned manifest, so
+        # the authorization decision matches what the render actually wrote.
         live = json.loads(
             (Path(self.args.root) / "apps/crq-python/config.json").read_text())
+        approved = json.loads(self.host.render(
+            Path(self.args.root), overlay,
+            self.manifest["identity"]["target_sha"]))
         moved = (live.get("repair", {}).get("cq_bin")
-                 != candidate_config.get("repair", {}).get("cq_bin"))
+                 != approved.get("repair", {}).get("cq_bin"))
         require(not moved or config["cq_bin_pointer_may_move"],
                 "pointer moved the cq_bin without authorization")
 
