@@ -178,7 +178,8 @@ def record_import(q, req, req_principal, runner):
         # outbox the backfill publisher drains, with artifacts in the configured
         # durable store. Rehashing with the durable reference changes the record
         # id, so the response carries the retained (published) id, not the
-        # import preview.
+        # import preview. The spooled marker moves to the code paths that
+        # actually spool: oversized quarantine reuse answers disabled.
         config = backfill_runtime.settings(runner.STATE)
         if config:
             # services() builds the publisher transport too; the record path
@@ -188,7 +189,6 @@ def record_import(q, req, req_principal, runner):
             # (no Git, no SSH from the import path).
             store = review_ledger.ArtifactStore(config["durable_artifact_root"])
             box = review_ledger.Outbox(runner.STATE / "backfill/publication", store)
-            result["publication"] = "spooled"
         else:
             store = review_ledger.ArtifactStore(runner.STATE / "record-artifacts")
             box = review_ledger.Outbox(runner.STATE / "record-outbox", store)
@@ -204,12 +204,13 @@ def record_import(q, req, req_principal, runner):
                 # outbox for every queued event; quarantine the oversized
                 # import at the door instead of spooling a poison event.
                 return _oversize_quarantine(runner, submitted, retained_ref,
-                                            box, result, config)
+                                            retained, box, result, config)
             if value["event_type"] == "review":
                 detail = value["id"]
                 retained.append(value)
             box.spool(value)
         if config:
+            result["publication"] = "spooled"
             # The durable background request makes the next publisher pass
             # drain the spooled record; safe under tick.lock, no Git/network.
             backfill_runtime.publish(runner, q)
@@ -222,18 +223,29 @@ def record_import(q, req, req_principal, runner):
     return result
 
 
-def _oversize_quarantine(runner, submitted, retained_ref, box, result, config):
+def _oversize_quarantine(runner, submitted, retained_ref, retained, box, result, config):
     """Quarantine an import whose serialized event exceeds the publisher bound.
 
     The report bytes stay retained in the durable store (the disposition
     references them, so the outbox can verify) and the oversized review event
-    itself never enters the shared outbox to block other queued evidence. The
-    response answers quarantined honestly.
+    itself never enters the shared outbox to block other queued evidence. A
+    repeated identical oversize import reuses the retained disposition (same
+    source key, same id): minting a second event would collide in
+    validate_sequence and block all publication. The response answers
+    quarantined honestly, spooled only when a new event actually spooled.
     """
     import review_ledger
     import review_record
     reason = "serialized event exceeds the 1 MiB publisher bound"
     digest_hex = hashlib.sha256(submitted["report_bytes"]).hexdigest()
+    quarantine_key = review_record.quarantine_source_key(reason=reason,
+                                                         digest_hex=digest_hex)
+    previous = next((v for v in retained if v.get("event_type") == "import-result"
+                     and v.get("source_key") == quarantine_key), None)
+    if previous is not None:
+        result["action"] = "quarantined"
+        result["reason"] = reason
+        return result
     quarantine = review_record._quarantine_event(
         reason=reason, digest_hex=digest_hex, submitted=submitted, at=runner.iso())
     if quarantine is None:
@@ -403,8 +415,11 @@ def handle(raw, runner, *, principal, policy):
         # authorization, so a configured clone for another repo cannot
         # publish evidence the policy never allowed.
         if req.get("repo") is not None:
+            # Compare like submit: identity equality (owner/name casing), not
+            # exact string, so an alternate spelling of an allowed repo is
+            # accepted instead of falling through to a misleading quarantine.
             allowed = [policy["repo"], *policy.get("repos", [])]
-            if req["repo"] not in allowed:
+            if not any(repo_registry.same_repo(req["repo"], a) for a in allowed):
                 return review_receipt.canonical(dict(v=1, op="record", action="refused",
                                                      record_digest=None, duplicate_of=None,
                                                      supersedes=req.get("supersedes"),

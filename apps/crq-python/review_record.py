@@ -112,9 +112,18 @@ def normalize_record(submitted, at):
     for row in claimed_scope or ():
         if not isinstance(row, dict) or not isinstance(row.get("path"), str):
             raise RecordRefused("claimed scope rows need a path")
-    expanded = sum(sum(end - start + 1 for start, end in row.get("intervals") or ()
-                       if type(start) is int and type(end) is int and end >= start)
-                   for row in claimed_scope or ())
+    expanded = 0
+    for row in claimed_scope or ():
+        for pair in row.get("intervals") or ():
+            # Non-pair shapes are refused, not crashed on: the wire schema
+            # already rejects them, but normalizing stays type-safe anyway
+            # and the arithmetic never materializes a line.
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise RecordRefused("claimed scope interval is not a start/end pair")
+            start, end = pair
+            if type(start) is not int or type(end) is not int or start > end:
+                raise RecordRefused("claimed scope interval is not a start/end pair")
+            expanded += end - start + 1
     if expanded > MAX_EXPANDED_SCOPE_LINES:
         # ledger validation materializes every line into sets; bound the
         # arithmetic here so a tiny request cannot exhaust memory under the
@@ -186,6 +195,11 @@ def normalize_record(submitted, at):
     return value, digest_hex
 
 
+def quarantine_source_key(*, reason, digest_hex):
+    """The ledger source_key for a quarantine disposition (digest, reason)."""
+    return "record:" + digest_hex[:16] + ":quarantine:" + ledger.digest(reason)[:16]
+
+
 def _quarantine_event(*, reason, digest_hex, submitted, at):
     """One unverified import-result for a refused import; nothing credited.
 
@@ -207,10 +221,9 @@ def _quarantine_event(*, reason, digest_hex, submitted, at):
                "reason": reason, "review_id": None, "duplicate_id": None,
                "artifacts": [_artifact(raw if isinstance(raw, bytes) else b"", digest_hex)]}
     try:
-        return ledger.event(
-            "import-result",
-            "record:" + digest_hex[:16] + ":quarantine:" + ledger.digest(reason)[:16],
-            at, payload)
+        return ledger.event("import-result", quarantine_source_key(reason=reason,
+                                                                  digest_hex=digest_hex),
+                            at, payload)
     except ledger.IntegrityError:
         return None
 
@@ -235,7 +248,7 @@ def import_record(submitted, at, existing):
         reason = str(exc)
         digest_hex = hashlib.sha256(
             submitted.get("report_bytes") if isinstance(submitted.get("report_bytes"), bytes) else b"").hexdigest()
-        quarantine_key = "record:" + digest_hex[:16] + ":quarantine:" + ledger.digest(reason)[:16]
+        quarantine_key = quarantine_source_key(reason=reason, digest_hex=digest_hex)
         previous = next((v for v in existing
                          if v.get("event_type") == "import-result"
                          and v.get("source_key") == quarantine_key), None)

@@ -285,7 +285,7 @@ class ImportIdempotencyTests(unittest.TestCase):
             {"path": "a.ts", "blob": "c" * 64, "intervals": [[2, 1]]}])
         events, action = review_record.import_record(reversed_rows, AT, [])
         self.assertTrue(action.startswith("quarantined:"))
-        self.assertIn("intervals", action)
+        self.assertIn("interval", action)
         ledger.validate_sequence(events)
         duplicates = submission(claimed_scope=[
             {"path": "a.ts", "blob": "c" * 64, "intervals": [[1, 2]]},
@@ -376,6 +376,12 @@ class CollectorSeamTests(unittest.TestCase):
         self.assertEqual(disposition["payload"]["result"], "unverified")
         record = next(v for v in events if v["event_type"] == "review")
         ledger.validate(record)
+        # The collector's durable store reference replaces the placeholder:
+        # exactly one report artifact, verifiable against the store (spool
+        # verifies every artifact, so a placeholder here would abort imports).
+        self.assertEqual(len(record["payload"]["artifacts"]), 1)
+        self.assertEqual(record["payload"]["artifacts"][0]["kind"], "report")
+        self.store.verify(record["payload"]["artifacts"][0])
         self.assertFalse(ledger.creditable(record))
         self.assertEqual(record["payload"]["source"]["type"], "manual")
         self.assertEqual(record["payload"]["provenance"]["claimed_reviewer"], "helper-agent")
@@ -606,6 +612,33 @@ class PublicationWireTests(RecordTransportBase, unittest.TestCase):
         self.assertEqual(len(quarantines), 1)
         ledger.validate_sequence(quarantines)
         self.assertEqual(first["reason"], second["reason"])
+
+    def test_repeated_oversize_import_reuses_the_retained_disposition(self):
+        # A second identical oversize import must reuse the retained quarantine
+        # disposition: minting a second event with the same source key and a
+        # different id would make validate_sequence reject the sequence with a
+        # source evidence conflict and block all publication.
+        huge_interval_row = {"path": "a.ts", "blob": "c" * 64,
+                             "intervals": [[i, i] for i in range(1, 40000)]}
+        req = dict(v=1, op="record", producer="manual", source_id="huge-scope-2",
+                   claimed_scope=[huge_interval_row],
+                   report=dict(encoding="utf8", data="scope dump"))
+        first = self.call(req)
+        self.assertEqual(first["action"], "quarantined")
+        self.assertEqual(first["publication"], "spooled")
+        self.runner.iso = lambda: "2026-11-13T02:00:00Z"  # a later import
+        second = self.call(req)
+        operation.validate("response", second)
+        self.assertEqual(second["action"], "quarantined")
+        self.assertEqual(second["reason"], first["reason"])
+        # Publication state stays honest: no new event spooled, so the second
+        # answer must not claim the disposition was freshly spooled.
+        self.assertNotEqual(second.get("publication"), "spooled")
+        pending = self.state / "backfill" / "publication" / "pending"
+        events = [json.loads(p.read_text()) for p in sorted(pending.glob("*.json"))]
+        quarantines = [v for v in events if v["event_type"] == "import-result"]
+        self.assertEqual(len(quarantines), 1)
+        ledger.validate_sequence(events)
 
     def test_oversized_event_quarantines_instead_of_poisoning_the_outbox(self):
         # A report inside the transport bounds whose claimed scope row pushes
