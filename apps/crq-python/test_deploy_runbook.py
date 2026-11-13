@@ -366,6 +366,11 @@ class RunbookFixture(unittest.TestCase):
         controller_mod = _load(
             "runbook_controller_" + str(id(args)),
             self.candidate / "apps/crq-python/ops/deploy-controller.py")
+        # Keep production-mode tests inside the injected unit provider.
+        provider = units or self.units
+        host_mod.inactive = mock.Mock(side_effect=lambda root: rb.require(
+            all(provider.state(unit) in rb.DEAD_STATES for unit in TRIGGERS),
+            "fake host inventory has active triggers"))
         document = json.loads(Path(args.manifest).read_text())
         effects = controller_mod.Effects(Path(args.root),
                                          Path(args.output_dir) / "controller-records")
@@ -1926,6 +1931,17 @@ class CLIStatusGateTests(RunbookFixture):
         self.assertFalse(artifact["released"])
         self.assertIn("trigger inventory", artifact["refusal"])
 
+    def test_list_inventory_refuses_without_host_reads(self):
+        self.write_released()
+        phase = rb.load_json(self.output_dir / "phase.json")
+        phase["triggers"] = list(phase["triggers"])
+        rb.durable_write(self.output_dir / "phase.json", phase)
+        with mock.patch.object(self.units, "state",
+                               side_effect=AssertionError("host read")):
+            code, artifact = self.run_status(units=self.units)
+        self.assertEqual(code, 1)
+        self.assertIn("trigger inventory", artifact["refusal"])
+
     def test_inventory_mismatching_final_triggers_refuses(self):
         # An inventory that does not match final_triggers is an unverified
         # expectation: refuse instead of comparing the wrong unit set.
@@ -2274,6 +2290,25 @@ class ReviewRoundTests(RunbookFixture):
         if args.rehearsal:
             argv += ["--rehearsal"]
         return argv
+
+    def test_queue_changed_during_drain_refuses_before_switch(self):
+        run = self.run_runbook(self.args(), self.units)
+        prior = subprocess.check_output(
+            ["git", "-C", str(self.args_root(run.args)), "rev-parse", "HEAD"], text=True)
+
+        def finish_drain():
+            (self.runner / "state" / "queue.json").write_text(
+                json.dumps({"author_requests": {}, "items": []}))
+
+        with mock.patch.object(run, "drain_controller", side_effect=finish_drain), \
+                mock.patch.object(run, "switch") as switch:
+            with self.assertRaisesRegex(rb.Refused, "author_requests"):
+                run.run()
+        switch.assert_not_called()
+        self.assertEqual(subprocess.check_output(
+            ["git", "-C", str(self.args_root(run.args)), "rev-parse", "HEAD"], text=True), prior)
+        self.assertTrue(self.marker_path.exists())
+        self.assertEqual(self.units.started, [])
 
     def test_host_queue_that_denies_rollback_refuses_before_the_switch(self):
         # D7 from host truth: the permission the journal must carry is only

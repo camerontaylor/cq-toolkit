@@ -653,6 +653,7 @@ class Run:
         self.drain_services()
         self.drain_controller()
         self.assert_hold()
+        self.assert_queue_rollback_compatible()
         self.phase("controller_pending", triggers=self.split_map)
         self.journal = self.switch()
         self.assert_hold()
@@ -792,6 +793,9 @@ class Run:
         # The journal assertion then demands the permission True the
         # controller records, which is only sound because a host where it
         # would be denied never reaches the switch.
+        self.assert_queue_rollback_compatible()
+
+    def assert_queue_rollback_compatible(self):
         compatibility = self.controller.compatibility_record(
             self.effects, self.args.target_sha)
         require(self.controller.rollback_compatible(compatibility),
@@ -1555,7 +1559,8 @@ def cmd_status(args, units=None) -> int:
                             "authorizing released gate refuses it")
         elif not isinstance(final_triggers, dict) or not final_triggers:
             live_refusal = "release.json lacks a nonempty final_triggers map"
-        elif not triggers_record or sorted(triggers_record) != sorted(final_triggers):
+        elif not isinstance(triggers_record, dict) or not triggers_record \
+                or sorted(triggers_record) != sorted(final_triggers):
             live_refusal = ("phase.json trigger inventory missing or does "
                             "not match final_triggers; refusing to compare "
                             "live states against an unverified inventory")
