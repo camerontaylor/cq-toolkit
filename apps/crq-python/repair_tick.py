@@ -342,14 +342,23 @@ def record_unpublished_siblings(c, record, handled):
             elif result.get('verdict') in ('FAILED', 'NOT-FIXED', 'STALE'):
                 # Sibling results bypass harvest's validation, so apply the
                 # same identity and binding checks before the verdict becomes
-                # an authoritative outcome write-back; anything else stays on
-                # the idempotent replay path.
+                # an authoritative outcome write-back. A deterministic artifact
+                # defect is terminalized (like harvest's record_terminal_failure)
+                # instead of replayed forever: the failure outcome is recorded,
+                # the attacker-controlled verdict is not, and the tick proceeds.
                 if result.get('job') != other or result.get('item') != job.get('item'):
-                    raise ValueError('repair result identity mismatch')
-                if job.get('source_sha') and any(result.get(k) != job.get(k)
+                    reason = 'invalid repair result: sibling identity mismatch'
+                elif job.get('source_sha') and any(result.get(k) != job.get(k)
                         for k in ('source_sha', 'finding_sha256', 'origin_job')):
-                    raise ValueError('prepared repair result source/evidence binding mismatch')
-                mark_finding_outcome(c, job, result)
+                    reason = 'invalid repair result: sibling source/evidence binding mismatch'
+                else:
+                    reason = None
+                if reason is not None:
+                    mark_finding_outcome(c, job, {'job': other, 'item': job.get('item'),
+                                                  'verdict': 'FAILED', 'reason': reason,
+                                                  'finding': job.get('finding')})
+                else:
+                    mark_finding_outcome(c, job, result)
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
             # One sibling's ledger write must not skip the healthy ones; the
             # terminal replay retries whatever is left.

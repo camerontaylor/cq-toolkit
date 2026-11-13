@@ -2206,19 +2206,24 @@ class UnpublishedSiblingValidationTest(unittest.TestCase):
         self.assertEqual(len(self.mark_calls), 1)
         self.assertEqual(self.mark_calls[0][1]['job'], 'crq-run1-F2')
 
-    def test_mismatched_binding_sibling_is_refused(self):
+    def test_mismatched_binding_sibling_is_terminalized(self):
         result = {'job': 'crq-run1-F2', 'item': 'item1', 'verdict': 'NOT-FIXED',
                   'source_sha': 'd' * 40, 'finding_sha256': 'b' * 64, 'origin_job': None,
                   'unchanged_evidence': {'fake': True}}
-        with self.assertRaisesRegex(ValueError, 'binding mismatch'):
-            self.run_siblings(result)
-        self.assertEqual(self.mark_calls, [])
+        self.run_siblings(result)
+        self.assertEqual(len(self.mark_calls), 1)
+        failure = self.mark_calls[0][2]
+        self.assertEqual(failure['verdict'], 'FAILED')
+        self.assertIn('binding mismatch', failure['reason'])
+        self.assertNotIn('unchanged_evidence', failure)
 
-    def test_identity_mismatch_sibling_is_refused(self):
+    def test_identity_mismatch_sibling_is_terminalized(self):
         result = {'job': 'other-job', 'item': 'item1', 'verdict': 'STALE'}
-        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
-            self.run_siblings(result)
-        self.assertEqual(self.mark_calls, [])
+        self.run_siblings(result)
+        self.assertEqual(len(self.mark_calls), 1)
+        failure = self.mark_calls[0][2]
+        self.assertEqual(failure['verdict'], 'FAILED')
+        self.assertIn('identity mismatch', failure['reason'])
 
 
 if __name__ == '__main__':
