@@ -65,7 +65,6 @@ function fixture(prefix = 'cq-static-conformance-'): string {
     'lint/plugin.mjs',
     'lint/rules/no-cli-beyond-registry-kernel.mjs',
     'lint/rules/no-driver-import-in-harness.mjs',
-    'lint/rules/no-process-env-accessor.mjs',
     'lint/rules/no-process-env.mjs',
     'lint/rules/no-vendor-sdk-in-kernel.mjs',
     'scripts/ratchet-typecheck.mjs',

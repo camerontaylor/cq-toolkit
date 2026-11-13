@@ -4,7 +4,7 @@ import { accessSync, constants, realpathSync } from 'node:fs';
 import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { buildSandboxLauncherEnv } from './index.js';
 import type { SandboxBackend, SandboxNetwork } from './config.js';
-import { processEnv } from '../config/process-env.js';
+import { currentEntryEnv, type EntryEnv } from '../config/run-env.js';
 
 /** A command to execute inside a backend boundary. */
 export interface SandboxLaunchRequest {
@@ -234,8 +234,10 @@ export function runChild(
  * execute the SAME binary even when a request supplies a parentEnv whose PATH
  * differs — a PATH pointing into the workspace could otherwise select a
  * planted launcher while adapter identity still matches the receipt.
- * Resolution deliberately uses the ADAPTER process environment (the env the
- * probe's availability check ran under), never the per-request parent env.
+ * Resolution deliberately uses the ADAPTER environment (the env the
+ * probe's availability check ran under), never the per-request parent env:
+ * that is the run's entry snapshot (`currentEntryEnv()`), so an ambient PATH
+ * change after entry cannot move a launcher mid-run.
  * Relative names (with or without slashes) are anchored to the ADAPTER
  * process cwd; PATH candidates are absolutized the same way, so a relative
  * PATH entry cannot turn into a cwd-dependent launcher.  `undefined` when
@@ -243,10 +245,13 @@ export function runChild(
  * the blocker; launch refuses) instead of falling back to a per-invocation
  * PATH lookup that would undo the binding.
  */
-export function resolveLauncher(name: string): string | undefined {
+export function resolveLauncher(
+  name: string,
+  env: EntryEnv = currentEntryEnv(),
+): string | undefined {
   const absolute = (candidate: string): string => resolve(candidate);
   if (name.includes('/')) return absolute(name);
-  for (const dir of (processEnv()['PATH'] ?? '').split(delimiter)) {
+  for (const dir of (env['PATH'] ?? '').split(delimiter)) {
     if (dir === '') continue;
     const candidate = absolute(join(dir, name));
     try {
@@ -274,7 +279,7 @@ export function launcherEnv(request: {
   parentEnv?: Readonly<Record<string, string | undefined>>;
   envPassthrough?: readonly string[];
 }): Record<string, string> {
-  const scrubbed = buildSandboxLauncherEnv(request.parentEnv ?? processEnv(), {
+  const scrubbed = buildSandboxLauncherEnv(request.parentEnv ?? currentEntryEnv(), {
     envPassthrough: request.envPassthrough ?? [],
   });
   for (const name of Object.keys(scrubbed)) {

@@ -147,7 +147,7 @@ import pLimit from 'p-limit';
 import { randomBytes } from 'node:crypto';
 import { messageOf } from '../shared/messageOf.js';
 import { assertCqEnv } from '../config/entry.js';
-import { currentCqEnv, runWithCqEnv } from '../config/run-env.js';
+import { currentCqEnv, currentEntryEnv, runWithCqEnv } from '../config/run-env.js';
 import { readCqEnv } from '../config/env.js';
 import { GovernanceOptInRefusedError } from './errors.js';
 import {
@@ -513,8 +513,13 @@ export async function runPlan(
     // Resolve the CQ_* snapshot once and carry it to the ops (ADR-0009).
     // A nested runPlan (a composition's plan runs) inherits the enclosing run's snapshot.
     const cqEnv = opts.cqEnv ?? currentCqEnv();
-    report = await runWithCqEnv(cqEnv, () =>
-      runPlanUnderLease(plan, { ...opts, cqEnv }, registry, gov, lease),
+    // The environment record rides the same context: the entry's capture when
+    // supplied, else the enclosing run's snapshot (or one read at run start).
+    const env = opts.env ?? currentEntryEnv();
+    report = await runWithCqEnv(
+      cqEnv,
+      () => runPlanUnderLease(plan, { ...opts, cqEnv }, registry, gov, lease),
+      env,
     );
   } catch (error) {
     // The run's own failure is the root cause: a release that fails too
@@ -542,13 +547,17 @@ async function runPlanUnderLease(
   // point): any invalid value throws here, before a job can dispatch.
   const cqEnv = opts.cqEnv ?? readCqEnv();
   assertCqEnv(cqEnv, 'runPlan');
+  // The run's environment record, already pinned by runPlan's context. Ops
+  // receive it on the importer wiring, so a foreign-name reader never re-reads
+  // the ambient environment mid-run.
+  const env = opts.env ?? currentEntryEnv();
   const unboundRegistry = registry;
   registry = {
     get: (name) => {
       const entry = unboundRegistry.get(name);
       return entry === undefined
         ? undefined
-        : { ...entry, importer: () => entry.importer({ cqEnv }) };
+        : { ...entry, importer: () => entry.importer({ cqEnv, env }) };
     },
   };
   // Caps guard, BEFORE anything else: a cap without a governor is a lie —

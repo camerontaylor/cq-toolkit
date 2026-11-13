@@ -79,7 +79,7 @@
 // provides it, and the same JSON written to $SWEEP_USAGE_OUT (set by the
 // workflow) for the artifact upload. The 2,000,000-token placeholder cap
 // (`SelfhostDefaults.maxTokens`) exists to be tuned from this evidence.
-import { enterWithCqEnv } from '../config/entry.js';
+import { enterWithEntryEnv } from '../config/entry.js';
 import type { CqEnv } from '../config/env.js';
 import { readCqEnv } from '../config/env.js';
 import { stripRefsHeads } from '../config/values.js';
@@ -105,7 +105,6 @@ import {
   resolveSelfhostDriver,
   SelfhostDefaults,
 } from './config.js';
-import { processEnv } from '../config/process-env.js';
 
 /**
  * Cap for a recorded failure message — an error (a GhError with its argv and
@@ -573,9 +572,9 @@ export async function runSelfReviewLoop(
   // does not switch models mid-run.
   /**
    * The entry point's CQ_* snapshot; direct callers without one fall back to
-   * a process-env snapshot read HERE (one explicit entry-level read — the
-   * resolvers themselves never touch ambient). Foreign-env behaviour is
-   * untouched: GH_REPOSITORY/GITHUB_* still read at their own seams.
+   * a snapshot read HERE (one explicit entry-level read — the resolvers
+   * themselves never touch ambient). Foreign names (GH_REPOSITORY,
+   * GITHUB_STEP_SUMMARY, the driver key) come from `main`'s entry record.
    */
   const driver = resolveSelfhostDriver(stamp, cfg.cqEnv ?? readCqEnv());
   // FIRST-RUN JOURNAL ROOT (CodeRabbit round 2, KyA): on a first run / cache
@@ -922,13 +921,17 @@ export async function main(
   // PRINT_DRIVER_KEY_ENV_FLAG). An unknown provider prints an empty line —
   // the caller's emptiness test then refuses (fail closed), never guesses.
   const argv = process.argv.slice(2);
-  // The CQ_* environment is read once for this process; an invalid value
-  // exits 2 before anything runs, warnings print once on stderr.
-  const cqEnv = enterWithCqEnv();
-  if (cqEnv === undefined) {
+  // The environment is read once for this process; an invalid value exits 2
+  // before anything runs, warnings print once on stderr. Foreign names this
+  // entry needs (the repository, the driver key, the summary/usage sinks) come
+  // from the same record, never a later ambient read.
+  const entry = enterWithEntryEnv();
+  if (entry === undefined) {
     process.exitCode = 2;
     return;
   }
+  const cqEnv = entry.cqEnv;
+  const env = entry.env;
   if (argv.length === 1 && argv[0] === PRINT_DRIVER_KEY_ENV_FLAG) {
     process.stdout.write(
       `${driverKeyEnv(resolveSelfhostDriver(runStartInstant(deps, cqEnv), cqEnv)) ?? ''}\n`,
@@ -939,7 +942,7 @@ export async function main(
   let runError: string | undefined;
   try {
     const parsed = parseSelfhostArgs(process.argv.slice(2));
-    const repoSpec = parsed.repo ?? processEnv()['GH_REPOSITORY'] ?? '';
+    const repoSpec = parsed.repo ?? env['GH_REPOSITORY'] ?? '';
     const parts = repoSpec.split('/');
     const owner = parts[0];
     const repo = parts[1];
@@ -975,7 +978,7 @@ export async function main(
     if (!parsed.dryRun) {
       const driver = resolveSelfhostDriver(startedAtMs, cqEnv);
       const required = driverRequiredEnv(driver);
-      const missing = required?.filter((name) => (processEnv()[name] ?? '').trim() === '');
+      const missing = required?.filter((name) => (env[name] ?? '').trim() === '');
       if (missing === undefined || missing.length > 0) {
         throw new Error(
           `selfhost-review-loop: the selected driver ${driver.provider}/${driver.model} requires ${missing?.join(', ') ?? 'a known provider key'} in the environment; refusing to start`,
@@ -1056,7 +1059,7 @@ export async function main(
     // asynchronous 'error' event to kill the process after finished work.
     // A failed diagnostic (step summary, per-PR failure echo) must not
     // record a whole-run error against that finished work.
-    appendStepSummaryTable(processEnv()['GITHUB_STEP_SUMMARY'], summary.usage);
+    appendStepSummaryTable(env['GITHUB_STEP_SUMMARY'], summary.usage);
     // Prominent, not buried: every failure is echoed as its own stderr line —
     // a human scanning the workflow log must not parse JSON to find them.
     for (const failure of summary.failures) {
@@ -1066,7 +1069,7 @@ export async function main(
     runError = oneLine(error instanceof Error ? error.message : String(error));
     throw error;
   } finally {
-    writeSweepUsageFile(processEnv()['SWEEP_USAGE_OUT'], usage, runError);
+    writeSweepUsageFile(env['SWEEP_USAGE_OUT'], usage, runError);
   }
 }
 

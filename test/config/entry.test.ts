@@ -1,7 +1,13 @@
 // C3a: entry helpers and the readers that now take a CqEnv snapshot.
 import { trustedOptIn } from '../../src/config/optin.js';
 import { describe, expect, test } from 'vitest';
-import { assertCqEnv, checkEntryEnv, CqEnvError, enterWithCqEnv } from '../../src/config/entry.js';
+import {
+  assertCqEnv,
+  checkEntryEnv,
+  CqEnvError,
+  enterWithCqEnv,
+  enterWithEntryEnv,
+} from '../../src/config/entry.js';
 import { readCqEnv } from '../../src/config/env.js';
 import { SANDBOX_POLICY_ENV_NAMES, resolveSandboxConfig } from '../../src/sandbox/config.js';
 import { harnessRunGate } from '../../src/sandbox/index.js';
@@ -20,6 +26,31 @@ describe('entry helpers', () => {
     const lines: string[] = [];
     const cqEnv = enterWithCqEnv((text) => lines.push(text), { CQ_SANBOX: 'off' });
     expect(cqEnv).toBeDefined();
+    expect(lines).toHaveLength(1);
+  });
+
+  test('checkEntryEnv returns the record it snapshotted, foreign names included', () => {
+    const env = { CQ_SANDBOX: 'off', GH_REPOSITORY: 'o/r' };
+    const check = checkEntryEnv(env);
+    expect(check.env).toBe(env);
+    expect(check.env['GH_REPOSITORY']).toBe('o/r');
+  });
+
+  test('enterWithEntryEnv returns the snapshot AND the entry record', () => {
+    const lines: string[] = [];
+    const entry = enterWithEntryEnv((text) => lines.push(text), {
+      CQ_SANBOX: 'off',
+      GH_REPOSITORY: 'o/r',
+    });
+    expect(entry?.cqEnv.warnings).toHaveLength(1);
+    expect(entry?.env['GH_REPOSITORY']).toBe('o/r');
+    expect(lines).toHaveLength(1);
+  });
+
+  test('enterWithEntryEnv returns undefined on any error, like enterWithCqEnv', () => {
+    const lines: string[] = [];
+    const entry = enterWithEntryEnv((text) => lines.push(text), { CQ_SANDBOX: 'of' });
+    expect(entry).toBeUndefined();
     expect(lines).toHaveLength(1);
   });
 
