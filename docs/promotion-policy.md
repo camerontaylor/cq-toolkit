@@ -6,7 +6,7 @@ The independent review is an agent PASS posted with `cq-review-post`, a human’
 
 Every thread and finding, including Codex, CodeRabbit, bot and minor findings, must be fixed or answered with a reason, and every thread resolved before merge.
 
-The reviewer comment names the reviewer agent, the full head SHA and `PASS`.
+An agent's PASS comment names the reviewer agent, the full head SHA and `PASS`.
 Reviewers post it with `cq-review-post` (agents repo), which posts as the
 **cq-review** GitHub App (`cq-review[bot]`, Pull requests: write only), so
 the PASS comes from an identity the PR author's lane did not use. When the App
