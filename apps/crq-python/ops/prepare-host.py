@@ -692,6 +692,12 @@ def prepare(root, overlay, raw, output, tag):
         # Validate against the SHA read under the lock so a concurrent switch
         # cannot make prepare render from a commit the tag does not name.
         verify_target(root, sha, tag)
+        # The units execute this working tree, not the tagged commit, so apply
+        # the same status guard as switch; only the rendered config that this
+        # operation itself writes may differ.
+        changes = git(root, 'status', '--porcelain', '--untracked-files=all').splitlines()
+        if any(line != ' M ' + CONFIG for line in changes):
+            raise ValueError('checkout has changes other than rendered config')
         data = render(root, overlay, sha)
         with tempfile.TemporaryDirectory(prefix='crq-units-') as temporary:
             paths = render_units(root, Path(temporary), sha)
