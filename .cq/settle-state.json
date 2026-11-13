@@ -4,13 +4,13 @@
   "prs": {
     "1694": {
       "tuple": {
-        "head": "85919bf1b2e48e9ec3324c67124926a9756517c5",
+        "head": "d03a64ba68c290b344fd1c6e072c8bf667f1f7a1",
         "base": "2bbad3ea6572f5413b82b53dc219a5dc39c75691",
         "forcePushEpoch": 1
       },
       "observations": [
         {
-          "observedAt": "2026-11-13T11:02:30.234Z",
+          "observedAt": "2026-11-13T12:16:46.378Z",
           "by": "self-merge-prs:observe"
         }
       ]
