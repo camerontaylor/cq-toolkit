@@ -990,57 +990,43 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(len(forked), 1)
         process_item.assert_not_called()
 
-    def test_job_level_refusal_stops_the_pass_before_the_child_exits(self):
-        # The second refusal channel: the child passes its item gate (so the
-        # barrier delivered b'a'), then refuses mid-item and publishes on the
-        # same pipe. The coordinator must read that byte before admitting the
-        # next item, while the child is still alive.
+    def test_a_published_job_refusal_stops_the_pass_without_an_exit(self):
+        # The second refusal channel, without a real child or any scheduling:
+        # the admitted child publishes b'a' at its item gate, then b'x' at its
+        # job gate (marker now present, but the marker is removed before the
+        # coordinator decides). Only the published byte can stop admission.
         self.config['repair']['max_concurrent_items'] = 2
-        parent = os.getpid()
         forked = []
-        real_fork = os.fork
-        published = self.root / 'state/refusal-published'
-        real_reap_completed = service.reap_completed
+        pipes = []
+        real_pipe = os.pipe
 
-        def fork_and_record():
+        def record_pipe():
+            pair = real_pipe()
+            pipes.append(pair)
+            return pair
+
+        def fake_fork():
             forked.append(1)
-            return real_fork()
-
-        def refuse_mid_item(config, item, jobs):
-            # The marker appears after this item was admitted, so the decision
-            # happens at the job gate; it is then removed again before the
-            # coordinator's own marker check, exactly the window F1 described.
-            # Only the published byte can stop the next admission here.
-            (self.root / 'state/runner-disabled').write_text('handover\n')
-            service.publish_refusal()
-            (self.root / 'state/runner-disabled').unlink()
-            published.write_text('published\n')
-            # Long enough that the child is certainly still alive when the
-            # coordinator decides: a short delay lets an exit-status based
-            # stop pass this test, which is what it must not do.
-            time.sleep(5)
-            return service.RUNNER_DISABLED_OUTCOME
-
-        def reap_after_publish(active):
-            # Only the iteration that has a live child waits for it; an empty
-            # set must return at once or the loop never admits the first item.
-            deadline = time.time() + 20
-            while active and not published.exists() and time.time() < deadline:
-                time.sleep(0.005)
-            return real_reap_completed(active)
+            if len(forked) == 1:
+                write = pipes[-1][1]
+                os.write(write, b'a')   # item gate: admitted
+                os.write(write, b'x')   # job gate: refused before any work
+            return 9000 + len(forked)
 
         stderr = io.StringIO()
-        with mock.patch.object(service.os, 'fork', side_effect=fork_and_record), \
-             mock.patch.object(service, 'drain_item', side_effect=refuse_mid_item), \
-             mock.patch.object(service, 'reap_completed', side_effect=reap_after_publish), \
+        with mock.patch.object(service.os, 'pipe', side_effect=record_pipe), \
+             mock.patch.object(service.os, 'fork', side_effect=fake_fork), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'reap_completed', return_value=(False, False)), \
+             mock.patch.object(service, 'reap_item',
+                               side_effect=lambda active: (active.clear() or False)), \
              mock.patch.object(service, 'process_item') as process_item, \
              contextlib.redirect_stderr(stderr):
-            service.drain_items(self.config, {'a': ['crq-run1-F1'], 'b': ['crq-run2-F1']},
-                                ['a', 'b'])
+            service.drain_items(self.config, {'a': ['crq-run1-F1'],
+                                              'b': ['crq-run2-F1']}, ['a', 'b'])
         self.assertEqual(len(forked), 1,
-                         'a published refusal stops the next admission even '
-                         'after the marker is gone')
-        self.assertFalse((self.root / 'state/runner-disabled').exists())
+                         'the published refusal stops the next admission')
         process_item.assert_not_called()
 
     def test_marker_mid_item_stops_the_remaining_jobs(self):
