@@ -29,10 +29,16 @@ describe('entry helpers', () => {
     expect(lines).toHaveLength(1);
   });
 
-  test('checkEntryEnv returns the record it snapshotted, foreign names included', () => {
+  test('checkEntryEnv returns a FROZEN copy of the record it snapshotted', () => {
     const env = { CQ_SANDBOX: 'off', GH_REPOSITORY: 'o/r' };
     const check = checkEntryEnv(env);
-    expect(check.env).toBe(env);
+    // The entry capture is copied and frozen: a later in-place process.env
+    // mutation cannot move what the wiring and the run context hand down.
+    expect(check.env).toEqual(env);
+    expect(check.env).not.toBe(env);
+    expect(Object.isFrozen(check.env)).toBe(true);
+    expect(check.env['GH_REPOSITORY']).toBe('o/r');
+    env.GH_REPOSITORY = 'mutated';
     expect(check.env['GH_REPOSITORY']).toBe('o/r');
   });
 

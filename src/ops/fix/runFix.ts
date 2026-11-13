@@ -349,9 +349,10 @@ export function makeFixRun(deps: FixRunDeps = {}) {
     // host supplied it, else the enclosing run's snapshot (or one fresh read
     // for a direct library call). Resolved before any await, so an ambient
     // change after entry cannot move provenance identity or config. The
-    // environment record is pinned the same way (foreign-name readers).
+    // environment record is pinned the same way (foreign-name readers), and
+    // an explicit `deps.env` is copied so it cannot drift under the run.
     const cqEnv = deps.cqEnv ?? currentCqEnv();
-    const env = deps.env ?? currentEntryEnv();
+    const env = Object.freeze({ ...(deps.env ?? currentEntryEnv()) });
     const parentSignal = currentJobContext()?.signal;
     const repoRoot = resolve(input.repoRoot);
     const runPrefix = input.runPrefix ?? `cq/fix-${randomUUID()}`;

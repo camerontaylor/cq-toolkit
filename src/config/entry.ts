@@ -11,9 +11,10 @@ import type { EntryEnv } from './run-env.js';
 export interface EntryEnvCheck {
   readonly cqEnv: CqEnv;
   /**
-   * The exact environment record the snapshot was read from: the entry's
-   * one capture, handed to `runWithCqEnv` so foreign-name readers see entry
-   * values for the whole run.
+   * A frozen copy of the environment record the snapshot was read from: the
+   * entry's one capture, handed to `runWithCqEnv` and the importer wiring so
+   * foreign-name readers see entry values for the whole run. A later in-place
+   * `process.env` mutation cannot move it.
    */
   readonly env: EntryEnv;
   /** `cq: error: …` lines (empty when the environment is valid). */
@@ -29,7 +30,9 @@ export function checkEntryEnv(env: EntryEnv = process.env): EntryEnvCheck {
   const cqEnv = readCqEnv(env);
   return {
     cqEnv,
-    env,
+    // The entry's ONE capture: frozen, so the importer wiring and the run
+    // context hand down the same immutable record.
+    env: Object.freeze({ ...env }),
     errorLines: formatCqEnvDiagnostics({ warnings: [], errors: cqEnv.errors }),
     warningLines: formatCqEnvDiagnostics({ warnings: cqEnv.warnings, errors: [] }),
     warnings: cqEnv.warnings,

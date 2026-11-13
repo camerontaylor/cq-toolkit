@@ -28,7 +28,10 @@ const store = new AsyncLocalStorage<RunEnvironment>();
  * omits `env` inherits the enclosing run's record.
  */
 export function runWithCqEnv<T>(cqEnv: CqEnv, fn: () => T, env: EntryEnv = currentEntryEnv()): T {
-  return store.run({ cqEnv, env: Object.freeze({ ...env }) }, fn);
+  // A frozen record is already immutable, so share it (the entry capture and
+  // the run context then hold the SAME snapshot); otherwise pin a copy.
+  const pinned = Object.isFrozen(env) ? env : Object.freeze({ ...env });
+  return store.run({ cqEnv, env: pinned }, fn);
 }
 
 /** The enclosing run's snapshot, or a fresh read when called outside a run. */

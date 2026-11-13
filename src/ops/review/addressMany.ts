@@ -166,7 +166,9 @@ export async function isolateAddressMany(
   },
 ): Promise<string> {
   const run = promisify(execFile);
-  const env = options.env ?? currentEntryEnv();
+  // Pin the record for the whole isolation: a caller-supplied env is copied so
+  // a mid-run mutation cannot move this op's git child env.
+  const env = Object.freeze({ ...(options.env ?? currentEntryEnv()) });
   const sshCommand = await resolveCoreSshCommand(repoRoot, env);
   const git = checkoutWriterContext()
     ? (file: string, args: string[]) =>
@@ -335,9 +337,10 @@ function makeReviewAddressManyCore(
   return async (input: ReviewAddressManyInput): Promise<ReviewAddressManyCoreResult> => {
     const valid = ReviewAddressManyInputSchema.safeParse(input);
     if (!valid.success) return { status: 'failed', error: valid.error.message };
-    // The composition's entry record: one pin per invocation, before any
-    // await, so a mid-run ambient change cannot move a git child env or PATH.
-    const env = deps.env ?? currentEntryEnv();
+    // The composition's entry record: one pinned snapshot per invocation,
+    // before any await, so a mid-run ambient change cannot move a git child
+    // env or PATH. An explicit deps.env is copied for the same reason.
+    const env = Object.freeze({ ...(deps.env ?? currentEntryEnv()) });
     const gh =
       deps.gh ?? makeGhRunner({ cwd: input.repoRoot, unsetEnv: ['GH_REPO'], timeoutMs: 30_000 });
     const facts = async (number: number): Promise<AddressManyPrFacts & { baseRefName: string }> => {

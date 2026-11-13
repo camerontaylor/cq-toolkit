@@ -548,9 +548,11 @@ async function runPlanUnderLease(
   const cqEnv = opts.cqEnv ?? readCqEnv();
   assertCqEnv(cqEnv, 'runPlan');
   // The run's environment record, already pinned by runPlan's context. Ops
-  // receive it on the importer wiring, so a foreign-name reader never re-reads
-  // the ambient environment mid-run.
-  const env = opts.env ?? currentEntryEnv();
+  // receive that FROZEN record on the importer wiring — never `opts.env`
+  // directly: a caller may hand a live `process.env` reference, and an op that
+  // captured it (deps.env) would see mid-run mutations while other readers see
+  // entry-time values.
+  const env = currentEntryEnv();
   const unboundRegistry = registry;
   registry = {
     get: (name) => {

@@ -203,10 +203,12 @@ explicit `env` argument where one already exists:
   `enterWithEntryEnv` is the print-and-exit gate for entries that read foreign
   names (selfhost entries, observe-prs). `enterWithCqEnv` stays as the
   CQ_*-only convenience.
-- `runWithCqEnv(cqEnv, fn, env)` stores a frozen **copy** of the record beside
-  the snapshot. `runPlan` pins `RunOptions.env` (or the enclosing run's record)
-  and hands it to registry importers on the wiring (`env`), so an op never
-  re-reads the ambient environment mid-run.
+- `runWithCqEnv(cqEnv, fn, env)` pins the record (a frozen copy of a mutable
+  one, or the already-frozen entry capture) beside the snapshot. `runPlan`
+  takes `RunOptions.env` (or the enclosing run's record), pins it in the run
+  context, and hands that FROZEN record to registry importers on the wiring
+  (`env`), so an op never re-reads the ambient environment mid-run and cannot
+  capture a record that keeps drifting.
 - Outside a run (direct library use) `currentEntryEnv()` is one fresh
   `process.env` read — the documented last resort, exactly like
   `currentCqEnv()`'s fresh `readCqEnv()`.
