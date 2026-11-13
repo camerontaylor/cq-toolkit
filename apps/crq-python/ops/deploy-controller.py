@@ -2165,7 +2165,15 @@ def main(argv=None) -> int:
         return 2
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         if args.operation == "health":
-            raise  # keep the health observation exit-1 contract
+            # A failed health enumeration is a thrown error, not a refusal:
+            # keep the exit-1 contract while I1 keeps stdout exactly one JSON
+            # artifact and machine mode stderr empty.
+            message = str(exc)[:400] or type(exc).__name__
+            print(json.dumps(_error_artifact("failed", args.operation, message, 1),
+                             indent=2, sort_keys=True))
+            if not parser.json_mode:
+                print("failed: " + message, file=sys.stderr)
+            return 1
         # Escaped outside mutation_record: the helper was never entered, so the
         # deployment surfaces are unchanged and this is a refusal (exit 2).
         message = str(exc)[:400] or type(exc).__name__
