@@ -10,8 +10,8 @@ import { REPO } from './prWorktree.helpers.js';
 // Shared fixtures and the fake git model (with the full pinned-behavior
 // header) live in prWorktree.helpers.ts.
 import { describe, expect, test } from 'vitest';
-import { mkdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, rm, symlink } from 'node:fs/promises';
+import { join, relative } from 'node:path';
 import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { removePrWorktree, resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import type { RegistryMap } from './legacyRegistryTypes.js';
@@ -159,6 +159,53 @@ describe('removePrWorktree', () => {
       createdAt: NOW - 1000,
     });
     expect(registry.calls).toEqual(['load']);
+  });
+
+  test('a registry entry spelled through a terminal symlink is pruned — compared before the tree goes', async () => {
+    const calls: string[][] = [];
+    const tree = `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`;
+    await mkdir(tree, { recursive: true });
+    // The entry records an out-of-tree SYMLINK to the checkout. Git removes
+    // the target, leaving the symlink dangling; a comparison made afterwards
+    // would resolve the dangling spelling to itself and miss the entry.
+    const alias = join(REPO, 'pr-7-alias');
+    await rm(alias, { force: true });
+    await symlink(tree, alias);
+    const registry = memRegistry({ '7': { path: alias, branch: LABEL, createdAt: NOW - 1000 } });
+    const model = mkModel([{ path: tree, branch: LABEL, head: SHA_B }]);
+    try {
+      await removePrWorktree({
+        ...baseOpts(model, registry, { run: fakeGit(model, calls) }),
+        path: tree,
+      });
+      expect(calls[calls.length - 1]).toEqual(['-C', REPO, 'worktree', 'remove', tree]);
+      expect(model.worktrees).toEqual([]);
+      expect(registry.current()).toEqual({});
+    } finally {
+      await rm(alias, { force: true });
+      await rm(tree, { recursive: true, force: true });
+    }
+  });
+
+  test('a repoRoot-relative path is RESOLVED before the boundary check and git — the same location decides all three', async () => {
+    const calls: string[][] = [];
+    const target = `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`;
+    const registry = memRegistry({ '7': { path: target, branch: LABEL, createdAt: NOW - 1000 } });
+    const model = mkModel([{ path: target, branch: LABEL, head: SHA_B }]);
+    // Resolved against the PROCESS CWD this spelling would name nothing under
+    // the root; resolved against repoRoot (as `git -C <repoRoot>` does) it
+    // names exactly the owned tree. The boundary check, the git argv and the
+    // registry prune must all agree on that ONE location.
+    const relativePath = relative(REPO, target);
+    expect(relativePath).not.toBe(target);
+    await removePrWorktree({
+      ...baseOpts(model, registry, { run: fakeGit(model, calls) }),
+      path: relativePath,
+    });
+    expect(calls[calls.length - 1]).toEqual(['-C', REPO, 'worktree', 'remove', target]);
+    expect(model.worktrees).toEqual([]);
+    // Pruned: the entry names the SAME (now removed) location.
+    expect(registry.current()).toEqual({});
   });
 
   test('a path OUTSIDE the worktreeRoot is refused before any destructive git runs — the registry and the foreign tree are untouched', async () => {
