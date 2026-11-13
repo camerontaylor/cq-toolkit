@@ -2467,8 +2467,8 @@ def deliver_pending_review_refreshes(q: Dict[str, Any]) -> List[str]:
                     identity_checkpoint=lambda login, reason: _checkpoint_review_identity(q, request, login, reason))
         try:
             result = pr_review_findings.crq_review_receipt.refresh(pr_review_findings, item_repo(item), request["pr"], meta)
-        except pr_review_findings.crq_review_receipt.ThreadsNotVisible:
-            result = {'state': 'waiting-threads'}
+        except pr_review_findings.crq_review_receipt.ThreadsNotVisible as exc:
+            result = {'state': 'waiting-threads', 'error': str(exc)}
         except (RuntimeError, OSError, ValueError) as exc:
             attempts += 1
             result = {"state": "abandoned" if attempts >= PR_REVIEW_MAX_ATTEMPTS else "retry", "error": str(exc)[:300]}

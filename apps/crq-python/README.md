@@ -309,10 +309,14 @@ or an earlier unresolved major/critical CRQ thread produce ITERATE.
   readout selects the latest exact-head CRQ verdict by submission timestamp;
   other independent reviewer evidence is preserved.
 - Each post-change scan receipt records its inline major finding IDs in the
-  `crq-review-inline-major` marker. Before PASS, expected IDs across all scans of
-  that head must map to visible, resolved owned GitHub threads. Missing or partial
+  `crq-review-inline-major` marker. Before PASS, expected IDs across all post-change
+  scans of the PR, including earlier heads, must map to visible, resolved owned
+  GitHub threads. Body-major taint remains scoped to the current head. Missing or partial
   visibility (including lag or deletion) keeps delivery pending for a later tick;
-  absence never proves resolution. Receipts and GraphQL supply this evidence.
+  absence never proves resolution. Waits retain missing run/head/finding bindings
+  and source receipt IDs/links in the existing queue error/state. A deleted thread
+  needs human investigation; it never clears automatically. Receipts and GraphQL
+  supply this evidence.
 - Pre-marker legacy body-only findings, including majors, do not hold the verdict
   and are not claimed covered or resolved. Cumulative body-major evidence applies
   only to post-change receipts carrying the scan marker. Minor thread counts are not dispositions;

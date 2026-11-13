@@ -53,30 +53,35 @@ def owned_receipt(row, login):
         and row.get('author_association') in {'OWNER', 'MEMBER', 'COLLABORATOR'})
 
 
-def expected_inline_major(rows, pr, head, login):
-    """Read immutable per-scan finding ids; absence of visibility is never resolution."""
-    expected = set()
+def expected_inline_major(rows, pr, login):
+    """Read all post-change scans of this PR, including earlier heads."""
+    expected = {}
     for row in rows:
         if not owned_receipt(row, login):
             continue
         body = row['body']
+        source = {'review_id': row['id'], 'url': row.get('html_url')}
         for match in re.finditer(re.escape(PREFIX) + r'(.*?) -->', body):
             try:
                 bound = json.loads(match[1])
-                if bound.get('pr') != pr or bound.get('head') != head:
+                if bound.get('pr') != pr:
                     continue
+                head = bound['head']
+                if not isinstance(head, str) or not re.fullmatch(r'[0-9a-f]{40}', head):
+                    raise ValueError()
                 proof = re.search(re.escape(INLINE_PREFIX) + r'(.*?) -->', body)
                 if proof is None:
-                    raise ThreadsNotVisible('CRQ inline-major receipt proof unavailable; retry')
+                    raise ThreadsNotVisible(f'CRQ inline-major receipt proof unavailable; source={source!r} run={bound.get("run_id")} head={head}; retry')
                 value = json.loads(proof[1])
                 if (value['run_id'] != bound['run_id'] or value['head'] != head
                         or not isinstance(value['findings'], list)
                         or any(not isinstance(key, str) or not re.fullmatch(r'[0-9a-f]{64}', key)
                                for key in value['findings'])):
                     raise ValueError()
-                expected.update((bound['run_id'], head, key) for key in value['findings'])
+                for key in value['findings']:
+                    expected.setdefault((bound['run_id'], head, key), []).append(source)
             except (ValueError, KeyError, TypeError, AttributeError):
-                raise ValueError('invalid CRQ inline-major receipt proof') from None
+                raise ThreadsNotVisible(f'invalid CRQ inline-major receipt proof; source={source!r}; investigate') from None
     return expected
 
 
@@ -129,6 +134,14 @@ def prior_receipt(prf, gh, repo, pr, meta, login):
                 raise ValueError('misplaced CRQ receipt binding')
             return {'id': row['id'], 'url': row.get('html_url'), 'login': row.get('user', {}).get('login'), 'body': body}
     return None
+
+
+def visibility_wait(expected, visible, repo, pr, reason):
+    missing = [{'run_id': key[0], 'head': key[1], 'finding': key[2], 'receipts': expected[key]}
+               for key in sorted(set(expected) - visible)]
+    sources = [source for values in expected.values() for source in values]
+    context = {'repo': repo, 'pr': pr, 'missing': missing, 'source_receipts': sources}
+    return ThreadsNotVisible(reason + ': ' + json.dumps(context, sort_keys=True))
 
 
 def open_major(prf, gh, repo, pr, login, expected=None):
@@ -188,8 +201,8 @@ def open_major(prf, gh, repo, pr, login, expected=None):
                 if own and not thread['isResolved'] and re.search(r'^\*\*crq finding F\d+ \[(major|critical|blocker|fatal)\]\*\*', body, re.I):
                     has_open = True
             if not page['hasNextPage']:
-                if (expected or set()) - visible:
-                    raise ThreadsNotVisible('expected CRQ major thread not visible; retry')
+                if set(expected or ()) - visible:
+                    raise visibility_wait(expected, visible, repo, pr, 'expected CRQ major thread not visible; retry')
                 return has_open
             next_cursor = page['endCursor']
             if not next_cursor or next_cursor in seen:
@@ -198,7 +211,8 @@ def open_major(prf, gh, repo, pr, login, expected=None):
             cursor = next_cursor
         except (KeyError, TypeError, ValueError, AttributeError):
             if expected:
-                raise ThreadsNotVisible('expected CRQ thread inventory incomplete; retry') from None
+                raise visibility_wait(expected, visible, repo, pr,
+                                      f'expected CRQ GraphQL thread inventory incomplete at cursor={cursor!r}; retry') from None
             raise RuntimeError('incomplete PR review threads') from None
 
 
@@ -243,7 +257,7 @@ def prepare(prf, gh, repo, pr, meta, ndjson, findings, login):
     whole = (saved.get('range_policy') == 'full-range-once-v1' and merge_base == meta['base'])
     blocked = any(f['severity'].lower() in BLOCKING for f in findings)
     rows = reviews(prf, gh, repo, pr)
-    threads_block = open_major(prf, gh, repo, pr, login, expected_inline_major(rows, pr, meta['head'], login))
+    threads_block = open_major(prf, gh, repo, pr, login, expected_inline_major(rows, pr, login))
     blocked = body_major_at_head(rows, pr, meta['head'], login) or threads_block or blocked
     verdict = 'PASS' if whole and not blocked else 'ITERATE'
     return {**meta, 'receipt_header': f"**Independent review (CodeRabbit CLI via crq): {verdict} for `{meta['head']}`**",
@@ -301,7 +315,7 @@ def refresh(prf, repo, pr, meta, gh=None, login=None):
         return {'state': 'body-major'}
     if (binding_marker(binding(meta, pr)) not in body or proof not in body):
         return {'state': 'no-whole-pr-proof'}
-    if open_major(prf, gh, repo, pr, login, expected_inline_major(rows, pr, meta['head'], login)):
+    if open_major(prf, gh, repo, pr, login, expected_inline_major(rows, pr, login)):
         return {'state': 'pending-threads'}
     wanted = f"{REFRESH}head={meta['head']} scan-run={meta['run_id']} -->"
     for row, _ in own:

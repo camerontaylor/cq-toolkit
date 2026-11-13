@@ -198,9 +198,10 @@ class ReceiptTest(unittest.TestCase):
             self.deliver(gh=ReceiptGh(pages=[[row]]), meta=changed)
 
     def test_new_head_is_not_suppressed_by_older_receipt(self):
-        old = {**self.meta, 'head': 'c' * 40, 'run_id': 'old'}
+        first = ReceiptGh()
+        self.deliver(gh=first)  # a complete clean receipt includes its empty inline-major manifest
         row = {'id': 6, 'user': {'login': 'cq-review[bot]'},
-               'body': prf.marker('old') + '\n' + receipt.binding_marker(receipt.binding(old, 7))}
+               'body': first.posts()[0]['body'].replace(META['run_id'], 'old').replace(HEAD, 'c' * 40)}
         gh = ReceiptGh(pages=[[row]])
         self.assertEqual(self.deliver(gh=gh)['state'], 'created')
         self.assertEqual(len(gh.posts()), 1)
@@ -385,6 +386,71 @@ class RefreshTest(unittest.TestCase):
                 self.assertEqual(receipt.refresh(prf, REPO, 7, self.meta,
                     gh=ReceiptGh(pages=[[original, earlier]]), login='cq-review[bot]')['state'], 'created')
 
+    def test_missing_or_invalid_inline_proof_identifies_source_receipt(self):
+        original = self.original()
+        for invalid in (None, receipt.INLINE_PREFIX + 'not-json -->'):
+            lines = [line for line in original['body'].splitlines() if not line.startswith(receipt.INLINE_PREFIX)]
+            if invalid:
+                lines.insert(3, invalid)
+            gh = ReceiptGh(pages=[[{**original, 'body': '\n'.join(lines)}]])
+            with self.assertRaises(receipt.ThreadsNotVisible) as waiting:
+                receipt.refresh(prf, REPO, 7, self.meta, gh=gh, login='cq-review[bot]')
+            self.assertIn('77', str(waiting.exception))
+            self.assertIn('old-url', str(waiting.exception))
+            self.assertEqual(gh.posts(), [])
+
+    def test_earlier_head_inline_major_visibility_blocks_clean_new_head_and_refresh(self):
+        first = ReceiptGh()
+        self.deliver([ANCHORED], first)
+        earlier = {'id': 77, 'html_url': 'https://github.com/o/r/pull/7#pullrequestreview-77',
+                   'body': first.posts()[0]['body'], 'user': {'login': 'cq-review[bot]'},
+                   'submitted_at': '2026-01-01T00:00:01Z'}
+        root = {'id': 'h1-major', 'isResolved': False, 'comments': {'nodes': [{
+            'body': first.posts()[0]['comments'][0]['body'],
+            'author': {'login': 'cq-review', '__typename': 'Bot'}}]}}
+        new_head = 'f' * 40
+        self.meta = {**self.meta, 'run_id': 'clean-h2', 'head': new_head}
+        (self.root / 'meta.json').write_text(json.dumps({**self.meta, 'range_policy': 'full-range-once-v1'}))
+        missing = ReceiptGh(pages=[[earlier]], head=new_head)
+        with self.assertRaises(receipt.ThreadsNotVisible) as waiting:
+            self.deliver(gh=missing)
+        diagnostic = str(waiting.exception)
+        for required in (META['run_id'], HEAD, receipt.THREAD.search(root['comments']['nodes'][0]['body'])[3],
+                         earlier['html_url'], '77'):
+            self.assertIn(required, diagnostic)
+        self.assertEqual(missing.posts(), [])
+        visible = ReceiptGh(pages=[[earlier]], head=new_head, threads=[{'nodes': [root],
+                            'pageInfo': {'hasNextPage': False, 'endCursor': None}}])
+        self.deliver(gh=visible)
+        self.assertIn('ITERATE for', visible.posts()[0]['body'])
+        latest = {'id': 78, 'body': visible.posts()[0]['body'], 'user': {'login': 'cq-review[bot]'},
+                  'submitted_at': '2026-01-01T00:00:02Z'}
+        item = {'id': 'pr7', 'kind': 'open', 'state': 'done',
+                'pr_review': {'state': 'created', 'verdict': 'ITERATE', 'whole_pr_scan': True},
+                'pr_review_request': {**self.meta, 'pr': 7}}
+        waiting_gh = ReceiptGh(pages=[[earlier, latest]], head=new_head)
+        with mock.patch.object(prf, 'select_receipt_identity',
+                side_effect=lambda repo, meta, *args: (waiting_gh, 'cq-review[bot]', meta)):
+            crq.deliver_pending_review_refreshes({'items': [item]})
+        self.assertEqual(item['pr_review_refresh']['state'], 'waiting-threads')
+        self.assertEqual(item['pr_review_refresh']['attempts'], 0)
+        for required in (META['run_id'], HEAD, earlier['html_url'], '77'):
+            self.assertIn(required, item['pr_review_refresh']['error'])
+        for pages in ([[earlier], [latest]], [[latest, earlier]]):
+            gh = ReceiptGh(pages=pages, head=new_head)
+            with self.assertRaises(receipt.ThreadsNotVisible):
+                receipt.refresh(prf, REPO, 7, self.meta, gh=gh, login='cq-review[bot]')
+            self.assertEqual(gh.posts(), [])
+        root['isResolved'] = True
+        resolved = ReceiptGh(pages=[[earlier]], head=new_head, threads=[{'nodes': [root],
+                             'pageInfo': {'hasNextPage': False, 'endCursor': None}}])
+        self.deliver(gh=resolved)
+        self.assertIn('PASS for', resolved.posts()[0]['body'])
+        refresh = ReceiptGh(pages=[[latest, earlier]], head=new_head, threads=[{'nodes': [root],
+                            'pageInfo': {'hasNextPage': False, 'endCursor': None}}])
+        self.assertEqual(receipt.refresh(prf, REPO, 7, self.meta, gh=refresh,
+                                        login='cq-review[bot]')['state'], 'created')
+
     def test_expected_inline_majors_require_visible_resolved_owned_threads(self):
         first = ReceiptGh()
         self.deliver([ANCHORED, {**ANCHORED, 'title': 'Second major'}], first)
@@ -559,6 +625,7 @@ class RefreshDeliveryTest(unittest.TestCase):
         for prefix in ('pr_review', 'clean_review'):
             self.assertEqual(item[prefix + '_refresh']['state'], 'waiting-threads')
             self.assertEqual(item[prefix + '_refresh']['attempts'], 0)
+            self.assertEqual(item[prefix + '_refresh']['error'], 'expected thread missing')
 
     def test_422_delivery_keeps_findings_debt_for_retry_without_cleaning_it(self):
         item = {'id': 'pr7', 'kind': 'open', 'pr_review_pending': True,
