@@ -924,6 +924,16 @@ class Run:
         # before release, the pre-deploy baseline is still the invariant.
         baseline = (self.controller.preserved_digests(self.effects)
                     if self.released else self.preserved)
+        # The rollback drain itself can change the queue's shape, so the
+        # permission proven before it is stale: re-measure the state the
+        # completed drains left and refuse the switch if it is incompatible.
+        compatibility = self.controller.compatibility_record(self.effects,
+                                                             self.prior_sha)
+        if not self.controller.rollback_compatible(compatibility):
+            self.fail_stop(
+                "automatic rollback is disabled after the rollback drain: "
+                + compatibility_reason(compatibility) + "; the hold is retained"
+                + " (after: " + reason[:200] + ")")
         self.helper.switch(self.root, self.overlay, self.overlay_raw,
                            self.prior_sha, None)
         self.switched = False
