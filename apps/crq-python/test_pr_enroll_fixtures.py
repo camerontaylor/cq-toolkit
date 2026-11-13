@@ -244,7 +244,7 @@ class PrTestBase:
             for name in ("write_status", "write_heartbeat", "notify_owner"):
                 stack.enter_context(mock.patch.object(crq, name))
             stack.enter_context(mock.patch.object(crq, "running_agents", return_value=[]))
-            stack.enter_context(mock.patch.object(crq.repair_tick, "reconcile_fix_prs"))
+            stack.enter_context(mock.patch.object(crq.repair_tick, "reconcile_fix_prs", return_value={}))
             stack.enter_context(mock.patch.object(crq, "make_worktree",
                                                   return_value=(self.root / "wt", "fixture")))
             scan = stack.enter_context(mock.patch.object(
