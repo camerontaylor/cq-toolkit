@@ -167,6 +167,13 @@ def record_import(q, req, req_principal, runner):
         return dict(v=1, op="record", action="refused", record_digest=None,
                     duplicate_of=None, supersedes=req.get("supersedes"),
                     reason="unsupported-repo")
+    # Admission accepts equivalent spellings (identity comparison), but the
+    # ledger schema pins the repository fields to the canonical spelling, so
+    # an alternate-casing import for the supported repo must normalize under
+    # the canonical name instead of quarantining as malformed.
+    if req.get("repo") is not None:
+        submitted["repo"] = runner.REPO if repo_registry.same_repo(req["repo"], runner.REPO) \
+            else repo_registry.by_repo(getattr(runner, "REPOS", []), req["repo"])["repo"]
     retained = _retained_records(runner)
     events, action = review_record.import_record(submitted, runner.iso(), retained)
     kind, _, detail = action.partition(":")

@@ -582,6 +582,22 @@ class TransportRecordTests(RecordTransportBase, unittest.TestCase):
         pending = self.state / "record-outbox" / "pending"
         self.assertTrue(any(p.suffix == ".json" for p in pending.iterdir()))
 
+    def test_admitted_repo_spelling_canonicalizes_before_normalization(self):
+        # Admission compares identities case-insensitively, but the ledger
+        # schema pins the payload's repository fields to the canonical
+        # spelling: an alternate-casing import for the supported repo must
+        # record under the canonical name, not quarantine as malformed.
+        req = dict(v=1, op="record", producer="manual", source_id="case-1",
+                   repo="CameronTaylor/cq-toolkit",
+                   report=dict(encoding="utf8", data="case probe"))
+        result = self.call(req)
+        self.assertEqual(result["action"], "recorded")
+        pending = self.state / "record-outbox" / "pending"
+        event = json.loads(next(pending.glob("*.json")).read_text())
+        self.assertEqual(event["payload"]["repo"], "camerontaylor/cq-toolkit")
+        self.assertEqual(event["payload"]["source"]["repo"], "camerontaylor/cq-toolkit")
+        ledger.validate_sequence([event])
+
     def test_one_bad_import_does_not_stop_scheduling(self):
         self.call(dict(v=1, op="record", producer="agent", source_id="broken",
                        report=dict(encoding="utf8", data="x")))
