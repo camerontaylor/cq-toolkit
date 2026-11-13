@@ -6,11 +6,14 @@ original record while retaining it; one malformed import is quarantined with a
 readable reason and the original artifact reference and never blocks queue
 scheduling. Manual/agent records are historical reports: incomplete scope
 metadata stays unknown, full-branch coverage is never claimed, no findings are
-synthesized, and no independent-acceptance verdict is issued. The collection
-layer publishes through the existing review ledger outbox only; there is no
-competing ledger and no new poller. GitHub review comments arrive through the
-existing ``fetchReviewState`` reads, pre-normalized by
-``normalize_github_review``.
+synthesized, and no independent-acceptance verdict is issued. The wire op spools
+through the publication worker's durable outbox (or the legacy local one when
+no rollout is configured); there is no competing ledger and no new poller.
+GitHub review comments arrive through the existing ``fetchReviewState`` reads
+and reach the ledger through ``import_catalog`` (class ``github-agent-review``
+for human/agent reviews, routed to ``record_submission`` below); historical
+``author-cli``/``merged-current`` receipts project through ``historical_view``
+with their original digests.
 """
 import hashlib
 import json
@@ -48,8 +51,13 @@ def _artifact(report_bytes, digest_hex):
 
 
 def _scope_confidence(claimed_scope, report_bytes):
-    """A report with path/line anchors has claimed scope; otherwise unknown."""
-    if claimed_scope is not None or (report_bytes or b"").strip():
+    """Scope confidence reflects the report's own metadata honestly.
+
+    ``claimed`` only when the report carries claimed path/line anchors; a
+    prose report with no scope metadata stays ``unknown`` (spec §12 keeps
+    incomplete-scope coverage unknown). Bytes alone never claim scope.
+    """
+    if claimed_scope:
         return "claimed"
     return "unknown"
 
@@ -128,13 +136,20 @@ def normalize_record(submitted, at):
                                    and re.fullmatch(r"[0-9a-f]{40,64}", target_name) is None) else None
     subject_id = ((branch_label + "@") if branch_label else "") + (submitted.get("subject_id") or source_id)
     target_commit = None if branch_label else target_name
+    # The ledger identity rule requires source_key == repo:producer:id with
+    # producer = source.producer. Import identity is (producer kind, source
+    # id, report digest): the digest suffix inside source.id separates two
+    # versions of one source in validate_sequence while identical bytes stay
+    # one event, and the key uses the producer KIND (not the claimed
+    # reviewer) so a changed reviewer is still the same import.
+    versioned_id = source_id + ":" + digest_hex[:16]
     payload = {
         "repo": repo,
         "subject_id": subject_id,
         "job_id": "record:" + producer + ":" + source_id,
         "attempt_id": "record:" + digest_hex[:16],
-        "source": {"repo": repo, "producer": submitted.get("reviewer") or producer,
-                   "type": producer, "id": source_id, "authenticated": False},
+        "source": {"repo": repo, "producer": producer,
+                   "type": producer, "id": versioned_id, "authenticated": False},
         "provenance": {
             "authenticated_submitter": submitter,
             "claimed_reviewer": submitted.get("reviewer") or "unknown",
@@ -164,7 +179,8 @@ def normalize_record(submitted, at):
     }
     if submitted.get("supersedes") is not None:
         payload["supersedes"] = submitted["supersedes"]
-    value = ledger.event("review", f"{repo}:{payload['source']['producer']}:{source_id}", at, payload)
+    source_key = f"{repo}:{producer}:{versioned_id}"
+    value = ledger.event("review", source_key, at, payload)
     return value, digest_hex
 
 
@@ -193,12 +209,19 @@ def import_record(submitted, at, existing):
                   "id": submitted.get("id") or "unknown", "authenticated": False}
         raw = submitted.get("report_bytes")
         digest_hex = hashlib.sha256(raw).hexdigest() if isinstance(raw, bytes) else "0" * 64
-        payload = {"source": source, "source_digest": digest_hex, "result": "unverified",
+        payload = {"source": {**source, "id": source["id"] + ":" + digest_hex[:16]},
+                   "source_digest": digest_hex, "result": "unverified",
                    "reason": reason, "review_id": None, "duplicate_id": None,
                    "artifacts": [_artifact(raw if isinstance(raw, bytes) else b"", digest_hex)]}
         try:
+            # One quarantine event per (report digest, reason): a repeated
+            # identical malformed import stays idempotent in the sequence,
+            # while a different refusal of the same bytes is a distinct,
+            # individually-retained disposition.
             quarantine_value = ledger.event(
-                "import-result", "record:" + digest_hex[:24] + ":quarantine", at, payload)
+                "import-result",
+                "record:" + digest_hex[:16] + ":quarantine:" + ledger.digest(reason)[:16],
+                at, payload)
         except ledger.IntegrityError:
             quarantine_value = None
         if quarantine_value is None:
@@ -258,12 +281,13 @@ def normalize_github_review(review, *, owner_repo, pr, at):
     return submitted
 
 
-def historical_receipt(record):
+def historical_view(record):
     """Adapter view of a historical ``author-cli``/``merged-current`` receipt.
 
     The original record keeps its original digest and producer; the adapter
     never claims full-branch coverage and never relabels the evidence. Returns
-    a summary document for history projections, not a new ledger event.
+    a summary document for history projections (unified summary and catalog
+    consumers), not a new ledger event.
     """
     if not isinstance(record, dict) or record.get("event_type") != "review":
         raise RecordRefused("historical adapter reads retained review events only")

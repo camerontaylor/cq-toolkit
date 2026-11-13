@@ -9,6 +9,7 @@ import signal
 import sys
 
 import author_snapshot
+import backfill_runtime
 import queue_transport
 import review_admission as admission
 import review_operation as operation
@@ -127,13 +128,17 @@ def resolve(runner, inputs, stored):
     return facts
 
 
-def record_import(q, req, runner):
-    """S3b review-record: normalize one import and return its disposition.
+def record_import(q, req, req_principal, runner):
+    """S3b review-record: normalize one import, retain and publish it.
 
     The import is idempotent on (producer, source id, report digest); one
     malformed import quarantines alone with a readable reason and never stops
-    queue scheduling. The record lands in the outbox for the next ledger
-    publication; nothing is dispatched and no vendor capacity is reserved.
+    queue scheduling. The authenticated submitter is the server-authenticated
+    principal, never client input. Events spool into the publication worker's
+    outbox (backfill_runtime.services) so the next publication drains them into
+    the shared ledger; without a rollout configuration the disposition still
+    answers honestly with a publication-disabled marker and nothing is
+    dispatched and no vendor capacity is reserved.
     """
     import review_ledger
     import review_record
@@ -147,26 +152,47 @@ def record_import(q, req, runner):
         "head_tree": req.get("head_tree"),
         "target": req.get("target"),
         "reviewer": req.get("reviewer"),
-        "authenticated_submitter": req.get("authenticated_submitter"),
+        # Provenance split: the trusted principal is the authenticated
+        # submitter; the claimed reviewer is client metadata that earns no
+        # credit. Client-supplied submitter identity is ignored.
+        "authenticated_submitter": req_principal,
         "verdict": req.get("verdict"),
         "claimed_scope": req.get("claimed_scope"),
         "independence": req.get("independence"),
         "supersedes": req.get("supersedes"),
         "forge_evidence": req.get("forge_evidence"),
     }
+    if req.get("repo") is not None and not repo_registry.same_repo(req["repo"], runner.REPO) \
+            and repo_registry.by_repo(getattr(runner, "REPOS", []), req["repo"]) is None:
+        return dict(v=1, op="record", action="refused", record_digest=None,
+                    duplicate_of=None, supersedes=req.get("supersedes"),
+                    reason="unsupported-repo")
     retained = _retained_records(runner)
     events, action = review_record.import_record(submitted, runner.iso(), retained)
     kind, _, detail = action.partition(":")
     result = dict(v=1, op="record", action="recorded" if kind == "record" else kind,
-                  record_digest=None, duplicate_of=None, supersedes=req.get("supersedes"))
+                  record_digest=None, duplicate_of=None, supersedes=req.get("supersedes"),
+                  publication="disabled")
     if events:
-        store = review_ledger.ArtifactStore(runner.STATE / "record-artifacts")
-        # The imported report bytes are retained content-addressed before the
-        # event spools; the ledger record then references the durable artifact.
-        # Rehashing with the durable reference changes the record id, so the
-        # response carries the retained (published) id, not the import preview.
+        # Publication shares the durable rollout: the record lands in the same
+        # outbox the backfill publisher drains, with artifacts in the configured
+        # durable store. Rehashing with the durable reference changes the record
+        # id, so the response carries the retained (published) id, not the
+        # import preview.
+        config = backfill_runtime.settings(runner.STATE)
+        if config:
+            # services() builds the publisher transport too; the record path
+            # needs only the shared durable store and outbox, so construct
+            # them directly from the rollout configuration exactly as
+            # backfill_runtime.services does, without touching the publisher
+            # (no Git, no SSH from the import path).
+            store = review_ledger.ArtifactStore(config["durable_artifact_root"])
+            box = review_ledger.Outbox(runner.STATE / "backfill/publication", store)
+            result["publication"] = "spooled"
+        else:
+            store = review_ledger.ArtifactStore(runner.STATE / "record-artifacts")
+            box = review_ledger.Outbox(runner.STATE / "record-outbox", store)
         retained_ref = store.put(req["report"]["data"].encode("utf-8"))
-        box = review_ledger.Outbox(runner.STATE / "record-outbox", store)
         for value in events:
             value = copy.deepcopy(value)
             value["payload"]["artifacts"] = [dict(retained_ref, kind="report")]
@@ -176,6 +202,10 @@ def record_import(q, req, runner):
                 detail = value["id"]
                 retained.append(value)
             box.spool(value)
+        if config:
+            # The durable background request makes the next publisher pass
+            # drain the spooled record; safe under tick.lock, no Git/network.
+            backfill_runtime.publish(runner, q)
     if kind == "record":
         result["record_digest"] = detail
     elif kind == "duplicate":
@@ -188,15 +218,18 @@ def record_import(q, req, runner):
 def _retained_records(runner):
     """Retained record events for idempotency; an unreadable one is skipped.
 
-    Idempotency consults the local record outbox (pending and acknowledged) so
-    a repeated import after a lost response stays a duplicate without making a
-    ledger read failure block scheduling.
+    Idempotency consults both spool locations: with a durable rollout the
+    record lives in the publication worker's outbox (pending side; ack files
+    carry only ids, so acknowledged events are read from pending, which the
+    publisher keeps as recovery authority), otherwise in the legacy local
+    record-outbox. A ledger read failure never blocks scheduling.
     """
     import review_ledger
     records = []
-    root = runner.STATE / "record-outbox"
-    for name in ("pending", "ack"):
-        directory = root / name
+    roots = [runner.STATE / "backfill/publication", runner.STATE / "record-outbox"]
+    seen = set()
+    for root in roots:
+        directory = root / "pending"
         if not directory.is_dir():
             continue
         for path in sorted(directory.glob("*.json")):
@@ -204,7 +237,8 @@ def _retained_records(runner):
                 value = review_ledger.loads(path.read_bytes())
             except (review_ledger.IntegrityError, OSError):
                 continue
-            if value.get("event_type") == "review":
+            if value.get("event_type") == "review" and value.get("id") not in seen:
+                seen.add(value["id"])
                 records.append(value)
     return records
 
@@ -321,7 +355,7 @@ def handle(raw, runner, *, principal, policy):
         result = admission.cancel(q, req["request_id"])
         runner.save_queue(q)
     elif op == "record":
-        result = record_import(q, req, runner)
+        result = record_import(q, req, principal, runner)
     elif op == "review-history":
         if req.get("request_id"):
             binding = q.get("review_requests", {}).get(req["request_id"])

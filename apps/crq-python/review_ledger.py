@@ -287,8 +287,10 @@ def validate_provenance(value):
         if "supersedes" in p:
             raise IntegrityError("superseding is a manual/agent record field")
         return
-    pv = p["provenance"]
-    if not pv["authenticated_submitter"]:
+    pv = p.get("provenance")
+    if not isinstance(pv, dict):
+        raise IntegrityError("manual/agent record requires provenance")
+    if not pv.get("authenticated_submitter"):
         raise IntegrityError("record requires the authenticated submitter")
     if pv["forge_evidence"] not in FORGE_EVIDENCE:
         raise IntegrityError("record forge evidence must name the observed source")
