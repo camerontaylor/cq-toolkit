@@ -2,7 +2,7 @@
 
 Open PRs directly against `main` and merge with a merge commit. The merge bar is green `static` and `denylist` on the exact PR head, one independent review of that head, and no unaddressed review comments.
 
-The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review with the `crq-findings` marker, posted by crq under the queue host’s login, whose reviewed range ends at the head and whose findings are all addressed. A clean crq run posts nothing and does not count.
+The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review posted as `cq-review[bot]` or, when the App path is unavailable, under the queue host’s login with an explicit unattested notice. Either CRQ identity counts under the same bar: an exact-head PASS with its run or verdict-refresh marker, whose findings are all addressed. The latest CRQ verdict for the head wins. A successful clean whole-PR crq run posts PASS; failed or partial scans never PASS. Owner-account fallback reviews explicitly say they are unattested.
 
 Every thread and finding, including Codex, CodeRabbit, bot and minor findings, must be fixed or answered with a reason, and every thread resolved before merge.
 
@@ -69,9 +69,11 @@ as visible review debt. The `crq-findings` marker alone does not identify a crq
 review: agent reviews posted with `cq-review-post --findings` also carry it.
 
 **Implementation limit.** `src/shared/independent-review.ts` currently requires
-an explicit `PASS` and full head SHA, rejects uppercase `HOLD` or `FAIL` words
-and negated PASS, and does not recognize the crq findings-review alternative
-above. Its bot-author filter accepts `cq-review[bot]` agent reviews without
+an explicit `PASS` and full head SHA. Recognized crq receipts use only their leading
+verdict header and its exact head SHA; finding prose cannot change either. Other
+comments retain the whole-body heuristic: uppercase `HOLD`, `FAIL` or `ITERATE`
+words and negated PASS reject acceptance. It does not infer
+acceptance from a findings marker or disposition alone. Its bot-author filter accepts `cq-review[bot]` agent reviews without
 requiring a `crq-findings` marker, and excludes other bot authors. These parser
 limits do not redefine the owner's merge bar; the merging agent reads the
 review and judges independence and disposition.

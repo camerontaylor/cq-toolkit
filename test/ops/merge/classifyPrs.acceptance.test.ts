@@ -386,3 +386,100 @@ describe('classifyPr — acceptance states (row 7)', () => {
     expect(result.reason).toBe('no_acceptable_review');
   });
 });
+
+describe('latest CRQ verdict at the exact head', () => {
+  const body = (verdict: string, head = HEAD, refresh = false) =>
+    `${refresh ? `<!-- crq-verdict-refresh head=${head} scan-run=scan -->` : '<!-- crq-findings run=scan -->'}\n**Independent review (CodeRabbit CLI via crq): ${verdict} for \`${head}\`**\n`;
+  const crq = (verdict: string, at: string, head = HEAD, refresh = false) =>
+    approved({
+      authorType: 'Bot',
+      authorLogin: 'cq-review[bot]',
+      state: 'COMMENTED',
+      submittedAt: at,
+      body: body(verdict, head, refresh),
+    });
+  test('CRQ PASS minor prose cannot supply a competing verdict', () => {
+    const pass = crq('PASS', '2026-01-01T00:00:01Z');
+    pass.body += 'Minor wording: ITERATE, HOLD, FAIL and not PASS are examples.';
+    expect(classifyPr(candidate({ reviews: [pass] }), PENDING_MS).reason).toBe(
+      'settle_window_pending',
+    );
+  });
+  test('dismissed ITERATE without chronology cannot hide earlier PASS', () => {
+    const pass = crq('PASS', '2026-01-01T00:00:01Z');
+    const dismissed = {
+      ...crq('ITERATE', '2026-01-01T00:00:02Z'),
+      state: 'DISMISSED' as const,
+      submittedAt: null,
+    };
+    expect(classifyPr(candidate({ reviews: [dismissed, pass] }), PENDING_MS).reason).toBe(
+      'settle_window_pending',
+    );
+  });
+  test('a native changes-requested review containing a CRQ header remains an objection', () => {
+    const objection = approved({
+      authorLogin: 'objector',
+      authorType: 'User',
+      state: 'CHANGES_REQUESTED',
+      body: body('ITERATE'),
+    });
+    expect(
+      classifyPr(
+        candidate({ reviews: [crq('PASS', '2026-01-01T00:00:01Z'), objection] }),
+        PENDING_MS,
+      ).reason,
+    ).toBe('merge_objection_outstanding');
+  });
+  test('trusted non-author host fallback joins CRQ history; untrusted fallback does not', () => {
+    const app = crq('PASS', '2026-01-01T00:00:01Z');
+    const fallback = {
+      ...crq('ITERATE', '2026-01-01T00:00:02Z'),
+      authorLogin: 'queue-host',
+      authorType: 'User',
+      authorAssociation: 'OWNER',
+    };
+    expect(classifyPr(candidate({ reviews: [app, fallback] }), PENDING_MS).reason).toBe(
+      'no_acceptable_review',
+    );
+    expect(
+      classifyPr(candidate({ reviews: [{ ...fallback, body: body('PASS') }] }), PENDING_MS).reason,
+    ).toBe('settle_window_pending');
+    expect(
+      classifyPr(
+        candidate({ reviews: [{ ...fallback, body: body('PASS'), authorAssociation: 'NONE' }] }),
+        PENDING_MS,
+      ).reason,
+    ).toBe('no_acceptable_review');
+    expect(
+      classifyPr(
+        candidate({ reviews: [app, { ...fallback, authorAssociation: 'NONE' }] }),
+        PENDING_MS,
+      ).reason,
+    ).toBe('settle_window_pending');
+  });
+  test.each([false, true])('uses submission time, not input order (reverse=%s)', (reverse) => {
+    const earlier = crq('PASS', '2026-01-01T00:00:01Z');
+    const later = crq('ITERATE', '2026-01-01T00:00:02Z');
+    const reviews = reverse ? [later, earlier] : [earlier, later];
+    expect(classifyPr(candidate({ reviews }), PENDING_MS).reason).toBe('no_acceptable_review');
+    const refresh = crq('PASS', '2026-01-01T00:00:03Z', HEAD, true);
+    expect(classifyPr(candidate({ reviews: [refresh, ...reviews] }), PENDING_MS).reason).toBe(
+      'settle_window_pending',
+    );
+  });
+  test('stale CRQ PASS cannot count even when its body mentions the current SHA', () => {
+    const stale = crq('PASS', '2026-01-01T00:00:03Z', 'b'.repeat(40));
+    stale.body += `Finding mentions ${HEAD}`;
+    expect(classifyPr(candidate({ reviews: [stale] }), PENDING_MS).reason).toBe(
+      'no_acceptable_review',
+    );
+  });
+  test('CRQ ITERATE preserves independent non-CRQ acceptance', () => {
+    expect(
+      classifyPr(
+        candidate({ reviews: [crq('ITERATE', '2026-01-01T00:00:03Z'), approved()] }),
+        PENDING_MS,
+      ).reason,
+    ).toBe('settle_window_pending');
+  });
+});

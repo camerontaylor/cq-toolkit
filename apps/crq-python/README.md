@@ -234,22 +234,31 @@ A counted `open` or `delta` review with findings in any reviewed repository post
 on the PR as one pull-request review (`pr_review_findings.py`;
 `POST /repos/{repo}/pulls/{pr}/reviews`, event `COMMENT`, `commit_id` = the
 reviewed head). Primary-repo repair enqueue still runs independently; other
-repos receive no repair enqueue or primary coverage credit. Clean reviews post
-nothing, consistently across repositories. No delivery configuration is required.
+repos receive no repair enqueue or primary coverage credit. Successful complete
+whole-PR clean reviews post an exact-head PASS receipt. Failed, partial and timed-out
+scans post no verdict. Successful narrower scans, a current major/critical finding,
+or an earlier unresolved major/critical CRQ thread produce ITERATE.
 
-- Each finding whose lines fall inside the PR diff for that commit (the
-  compare of the PR base and the reviewed head, context lines included)
+- Each finding whose lines fall inside the added PR diff lines for that commit
+  (the compare of the PR base and the reviewed head)
   becomes an inline comment, so it is its own resolvable review thread
   (GraphQL `reviewThreads`, reply, `resolveReviewThread`). A range is clamped
-  to the first diff hunk it overlaps. Findings without a file or line, outside
-  the diff, or in files with no patch are listed in the review body. If
-  GitHub still rejects the review with HTTP 422 (an anchor, or a head that was
-  force-pushed away), crq posts it once more with every finding in the body
-  and no `commit_id`. At most 50 inline threads per review; exact duplicate
-  findings in one stream are posted once.
+  to the first added line it overlaps. If a finding has no valid intended line, the counted-run publisher uses an actual added
+  line in the same file, then the PR's first added line, and explicitly names
+  the intended location in the thread body. Every new finding gets a thread;
+  the legacy CLI's inline cap does not apply to counted-run receipts. If the PR
+  has no commentable added line, or GitHub definitively rejects an anchor with
+  HTTP 422, findings stay visible in a body-only review. Any new major in that
+  body forces ITERATE and forbids a same-head refresh; it has no thread that can
+  be resolved. An ambiguous POST failure stays debt with the selected identity;
+  it never triggers that fallback. The independent-review CLI retains its legacy
+  50-thread cap; its behavior and parity vectors are unchanged.
 - The review is labelled as crq output, not as a CodeRabbit PR review. The
   body starts with `<!-- crq-findings run=<run_id> -->` and the header
-  `crq findings (CodeRabbit CLI, local run <run_id>, <base10>..<head10>)`.
+  `**Independent review (CodeRabbit CLI via crq): PASS|ITERATE for <full head>**`
+  follows the leading run and immutable-binding markers. The existing
+  `crq-local-findings` marker remains on the no-summary tick path. The reviewed
+  range stays in the body.
   HTML comments are stripped from finding text, and `suggestion` fences become
   plain fences, so no vendor marker or committable suggestion is copied.
   Severity, title and text all get this treatment, and a leftover `<!--`
@@ -266,9 +275,63 @@ nothing, consistently across repositories. No delivery configuration is required
   to five attempts (`findings_review_abandoned` event); success stores
   `pr_review` and emits `findings_review_delivered`. A newer run of the same
   item replaces an undelivered older request.
-- Identity: the tick's `gh` uses the queue host's `gh` login (hosts.yml, no
-  token in the unit environment), so reviews appear under that account.
-  The login needs pull-request review write access in each reviewed repo.
+- Clean delivery uses its own `clean_review_request` / `clean_review_pending`
+  and bounded delivery entrypoint; it never clears or replaces an undelivered
+  findings request. The original newer-findings-request-wins semantics remain.
+- Identity: the publisher probes `cq-review-post --capabilities` for the
+  `repo-scoped-v1` token interface, then captures its token and expiry privately.
+  The agents helper owns the existing `CQ_REVIEW_KEY_DIR` / XDG credential paths;
+  the publisher passes the token only through its `gh` child's environment.
+  A missing or older helper or failed credential setup selects an explicitly
+  unattested host-login review before posting. Unattested receipts count as evidence
+  on the same trust/association terms as the merge bar accepts those reviews;
+  an accepted owner-credential receipt can therefore also hold the head at ITERATE.
+  The existing request checkpoints
+  that selected identity before the POST, so a lost response retries with the
+  same identity. No ambiguous App POST falls back to a second account. Receipt
+  results record the safe identity/reason and attested boolean, never credentials.
+- CRQ never resolves threads. The author replies with the fixing commit, or a
+  reason for an invalid finding, and resolves the thread. A new run's absence of a finding is not proof of a fix;
+  earlier unresolved major threads keep its verdict at ITERATE. Review/thread
+  reads paginate and fail closed when incomplete. Current CodeRabbit model
+  findings expose no invocable deterministic per-rule re-check subset.
+- When a complete whole-PR scan's latest verdict at the current head was ITERATE,
+  a later tick can refresh it to PASS after the author resolves all major-or-above
+  CRQ threads, provided no scan of that head left a major finding in the body. The refresh cites that saved scan; it runs no scan, creates no
+  findings and uses `<!-- crq-verdict-refresh head=<sha> scan-run=<run id> -->`.
+  Its whole head-and-scan-run marker dedupes one refresh per scan of a head,
+  separate from original per-run retry dedupe. A later complete whole-PR scan at
+  that head can receive a fresh PASS after its own ITERATE conditions clear;
+  earlier receipts remain immutable. Body-only majors from any post-change scan
+  block PASS and every refresh at that head; later scan absence cannot clear them.
+  Neither
+  reviewed-range refusal nor run/base/head binding changes. The advisory source
+  readout selects the latest exact-head CRQ verdict by submission timestamp;
+  other independent reviewer evidence is preserved.
+- Each post-change scan receipt records its inline major finding IDs in the
+  `crq-review-inline-major` marker. Before PASS, expected IDs across all post-change
+  scans of the PR, including earlier heads, must map to visible, resolved owned
+  GitHub threads. Body-major taint remains scoped to the current head. Missing or partial
+  visibility (including lag or deletion) keeps delivery pending for a later tick;
+  absence never proves resolution. Waits retain missing run/head/finding bindings
+  and source receipt IDs/links in the existing queue error/state. A deleted expected
+  major thread leaves later delivery pending across every subsequent head on that
+  PR by design: report it to the owner for human investigation. Resolving a visible
+  thread clears its expectation; a new push cannot clear a deleted expectation,
+  and there is no automatic exit. Receipts and GraphQL supply this evidence.
+- Pre-marker legacy body-only findings, including majors, do not hold the verdict
+  and are not claimed covered or resolved. Cumulative body-major evidence applies
+  only to post-change receipts carrying the scan marker. Pre-change reviews without
+  new receipt proof are excluded from the expected-manifest inventory. A bound
+  post-change receipt with a missing or invalid manifest instead fails closed and
+  remains pending. Minor thread counts are not dispositions;
+  minors do not hold PASS, while the merge bar still requires their disposition.
+- Python is the production PR publisher. The TS policy mirror
+  `src/policy/crq/prReviewFindings.ts` deliberately retains its legacy contract;
+  existing parity vectors remain unchanged and tested. This change does not
+  activate TS publishing or move the deployed `prepared-a221` repair dist pointer.
+  Deploy the token-capable agents helper before adopting this Python contract
+  through the normal CRQ deploy controller; no live changes follow from a merge.
 - On upgrade, pending open/delta issue deliveries become PR-review debt using
   their original run, artifacts and reviewed range. Already delivered issues
   are left alone. Push/post-merge reviews keep issue delivery and its existing

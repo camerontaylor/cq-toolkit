@@ -77,6 +77,8 @@ import {
   isIgnoredBotAuthor,
   isReviewAppAuthor,
   parseIndependentReview,
+  latestCrqReviewEvidence,
+  isCrqReviewBody,
 } from '../../shared/independent-review.js';
 
 /**
@@ -312,22 +314,38 @@ const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContex
   // never the automation identity or an excluded login. Those guards bind THAT
   // alternative only: the cq-review App's PASS is independent acceptance, so an
   // automation-authored or excluded-author PR must still be able to earn it.
-  // DISMISSED evidence is void on both paths.
+  // Recognized CRQ receipts also admit explicitly unattested host User reviews
+  // on the configured trusted-association terms; excluded/automation logins stay out.
+  // DISMISSED evidence is void on every path.
   const prAuthor = candidate.authorLogin;
   const authorSharesAccount =
     prAuthor !== null &&
     prAuthor.toLowerCase() !== ctx.config.automationLogin?.toLowerCase() &&
     ctx.config.excludedLogins?.some((login) => login.toLowerCase() === prAuthor.toLowerCase()) !==
       true;
-  return [
-    ...candidate.reviews.filter((review) => review.state !== 'DISMISSED'),
-    ...candidate.issueComments,
-  ].some(
+  const evidence = [...candidate.reviews, ...candidate.issueComments].filter(
     (comment) =>
+      (!('state' in comment) || comment.state !== 'DISMISSED') &&
       (isReviewAppAuthor(comment.authorType, comment.authorLogin) ||
+        (isCrqReviewBody(comment.body) &&
+          comment.authorType === 'User' &&
+          comment.authorLogin != null &&
+          comment.authorLogin.toLowerCase() !== ctx.config.automationLogin?.toLowerCase() &&
+          !ctx.config.excludedLogins?.some(
+            (login) => login.toLowerCase() === comment.authorLogin?.toLowerCase(),
+          ) &&
+          (ctx.config.trustedAssociations ?? ['OWNER', 'MEMBER', 'COLLABORATOR']).includes(
+            ('authorAssociation' in comment ? comment.authorAssociation : null) ?? '',
+          )) ||
         (authorSharesAccount &&
           comment.authorLogin === prAuthor &&
-          !isIgnoredBotAuthor(comment.authorType, comment.authorLogin))) &&
+          !isIgnoredBotAuthor(comment.authorType, comment.authorLogin))),
+  );
+  return latestCrqReviewEvidence(evidence, head, (review) =>
+    'submittedAt' in review ? review.submittedAt : review.createdAt,
+  ).some(
+    (comment) =>
+      (!('state' in comment) || comment.state !== 'DISMISSED') &&
       parseIndependentReview(comment.body, head).kind === 'valid',
   );
 };
@@ -457,13 +475,18 @@ export function classifyPr(
     return candidate.headRefOid != null && review.commitOid === candidate.headRefOid;
   };
   const foldInput = candidate.reviews.filter((review) => {
+    if (isCrqReviewBody(review.body) && review.state !== 'CHANGES_REQUESTED') return false;
     // COMMENTED/DISMISSED are transparent: they must not mask a standing
     // verdict from the same actor.
     if (review.state !== 'APPROVED' && review.state !== 'CHANGES_REQUESTED') return false;
     if (!policyActive) return true;
     return screened(review);
   });
-  const foldedReviews = policyActive ? latestReviewPerActor(foldInput) : candidate.reviews;
+  const foldedReviews = policyActive
+    ? latestReviewPerActor(foldInput)
+    : candidate.reviews.filter(
+        (review) => !isCrqReviewBody(review.body) || review.state === 'CHANGES_REQUESTED',
+      );
   // Row 6 — an OUTSTANDING OBJECTION: a non-author reviewer's
   // CHANGES_REQUESTED against the last commit's head state, not yet
   // withdrawn (verdict moved off CHANGES_REQUESTED). An objection is not
@@ -489,7 +512,10 @@ export function classifyPr(
   // objection fold above, so they cannot mask a CHANGES_REQUESTED).
   const commentedEvidence =
     policyActive && config.acceptReviewStates?.includes('COMMENTED') === true
-      ? candidate.reviews.filter((review) => review.state === 'COMMENTED' && screened(review))
+      ? candidate.reviews.filter(
+          (review) =>
+            review.state === 'COMMENTED' && !isCrqReviewBody(review.body) && screened(review),
+        )
       : [];
   const hasAcceptableReview =
     [...foldedReviews, ...commentedEvidence].some((review) => isAcceptableReview(review, ctx)) ||
