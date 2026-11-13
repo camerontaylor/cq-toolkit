@@ -576,6 +576,48 @@ class PublicationWireTests(RecordTransportBase, unittest.TestCase):
         self.assertEqual(result["publication"], "disabled")
         self.assertFalse((self.state / "backfill" / "publish-request.json").exists())
 
+    def test_repeated_quarantine_reuses_the_retained_disposition(self):
+        # The same malformed import twice, at different times, must not mint a
+        # second event with the same source key and a different id: that pair
+        # would be rejected by validate_sequence (source evidence conflict) and
+        # block publication of every later queued event.
+        bad = dict(v=1, op="record", producer="agent", source_id="repeat-bad",
+                   report=dict(encoding="utf8", data="x" * (257 * 1024)))
+        first = self.call(bad)
+        self.runner.iso = lambda: "2026-11-13T01:00:00Z"  # a later import
+        second = self.call(bad)
+        operation.validate("response", second)
+        self.assertEqual(second["action"], "quarantined")
+        pending = self.state / "backfill" / "publication" / "pending"
+        quarantines = [json.loads(p.read_text()) for p in sorted(pending.glob("*.json"))
+                       if json.loads(p.read_text())["event_type"] == "import-result"]
+        self.assertEqual(len(quarantines), 1)
+        ledger.validate_sequence(quarantines)
+        self.assertEqual(first["reason"], second["reason"])
+
+    def test_oversized_event_quarantines_instead_of_poisoning_the_outbox(self):
+        # A report inside the transport bounds whose claimed scope row pushes
+        # the serialized event past the publisher's 1 MiB validation bound is
+        # quarantined at the door; the shared outbox stays publishable.
+        huge_interval_row = {"path": "a.ts", "blob": "c" * 64,
+                             "intervals": [[i, i] for i in range(1, 40000)]}
+        req = dict(v=1, op="record", producer="manual", source_id="huge-scope-1",
+                   claimed_scope=[huge_interval_row],
+                   report=dict(encoding="utf8", data="scope dump"))
+        result = self.call(req)
+        operation.validate("response", result)
+        self.assertEqual(result["action"], "quarantined")
+        self.assertIn("1 MiB", result["reason"])
+        pending = self.state / "backfill" / "publication" / "pending"
+        for path in sorted(pending.glob("*.json")):
+            value = json.loads(path.read_text())
+            self.assertLessEqual(len(json.dumps(value)), review_record.MAX_EVENT_BYTES)
+            ledger.validate(value)
+        # A following good import still publishes cleanly.
+        follow = self.call(dict(v=1, op="record", producer="manual", source_id="after-huge",
+                                report=dict(encoding="utf8", data="a clean report")))
+        self.assertEqual(follow["action"], "recorded")
+
 
 class CapabilityTests(unittest.TestCase):
     def test_capabilities_advertise_record_operation_and_feature(self):

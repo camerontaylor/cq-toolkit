@@ -159,7 +159,10 @@ def import_source(repo, store, source_class, source_id, raw, envelope, at, exist
                 pr=envelope.get("pr"), at=at)
             submitted["report_bytes"] = raw
             review, _ = review_record.normalize_record(submitted, at)
-            review["payload"]["artifacts"].append(dict(reference, kind="report"))
+            # The placeholder reference (imported-report:<digest>) has no
+            # durable backing; the collector's store reference is the retained
+            # artifact the outbox can verify, so it replaces the placeholder.
+            review["payload"]["artifacts"] = [dict(reference, kind="report")]
             review["id"] = ledger.digest({k: v for k, v in review.items() if k != "id"})
             ledger.validate(review)
         except (review_record.RecordRefused, ledger.IntegrityError) as exc:

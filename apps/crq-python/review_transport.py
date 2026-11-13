@@ -198,6 +198,13 @@ def record_import(q, req, req_principal, runner):
             value["payload"]["artifacts"] = [dict(retained_ref, kind="report")]
             value["id"] = review_ledger.digest({k: v for k, v in value.items() if k != "id"})
             review_ledger.validate(value)
+            if len(review_ledger.canonical(value)) > review_record.MAX_EVENT_BYTES:
+                # The publisher refuses events above its validation bound while
+                # building publication groups, which would block the shared
+                # outbox for every queued event; quarantine the oversized
+                # import at the door instead of spooling a poison event.
+                return _oversize_quarantine(runner, submitted, retained_ref,
+                                            box, result, config)
             if value["event_type"] == "review":
                 detail = value["id"]
                 retained.append(value)
@@ -212,6 +219,34 @@ def record_import(q, req, req_principal, runner):
         result["duplicate_of"] = detail
     elif kind in ("quarantined", "refused"):
         result["reason"] = detail
+    return result
+
+
+def _oversize_quarantine(runner, submitted, retained_ref, box, result, config):
+    """Quarantine an import whose serialized event exceeds the publisher bound.
+
+    The report bytes stay retained in the durable store (the disposition
+    references them, so the outbox can verify) and the oversized review event
+    itself never enters the shared outbox to block other queued evidence. The
+    response answers quarantined honestly.
+    """
+    import review_ledger
+    import review_record
+    reason = "serialized event exceeds the 1 MiB publisher bound"
+    digest_hex = hashlib.sha256(submitted["report_bytes"]).hexdigest()
+    quarantine = review_record._quarantine_event(
+        reason=reason, digest_hex=digest_hex, submitted=submitted, at=runner.iso())
+    if quarantine is None:
+        result["action"] = "refused"
+        result["reason"] = reason
+        return result
+    quarantine["payload"]["artifacts"] = [dict(retained_ref, kind="report")]
+    quarantine["id"] = review_ledger.digest({k: v for k, v in quarantine.items() if k != "id"})
+    review_ledger.validate(quarantine)
+    box.spool(quarantine)
+    result["action"] = "quarantined"
+    result["reason"] = reason
+    result["publication"] = "spooled" if config else result["publication"]
     return result
 
 
@@ -238,6 +273,14 @@ def _retained_records(runner):
             except (review_ledger.IntegrityError, OSError):
                 continue
             if value.get("event_type") == "review" and value.get("id") not in seen:
+                seen.add(value["id"])
+                records.append(value)
+            elif (value.get("event_type") == "import-result"
+                  and str(value.get("source_key", "")).startswith("record:")
+                  and value.get("id") not in seen):
+                # Retained quarantine dispositions participate in import
+                # idempotency: a repeated identical malformed import reuses the
+                # original event instead of minting a colliding duplicate.
                 seen.add(value["id"])
                 records.append(value)
     return records
@@ -355,6 +398,17 @@ def handle(raw, runner, *, principal, policy):
         result = admission.cancel(q, req["request_id"])
         runner.save_queue(q)
     elif op == "record":
+        # The operator's policy repository allowlist applies to record
+        # imports exactly as to submit: configuration alone is not
+        # authorization, so a configured clone for another repo cannot
+        # publish evidence the policy never allowed.
+        if req.get("repo") is not None:
+            allowed = [policy["repo"], *policy.get("repos", [])]
+            if req["repo"] not in allowed:
+                return review_receipt.canonical(dict(v=1, op="record", action="refused",
+                                                     record_digest=None, duplicate_of=None,
+                                                     supersedes=req.get("supersedes"),
+                                                     reason="unsupported-repo"))
         result = record_import(q, req, principal, runner)
     elif op == "review-history":
         if req.get("request_id"):

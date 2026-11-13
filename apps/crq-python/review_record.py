@@ -23,6 +23,10 @@ import review_ledger as ledger
 
 PROVENANCE_FORGE_EVIDENCE = "github-review-comment"
 MAX_REPORT_BYTES = 256 * 1024
+# The publisher refuses serialized events above 1 MiB while building
+# publication groups; importing one bigger event would poison the shared
+# outbox, so record imports enforce the same bound at the door.
+MAX_EVENT_BYTES = 1024 * 1024
 VERDICT_OUTCOMES = {"APPROVED": "completed", "CHANGES_REQUESTED": "completed",
                      "COMMENTED": "completed"}
 
@@ -170,6 +174,35 @@ def normalize_record(submitted, at):
     return value, digest_hex
 
 
+def _quarantine_event(*, reason, digest_hex, submitted, at):
+    """One unverified import-result for a refused import; nothing credited.
+
+    One quarantine event per (report digest, reason): a repeated identical
+    malformed import stays idempotent in the sequence, while a different
+    refusal of the same bytes is a distinct, individually-retained
+    disposition. Returns ``None`` when the disposition itself is
+    unrepresentable (the caller answers refused without a ledger event).
+    """
+    claimed = submitted.get("producer")
+    typed = claimed if claimed in ledger.REPORT_PRODUCERS else "manual"
+    source = {"repo": ledger.REPO,
+              "producer": claimed or "unknown",
+              "type": typed,
+              "id": submitted.get("id") or "unknown", "authenticated": False}
+    raw = submitted.get("report_bytes")
+    payload = {"source": {**source, "id": source["id"] + ":" + digest_hex[:16]},
+               "source_digest": digest_hex, "result": "unverified",
+               "reason": reason, "review_id": None, "duplicate_id": None,
+               "artifacts": [_artifact(raw if isinstance(raw, bytes) else b"", digest_hex)]}
+    try:
+        return ledger.event(
+            "import-result",
+            "record:" + digest_hex[:16] + ":quarantine:" + ledger.digest(reason)[:16],
+            at, payload)
+    except ledger.IntegrityError:
+        return None
+
+
 def import_record(submitted, at, existing):
     """Idempotent ingestion against retained ledger events.
 
@@ -188,32 +221,22 @@ def import_record(submitted, at, existing):
         # validation; they quarantine individually like any other malformed
         # import instead of surfacing as invalid-input errors.
         reason = str(exc)
+        digest_hex = hashlib.sha256(
+            submitted.get("report_bytes") if isinstance(submitted.get("report_bytes"), bytes) else b"").hexdigest()
+        quarantine_key = "record:" + digest_hex[:16] + ":quarantine:" + ledger.digest(reason)[:16]
+        previous = next((v for v in existing
+                         if v.get("event_type") == "import-result"
+                         and v.get("source_key") == quarantine_key), None)
+        if previous is not None:
+            # The same malformed report was already retained with this
+            # disposition; re-emitting it would collide in validate_sequence
+            # (same source key, different id via occurred_at).
+            return [previous], "quarantined:" + reason
         # The quarantine source vocabulary is the ledger's producer enum; an
         # unknown claimed producer is preserved in the reason, and the typed
         # source falls back to manual (never authenticated).
-        claimed = submitted.get("producer")
-        typed = claimed if claimed in ledger.REPORT_PRODUCERS else "manual"
-        source = {"repo": ledger.REPO,
-                  "producer": submitted.get("producer") or "unknown",
-                  "type": typed,
-                  "id": submitted.get("id") or "unknown", "authenticated": False}
-        raw = submitted.get("report_bytes")
-        digest_hex = hashlib.sha256(raw).hexdigest() if isinstance(raw, bytes) else "0" * 64
-        payload = {"source": {**source, "id": source["id"] + ":" + digest_hex[:16]},
-                   "source_digest": digest_hex, "result": "unverified",
-                   "reason": reason, "review_id": None, "duplicate_id": None,
-                   "artifacts": [_artifact(raw if isinstance(raw, bytes) else b"", digest_hex)]}
-        try:
-            # One quarantine event per (report digest, reason): a repeated
-            # identical malformed import stays idempotent in the sequence,
-            # while a different refusal of the same bytes is a distinct,
-            # individually-retained disposition.
-            quarantine_value = ledger.event(
-                "import-result",
-                "record:" + digest_hex[:16] + ":quarantine:" + ledger.digest(reason)[:16],
-                at, payload)
-        except ledger.IntegrityError:
-            quarantine_value = None
+        quarantine_value = _quarantine_event(reason=reason, digest_hex=digest_hex,
+                                             submitted=submitted, at=at)
         if quarantine_value is None:
             # Unrepresentable input: report the refusal without a ledger event.
             return [], "refused:" + reason
