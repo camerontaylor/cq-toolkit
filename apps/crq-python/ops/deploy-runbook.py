@@ -549,6 +549,7 @@ class Run:
                 "prior_sha": self.args.prior_sha,
                 "marker_path": str(self.marker),
                 "journal": (self.journal or {}).get("transaction_id"),
+                "root": str(Path(self.args.root).resolve()),
                 "cq_bin_entry": getattr(self, "cq_bin_entry", None),
                 "final_triggers": self.final_triggers}
 
@@ -1508,6 +1509,25 @@ def execute(args, effects_factory=None) -> dict:
             "manifest marker.path must be exactly " + MARKER_RELPATH
             + " (the tick's own marker); got "
             + repr(manifest["marker"]["path"]))
+    # Finding (design review F2): every marker path is derived from --root,
+    # so an operator passing another checkout stopped units while the live
+    # tick - which reads its own root's state/runner-disabled - never saw the
+    # hold. The manifest now carries the absolute deployment root the deploy
+    # was approved against and this refuses before any host read or marker
+    # operation. Not an approval: the approved value is compared, and the
+    # comparison is the whole mechanism.
+    approved_root = (manifest.get("marker") or {}).get("root")
+    require(isinstance(approved_root, str) and approved_root
+            and Path(approved_root).is_absolute(),
+            "manifest marker.root must be the absolute deployment root the "
+            "deploy was approved against; got " + repr(approved_root))
+    resolved_root = Path(args.root).resolve()
+    require(resolved_root == Path(approved_root).resolve(),
+            "deployment root mismatch: --root resolves to "
+            + str(resolved_root) + " but the manifest approves "
+            + str(Path(approved_root).resolve()) + "; the live tick reads the "
+            "marker from the approved tree, so this run would stop units for a "
+            "hold nothing observes")
     if args.rehearsal:
         # Finding 3, defense in depth: even a direct execute() call with
         # --rehearsal must not fall through to the live factory.
