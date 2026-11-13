@@ -1622,6 +1622,7 @@ class RepairDrainTest(unittest.TestCase):
         wt = self.worktree('crq-repair-pr1-merged-' + job_id)
         def dispatch(config, role, current, tree, directory, judge=False):
             self.assertFalse(judge)
+            Path(directory).mkdir(parents=True, exist_ok=True)
             (tree / 'src/kept.ts').write_text('fixed\n')
             subprocess.run(['git', 'commit', '-qam', job_id], cwd=tree, check=True)
             sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=tree, check=True,
@@ -1748,6 +1749,33 @@ class RepairDrainTest(unittest.TestCase):
         # candidate was rejected too, and the A2 escalation was dispatched.
         self.assertEqual(dispatch_mock.call_count, 2)
         self.assertEqual([a['rung'] for a in second['attempts']], ['A0', 'A1', 'A2'])
+
+    def test_detector_process_failure_translates_to_unavailable_and_defers(self):
+        # A detector that never completed (timeout/launch OSError) is an
+        # outage, not a verdict: hack_detector() translates it to
+        # DetectorUnavailable so the job defers with pending_mechanical
+        # instead of dropping the candidate and spending another fixer rung.
+        self.config['repair']['cq_bin'] = '/unused/cli.js'
+        job, wt, dispatch = self.changed_fixer_job('crq-run1-F1')
+        import crq_repair as detector_service
+        real_command = detector_service.command
+        def detector_only_command(argv, **kwargs):
+            if 'gates.hackDetector' in argv:
+                raise subprocess.TimeoutExpired(argv, 1200)
+            return real_command(argv, **kwargs)
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', side_effect=dispatch) as dispatch_mock, \
+             mock.patch.object(detector_service, 'command', side_effect=detector_only_command), \
+             mock.patch.object(service, 'retain', return_value=None):
+            result = service.process(self.config, job, wt)
+        self.assertIn('retry_after', result)
+        self.assertIn('hack detector unavailable', result['reason'])
+        self.assertIn('pending_mechanical', result)
+        self.assertEqual(result['pending_mechanical']['rung'], 0)
+        self.assertEqual(result['next_rung'], 0)
+        self.assertEqual(dispatch_mock.call_count, 1)
+        self.assertEqual([a['rung'] for a in result['attempts']], ['A0'])
+        self.assertEqual(result['attempts'][-1]['mechanical']['tests'], 'suspended')
 
     def test_backfill_job_ids_sort_without_finding_suffix(self):
         jobs = [{'job': 'crq-run1-F10', 'run': 'run1'}, {'job': 'crq-run1-F2', 'run': 'run1'},
