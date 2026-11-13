@@ -38,17 +38,20 @@ const result = await run(process.argv.slice(2), {
     if (command === 'status') {
       const parsed = parseStatusArgv(args);
       if (!parsed.ok) return usageArtifact('status', parsed.message);
+      // The queue-runner binary's stdout is exactly one JSON document for
+      // every command; the operator-readable markdown travels in the
+      // artifact's `value` field, not the stdout channel.
+      let statusMarkdown = '';
       const exitCode = await runStatusWriter(statusRoots(parsed.stateRoot), {
-        write: (text) => process.stdout.write(text),
+        write: (text) => {
+          statusMarkdown = text;
+        },
         error: (text) => process.stderr.write(text),
       });
-      // The runner's artifact channel is one JSON document; the status
-      // command's stdout is the markdown itself, so the artifact records
-      // only the outcome. Python's `crq status` prints markdown and exits.
       return {
         artifact:
           exitCode === 0
-            ? { status: 'ok' as const }
+            ? { status: 'ok' as const, value: { markdown: statusMarkdown } }
             : { status: 'failed' as const, error: 'status write failed' },
         exitCode,
       };

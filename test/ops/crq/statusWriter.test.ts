@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parseCrqState } from '../../../src/policy/crq/state.js';
 import { pythonJsonText } from '../../../src/policy/crq/pythonJson.js';
@@ -270,6 +271,23 @@ describe('status.json projection', () => {
     ]);
     expect(statusItems[0]!['repo']).toBe('owner/main');
     expect('extra' in statusItems[0]!).toBe(false);
+    // Python copies `i.get("kind")` into status.json: the RAW kind, never
+    // the decorated markdown column the row renders (`open t1`).
+    expect(statusItems[0]!['kind']).toBe('open');
+  });
+
+  it('publishes paused as the queue value: null when the key is absent', () => {
+    // Python `q.get("paused")`: an absent key publishes null (the schema
+    // allows boolean | null), it is not coerced to false.
+    const docs = documents([{ id: 'pr1', kind: 'open', state: 'pending', cycles: [] }]);
+    delete (docs.queue as Record<string, unknown>).paused;
+    const items = docs.queue['items'] as Record<string, unknown>[];
+    const rows = [{ row: statusRow(items[0]!, 'owner/main'), raw: items[0]! }];
+    const status = statusJsonDocument(docs, ISO_NOW, { total: 0 }, rows);
+    expect(status['paused']).toBeNull();
+    const pausedDocs = documents([], { paused: true });
+    const pausedStatus = statusJsonDocument(pausedDocs, ISO_NOW, { total: 0 }, []);
+    expect(pausedStatus['paused']).toBe(true);
   });
 
   it('validates against policy/crq/status.schema.json before the write', async () => {
@@ -349,6 +367,19 @@ describe('markdown assembly', () => {
     expect(row.why).toHaveLength(110);
     expect(row.markdown).toContain('| pr7 |  | open | pending | 0/1 |');
     expect(row.markdown.endsWith(`| ${'x'.repeat(110)} |  |`)).toBe(true);
+  });
+
+  it('renders a missing attempts outcome as an empty cell, not None', () => {
+    // Python `last.get('outcome', '')`: a missing key is the empty string.
+    const row = statusRow({ id: 'pr8', kind: 'open', state: 'pending', cycles: [] }, 'owner/main');
+    expect(row.lastOutcome).toBe('');
+    expect(row.markdown).toContain('| 0/1 |  |  |');
+    // An explicit None value still prints 'None' (str(None)).
+    const noneRow = statusRow(
+      { id: 'pr9', kind: 'open', state: 'pending', cycles: [], attempts: [{ outcome: null }] },
+      'owner/main',
+    );
+    expect(noneRow.lastOutcome).toBe('None');
   });
 
   it('marks gate-stalled promoting items with the intervention prefix', () => {
@@ -454,6 +485,70 @@ describe('write route', () => {
       readConfig: async () => JSON.stringify(docs.config),
     });
     await expect(writeStatusForDocuments(effects, docs)).rejects.toThrow(/max_starts_per_hour/);
+  });
+
+  it('parses the shipped config: safe integers materialise as numbers, not bigint', async () => {
+    // P1 regression: parseConfig's lossless materialisation turned every
+    // integer into a bigint, so localReviewAgingMinutes threw for the
+    // repository's own config before any artifact was written.
+    const shipped = parseConfig(readFileSync('apps/crq-python/config.json', 'utf8'));
+    expect(localReviewAgingMinutes(shipped)).toBe(60);
+    // And a bigint rank_tier still ranks (gYDE: lossless ints are Python ints).
+    expect(
+      repoRankFor({ repo: 'owner/other' }, 'owner/main', [{ repo: 'owner/other', rank_tier: 2n }]),
+    ).toBe(2);
+  });
+
+  it('defaults a configured repo without rank_tier to 3 (entry.get default)', () => {
+    const docs = documents(
+      [{ id: 'pr1', kind: 'open', state: 'pending', cycles: [] }],
+      {},
+      {
+        repos: [{ repo: 'owner/other' }],
+      },
+    );
+    expect(
+      repoRankFor(
+        { id: 'pr2', repo: 'owner/other', kind: 'merged', state: 'pending' },
+        'owner/main',
+        docs.config['repos'] as Record<string, unknown>[],
+      ),
+    ).toBe(3);
+  });
+
+  it('treats an absent events.jsonl as empty recent events', async () => {
+    // Python `EVENTS.read_text()... if EVENTS.exists() else []`: a fresh or
+    // restored state root has no events file and still writes status.
+    const docs = documents([{ id: 'pr1', kind: 'open', state: 'pending', cycles: [], order: 0 }]);
+    (docs.queue as Record<string, unknown>)['last_tick'] = '2026-11-10T00:00:00Z';
+    const { effects } = stubEffects(docs, {
+      readQueue: async () => JSON.stringify(docs.queue),
+      readConfig: async () => JSON.stringify(docs.config),
+      readEvents: async () => {
+        const error = new Error(
+          "ENOENT: no such file or directory, open 'events.jsonl'",
+        ) as NodeJS.ErrnoException;
+        error.code = 'ENOENT';
+        throw error;
+      },
+    });
+    const result = await writeStatusForDocuments(effects, docs);
+    expect(result.markdown).toContain('## Recent events');
+    expect(result.markdown).not.toContain('event"');
+  });
+
+  it('passes the live schedule probe into the publish seam', async () => {
+    const docs = documents([], {}, { schedule_id: 'crq-tick' });
+    const received: CrqDocuments[] = [];
+    const { effects } = stubEffects(docs, {
+      probeSchedule: async () => ({ stdout: '{"status":"active","id":"crq-tick"}', failure: null }),
+      publishSummary: async (published: CrqDocuments) => {
+        received.push(published);
+        return { schema_version: 2 };
+      },
+    });
+    await writeStatusForDocuments(effects, docs);
+    expect(received[0]?.scheduleProbe?.schedule).toEqual({ status: 'active', id: 'crq-tick' });
   });
 
   it('serves the schedule probe failure text through the banner', async () => {

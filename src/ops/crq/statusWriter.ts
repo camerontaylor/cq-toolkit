@@ -119,7 +119,7 @@ export interface StatusWriterEffects {
   readQueue(): Promise<string>;
   /** `config.json` text. */
   readConfig(): Promise<string>;
-  /** `state/events.jsonl` text. */
+  /** `state/events.jsonl` text, or '' when the file does not exist yet. */
   readEvents(): Promise<string>;
   /** Receipt bytes by validated id; null when unavailable (OSError catch). */
   readReceipt(receiptId: string): Promise<Uint8Array | null>;
@@ -153,6 +153,13 @@ export interface CrqDocuments {
   readonly queue: CrqRecord;
   /** The exact lossless config document. */
   readonly config: CrqRecord;
+  /**
+   * The live `paseo schedule inspect` outcome this invocation probed (the
+   * `schedule` dict Python passes to `status_summary.publish`). Undefined
+   * for direct route callers that never probed; the adapter's publish seam
+   * falls back to the producer's initial dict in that case.
+   */
+  readonly scheduleProbe?: ScheduleProbeOutcome;
 }
 
 /** The three write results plus the optional publish failure event. */
@@ -278,6 +285,10 @@ function authorCycleOf(item: CrqRecord): number {
 }
 
 function pythonNumberIsInt(value: unknown): value is number {
+  // A lossless bigint IS Python's int (gYDE): a document parsed from bytes
+  // through a lossless path keeps exact integers as bigint, and Python
+  // accepts both the plain int and the lossless int identically.
+  if (typeof value === 'bigint') return true;
   return typeof value === 'number' && Number.isInteger(value);
 }
 
@@ -347,11 +358,16 @@ export function repoRankFor(
   const slug = itemRepo(item, primary);
   if (repoIdentity(slug) === repoIdentity(primary)) return null;
   const configured = repos.find((entry) => repoIdentity(entry['repo']) === repoIdentity(slug));
-  const tier = configured === undefined ? DEFAULT_REPO_RANK : configured['rank_tier'];
+  // `entry.get("rank_tier", DEFAULT_RANK)`: the default applies to an omitted
+  // key on a configured repo, not only to an unconfigured repo.
+  const tier =
+    configured === undefined || configured['rank_tier'] === undefined
+      ? DEFAULT_REPO_RANK
+      : configured['rank_tier'];
   if (!pythonNumberIsInt(tier)) {
     throw new StatusWriterError('rank_tier must be an integer', 'TypeError');
   }
-  return tier;
+  return typeof tier === 'bigint' ? Number(tier) : tier;
 }
 
 function repoIdentity(slug: unknown): string {
@@ -532,7 +548,9 @@ export function statusRow(item: CrqRecord, primary: string): StatusRow {
   const markdown =
     `| ${pythonStrOrNone(item['id'])} | ${repo === primary ? '' : repo} | ${kindColumn} | ` +
     `${pythonStrOrNone(item['state'])} | ${cyc} | ${pinnedBase} | ` +
-    `${pythonStrOrNone(outcome)} | ${whyBounded} | ${extra} |`;
+    // Python `last.get('outcome', '')`: a missing key is an empty cell, not
+    // the string 'None' (only an explicit None value prints 'None').
+    `${outcome === undefined ? '' : pythonStrOrNone(outcome)} | ${whyBounded} | ${extra} |`;
   return {
     id: item['id'],
     repo,
@@ -540,7 +558,7 @@ export function statusRow(item: CrqRecord, primary: string): StatusRow {
     state: item['state'],
     cycles: cyc,
     pinnedBase,
-    lastOutcome: pythonStrOrNone(outcome),
+    lastOutcome: outcome === undefined ? '' : pythonStrOrNone(outcome),
     why: whyBounded,
     extra,
     markdown,
@@ -601,9 +619,10 @@ export interface StatusRowWithRaw {
 /**
  * The status.json projection: exactly the historical keys in the historical
  * order (the phase 0.2 `status.schema.json` shape), with `generated_at`
- * first as Python's literal orders them. `paused` is a plain boolean by
- * construction (the schema forbids null); `cooldown_until` passes through as
- * the queue's exact value (null when absent).
+ * first as Python's literal orders them. `paused` passes through as the
+ * queue's exact value (the schema allows `boolean | null`, and Python's
+ * `q.get("paused")` publishes a missing key as null); `cooldown_until`
+ * likewise passes through (null when absent).
  */
 export function statusJsonDocument(
   documents: CrqDocuments,
@@ -614,12 +633,14 @@ export function statusJsonDocument(
   const queue = documents.queue;
   return {
     generated_at: generatedAt,
-    paused: queue['paused'] === true,
+    paused: queue['paused'] === undefined ? null : queue['paused'],
     cooldown_until: queue['cooldown_until'] === undefined ? null : queue['cooldown_until'],
     finding_triage: triage,
     items: rows.map(({ row, raw }) => ({
       id: row.id,
-      kind: row.kind,
+      // Python copies `i.get("kind")` unchanged: the raw kind, never the
+      // decorated Markdown column (`"open t1"`, `"delta new"`).
+      kind: raw['kind'] === undefined ? null : raw['kind'],
       state: row.state,
       repo: row.repo,
       prior_cycles: memberOr(raw, 'prior_cycles'),
@@ -890,7 +911,20 @@ function toPlainRecord(value: JsonObject): CrqRecord {
 function plainJsonValue(value: JsonValue): unknown {
   if (value instanceof JsonObject) return toPlainRecord(value);
   if (Array.isArray(value)) return value.map(plainJsonValue);
-  if (value instanceof JsonNumber) return value.integer !== null ? value.integer : value.float;
+  if (value instanceof JsonNumber) {
+    // A safe integer parses to Python's int and JS's number identically
+    // (both exact through 2^53-1), so it materialises as a plain number the
+    // route's arithmetic accepts; only values beyond Number.MAX_SAFE_INTEGER
+    // stay bigint, which no producer field reaches (the lossless
+    // JsonNumber remains available wherever exactness matters).
+    if (value.integer !== null) {
+      const exact = value.integer as bigint;
+      return exact >= BigInt(Number.MIN_SAFE_INTEGER) && exact <= BigInt(Number.MAX_SAFE_INTEGER)
+        ? Number(exact)
+        : exact;
+    }
+    return value.float;
+  }
   return value;
 }
 
@@ -942,7 +976,7 @@ export async function writeStatusForDocuments(
   const scheduleId = config['schedule_id'];
   const probe = await probeSchedule(effects, scheduleId);
 
-  const recent = recentEventLines(await effects.readEvents());
+  const recent = recentEventLines(await readEventsOrEmpty(effects));
   const triage = findingTriage(effects.composerSeams.triageRows);
   const mergedCurrentView = await mergedCurrentWithReceipts(queue, effects);
   const repair = repairDigest(queue, effects.composerSeams.inbox, now);
@@ -983,13 +1017,19 @@ export async function writeStatusForDocuments(
       'ValueError',
     );
   }
-  await effects.writeStatusMarkdown(`${markdown}\n`);
+  await effects.writeStatusMarkdown(markdown);
   await effects.writeStatusJson(new TextEncoder().encode(statusText));
 
   let summary: Record<string, unknown> | null = null;
   let publishFailure: PublishFailureEvent | undefined;
   try {
-    summary = await effects.publishSummary(documents);
+    // Python passes the probe dict it built for the banner: on success the
+    // parsed inspect document, on failure `None` (then `schedule.get("status")`
+    // reads falsy and the composer keeps its systemd default + error arm).
+    summary = await effects.publishSummary({
+      ...documents,
+      scheduleProbe: probe,
+    });
   } catch (error) {
     publishFailure = { event: 'summary_failed', error: publishErrorName(error) };
     await effects.appendEvent(publishFailure);
@@ -1000,6 +1040,23 @@ export async function writeStatusForDocuments(
     summary,
     ...(publishFailure === undefined ? {} : { publishFailure }),
   };
+}
+
+/**
+ * The `EVENTS.exists() ? read_text() : []` arm: only a missing file is the
+ * empty default; every other read failure stays a refusal.
+ */
+async function readEventsOrEmpty(effects: StatusWriterEffects): Promise<string> {
+  try {
+    return await effects.readEvents();
+  } catch (error) {
+    // Python: `EVENTS.read_text()... if EVENTS.exists() else []`. Only a
+    // missing file is the empty default; ENOTDIR (a non-directory `state`
+    // parent), EACCES and decode failures stay refusals.
+    const code = (error as { code?: unknown }).code;
+    if (code === 'ENOENT') return '';
+    throw error;
+  }
 }
 
 /** The wrapper's first Python refusal class; anything else is a route bug. */

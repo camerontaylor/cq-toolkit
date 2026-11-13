@@ -100,7 +100,10 @@ describe('runStatusWriter over a real state root', () => {
     expect(markdown).toContain('- last tick: 2025-11-13T01:00:00Z');
 
     const writtenMarkdown = await readFile(join(roots.stateRoot, 'status.md'), 'utf8');
-    expect(writtenMarkdown).toBe(`${markdown}\n`);
+    // Python `"\n".join(md)`: exactly one trailing newline (the assembly's
+    // final empty element), never two.
+    expect(writtenMarkdown).toBe(markdown);
+    expect(writtenMarkdown.endsWith('\n\n')).toBe(false);
 
     const statusText = await readFile(join(roots.stateRoot, 'status.json'), 'utf8');
     expect(statusText.endsWith('\n')).toBe(true);
@@ -189,12 +192,48 @@ describe('runStatusWriter over a real state root', () => {
       async (argv) => (argv[1] === 'schedule' ? '{"status":"active","nextRunAt":"soon"}' : null),
       () => NOW,
     );
-    const seams = await resolveComposerSeams(roots.stateRoot);
+    const seams = await resolveComposerSeams(
+      roots.stateRoot,
+      JSON.parse(await readFile(join(roots.stateRoot, 'queue.json'), 'utf8')) as unknown,
+    );
     const { writeStatus } = await import('../../../src/ops/crq/statusWriter.js');
     const result = await writeStatus({ ...effects, composerSeams: seams });
     expect(result.markdown).toContain(
       '- schedule: `crq-tick` active · next run soon · last run None',
     );
+    // The live probe dict reaches the publish seam: state is the probe's,
+    // never a hardcoded systemd default.
+    const summaryText = await readFile(join(roots.xdgStateHome, 'crq', 'summary.json'), 'utf8');
+    const summary = JSON.parse(summaryText) as Record<string, unknown>;
+    expect(summary['schedule']).toEqual({ id: 'crq-tick', state: 'active' });
+  });
+
+  it('captures drainable repair stems so the digest reads their bytes', async () => {
+    const roots = await makeRoots();
+    await seedRoots(roots.stateRoot, roots.runnerRoot);
+    await mkdir(join(roots.stateRoot, 'repair', 'inbox'), { recursive: true });
+    await writeFile(join(roots.stateRoot, 'repair', 'inbox', 'crq-fix.json'), 'job-bytes');
+    const queue = {
+      ...QUEUE,
+      items: [
+        ...QUEUE.items,
+        {
+          id: 'rep1',
+          kind: 'merged',
+          state: 'pending',
+          repair_runs: { 'crq-fix': { state: 'queued', jobs: ['crq-fix'] } },
+          cycles: [],
+          attempts: [],
+          notes: [],
+        },
+      ],
+    };
+    await writeFile(join(roots.stateRoot, 'queue.json'), `${JSON.stringify(queue, null, 2)}\n`);
+    const seams = await resolveComposerSeams(roots.stateRoot, queue);
+    const entry = seams.inbox.entries.find((candidate) => candidate.stem === 'crq-fix');
+    expect(entry).toBeDefined();
+    expect(entry?.jobBytes).not.toBeNull();
+    expect(new TextDecoder().decode(entry?.jobBytes ?? new Uint8Array())).toBe('job-bytes');
   });
 
   it('keeps the composer seam reads on the state root', async () => {

@@ -18,7 +18,7 @@
  * and no working-directory default is consulted here, so a test or the CLI
  * seam controls the roots.
  */
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   fileRepairInboxState,
@@ -29,6 +29,7 @@ import {
   type RunCommand,
   type SummaryStateRoots,
 } from './summarySource.js';
+import { drainableStemsFromQueue } from '../../policy/crq/publishEffects.js';
 import { readSummaryCore, type ReadOnlyStatusEffects } from '../../ops/crq/readOnlyStatus.js';
 import { fileReadOnlyStatusEffects, type StatusStateRoots } from './statusSource.js';
 import {
@@ -122,11 +123,14 @@ export function fileStatusWriterEffects(
       // the shared effect snapshot for this queue, compose the core through
       // readSummaryCore's summarize+merged_current pipeline, then write
       // atomically. Python passes its in-memory q; here the composer re-reads
-      // the same strict bytes the route just validated (the queue is never
-      // written between the two reads), so the lossless parse the composer
-      // sees is the route's own documents, BigInt lexemes included. The
-      // validated documents still drive the effect snapshot below.
-      void documents;
+      // the queue bytes, so a concurrent tick between the route's validation
+      // and this read yields a summary whose core counters come from one
+      // revision and whose repair/utilization sections (built from the
+      // validated documents below) come from another. That residual race is
+      // transient — the next `crq status` republishes from a consistent
+      // snapshot — and Python has the same window between `save_queue` and
+      // `publish`. The validated documents still drive the effect snapshot.
+      void documents.scheduleProbe;
       const coreEffects: ReadOnlyStatusEffects = {
         readQueue: readOnly.readQueue,
         readConfig: readOnly.readConfig,
@@ -146,7 +150,7 @@ export function fileStatusWriterEffects(
         core.value,
         documents.queue,
         documents.config,
-        scheduleProbeForPublish(documents.config),
+        scheduleProbeForPublish(documents),
         effects,
         roots.home,
       );
@@ -159,15 +163,22 @@ export function fileStatusWriterEffects(
  * Resolve the status.md triage/repair snapshot for one invocation: the
  * sorted triage rows and the repair-inbox glob the two markdown JSON blocks
  * read. Python opens these inline mid-route; the adapter snapshots them up
- * front so the route stays pure.
+ * front so the route stays pure. The inbox glob carries the queue's
+ * drainable stems: Python opens each drainable queued job inline
+ * (`repair_tick.digest`), so an unconsumed stem's bytes must be captured
+ * here or the digest would refuse on null bytes where Python reads the file.
  */
-export async function resolveComposerSeams(stateRoot: string): Promise<{
+export async function resolveComposerSeams(
+  stateRoot: string,
+  queue: unknown = null,
+): Promise<{
   readonly triageRows: Awaited<ReturnType<typeof fileTriageRows>>;
   readonly inbox: Awaited<ReturnType<typeof fileRepairInboxState>>;
 }> {
+  const selectedStems = drainableStemsFromQueue(queue);
   const [triageRows, inbox] = await Promise.all([
     fileTriageRows(stateRoot),
-    fileRepairInboxState(stateRoot),
+    fileRepairInboxState(stateRoot, selectedStems),
   ]);
   return { triageRows, inbox };
 }
@@ -195,15 +206,16 @@ function pendingPullsOf(core: Record<string, unknown>): {
 }
 
 /**
- * The schedule dict the banner probe built (`{"status": ...}` on success, or
- * the `{"status": "systemd", "id": "crq-tick.timer"}` default). Python
- * passes the same dict to `status_summary.publish`, whose `state` arm reads
- * only `status`; an unavailable probe keeps the systemd default exactly as
- * the producer's initial dict does.
+ * The schedule dict Python passes to `status_summary.publish`: on a live
+ * probe success the parsed inspect document, on probe failure `None` (whose
+ * falsy `status` keeps the composer's systemd default and arms its `error`
+ * key), and the producer's initial systemd dict when this invocation never
+ * probed at all (no `schedule_id`).
  */
-function scheduleProbeForPublish(config: CrqDocuments['config']): Record<string, unknown> {
-  void config;
-  return { status: 'systemd', id: 'crq-tick.timer' };
+function scheduleProbeForPublish(documents: CrqDocuments): Record<string, unknown> | null {
+  const outcome = documents.scheduleProbe;
+  if (outcome === undefined) return { status: 'systemd', id: 'crq-tick.timer' };
+  return outcome.schedule;
 }
 
 export interface StatusWriterCliIo {
@@ -224,7 +236,14 @@ export async function runStatusWriter(
   now?: () => number,
 ): Promise<number> {
   try {
-    const seams = await resolveComposerSeams(roots.stateRoot);
+    // The stems the repair digest needs come from a lenient read of the
+    // queue: a corrupt queue.json fails the route's own strict validation
+    // moments later with the schema refusal, so this read only needs to
+    // yield a plain object or nothing.
+    const seams = await resolveComposerSeams(
+      roots.stateRoot,
+      await lenientQueueJson(roots.stateRoot),
+    );
     const effects = fileStatusWriterEffects(roots, realRunCommand, now);
     const result = await writeStatus({ ...effects, composerSeams: seams });
     io.write(result.markdown);
@@ -239,3 +258,13 @@ export async function runStatusWriter(
 }
 
 export { writeStatus };
+
+/** A best-effort plain-object parse of queue.json for the stem selector. */
+async function lenientQueueJson(stateRoot: string): Promise<unknown> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(join(stateRoot, 'queue.json'), 'utf8'));
+    return parsed;
+  } catch {
+    return null;
+  }
+}
