@@ -72,16 +72,27 @@ export const DEFAULT_PROTECTED_BRANCH = 'main';
 
 /** Options for the I3 guard's configurable side. */
 export interface SafeArgsOpts {
-  /** The branch pushes may never land on, under either spelling; default
-   * DEFAULT_PROTECTED_BRANCH ('main'). */
+  /** The branch pushes may never land on, under any spelling git accepts
+   * (bare name, `refs/heads/<branch>`, or the `heads/<branch>` alias);
+   * default DEFAULT_PROTECTED_BRANCH ('main'). */
   protectedBranch?: string;
 }
 
-/** True when `ref` is the protected branch under EITHER spelling — the bare
- * branch name or its `refs/heads/<branch>` form (the two shapes a push
- * refspec destination takes). */
+/** True when `ref` is the protected branch under ANY spelling git accepts —
+ * the bare branch name, its fully-qualified `refs/heads/<branch>` form, or the
+ * partial-name alias `heads/<branch>` (git resolves the alias to the same
+ * ref, so string equality on the other two alone leaves a bypass). */
 const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
-  ref === protectedBranch || ref === `refs/heads/${protectedBranch}`;
+  ref === protectedBranch ||
+  ref === `refs/heads/${protectedBranch}` ||
+  ref === `heads/${protectedBranch}`;
+
+/** True when a refspec carries a glob metacharacter. Git EXPANDS a wildcard
+ * push refspec at push time, so a string-equality destination check cannot
+ * see where it lands: `refs/heads/*:refs/heads/*` updates the protected
+ * branch like any other. */
+const hasGlob = (refspec: string): boolean =>
+  refspec.includes('*') || refspec.includes('?') || refspec.includes('[');
 
 /**
  * THE I3 GUARD — AN ALLOWLIST (round 2): only the argv shapes this family
@@ -104,15 +115,22 @@ const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
  *       (round 3: the documented shapes carry no flags, so `worktree
  *       remove --force <path>` is refused — the real impl deliberately
  *       omits --force)
- *   push --no-follow-tags <remote> <src:dst>  — the EXACT hardened shape
- *       (review P1 p522, PR #1641): the flag pins push.followTags OFF (a
+ *   push --no-follow-tags --recurse-submodules=no <remote> <src:dst>
+ *                                             — the EXACT hardened shape
+ *       (review P1 p522, PR #1641): the flags pin push.followTags OFF (a
  *       repo/user config could otherwise publish annotated tags — and a
- *       credential in a tag annotation bypasses every scan), an EXPLICIT
- *       src:dst refspec is required with BOTH halves non-empty (`:dst`
- *       deletes a remote branch — refused), no '+' force marker (I3
+ *       credential in a tag annotation bypasses every scan) and stop
+ *       recurseSubmodules=only from exiting 0 with the branch UNPUSHED, an
+ *       EXPLICIT src:dst refspec is required with BOTH halves non-empty
+ *       (`:dst` deletes a remote branch — refused), no '+' force marker (I3
  *       forbids force, period), NO flag beyond the hardened prefix
- *       (`--force` cannot follow it), and the destination must not be the
- *       protected branch. The flag-less historical shape is refused.
+ *       (`--force` cannot follow it), NO glob metacharacter anywhere in a
+ *       refspec (round 4: git EXPANDS a wildcard refspec at push time, so
+ *       `refs/heads/*:refs/heads/*` reaches the protected branch while its
+ *       literal destination does not name it), and the destination must not
+ *       be the protected branch under any spelling git accepts (bare name,
+ *       `refs/heads/<branch>`, or the `heads/<branch>` partial-name alias).
+ *       The flag-less historical shape is refused.
  *   gh pr merge <n> --merge [--match-head-commit <sha>]  — the ONLY merge
  *       method (I3); the head-commit pin is allowed only as a 40-hex sha
  *       (review-debt #186)
@@ -133,7 +151,8 @@ const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
  *       short sha, a range, or any other flag is refused as an unknown
  *       shape).
  * opts.protectedBranch (default 'main') names the branch pushes may never
- * land on, under either spelling.
+ * land on, under any spelling git accepts (bare name, `refs/heads/<branch>`,
+ * or the `heads/<branch>` partial-name alias).
  */
 export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): readonly string[] {
   const protectedBranch = opts.protectedBranch ?? DEFAULT_PROTECTED_BRANCH;
@@ -255,6 +274,16 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
       // would choose the destination — possibly the protected branch.
       if (tail.length < 4) throw unknown();
       for (const refspec of tail.slice(3)) {
+        if (hasGlob(refspec)) {
+          // Glob bypass, closed (round 4): git EXPANDS a wildcard refspec at
+          // push time, so `refs/heads/*:refs/heads/*` is an explicit src:dst
+          // whose literal destination never equals the protected branch —
+          // yet the push updates it. No glob may ride a push refspec.
+          throw new UnsafeMergeArgsError(
+            args,
+            `push refspec ${JSON.stringify(refspec)} contains a glob — wildcard pushes can reach the protected branch`,
+          );
+        }
         if (refspec.startsWith('+')) {
           // Force-marker bypass, closed (round 2): a '+'-marked PUSH
           // refspec is a force-push — I3 forbids force outright, whatever
