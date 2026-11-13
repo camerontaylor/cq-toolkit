@@ -67,10 +67,15 @@ Relevant topology facts for a switch:
 
 The numbered findings below are the pre-change finding: they describe the
 controller as reviewed, before the "Implemented in the existing controller"
-list below resolved items 2 and 3 in code. Items 1 and 4 remain open and are
-carried by the "Remaining gaps" list below; only the physical reconciliation
-of production history belongs to the parent. The pre-change source showed a
-concrete defect, not merely an unknown record location.
+list below resolved items 2 and 3 in code. Item 3 is resolved only for
+unit-recovery transactions, where `recover_unit` machine-verifiably resolves
+a unit switch by self-excluding its own record; its checkout-record portion
+is unresolved — a checkout `deploy_pending`, `rollback_pending` or
+`recovery_required` record has no machine-verifiable resolution — so that
+portion remains open alongside items 1 and 4 and is carried by the
+"Remaining gaps" list below; only the physical reconciliation of production
+history belongs to the parent. The pre-change source showed a concrete
+defect, not merely an unknown record location.
 
 1. **Two record roots are not bound to each other (still open).**
    `prepare-host.record()`
@@ -156,8 +161,13 @@ Remaining gaps (not fixed here): the CLI still accepts an arbitrary
 `--record-dir`; the guard sees only that directory, the lock is checkout-local,
 and older binaries or a second directory can bypass it. Records do not carry
 the record root or controller version, so cross-checkout identity and the
-production inventory of old records remain parent-owned. A host adapter is
-still not enabled.
+production inventory of old records remain parent-owned. A checkout record in
+`deploy_pending`, `rollback_pending` or `recovery_required` state has no
+machine-verifiable resolution: the guard only refuses it (unfinished checkout
+switch requires recovery; unresolved checkout recovery requires out-of-band
+reconciliation), and, unlike a unit switch, `recover_unit` cannot resolve it
+because it self-excludes only its own `unit_switch` record; resolving such
+records remains parent-owned. A host adapter is still not enabled.
 
 The one input that cannot be derived from source is the actual deployed record
 root, the controller versions in use, and the inventory of existing pending or
