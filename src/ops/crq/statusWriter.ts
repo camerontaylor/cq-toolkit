@@ -38,7 +38,6 @@ import {
   repairDigest,
   type RepairInboxState,
   type SystemdClock,
-  type SystemdProbe,
   type TriageRowFile,
 } from '../../policy/crq/publishEffects.js';
 import {
@@ -95,10 +94,27 @@ export interface PublishFailureEvent {
 }
 
 /**
+ * The composer's local triage and repair seams: status.md embeds
+ * `finding_triage` and `repair_tick.digest` from the effect snapshot the
+ * adapter assembles, exactly as Python calls them inline.
+ */
+export interface StatusComposerSeams {
+  /** The sorted `triage/*.json` rows as exact bytes (null bytes = row error). */
+  readonly triageRows: readonly TriageRowFile[];
+  /** The repair inbox state (`repair_tick.digest`'s seam). */
+  readonly inbox: RepairInboxState;
+}
+
+/**
  * The write effects. Every path and value is resolved by the adapter; this
- * route never consults the environment or the clock directly.
+ * route never consults the environment or the clock directly. The summary
+ * publish owns its own effect snapshot (previous-summary cache, repair inbox,
+ * triage rows, systemd probe), so only the reads, writes, schedule probe,
+ * event append and clock are bound here.
  */
 export interface StatusWriterEffects {
+  /** The status.md triage/repair snapshot, assembled at adapter time. */
+  readonly composerSeams: StatusComposerSeams;
   /** `queue.json` text, strictly decoded UTF-8 by the adapter. */
   readQueue(): Promise<string>;
   /** `config.json` text. */
@@ -107,18 +123,6 @@ export interface StatusWriterEffects {
   readEvents(): Promise<string>;
   /** Receipt bytes by validated id; null when unavailable (OSError catch). */
   readReceipt(receiptId: string): Promise<Uint8Array | null>;
-  /**
-   * The previous `crq/summary.json` TEXT. A read failure (absent file, bad
-   * bytes) is null: the producer's title cache treats every
-   * OSError/ValueError/KeyError/TypeError as `titles = {}`.
-   */
-  readPreviousSummary(): Promise<string | null>;
-  /** The sorted `triage/*.json` rows as exact bytes (null bytes = row error). */
-  readonly triageRows: readonly TriageRowFile[];
-  /** The repair inbox state (`repair_tick.digest`'s seam). */
-  readonly inbox: RepairInboxState;
-  /** The `systemctl --user show` probe result plus its clock pair. */
-  readonly systemd: { readonly probe: SystemdProbe; readonly clock: SystemdClock };
   /**
    * The `paseo schedule inspect` port: resolve the exact stdout on exit 0,
    * or null on spawn failure / non-zero exit / timeout. A null result is the
@@ -925,9 +929,9 @@ export async function writeStatusForDocuments(
   const probe = await probeSchedule(effects, scheduleId);
 
   const recent = recentEventLines(await effects.readEvents());
-  const triage = findingTriage(effects.triageRows);
+  const triage = findingTriage(effects.composerSeams.triageRows);
   const mergedCurrentView = await mergedCurrentWithReceipts(queue, effects);
-  const repair = repairDigest(queue, effects.inbox, now);
+  const repair = repairDigest(queue, effects.composerSeams.inbox, now);
   const utilization = utilizationAtConfigCap(queue, config, now);
   const repairUtilization = { repair, utilization };
 
