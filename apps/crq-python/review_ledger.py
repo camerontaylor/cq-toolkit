@@ -348,9 +348,23 @@ def fsync_dir(directory):
         os.close(fd)
 
 
+def durable_directory(directory):
+    """Create a directory tree and persist each new entry in its parent."""
+    directory = Path(directory)
+    created = []
+    probe = directory
+    while probe.parent != probe and not probe.exists():
+        created.append(probe)
+        probe = probe.parent
+    if created:
+        directory.mkdir(parents=True, exist_ok=True)
+        for entry in created:
+            fsync_dir(entry.parent)
+
+
 def atomic(filename, data):
     filename = Path(filename)
-    filename.parent.mkdir(parents=True, exist_ok=True)
+    durable_directory(filename.parent)
     with tempfile.NamedTemporaryFile(dir=filename.parent, delete=False) as stream:
         stream.write(data)
         stream.flush()
@@ -363,7 +377,7 @@ def atomic(filename, data):
 @contextlib.contextmanager
 def locked(filename):
     filename = Path(filename)
-    filename.parent.mkdir(parents=True, exist_ok=True)
+    durable_directory(filename.parent)
     with filename.open("a+b") as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         yield
@@ -404,7 +418,7 @@ class ArtifactStore:
                 hasher.update(chunk)
         ident = hasher.hexdigest()
         destination = self.root / "sha256" / ident
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        durable_directory(destination.parent)
         if not destination.exists():
             with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
                 with Path(filename).open("rb") as source:
