@@ -355,7 +355,7 @@ def review_metrics(queue, events, now):
                 pr_reuse += 1
             if item.get("state") == "done" and item.get("scope_adequate") is True:
                 dedup_completed += 1
-    starts = failed = unknown_attempts = 0
+    starts = failed = unknown_attempts = no_review = 0
     wait = {"interactive": _latency_acc(), "background": _latency_acc()}
     wait_class = {"first": _latency_acc(), "repeat": _latency_acc()}
     completion = {"interactive": _latency_acc(), "background": _latency_acc()}
@@ -382,13 +382,16 @@ def review_metrics(queue, events, now):
                 completed_repeats += 1
         pr_linked = (item["id"] in pr_link_items or item.get("pr_observers") or
                      item.get("pr") is not None)
-        if isinstance(item.get("run"), dict):
-            # Vendor starts come from launch evidence, not admission
-            # bookkeeping: an actual launch leaves `run` (including a consumed
-            # spawn failure), while receipt-only reuse stays uncounted.
-            starts += 1
-            if pr_linked:
-                pr_starts += 1
+        run = item.get("run")
+        if isinstance(run, dict):
+            # Vendor starts come from actual launches, not admission or reuse
+            # bookkeeping. A retained spawn-failed run never launched the CLI
+            # (crq keeps it only as a consumed reservation); the spawn_failed
+            # event counter below already covers it.
+            if not run.get("spawn_failed_at"):
+                starts += 1
+                if pr_linked:
+                    pr_starts += 1
         item_attempts = item.get("attempts")
         if not isinstance(item_attempts, list):
             item_attempts = ()
@@ -397,20 +400,30 @@ def review_metrics(queue, events, now):
             if not isinstance(attempt, dict):
                 unknown_attempts += 1
                 continue
-            if isinstance(attempt.get("run_id"), str) or timestamp(attempt.get("started_at")) is not None:
+            if timestamp(attempt.get("started_at")) is not None:
+                # A start time is launch evidence; a reused run id alone is not
+                # (receipt-only reuse retains the source run id, started_at null).
                 starts += 1
                 if pr_linked:
                     pr_starts += 1
             else:
                 unknown_attempts += 1
             outcome = attempt.get("outcome")
+            # Classifier vocabulary (crq.classify): rate_limited, auth and
+            # action_required are vendor stops after a real invocation; error,
+            # interrupted, timeout and malformed are failed invocations.
+            # skipped ("no fresh review" / non-reviewed status) and too_large
+            # (diff oversize, no review performed) mean no vendor review ran,
+            # so they are neither failed nor successful attempts.
             if outcome is None:
                 unknown_attempts += 1
             elif outcome == "completed" and attempt.get("counted") is not False:
                 pass
-            elif outcome in ("interrupted", "error", "timeout", "malformed", "rate_limited",
-                             "auth", "action_required", "skipped"):
+            elif outcome in ("error", "interrupted", "timeout", "malformed",
+                             "rate_limited", "auth", "action_required"):
                 failed += 1
+            elif outcome in ("skipped", "too_large"):
+                no_review += 1
             else:
                 unknown_attempts += 1
             band = attempt.get("band") if attempt.get("band") in ("interactive", "background") else None
@@ -505,7 +518,8 @@ def review_metrics(queue, events, now):
                         "change_statistics": _unknown(
                             "predecessor deltas are advisory-only and not retained in queue state")},
         "cooldown": cooldown,
-        "attempts": {"failed": failed, "unknown": unknown_attempts},
+        "attempts": {"failed": failed, "unknown": unknown_attempts,
+                     "no_review": no_review},
         "quota": quota,
         "notifications": {**notify_states, "retries": retries,
                           "delivery_lag": _unknown(

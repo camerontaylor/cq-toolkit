@@ -2194,7 +2194,8 @@
             },
             "attempts": {
               "failed": 0,
-              "unknown": 0
+              "unknown": 0,
+              "no_review": 0
             },
             "quota": {
               "state": "known",
@@ -2452,7 +2453,8 @@
             },
             "attempts": {
               "failed": 0,
-              "unknown": 0
+              "unknown": 0,
+              "no_review": 0
             },
             "quota": {
               "state": "known",
@@ -2712,7 +2714,8 @@
             },
             "attempts": {
               "failed": 0,
-              "unknown": 0
+              "unknown": 0,
+              "no_review": 0
             },
             "quota": {
               "state": "known",
@@ -3008,7 +3011,8 @@
             },
             "attempts": {
               "failed": 0,
-              "unknown": 0
+              "unknown": 0,
+              "no_review": 0
             },
             "quota": {
               "state": "known",

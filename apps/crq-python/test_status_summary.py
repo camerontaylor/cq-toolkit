@@ -516,7 +516,7 @@ class ReposSummaryTests(unittest.TestCase):
         self.assertEqual(m["cooldown"], {"state": "expired",
                                          "until": "2026-11-06T03:00:00Z",
                                          "seconds_remaining": 0})  # past cooldown relative to now
-        self.assertEqual(m["attempts"], {"failed": 2, "unknown": 0})
+        self.assertEqual(m["attempts"], {"failed": 2, "unknown": 0, "no_review": 0})
         self.assertEqual(m["quota"], {"state": "known", "limit": 10, "remaining": 4})
         self.assertEqual(m["notifications"], {"sent": 1, "error": 1, "pending": 1,
                                               "withdrawn": 0, "retries": 5,
@@ -544,6 +544,51 @@ class ReposSummaryTests(unittest.TestCase):
         self.assertEqual(m["requests"], {"total": 0, "created": 0, "joined": 0,
                                          "reused": 0, "observed": 0, "unknown_action": 0})
         self.assertEqual(m["vendor_starts"], 0)
+
+    def test_review_metrics_vendor_starts_need_launch_evidence(self):
+        """Regression: reuse run ids and spawn-failed runs are not vendor starts.
+
+        A receipt-only reuse attempt retains the source run id but started_at
+        is null (nothing launched for this request). A retained spawn-failed
+        run (crq.py keeps `run` with spawn_failed_at as a consumed
+        reservation) never launched the CLI; the spawn_failed event counter
+        covers it. Outcome rule follows the classifier's own vocabulary
+        (crq.classify): skipped (no fresh review) and too_large (oversize,
+        no review performed) mean the vendor never reviewed, so they count
+        under attempts.no_review, not failed and not unknown.
+        """
+        reuse_attempt = dict(id="lr-reuse", kind="local-review", generation=1,
+                             state="pending", created_at="2026-11-06T00:00:00Z",
+                             attempts=[dict(run_id="r-old", outcome="completed",
+                                            counted=True, band="background",
+                                            started_at=None)])
+        spawn_failed = dict(id="lr-spawn", kind="local-review", generation=1,
+                            state="failed", created_at="2026-11-06T01:00:00Z",
+                            run={"run_id": "r-new",
+                                 "started_at": "2026-11-06T01:00:00Z",
+                                 "spawn_failed_at": "2026-11-06T01:00:01Z"},
+                            attempts=[])
+        skipped = dict(id="lr-skip", kind="local-review", generation=1,
+                       state="done", scope_adequate=False,
+                       created_at="2026-11-06T02:00:00Z",
+                       attempts=[dict(run_id="r-skip", band="background",
+                                      started_at="2026-11-06T02:00:00Z",
+                                      outcome="skipped", counted=False)])
+        too_large = dict(id="lr-big", kind="local-review", generation=1,
+                         state="blocked", created_at="2026-11-06T03:00:00Z",
+                         attempts=[dict(run_id="r-big", band="background",
+                                        started_at="2026-11-06T03:00:00Z",
+                                        outcome="too_large", counted=False)])
+        queue = {"items": [reuse_attempt, spawn_failed, skipped, too_large],
+                 "review_requests": {}, "review_notify_outbox": {}}
+        data = adapter.summarize({"generated_at": "2026-11-07T00:00:00Z"}, queue, {},
+                                 {"repo": "owner/repo", "max_starts_per_hour": 8}, [], 0)
+        m = data["review_metrics"]
+        # The reuse attempt and the spawn-failed run launched nothing.
+        self.assertEqual(m["vendor_starts"], 2)  # only skipped + too_large attempts
+        # The reuse attempt (started_at null: bookkeeping, not a launch) is
+        # unknown; skipped/too_large are no-review outcomes, not failures.
+        self.assertEqual(m["attempts"], {"failed": 0, "unknown": 1, "no_review": 2})
 
 
 if __name__ == "__main__":
