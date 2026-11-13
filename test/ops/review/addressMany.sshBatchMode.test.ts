@@ -3,7 +3,10 @@
 // first occurrence of an option, so appending `-oBatchMode=yes` after a
 // configured `-oBatchMode=no` left interactive prompts enabled. Both the
 // attached (`-oBatchMode=no`) and separated (`-o BatchMode=no`) forms must be
-// normalized before the enforcement option is appended.
+// normalized before the enforcement option is appended. Quoted occurrences
+// (`"-oBatchMode=no"`) must be removed too, without consuming their bounding
+// quotes so shell quoting stays balanced, and repeated occurrences must not
+// survive the rewrite so exactly one `-oBatchMode=yes` remains.
 import { expect, test } from 'vitest';
 import { gitSubprocess } from '../../../src/ops/review/addressMany.js';
 
@@ -51,4 +54,24 @@ test('separated -o BatchMode=no is replaced when both SSH env vars are unset', (
     if (previousGitSsh !== undefined) process.env['GIT_SSH'] = previousGitSsh;
     if (previousGitSshCommand !== undefined) process.env['GIT_SSH_COMMAND'] = previousGitSshCommand;
   }
+});
+
+test('quoted "-oBatchMode=no" is removed without breaking shell quoting', () => {
+  // Removal keeps both bounding quotes of the quoted argument, so quoting
+  // stays balanced and the rewritten GIT_SSH_COMMAND remains valid for shell
+  // execution: the leftover quoted token is inert and every other option and
+  // argument survives, with the appended enforcement option the only
+  // BatchMode occurrence in the command.
+  const command = sshCommand('ssh "-oBatchMode=no" -p 2222');
+  expect(command).toBe('ssh " " -p 2222 -oBatchMode=yes');
+  expect((command?.match(/"/g) ?? []).length % 2).toBe(0);
+  expect((command?.match(/-oBatchMode=/gi) ?? []).length).toBe(1);
+});
+
+test('repeated existing BatchMode options leave exactly one appended option', () => {
+  // Adjacent occurrences share one delimiter, so a first rewrite that consumed
+  // the whitespace between them left the second in place and OpenSSH would
+  // still honor a configured BatchMode=no; both occurrences must be gone for
+  // the appended `-oBatchMode=yes` to be the only BatchMode option in force.
+  expect(sshCommand('ssh -oBatchMode=no -oBatchMode=yes')).toBe('ssh -oBatchMode=yes');
 });

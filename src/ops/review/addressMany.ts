@@ -118,12 +118,18 @@ export const gitSubprocess = (
   // timeout below bounds anyway. With no env vars set, the caller's resolved
   // core.sshCommand stays the base command so its options survive; plain ssh
   // applies only when nothing is configured. Any existing BatchMode option is
-  // dropped first, in both its attached (`-oBatchMode=no`) and separated
-  // (`-o BatchMode=no`) forms: OpenSSH honors the first occurrence of an
-  // option, so a configured `BatchMode=no` would win over an appended
-  // `-oBatchMode=yes`.
-  const enforceBatchMode = (command: string): string =>
-    `${command.replace(/(^|[\s"'])-o\s*batchmode=\S+([\s"']|$)/gi, '$1').trim()} -oBatchMode=yes`;
+  // dropped first, in its attached (`-oBatchMode=no`), separated
+  // (`-o BatchMode=no`) and quoted (`"-oBatchMode=no"`) forms: OpenSSH honors
+  // the first occurrence of an option, so a configured `BatchMode=no` would
+  // win over an appended `-oBatchMode=yes`, and every occurrence must go so
+  // the appended one is the only one in force. Lookbehind and lookahead
+  // delimit each option, so removal takes the option and its trailing
+  // whitespace but never a bounding quote: shell quoting stays balanced and
+  // the rewritten command remains valid for shell execution.
+  const enforceBatchMode = (command: string): string => {
+    const stripped = command.replace(/(?<=^|[\s"'])-o\s*batchmode=\S*?(?=$|[\s"'])\s*/gi, ' ');
+    return `${stripped.trim()} -oBatchMode=yes`;
+  };
   if (env['GIT_SSH'] === undefined && env['GIT_SSH_COMMAND'] === undefined) {
     const base = configuredSshCommand?.trim() || 'ssh';
     env['GIT_SSH_COMMAND'] = enforceBatchMode(base);
