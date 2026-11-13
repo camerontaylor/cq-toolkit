@@ -2441,7 +2441,7 @@ def deliver_pending_review_refreshes(q: Dict[str, Any]) -> List[str]:
                 continue
             previous = item.get("review_refresh", {})
             if (previous.get("head") == request["head"] and previous.get("scan_run") == request["run_id"]
-                    and previous.get("state") in ("created", "existing", "abandoned", "skipped-head", "skipped-range")):
+                    and previous.get("state") in ("created", "existing", "abandoned", "skipped-head", "skipped-range", "body-major")):
                 continue
             candidates.append((item, request))
     candidates.sort(key=lambda pair: pair[0].get("review_refresh_attempt_at") or "")

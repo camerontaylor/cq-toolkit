@@ -242,31 +242,97 @@ class RefreshTest(unittest.TestCase):
                                         login='cq-review[bot]')['state'], 'created')
 
     def test_prior_pass_does_not_suppress_new_scan_or_its_refresh(self):
-        old_pass = self.original()
-        old_pass['body'] = old_pass['body'].replace('ITERATE for', 'PASS for')
-        self.meta = {**self.meta, 'run_id': 'new-scan'}
+        original = self.original()
+        first = ReceiptGh(pages=[[original]])
+        self.assertEqual(receipt.refresh(prf, REPO, 7, self.meta, gh=first,
+                                        login='cq-review[bot]')['state'], 'created')
+        old_pass = {'id': 77, 'user': {'login': 'cq-review[bot]'}, 'body': first.posts()[0]['body'],
+                    'submitted_at': '2026-01-01T00:00:01Z'}
+        moved_base = 'e' * 40
+        self.meta = {**self.meta, 'run_id': 'new-scan', 'base': moved_base}
         (self.root / 'meta.json').write_text(json.dumps({**self.meta, 'range_policy': 'full-range-once-v1'}))
-        fresh = ReceiptGh(pages=[[old_pass]], threads=[{'nodes': [thread()],
+        fresh = ReceiptGh(pages=[[old_pass]], base=moved_base, merge_base=moved_base, threads=[{'nodes': [thread()],
                              'pageInfo': {'hasNextPage': False, 'endCursor': None}}])
         self.assertEqual(self.deliver(gh=fresh)['state'], 'created')
         iterate = {'id': 78, 'user': {'login': 'cq-review[bot]'}, 'body': fresh.posts()[0]['body'],
                    'submitted_at': '2026-01-01T00:00:02Z'}
         self.assertIn('ITERATE for', iterate['body'])
-        gh = ReceiptGh(pages=[[iterate, old_pass]])  # API list ordering is not trusted
+        gh = ReceiptGh(pages=[[iterate, old_pass]], base=moved_base, merge_base=moved_base)  # unordered API history
         self.assertEqual(receipt.refresh(prf, REPO, 7, self.meta, gh=gh,
                                         login='cq-review[bot]')['state'], 'created')
         body = gh.posts()[0]['body']
         self.assertIn(f'head={HEAD} scan-run=new-scan -->', body)
         refreshed = {'id': 79, 'user': {'login': 'cq-review[bot]'}, 'body': body,
                      'submitted_at': '2026-01-01T00:00:03Z'}
-        replay = ReceiptGh(pages=[[old_pass, refreshed, iterate]])
+        replay = ReceiptGh(pages=[[old_pass, refreshed, iterate]], base=moved_base, merge_base=moved_base)
         self.assertEqual(receipt.refresh(prf, REPO, 7, self.meta, gh=replay,
                                         login='cq-review[bot]')['state'], 'existing')
         self.assertEqual(replay.posts(), [])
         # A distinct completed clean scan can publish its own PASS at the same head.
-        clean = ReceiptGh(pages=[[old_pass]])
+        clean = ReceiptGh(pages=[[old_pass]], base=moved_base, merge_base=moved_base)
         self.assertEqual(self.deliver(gh=clean)['state'], 'created')
         self.assertIn('PASS for', clean.posts()[0]['body'])
+
+    def test_earlier_new_body_major_holds_later_clean_scan_and_every_refresh_at_head(self):
+        rejected = ReceiptGh(post=[(1, '', 'HTTP 422 anchor rejected'), (0, '{"id":77}', '')])
+        self.deliver([ANCHORED], rejected)
+        body = rejected.posts()[1]['body']
+        self.assertIn('body-major=1', body)
+        earlier = {'id': 77, 'body': body, 'user': {'login': 'cq-review[bot]'},
+                   'submitted_at': '2026-01-01T00:00:01Z'}
+        moved_base = 'e' * 40
+        self.meta = {**self.meta, 'run_id': 'new-clean', 'base': moved_base}
+        (self.root / 'meta.json').write_text(json.dumps({**self.meta, 'range_policy': 'full-range-once-v1'}))
+        for scope in ('whole-pr-success', 'narrow-success'):
+            with self.subTest(scope=scope):
+                earlier['body'] = body.replace('whole-pr-success', scope)
+                clean = ReceiptGh(pages=[[earlier]], base=moved_base, merge_base=moved_base)
+                self.assertEqual(self.deliver(gh=clean)['state'], 'created')
+                latest = {'id': 78, 'body': clean.posts()[0]['body'], 'user': {'login': 'cq-review[bot]'},
+                          'submitted_at': '2026-01-01T00:00:02Z'}
+                self.assertIn('ITERATE for', latest['body'])
+                # The new scan itself is complete/clean: only the earlier receipt blocks it.
+                self.assertIn('whole-pr-success -->', latest['body'])
+                for pages in ([[latest], [earlier]], [[earlier, latest]]):
+                    refresh = ReceiptGh(pages=pages, base=moved_base, merge_base=moved_base)
+                    self.assertEqual(receipt.refresh(prf, REPO, 7, self.meta, gh=refresh,
+                                                    login='cq-review[bot]')['state'], 'body-major')
+                    self.assertEqual(refresh.posts(), [])
+        # That debt is head-scoped: a genuinely new head can receive PASS.
+        new_head = 'f' * 40
+        self.meta = {**self.meta, 'run_id': 'new-head', 'head': new_head}
+        (self.root / 'meta.json').write_text(json.dumps({**self.meta, 'range_policy': 'full-range-once-v1'}))
+        new = ReceiptGh(pages=[[earlier]], base=moved_base, merge_base=moved_base, head=new_head)
+        self.deliver(gh=new)
+        self.assertIn('PASS for', new.posts()[0]['body'])
+
+    def test_earlier_unattested_host_body_major_holds_after_app_identity_recovers(self):
+        original = self.original()
+        body = original['body'].replace('whole-pr-success -->', 'whole-pr-success body-major=1 -->')
+        body = body.replace(f'for `{HEAD}`**', f'for `{HEAD}`**\nUnattested: App identity unavailable; posted with the host account.')
+        earlier = {**original, 'body': body, 'user': {'login': 'crq-host'}}
+        self.meta = {**self.meta, 'run_id': 'app-recovered'}
+        (self.root / 'meta.json').write_text(json.dumps({**self.meta, 'range_policy': 'full-range-once-v1'}))
+        gh = ReceiptGh(pages=[[earlier]])
+        self.deliver(gh=gh)
+        self.assertIn('ITERATE for', gh.posts()[0]['body'])
+        refresh = ReceiptGh(pages=[[earlier]])
+        self.assertEqual(receipt.refresh(prf, REPO, 7, self.meta, gh=refresh,
+                                        login='cq-review[bot]')['state'], 'body-major')
+        self.assertEqual(refresh.posts(), [])
+
+    def test_legacy_body_major_and_foreign_receipts_do_not_create_new_head_debt(self):
+        original = self.original()
+        legacy = {**original, 'body': 'Legacy major body finding; no post-change CRQ receipt binding.'}
+        fake = {**original, 'user': {'login': 'unrelated-reviewer'},
+                'body': original['body'].replace('whole-pr-success -->', 'whole-pr-success body-major=1 -->')}
+        for earlier in (legacy, fake):
+            with self.subTest(earlier=earlier):
+                clean = ReceiptGh(pages=[[earlier]])
+                self.deliver(gh=clean)
+                self.assertIn('PASS for', clean.posts()[0]['body'])
+                self.assertEqual(receipt.refresh(prf, REPO, 7, self.meta,
+                    gh=ReceiptGh(pages=[[original, earlier]]), login='cq-review[bot]')['state'], 'created')
 
     def test_unresolved_major_and_incomplete_scope_do_not_refresh(self):
         original = self.original()
@@ -342,7 +408,7 @@ class RefreshDeliveryTest(unittest.TestCase):
         self.assertEqual(item['review_refresh']['scan_run'], META['run_id'])
 
     def test_closed_or_superseded_refresh_requests_settle_and_stop_polling(self):
-        for state in ('skipped-head', 'skipped-range'):
+        for state in ('skipped-head', 'skipped-range', 'body-major'):
             item = {'id': 'pr7', 'kind': 'open', 'state': 'done',
                     'pr_review': {'state': 'created', 'verdict': 'ITERATE', 'whole_pr_scan': True},
                     'pr_review_request': {**META, 'pr': 7, 'posting_identity': 'cq-review[bot]'}}

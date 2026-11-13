@@ -37,6 +37,29 @@ def reviews(prf, gh, repo, pr):
     return rows
 
 
+def body_major_at_head(rows, pr, head, login):
+    """Only post-change CRQ receipt evidence holds a head across later scans."""
+    for row in rows:
+        author, body = row.get('user', {}).get('login') or '', row['body']
+        fallback = ('Unattested: App identity unavailable; posted with the host account.' in body
+                    and author and not author.endswith('[bot]'))
+        if author not in {login, 'cq-review[bot]'} and not fallback:
+            continue
+        for match in re.finditer(re.escape(PREFIX) + r'(.*?) -->', body):
+            try:
+                found = json.loads(match[1])
+            except ValueError:
+                raise ValueError('malformed CRQ receipt binding') from None
+            if not isinstance(found, dict):
+                raise ValueError('malformed CRQ receipt binding')
+            if found.get('pr') != pr or found.get('head') != head:
+                continue
+            for scope in ('whole-pr-success', 'narrow-success'):
+                if f"<!-- crq-review-scan run={found.get('run_id')} {scope} body-major=1 -->" in body:
+                    return True
+    return False
+
+
 def prior_receipt(prf, gh, repo, pr, meta, login):
     wanted = binding(meta, pr)
     for row in reviews(prf, gh, repo, pr):
@@ -156,7 +179,8 @@ def prepare(prf, gh, repo, pr, meta, ndjson, findings, login):
     merge_base = current_merge_base(prf, gh, repo, state['base'], meta['head'])
     whole = (saved.get('range_policy') == 'full-range-once-v1' and merge_base == meta['base'])
     blocked = any(f['severity'].lower() in BLOCKING for f in findings)
-    blocked = open_major(prf, gh, repo, pr, login) or blocked
+    blocked = (body_major_at_head(reviews(prf, gh, repo, pr), pr, meta['head'], login)
+               or open_major(prf, gh, repo, pr, login) or blocked)
     verdict = 'PASS' if whole and not blocked else 'ITERATE'
     return {**meta, 'receipt_header': f"**Independent review (CodeRabbit CLI via crq): {verdict} for `{meta['head']}`**",
             'receipt_binding': binding_marker(binding(meta, pr)), 'whole_pr_scan': whole, 'receipt_verdict': verdict}
@@ -182,6 +206,8 @@ def refresh(prf, repo, pr, meta, gh=None, login=None):
     if current_merge_base(prf, gh, repo, state['base'], meta['head']) != meta['base']:
         return {'state': 'skipped-range'}
     rows = reviews(prf, gh, repo, pr)
+    if body_major_at_head(rows, pr, meta['head'], login):
+        return {'state': 'body-major'}
     own = []
     for row in rows:
         body = row.get('body') or ''

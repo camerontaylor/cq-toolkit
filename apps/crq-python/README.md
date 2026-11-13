@@ -294,12 +294,14 @@ or an earlier unresolved major/critical CRQ thread produce ITERATE.
   findings expose no invocable deterministic per-rule re-check subset.
 - When a complete whole-PR scan's latest verdict at the current head was ITERATE,
   a later tick can refresh it to PASS after the author resolves all major-or-above
-  CRQ threads, provided that scan left no major finding in the body. The refresh cites that saved scan; it runs no scan, creates no
+  CRQ threads, provided no post-change scan of that head left a major finding in the body. The refresh cites that saved scan; it runs no scan, creates no
   findings and uses `<!-- crq-verdict-refresh head=<sha> scan-run=<run id> -->`.
   Its whole head-and-scan-run marker dedupes one refresh per scan of a head,
   separate from original per-run retry dedupe. A later complete whole-PR scan at
   that head can receive a fresh PASS after its own ITERATE conditions clear;
-  earlier receipts remain immutable. Neither
+  earlier receipts remain immutable. Body-only majors from any post-change scan
+  block PASS and every refresh at that head; later scan absence cannot clear them.
+  Neither
   reviewed-range refusal nor run/base/head binding changes. The advisory source
   readout selects the latest exact-head CRQ verdict by submission timestamp;
   other independent reviewer evidence is preserved.
