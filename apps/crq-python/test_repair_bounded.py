@@ -760,7 +760,7 @@ class BoundedRepairTest(unittest.TestCase):
             with self.subTest(rung=rung):
                 atomic(self.root / 'state/repair' / job_id / 'result.json',
                        {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
-                        'attempts': [{'rung': rung}], 'source_sha': job['source_sha'],
+                        'attempts': [{'rung': rung}], 'reason': 'test', 'source_sha': job['source_sha'],
                         'finding_sha256': job['finding_sha256'], 'origin_job': OLD,
                         'worktree': str(self.c.WT_ROOT / 'crq-repair-pr1-merged'),
                         'repair_base': job['repair_base']})
