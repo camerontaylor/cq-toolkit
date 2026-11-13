@@ -158,6 +158,53 @@ describe('review.address candidate isolation', () => {
     },
   );
   test.each([
+    ['transitive', 'npm run compile', 'compile'],
+    ['hook', 'node build.mjs', 'prebuild'],
+    ['hook dependency', 'node build.mjs', 'compile'],
+    ['cycle', 'npm run compile', 'compile'],
+    ['shell indirection', 'script=compile; npm run "$script"', 'compile'],
+  ])(
+    'install hooks compare reachable scripts through %s before dispatch',
+    async (mode, build, changed) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        const scripts = {
+          postinstall: 'pnpm run build',
+          build,
+          prebuild: mode === 'hook dependency' ? 'pnpm compile' : 'node prebuild.mjs',
+          compile: mode === 'cycle' ? 'pnpm run build' : 'node compile.mjs',
+        };
+        await f.repo.write('package.json', JSON.stringify({ scripts }));
+        f.repo.commitAll('transitive install lifecycle metadata');
+        await writeFile(
+          join(f.dependencyRoot, 'package.json'),
+          JSON.stringify({ scripts: { ...scripts, [changed]: 'different installed files' } }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.commit).toBeUndefined();
+        expect(result.reason).toContain('manifests/locks differ');
+        expect(f.calls()).toBe(0);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('unchanged cyclic install script graph terminates and reuses dependencies', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const manifest = JSON.stringify({
+        scripts: { postinstall: 'pnpm run build', build: 'pnpm compile', compile: 'npm run build' },
+      });
+      await f.repo.write('package.json', manifest);
+      f.repo.commitAll('cyclic install lifecycle metadata');
+      await writeFile(join(f.dependencyRoot, 'package.json'), manifest);
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit, result.reason).toBeTruthy();
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test.each([
     ['dependencies', { dep: '1' }],
     ['devDependencies', { dep: '1' }],
     ['optionalDependencies', { dep: '1' }],
