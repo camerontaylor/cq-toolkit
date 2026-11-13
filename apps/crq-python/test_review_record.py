@@ -302,6 +302,18 @@ class ImportIdempotencyTests(unittest.TestCase):
         _, action = review_record.import_record(submission(), AT, [])
         self.assertTrue(action.startswith("record:"))
 
+    def test_aggregate_scope_budget_is_enforced_before_materialization(self):
+        # 256 rows of a million declared lines each fit every per-row bound but
+        # would expand to 256M set members inside ledger validation; the
+        # aggregate budget refuses the import cheaply, before any
+        # materialization.
+        rows = [{"path": f"p{i}.ts", "blob": "c" * 64,
+                 "intervals": [[1, 1_000_000]]} for i in range(256)]
+        events, action = review_record.import_record(
+            submission(claimed_scope=rows), AT, [])
+        self.assertTrue(action.startswith("quarantined:"))
+        self.assertIn("expanded-line budget", action)
+
 
 class HistoricalAdapterTests(unittest.TestCase):
     def a22_receipt(self):

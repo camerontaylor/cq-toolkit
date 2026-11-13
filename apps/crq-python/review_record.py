@@ -27,6 +27,10 @@ MAX_REPORT_BYTES = 256 * 1024
 # publication groups; importing one bigger event would poison the shared
 # outbox, so record imports enforce the same bound at the door.
 MAX_EVENT_BYTES = 1024 * 1024
+# Aggregates bound cheap arithmetic before validation materializes anything:
+# a small request may still declare millions of expanded scope lines, which
+# would allocate gigabytes while holding the queue lock.
+MAX_EXPANDED_SCOPE_LINES = 2_000_000
 VERDICT_OUTCOMES = {"APPROVED": "completed", "CHANGES_REQUESTED": "completed",
                      "COMMENTED": "completed"}
 
@@ -108,6 +112,14 @@ def normalize_record(submitted, at):
     for row in claimed_scope or ():
         if not isinstance(row, dict) or not isinstance(row.get("path"), str):
             raise RecordRefused("claimed scope rows need a path")
+    expanded = sum(sum(end - start + 1 for start, end in row.get("intervals") or ()
+                       if type(start) is int and type(end) is int and end >= start)
+                   for row in claimed_scope or ())
+    if expanded > MAX_EXPANDED_SCOPE_LINES:
+        # ledger validation materializes every line into sets; bound the
+        # arithmetic here so a tiny request cannot exhaust memory under the
+        # queue lock. Bounded scopes keep validating normally.
+        raise RecordRefused("claimed scope exceeds the expanded-line budget")
     outcome = VERDICT_OUTCOMES.get(submitted.get("verdict"), "unverified")
     completion = _completion_evidence(submitted)
     if outcome == "completed" and completion is None:
