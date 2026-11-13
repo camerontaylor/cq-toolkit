@@ -175,7 +175,9 @@ jobs:
     # that stays pending.
     # Pull requests keep today's behaviour: a new push cancels the
     # superseded run. A superseded commit's shards report `cancelled` and its
-    # static is skipped, so that commit claims no result.
+    # static is skipped: it has no completed static validation, and the skipped
+    # check still counts as satisfying the required context (the trade the
+    # static job's comment below sets out).
     concurrency:
       group: ${{ github.workflow }}-unit-${{ matrix.shard }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
