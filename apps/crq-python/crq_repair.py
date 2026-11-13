@@ -396,11 +396,17 @@ def process(config, job, wt):
             elif result.get('pending_mechanical'):
                 # A committed candidate whose detector verification was
                 # deferred: resume mechanical verification over the preserved
-                # tree without repeating this rung's fixer.
+                # tree without repeating this rung's fixer. pending_judge and
+                # pending_mechanical are mutually exclusive: pending_judge is
+                # only set after a completed mechanical verification and is
+                # popped before the next fixer dispatch, and pending_mechanical
+                # is only set (and later popped) before any judge step runs.
                 pending_mechanical = result['pending_mechanical']
                 reason = pending_mechanical['fixer_reason']
-                result['attempts'][-1]['mechanical'] = mechanical(
-                    config, wt, base, pending_mechanical['commits'], job['job'], attempt_dir)
+                if (result.get('attempts') and
+                        result['attempts'][-1].get('rung') == 'A' + str(pending_mechanical['rung'])):
+                    result['attempts'][-1]['mechanical'] = mechanical(
+                        config, wt, base, pending_mechanical['commits'], job['job'], attempt_dir)
                 result.pop('pending_mechanical', None)
                 result.update(verdict='FIXED', reason=reason, commits=pending_mechanical['commits'])
                 break
@@ -559,7 +565,10 @@ def process(config, job, wt):
             if isinstance(exc, DetectorUnavailable) and result.get('pending_mechanical'):
                 # The detector outage hit this rung's committed candidate:
                 # preserve it and resume mechanical verification alone instead
-                # of advancing to another fixer rung during the outage.
+                # of advancing to another fixer rung during the outage. A
+                # deterministic DetectorRejection does not take this path: the
+                # pending state is dropped below so the next fixer rung can
+                # address the rejected candidate.
                 try:
                     retain(wt, base, attempt_dir)
                 except Exception as capture_error:
@@ -568,6 +577,7 @@ def process(config, job, wt):
                 result['evidence'] = evidence
                 result['next_rung'] = rung
                 return defer('hack detector unavailable; resume mechanical verification without repeating fixer')
+            result.pop('pending_mechanical', None)
             if not result['attempts'] or result['attempts'][-1]['rung'] != 'A' + str(rung):
                 result['attempts'].append({'rung': 'A' + str(rung), 'driver': role['driver'],
                                            'model': role['model'], 'stop': 'error', 'changed': False})

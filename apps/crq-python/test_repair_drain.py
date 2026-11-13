@@ -1617,6 +1617,112 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertEqual(json.loads(stdout.getvalue()), {'a': 1})
         self.assertEqual(stderr.getvalue(), '')
+    def changed_fixer_job(self, job_id):
+        job = bounded.drain_job(self.root, self.config, self.queue, job_id)[1]
+        wt = self.worktree('crq-repair-pr1-merged-' + job_id)
+        def dispatch(config, role, current, tree, directory, judge=False):
+            self.assertFalse(judge)
+            (tree / 'src/kept.ts').write_text('fixed\n')
+            subprocess.run(['git', 'commit', '-qam', job_id], cwd=tree, check=True)
+            sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=tree, check=True,
+                                 capture_output=True, text=True).stdout.strip()
+            return {'stop': 'ok', 'changed': True, 'commits': [sha], 'summary': 'fixed it'}
+        return job, wt, dispatch
+
+    def test_detector_outage_defers_with_pending_mechanical_without_second_fixer(self):
+        # 1. A changed fixer whose mechanical raises DetectorUnavailable writes
+        # pending_mechanical with that rung's commits and defers; no second
+        # fixer dispatch happens.
+        job, wt, dispatch = self.changed_fixer_job('crq-run1-F1')
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', side_effect=dispatch) as dispatch_mock, \
+             mock.patch.object(service, 'mechanical',
+                               side_effect=service.DetectorUnavailable('detector offline')):
+            result = service.process(self.config, job, wt)
+        self.assertIn('retry_after', result)
+        self.assertIn('hack detector unavailable', result['reason'])
+        self.assertIn('pending_mechanical', result)
+        self.assertEqual(result['pending_mechanical']['rung'], 0)
+        self.assertEqual(len(result['pending_mechanical']['commits']), 1)
+        self.assertEqual(result['next_rung'], 0)
+        self.assertEqual(dispatch_mock.call_count, 1)
+        self.assertEqual([a['rung'] for a in result['attempts']], ['A0'])
+
+    def test_resumed_pending_mechanical_reaches_fixed_with_same_commits(self):
+        # 2. The resumed run re-runs mechanical over the preserved tree, does
+        # not dispatch a second fixer, and reaches FIXED with the same commits.
+        job, wt, dispatch = self.changed_fixer_job('crq-run1-F1')
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', side_effect=dispatch), \
+             mock.patch.object(service, 'mechanical',
+                               side_effect=service.DetectorUnavailable('detector offline')):
+            first = service.process(self.config, job, wt)
+        self.assertIn('retry_after', first)
+        self.past(job['job'])  # expire the deferral pause so the resume runs
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch') as dispatch_mock, \
+             mock.patch.object(service, 'mechanical', return_value={'verify': 'ok', 'hack': 'ok'}):
+            second = service.process(self.config, job, wt)
+        self.assertEqual(second['verdict'], 'FIXED')
+        self.assertEqual(second['commits'], first['pending_mechanical']['commits'])
+        self.assertNotIn('pending_mechanical', second)
+        dispatch_mock.assert_not_called()
+        self.assertEqual([a['rung'] for a in second['attempts']], ['A0'])
+
+    def test_second_outage_on_resume_keeps_deferring(self):
+        # 3. A detector outage again on resume keeps the candidate pending and
+        # defers a second time without spending a rung.
+        job, wt, dispatch = self.changed_fixer_job('crq-run1-F1')
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', side_effect=dispatch), \
+             mock.patch.object(service, 'mechanical',
+                               side_effect=service.DetectorUnavailable('still offline')):
+            first = service.process(self.config, job, wt)
+        self.past(job['job'])  # expire the deferral pause so the resume runs
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch') as dispatch_mock, \
+             mock.patch.object(service, 'mechanical',
+                               side_effect=service.DetectorUnavailable('still offline 2')):
+            second = service.process(self.config, job, wt)
+        self.assertIn('retry_after', second)
+        self.assertIn('pending_mechanical', second)
+        self.assertEqual(second['pending_mechanical']['commits'],
+                         first['pending_mechanical']['commits'])
+        self.assertEqual(second['next_rung'], 0)
+        dispatch_mock.assert_not_called()
+
+    def test_deterministic_rejection_clears_pending_and_advances_rung(self):
+        # 4. A DetectorRejection on resume is deterministic: the pending state
+        # is cleared and the rung advances to the next fixer instead of
+        # rechecking the same candidate forever.
+        job, wt, dispatch = self.changed_fixer_job('crq-run1-F1')
+        from crq_repair import DetectorRejection
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', side_effect=dispatch), \
+             mock.patch.object(service, 'mechanical',
+                               side_effect=service.DetectorUnavailable('detector offline')):
+            first = service.process(self.config, job, wt)
+        self.assertIn('pending_mechanical', first)
+        self.past(job['job'])  # expire the deferral pause so the resume runs
+        def dispatch_again(config, role, current, tree, directory, judge=False):
+            (tree / 'src/kept.ts').write_text('second attempt\n')
+            subprocess.run(['git', 'commit', '-qam', job['job'] + '-2'], cwd=tree, check=True)
+            sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=tree, check=True,
+                                 capture_output=True, text=True).stdout.strip()
+            return {'stop': 'ok', 'changed': True, 'commits': [sha], 'summary': 'second fix'}
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', side_effect=dispatch_again) as dispatch_mock, \
+             mock.patch.object(service, 'mechanical',
+                               side_effect=DetectorRejection('detector rejected the diff')):
+            second = service.process(self.config, job, wt)
+        self.assertNotIn('pending_mechanical', second)
+        self.assertNotEqual(second['verdict'], 'deferred')
+        self.assertNotIn('retry_after', second)
+        self.assertGreater(second['next_rung'], 0)  # the rung advanced past the rejected candidate
+        # A rejection on the resumed rung escalates: the A1 fixer ran, its
+        # candidate was rejected too, and the A2 escalation was dispatched.
+        self.assertEqual(dispatch_mock.call_count, 2)
+        self.assertEqual([a['rung'] for a in second['attempts']], ['A0', 'A1', 'A2'])
 
     def test_backfill_job_ids_sort_without_finding_suffix(self):
         jobs = [{'job': 'crq-run1-F10', 'run': 'run1'}, {'job': 'crq-run1-F2', 'run': 'run1'},
