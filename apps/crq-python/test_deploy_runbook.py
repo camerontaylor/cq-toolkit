@@ -323,6 +323,7 @@ class RunbookFixture(unittest.TestCase):
             "output_dir": self.output_dir,
             "annotations": None,
             "rehearsal": True,
+            "operator_go": False,
             "controller": self.candidate / "apps/crq-python/ops/deploy-controller.py",
             "hostname": None,
             "service_drain_deadline_s": None,
@@ -1272,6 +1273,80 @@ class CLITests(RunbookFixture):
         run2 = self.run_runbook(self.args(hostname=self.observed_hostname()),
                                 self.units)
         self.assertEqual(run2.run(), 0)
+
+    def test_active_triggers_refuse_production_without_authorization(self):
+        # A production invocation (operator_go False) with active triggers
+        # refuses before any effect construction: no provider, no journal,
+        # no import. The systemctl probe is mocked to report active units
+        # so the test never depends on this host's bus.
+        args = self.args(rehearsal=False, operator_go=False)
+
+        def refusing_factory(marker_path, effects_builder):
+            raise AssertionError("effects constructed before the active-unit "
+                                 "guard")
+
+        listing = "active active running crq-tick.timer\n"
+        with mock.patch.object(rb, "load_module") as load, \
+                mock.patch.object(rb.subprocess, "run",
+                                  return_value=mock.Mock(returncode=0,
+                                                         stdout=listing)):
+            with self.assertRaisesRegex(rb.Refused,
+                                        "live crq trigger units are active"):
+                rb.execute(args, effects_factory=refusing_factory)
+            load.assert_not_called()
+
+    def test_operator_go_probe_is_skipped(self):
+        # Authorized invocations never run the authorization probe: no
+        # list-units subprocess at all. The run is patched at preflight so
+        # only execute()'s probe behavior is under test.
+        args = self.args(rehearsal=False, operator_go=True)
+        run = self.run_runbook(args, self.units)
+        with mock.patch.object(rb.subprocess, "run") as probe, \
+                mock.patch.object(run, "preflight",
+                                  side_effect=rb.Refused("stop here")):
+            with self.assertRaises(rb.Refused):
+                run.run()
+        for call in probe.call_args_list:
+            self.assertNotIn("list-units", call.args[0])
+
+    def test_operator_go_authorizes_production_with_active_triggers(self):
+        # --operator-go is the explicit production authorization: the run
+        # proceeds with active triggers, observes them as original, splits
+        # the long ones and restores the ORIGINAL map, so no trigger is
+        # left stopped and the release completes.
+        args = self.args(rehearsal=False, operator_go=True)
+        run = self.run_runbook(args, self.units)
+        self.assertEqual(run.run(), 0)
+        phase = rb.load_json(self.output_dir / "phase.json")
+        self.assertEqual(phase["phase"], "completed")
+        self.assertTrue(phase["released"])
+        self.assertFalse(phase["rehearsal"])
+        release = rb.load_json(self.output_dir / "release.json")
+        self.assertEqual(release["final_triggers"], phase["original"])
+        for unit, state in phase["original"].items():
+            self.assertEqual(self.units.state(unit), state,
+                             "restore must return to the original state")
+
+    def test_every_phase_record_carries_original_and_stop_intent(self):
+        # CodeRabbit major: original and stopped_pre survive every phase
+        # transition, including recovery_required records.
+        units = FakeUnits(self.marker_path)
+        run = self.run_runbook(self.args(), units)
+        with mock.patch.object(run, "preflight",
+                               side_effect=rb.Refused("preflight boom")):
+            with self.assertRaises(rb.Refused):
+                run.run()
+        with (self.output_dir / "phase.json").open() as handle:
+            phase = rb.load_json(self.output_dir / "phase.json")
+        self.assertEqual(phase["phase"], "recovery_required")
+        self.assertTrue(phase["original"])
+        self.assertIsNotNone(phase["stopped_pre"])
+        run2 = self.run_runbook(self.args(), FakeUnits(self.marker_path))
+        run2.output_dir.mkdir(parents=True, exist_ok=True)
+        run2.phase("held")
+        held = rb.load_json(run2.output_dir / "phase.json")
+        self.assertIsNone(held["original"])
+        self.assertIsNone(held["stopped_pre"])
 
     @staticmethod
     def observed_hostname():

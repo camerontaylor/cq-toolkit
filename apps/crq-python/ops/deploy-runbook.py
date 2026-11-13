@@ -396,6 +396,8 @@ class Run:
                        "runbook_sha256": self.args.runbook_sha256,
                        "final_triggers": self.final_triggers,
                        "journal": self.journal,
+                       "original": self.original or None,
+                       "stopped_pre": sorted(self.stopped_pre) or None,
                        "error": extra.pop("error", None),
                        **extra})
 
@@ -998,6 +1000,12 @@ def build_arg_parser():
     parser.add_argument("--rehearsal", action="store_true",
                         help="run against a throwaway clone with a fake unit "
                              "provider; refuses live host units without it")
+    parser.add_argument("--operator-go", action="store_true",
+                        help="operator authorization for a production run on "
+                             "a host with active trigger units: the runbook "
+                             "observes, splits and restores the original "
+                             "states itself; without it, active triggers "
+                             "refuse before any host read", default=None)
     parser.add_argument("--controller", type=Path, default=None,
                         help="deploy-controller.py path (default: the "
                              "candidate artifact root's copy)")
@@ -1031,14 +1039,38 @@ def check_pinned_revision(args):
             + "; refusing before any host read")
 
 
+def check_active_trigger_authorization(args):
+    """Authorization gate BEFORE any effect construction: a production run
+    (no --rehearsal) needs --operator-go when the host carries active crq
+    trigger units. The state read goes through one guarded systemctl probe
+    so an unauthorized invocation touches nothing else."""
+    if args.rehearsal or args.operator_go:
+        return
+    listing = subprocess.run(
+        ["systemctl", "--user", "list-units", "--no-legend", "--no-pager",
+         "--plain", "--all", "crq-*.timer", "crq-*.path"],
+        capture_output=True, text=True)
+    if listing.returncode != 0:
+        return  # no user manager/bus: production run is operator-side; the
+        # preflight inventory assertion will refuse with full context.
+    active = [line.split()[0] for line in listing.stdout.splitlines()
+              if line.strip().startswith("active")]
+    require(not active,
+            "live crq trigger units are active; production runs are operator-"
+            "executed only. Pass --rehearsal for a throwaway clone or "
+            "--operator-go to authorize this production run: "
+            + ", ".join(active))
+
+
 def check_no_live_units_without_rehearsal(args, units):
-    if args.rehearsal:
+    if args.rehearsal or args.operator_go:
         return
     triggers, _services = units.inventory()
     active = [unit for unit in triggers if units.state(unit) == "active"]
     require(not active,
             "live crq trigger units are active; production runs are operator-"
-            "executed only. Pass --rehearsal for a throwaway clone: "
+            "executed only. Pass --rehearsal for a throwaway clone or "
+            "--operator-go to authorize this production run: "
             + ", ".join(active))
 
 
@@ -1065,6 +1097,10 @@ def execute(args, effects_factory=None) -> int:
     and the test asserts on the factory's argument, proving no real effects
     were constructed. Production (factory None) builds ``RealUnits`` and the
     controller's ``Effects``."""
+    # The authorization guard runs first: a production invocation without
+    # --operator-go must not import candidate code, construct effects or
+    # touch record directories when active triggers sit on the host.
+    check_active_trigger_authorization(args)
     check_pinned_revision(args)
     manifest = validate_manifest_document(load_json(args.manifest),
                                           args.manifest, args.manifest_sha256)
@@ -1103,6 +1139,11 @@ def execute(args, effects_factory=None) -> int:
         return controller.Effects(Path(args.root),
                                   Path(args.output_dir) / "controller-records")
 
+    # The active-trigger guard ran at the top; this provider-level check
+    # re-verifies against the bound provider's inventory before the Run
+    # starts. A production invocation without authorization must not build
+    # providers, journals or record directories.
+    check_active_trigger_authorization(args)
     effects = effects_factory(
         Path(args.root) / "apps/crq-python/state/runner-disabled",
         effects_builder)
