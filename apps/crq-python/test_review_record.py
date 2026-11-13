@@ -40,8 +40,11 @@ class RecordTransportBase:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.state = Path(self.tmp.name)
+        # record_import ignores the loaded queue (it persists through the
+        # outbox seam), so handle()-level tests only need a trivial loader;
+        # the refusal path must never reach it (fail fast on authorization).
         self.runner = SimpleNamespace(STATE=self.state, REPO="camerontaylor/cq-toolkit",
-                                      iso=lambda: AT)
+                                      iso=lambda: AT, load_queue=lambda: {})
 
 
 def spool_all(runner_ns, values, reports=()):
@@ -314,6 +317,22 @@ class ImportIdempotencyTests(unittest.TestCase):
         self.assertTrue(action.startswith("quarantined:"))
         self.assertIn("expanded-line budget", action)
 
+    def test_malformed_interval_shapes_quarantine_instead_of_raising(self):
+        # The reviewer's exact repro: a non-list intervals value must
+        # quarantine with a readable reason, not escape as TypeError past
+        # import_record's refused-with-reason contract.
+        events, action = review_record.import_record(
+            submission(claimed_scope=[{"path": "a", "intervals": 5}]), AT, [])
+        self.assertTrue(action.startswith("quarantined:"))
+        self.assertIn("list of start/end pairs", action)
+        ledger.validate_sequence(events)
+        for shape in ("not-a-list", [["1", 2]], [[1], [2, 3, 4]], "x"):
+            events, action = review_record.import_record(
+                submission(claimed_scope=[{"path": "a", "intervals": shape}]),
+                AT, [])
+            self.assertTrue(action.startswith("quarantined:"), shape)
+            ledger.validate_sequence(events)
+
 
 class HistoricalAdapterTests(unittest.TestCase):
     def a22_receipt(self):
@@ -517,6 +536,39 @@ class TransportRecordTests(RecordTransportBase, unittest.TestCase):
         operation.validate("response", result)
         self.assertEqual(result["action"], "refused")
         self.assertEqual(result["reason"], "unsupported-repo")
+
+    def test_omitted_repo_resolves_to_the_runner_and_is_still_allowlisted(self):
+        # An omitted repo defaults to the runner's own repository in
+        # normalization; authorization resolves the same effective repo, so a
+        # policy allowlisting only another repo cannot be bypassed by omitting
+        # the field. The allowlist check runs before load_queue, so the seam
+        # needs no queue.
+        runner = SimpleNamespace(STATE=self.state, REPO="camerontaylor/cq-toolkit",
+                                 iso=lambda: AT)
+        result = transport.handle(json.dumps(dict(v=1, op="record", producer="manual",
+                                                  source_id="omit-1",
+                                                  report=dict(encoding="utf8", data="x"))).encode(),
+                                  runner, principal=self.PRINCIPAL,
+                                  policy={"enabled": True, "repo": "other-org/other-repo",
+                                          "write": [self.PRINCIPAL]})
+        body = json.loads(result)
+        self.assertEqual(body["action"], "refused")
+        self.assertEqual(body["reason"], "unsupported-repo")
+        # An alternate casing spelling of the allowed repo is accepted
+        # (identity comparison), avoiding a misleading quarantine reason; this
+        # path proceeds to import, so it runs through the full seam with the
+        # state-backed runner.
+        ok = transport.handle(json.dumps(dict(v=1, op="record", producer="manual",
+                                              source_id="omit-2",
+                                              report=dict(encoding="utf8", data="y"))).encode(),
+                              self.runner, principal=self.PRINCIPAL,
+                              policy={"enabled": True, "repo": "CAMERONTAYLOR/cq-toolkit",
+                                      "write": [self.PRINCIPAL]})
+        self.assertEqual(json.loads(ok)["action"], "recorded")
+        # The accepted path went through record_import directly, so the event
+        # actually spooled under the state-backed runner.
+        pending = self.state / "record-outbox" / "pending"
+        self.assertTrue(any(p.suffix == ".json" for p in pending.iterdir()))
 
     def test_one_bad_import_does_not_stop_scheduling(self):
         self.call(dict(v=1, op="record", producer="agent", source_id="broken",

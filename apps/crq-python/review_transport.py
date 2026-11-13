@@ -319,9 +319,28 @@ def handle(raw, runner, *, principal, policy):
         return review_receipt.canonical(capabilities())
     if policy.get("enabled") is not True:
         return review_receipt.canonical(dict(v=1, action="observed", state="unsupported", reason="review-disabled"))
-    q = runner.load_queue()
     op = req["op"]
-    if op == "submit":
+    if op == "record":
+        # The operator's policy repository allowlist applies to record
+        # imports exactly as to submit: configuration alone is not
+        # authorization, so a configured clone for another repo cannot
+        # publish evidence the policy never allowed. The effective repo is
+        # resolved first (normalize_record defaults an omitted repo to the
+        # runner's own), so omitting repo cannot bypass the allowlist.
+        effective_repo = req.get("repo") or runner.REPO
+        allowed = [policy["repo"], *policy.get("repos", [])]
+        # Compare like submit: identity equality (owner/name casing), not
+        # exact string, so an alternate spelling of an allowed repo is
+        # accepted instead of falling through to a misleading quarantine.
+        if not any(repo_registry.same_repo(effective_repo, a) for a in allowed):
+            return review_receipt.canonical(dict(v=1, op="record", action="refused",
+                                                 record_digest=None, duplicate_of=None,
+                                                 supersedes=req.get("supersedes"),
+                                                 reason="unsupported-repo"))
+    q = runner.load_queue()
+    if op == "record":
+        result = record_import(q, req, principal, runner)
+    elif op == "submit":
         inputs = req["inputs"]
         allowed = [policy["repo"], *policy.get("repos", [])]
         configured = repo_registry.same_repo(inputs["repo"], runner.REPO) or repo_registry.by_repo(getattr(runner, "REPOS", []), inputs["repo"]) is not None
@@ -409,22 +428,6 @@ def handle(raw, runner, *, principal, policy):
     elif op == "cancel":
         result = admission.cancel(q, req["request_id"])
         runner.save_queue(q)
-    elif op == "record":
-        # The operator's policy repository allowlist applies to record
-        # imports exactly as to submit: configuration alone is not
-        # authorization, so a configured clone for another repo cannot
-        # publish evidence the policy never allowed.
-        if req.get("repo") is not None:
-            # Compare like submit: identity equality (owner/name casing), not
-            # exact string, so an alternate spelling of an allowed repo is
-            # accepted instead of falling through to a misleading quarantine.
-            allowed = [policy["repo"], *policy.get("repos", [])]
-            if not any(repo_registry.same_repo(req["repo"], a) for a in allowed):
-                return review_receipt.canonical(dict(v=1, op="record", action="refused",
-                                                     record_digest=None, duplicate_of=None,
-                                                     supersedes=req.get("supersedes"),
-                                                     reason="unsupported-repo"))
-        result = record_import(q, req, principal, runner)
     elif op == "review-history":
         if req.get("request_id"):
             binding = q.get("review_requests", {}).get(req["request_id"])
