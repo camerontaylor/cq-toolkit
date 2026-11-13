@@ -880,13 +880,15 @@ def drain_items(config, groups, order):
     stopped = False
     try:
         for item in order:
-            if runner_disabled():
-                narrate(RUNNER_DISABLED + ': pass stopped before ' + str(item))
-                break
             while len(active) >= limit:
                 stopped = reap_item(active) or stopped
             stopped = reap_completed(active)[0] or stopped
-            # A marker written while waiting for capacity must stop the pass too.
+            # One coordinator admission check, after any capacity wait and before
+            # the next item: it covers a marker that was already present when the
+            # item's turn arrived and one written while this pass waited at the
+            # cap (a first check before the wait proved redundant in a
+            # counterfactual). The serial path's and the child's own gates are the
+            # other two lines of defence.
             if runner_disabled():
                 narrate(RUNNER_DISABLED + ': pass stopped before ' + str(item))
                 break
