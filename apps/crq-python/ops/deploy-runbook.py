@@ -79,6 +79,7 @@ import os
 import re
 import subprocess
 import sys
+import types
 import tempfile
 import time
 import uuid
@@ -87,13 +88,76 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 
 OPS_DIR = Path(__file__).resolve().parent
+
+# Bootstrap trust (frozen-range review F3). The GO pins THIS file, but this
+# file imports digests.py and loads deploy-invariants.schema.json, and an
+# unpinned sibling can quietly undo every pin: with a substituted digests.py
+# whose file_digest returns a constant, check_pinned_revision compared the
+# constant with itself and PASSED, and a widened schema admitted a manifest
+# the reviewed schema rejects. So the bootstrapping below uses ONLY stdlib
+# hashlib, before any sibling is imported or read:
+#
+#   * RUNBOOK_SELF_DIGEST is the stdlib hash of these bytes, never the
+#     sibling's idea of them;
+#   * digests.py and the schema are checked against the digests of the
+#     reviewed bytes, and a mismatch refuses to start at all.
+#
+# These two constants are the reviewed bytes' digests. A change to either
+# sibling must update them in the same reviewed change; the test
+# test_pinned_siblings_match_the_reviewed_bytes recomputes both, so a stale
+# constant fails in CI rather than at deploy time. No approval role, no
+# second manifest: this is the same pin the GO already makes, extended to the
+# files an import executes.
+REVIEWED_SIBLING_SHA256 = {
+    "digests.py":
+        "93362d4678867a771a50d4512bbee4a05aebbec045c60ca832401feb9775edc1",
+    "deploy-invariants.schema.json":
+        "6c8c0e06d42301467fccac7a27ad48ec236ba5a04c0b1f11691459daa4979116",
+}
+RUNBOOK_SELF_DIGEST = hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()
+# The verified bytes are CONSUMED, never re-read. Hashing a file and then
+# letting an import or a JSON load open it again checks bytes that are not the
+# bytes used, which is the whole defect this closes: the check and the use must
+# be the same read. Every consumer below (the digests module, the schema) is
+# built from these buffers.
+VERIFIED_SIBLING_BYTES = {}
+for _sibling_name, _sibling_want in REVIEWED_SIBLING_SHA256.items():
+    _sibling_bytes = (OPS_DIR / _sibling_name).read_bytes()
+    _sibling_got = hashlib.sha256(_sibling_bytes).hexdigest()
+    if _sibling_got != _sibling_want:
+        _message = ("ops sibling " + _sibling_name + " does not match the "
+                    "reviewed digest: got " + _sibling_got + " want "
+                    + _sibling_want + "; refusing to import or use unverified "
+                    "ops bytes")
+        # One machine-readable refusal and a nonzero exit. Only stdlib has
+        # been used at this point, so the documented error document can be
+        # emitted without importing or executing anything from the ops
+        # directory.
+        sys.stdout.write(json.dumps(
+            {"error": {"kind": "unverified_ops_bytes",
+                       "message": _message}},
+            indent=2, sort_keys=True) + "\n")
+        sys.stdout.flush()
+        raise RuntimeError(_message)
+    VERIFIED_SIBLING_BYTES[_sibling_name] = _sibling_bytes
+del _sibling_name, _sibling_want, _sibling_got, _sibling_bytes
+
 if str(OPS_DIR) not in sys.path:
     sys.path.insert(0, str(OPS_DIR))
 
-import digests  # noqa: E402  (sibling module, stdlib only)
+# Build the digests module from the verified buffer. An `import` here would
+# re-open the file, so the bytes that were hashed and the bytes that execute
+# would be two different reads.
+_digests_module = types.ModuleType("digests")
+_digests_module.__file__ = str(OPS_DIR / "digests.py")
+exec(compile(VERIFIED_SIBLING_BYTES["digests.py"],
+             _digests_module.__file__, "exec"),
+     _digests_module.__dict__)
+sys.modules["digests"] = _digests_module
+import digests  # noqa: E402  (the module just built from the verified buffer)
+del _digests_module
 
 RUNBOOK_SCHEMA_VERSION = 1
-RUNBOOK_SELF_DIGEST = digests.file_digest(Path(__file__).resolve())
 HEX40_RE = re.compile(r"[0-9a-f]{40}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
 ANCESTRY_MODES = ("must", "must_not", "either")
@@ -102,6 +166,7 @@ RELEASE_ORDER = ("start_original_active", "assert_original",
 DRAIN_MODE = "controller_drain_check_owned_runs"
 RESTORE_TARGET = "original_observed"
 SCHEMA_PATH = OPS_DIR / "deploy-invariants.schema.json"
+_VERIFIED_SCHEMA = None
 LONG_SERVICES = ("crq-repair.service", "crq-backfill.service")
 ACTIVE_STATES = ("active", "inactive")
 DEAD_STATES = ("inactive", "failed")
@@ -547,9 +612,12 @@ class Run:
                 "target": self.args.target_sha,
                 "target_tag": self.args.target_tag,
                 "prior_sha": self.args.prior_sha,
-                "marker_path": str(self.marker),
                 "journal": (self.journal or {}).get("transaction_id"),
                 "root": str(Path(self.args.root).resolve()),
+                # Recorded in the same frame as the root: the root is compared
+                # resolved, so a literal marker beside it would let the two
+                # fields describe different paths.
+                "marker_path": str(Path(self.marker).resolve()),
                 "cq_bin_entry": getattr(self, "cq_bin_entry", None),
                 "final_triggers": self.final_triggers}
 
@@ -1388,6 +1456,19 @@ def build_arg_parser():
     return parser
 
 
+def verified_schema():
+    """The invariants schema, parsed once from the hash-verified buffer.
+
+    Loading it from the path would read the file a second time, so the schema
+    that was verified and the schema that is applied could differ."""
+    global _VERIFIED_SCHEMA
+    if _VERIFIED_SCHEMA is None:
+        _VERIFIED_SCHEMA = json.loads(
+            VERIFIED_SIBLING_BYTES[
+                "deploy-invariants.schema.json"].decode("utf-8"))
+    return _VERIFIED_SCHEMA
+
+
 def validate_manifest_document(manifest, manifest_path, manifest_sha256):
     require(isinstance(manifest, dict), "manifest must be a JSON object")
     require(manifest.get("schema_version") == RUNBOOK_SCHEMA_VERSION,
@@ -1398,10 +1479,46 @@ def validate_manifest_document(manifest, manifest_path, manifest_sha256):
             + manifest_sha256)
     # Finding 2: the message exists only when validation failed; a valid
     # manifest never concatenates a None problem into an error string.
-    schema_problem_text = manifest_problem(manifest, load_json(SCHEMA_PATH))
+    schema_problem_text = manifest_problem(manifest, verified_schema())
     if schema_problem_text is not None:
         require(False, "manifest schema: " + schema_problem_text)
+    # The manifest restates the marker path for review; the executable value is
+    # derived from --root (``marker_path``) so the two name the same file the
+    # tick reads. Any other manifest value is refused rather than kept as a
+    # second, unchecked source of truth.
+    require(manifest["marker"]["path"] == MARKER_RELPATH,
+            "manifest marker.path must be exactly " + MARKER_RELPATH
+            + " (the tick's own marker); got "
+            + repr(manifest["marker"]["path"]))
     return manifest
+
+
+def validate_manifest_root(manifest, args):
+    """Bind --root to the deployment root the manifest was approved against.
+
+    Finding (design review F2): every marker path is derived from --root, so
+    an operator passing another checkout stopped units while the live tick -
+    which reads its own root's state/runner-disabled - never saw the hold. The
+    manifest carries the absolute deployment root the deploy was approved
+    against and this compares it.
+
+    Pure: it reads only the manifest already in hand and the path the caller
+    passed, so execute() calls it immediately after the manifest validation and
+    therefore before the systemctl probe, before every candidate import and
+    before any marker operation. Not an approval: the approved value is
+    compared, and the comparison is the whole mechanism."""
+    approved_root = (manifest.get("marker") or {}).get("root")
+    require(isinstance(approved_root, str) and approved_root
+            and Path(approved_root).is_absolute(),
+            "manifest marker.root must be the absolute deployment root the "
+            "deploy was approved against; got " + repr(approved_root))
+    resolved_root = Path(args.root).resolve()
+    require(resolved_root == Path(approved_root).resolve(),
+            "deployment root mismatch: --root resolves to "
+            + str(resolved_root) + " but the manifest approves "
+            + str(Path(approved_root).resolve()) + "; the live tick reads the "
+            "marker from the approved tree, so this run would stop units for a "
+            "hold nothing observes")
 
 
 def check_pinned_revision(args):
@@ -1426,8 +1543,24 @@ def check_active_trigger_authorization(args):
     if listing.returncode != 0:
         return  # no user manager/bus: production run is operator-side; the
         # preflight inventory assertion will refuse with full context.
-    active = [line.split()[0] for line in listing.stdout.splitlines()
-              if line.strip().startswith("active")]
+    # Real --no-legend output is `UNIT LOAD ACTIVE SUB DESCRIPTION`
+    # (`crq-tick.timer loaded active waiting ...`): the activation state is
+    # the THIRD column. Checking whether the line starts with "active" saw
+    # nothing, so this guard never fired on a real host while its fixture fed
+    # a fabricated `active active running ...` line. Parsed by column now,
+    # and a line too short to be a listing refuses rather than being skipped:
+    # silence is exactly the failure this guard had.
+    active = []
+    for line in listing.stdout.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split()
+        require(len(fields) >= 3,
+                "systemctl unit listing line is not UNIT LOAD ACTIVE SUB "
+                "DESCRIPTION: " + repr(line) + " (refusing rather than "
+                "assuming no unit is active)")
+        if fields[2] == "active":
+            active.append(fields[0])
     require(not active,
             "live crq trigger units are active; production runs are operator-"
             "executed only. Pass --rehearsal for a throwaway clone or "
@@ -1471,13 +1604,20 @@ def execute(args, effects_factory=None) -> dict:
     were constructed. Production (factory None) builds ``RealUnits`` and the
     controller's ``Effects``. Returns the run's result document (the caller
     prints it; ``main`` maps it to an exit status)."""
-    # The authorization guard runs first: a production invocation without
-    # --operator-go must not import candidate code, construct effects or
-    # touch record directories when active triggers sit on the host.
-    check_active_trigger_authorization(args)
+    # Order is the point of the findings this closes, and it is the order the
+    # code now has rather than a comment about an intended one: the runbook
+    # pin, the manifest (schema included, parsed from the verified buffer), the
+    # marker path and the root comparison read only this checkout's own files,
+    # so they run BEFORE the systemctl authorization probe and before any
+    # candidate module is imported. An unauthorized invocation, or one pointed
+    # at the wrong checkout, therefore refuses without a host read and without
+    # executing imported code. The guard still precedes every effect, every
+    # marker operation and every import.
     check_pinned_revision(args)
     manifest = validate_manifest_document(load_json(args.manifest),
                                           args.manifest, args.manifest_sha256)
+    validate_manifest_root(manifest, args)
+    check_active_trigger_authorization(args)
     candidate_ops = Path(args.candidate_root) / "apps/crq-python/ops"
     # Digest-pin the candidate modules BEFORE importing them: an import is
     # arbitrary code execution, so a stale or substituted helper or
@@ -1501,33 +1641,6 @@ def execute(args, effects_factory=None) -> dict:
             "--target-sha must equal the manifest identity target_sha: "
             "command line " + str(args.target_sha) + " manifest "
             + str(manifest["identity"]["target_sha"]))
-    # The manifest restates the marker path for review; the executable value
-    # is derived from --root (``marker_path``) so the two are the same file
-    # the tick reads. Any other manifest value is refused rather than kept as
-    # a second, unchecked source of truth.
-    require(manifest["marker"]["path"] == MARKER_RELPATH,
-            "manifest marker.path must be exactly " + MARKER_RELPATH
-            + " (the tick's own marker); got "
-            + repr(manifest["marker"]["path"]))
-    # Finding (design review F2): every marker path is derived from --root,
-    # so an operator passing another checkout stopped units while the live
-    # tick - which reads its own root's state/runner-disabled - never saw the
-    # hold. The manifest now carries the absolute deployment root the deploy
-    # was approved against and this refuses before any host read or marker
-    # operation. Not an approval: the approved value is compared, and the
-    # comparison is the whole mechanism.
-    approved_root = (manifest.get("marker") or {}).get("root")
-    require(isinstance(approved_root, str) and approved_root
-            and Path(approved_root).is_absolute(),
-            "manifest marker.root must be the absolute deployment root the "
-            "deploy was approved against; got " + repr(approved_root))
-    resolved_root = Path(args.root).resolve()
-    require(resolved_root == Path(approved_root).resolve(),
-            "deployment root mismatch: --root resolves to "
-            + str(resolved_root) + " but the manifest approves "
-            + str(Path(approved_root).resolve()) + "; the live tick reads the "
-            "marker from the approved tree, so this run would stop units for a "
-            "hold nothing observes")
     if args.rehearsal:
         # Finding 3, defense in depth: even a direct execute() call with
         # --rehearsal must not fall through to the live factory.
@@ -1585,7 +1698,10 @@ def cmd_status(args, units=None) -> int:
     file (resolved through realpath so a copied gate at another path is
     still pinned to the recorded revision), so a stale copy never reports on
     a run it did not perform. Refusals report in a fixed order: artifacts,
-    digest, marker. Requirement 2: the gate answers "does the host still
+    digest, marker. The recorded marker path is an absolute host path, so the
+    gate answers for THIS host and THIS output dir: pass --root and the record
+    must name that checkout's own marker, or the answer is refused as another
+    checkout's. Requirement 2: the gate answers "does the host still
     match the release record" too — it prints released_at, final_triggers
     AND the live observed state of every trigger, and refuses when any live
     state differs from final_triggers. Exit 0 is the only permitted basis
@@ -1617,16 +1733,30 @@ def cmd_status(args, units=None) -> int:
                             "not perform")
     marker_refusal = None
     marker_record = output_dir / "marker.path"
-    marker_path = None
+    recorded_marker = None
     if marker_record.is_file():
         try:
-            marker_path = Path(json.loads(marker_record.read_text())["path"])
+            recorded_marker = Path(json.loads(marker_record.read_text())["path"])
         except (OSError, ValueError, KeyError) as exc:
             marker_refusal = "marker.path unreadable: " + str(exc)[:120]
     else:
         marker_refusal = ("run recorded no marker.path; the gate cannot "
                           "verify the hold is released")
-    if marker_refusal is None and marker_path is not None and marker_path.exists():
+    # Finding (frozen-range review F5): the record holds an absolute host
+    # path, so a copied output dir on another host - or under another root -
+    # could report released while this host's marker is elsewhere. With an
+    # explicit --root the recorded path must be that checkout's own marker;
+    # without it the same-host/same-output-dir precondition is documented on
+    # the subcommand rather than assumed silently.
+    if marker_refusal is None and recorded_marker is not None:
+        expected = marker_path(args.root)
+        if Path(recorded_marker).resolve() != expected.resolve():
+            marker_refusal = (
+                "recorded marker.path " + str(recorded_marker) + " is not the "
+                "marker of --root " + str(Path(args.root)) + " (expected "
+                + str(expected) + "); a copied output dir must not report on "
+                "another checkout's hold")
+    if marker_refusal is None and recorded_marker is not None and recorded_marker.exists():
         marker_refusal = "runner-disabled marker is present again after release"
     live_refusal = None
     final_triggers = release.get("final_triggers") if release else None
@@ -1655,7 +1785,7 @@ def cmd_status(args, units=None) -> int:
             and marker_refusal is None and live_refusal is None:
         provider = units
         if provider is None:
-            provider = RealUnits(marker_path.parent)
+            provider = RealUnits(recorded_marker.parent)
         live_triggers = read_observed_triggers(provider, live_document(phase))
         drifted = {unit: {"live": state, "released_as": final_triggers.get(unit)}
                    for unit, state in live_triggers.items()
@@ -1674,7 +1804,7 @@ def cmd_status(args, units=None) -> int:
         "released_at": release.get("released_at") if release else None,
         "final_triggers": final_triggers,
         "live_triggers": live_triggers,
-        "marker_path": str(marker_path) if marker_path else None,
+        "marker_path": str(recorded_marker) if recorded_marker else None,
         "runbook_sha256": self_digest,
     }, indent=2, sort_keys=True))
     return 0 if refused is None else 1
@@ -1710,8 +1840,24 @@ def main(argv=None, effects_factory=None, status_units=None) -> int:
     sub = parser.add_subparsers(dest="operation")
     status = sub.add_parser("status", help="released-flag gate")
     status.add_argument("--output-dir", required=True, type=Path)
+    # Required, not optional: an optional binding is a binding the next
+    # invocation can omit, and the record then reports on whatever host and
+    # checkout wrote it. Status therefore always names the checkout whose
+    # marker it is binding the answer to.
+    status.add_argument("--root", required=True, type=Path,
+                        help="deployment checkout the tick reads its marker "
+                             "from; the recorded marker.path must be that "
+                             "checkout's own marker")
+    # Accepted for compatibility, and redundant by construction: status is
+    # always a require-released gate - it refuses any record that does not
+    # say released, so the flag cannot loosen it and is never read. Kept so
+    # existing operator command lines stay valid; the help says so rather
+    # than implying a behaviour switch that does not exist.
     status.add_argument("--require-released", action="store_true",
-                        dest="status_require_released", default=False)
+                        dest="status_require_released", default=False,
+                        help="accepted for compatibility; status always "
+                             "requires a released record and never reports on "
+                             "an unreleased one")
 
     def parser_error(message):
         # Machine-mode boundary for argparse itself: argument errors used to

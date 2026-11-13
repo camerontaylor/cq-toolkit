@@ -15,6 +15,7 @@ pinned revision and manifest digest refusal before host reads,
 candidate/running naming, quiescence polling and fail-safe, and both
 ancestry modes through the fixture rehearsal at the pinned revision.
 """
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -1143,8 +1144,10 @@ class ReleasedFlagGateTests(RunbookFixture):
         super().setUp()
         self.build_repo()
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        # --root is part of the status interface now, so the namespace built
+        # for direct cmd_status calls carries it like the parser would.
         self.status_args = argparse_namespace(
-            output_dir=self.output_dir, require_released=True)
+            output_dir=self.output_dir, root=self.root, require_released=True)
         self.digest = sha256_file(OPS / "deploy-runbook.py")
 
     def write_pair(self, release=None, phase=None, marker_record=True,
@@ -1262,7 +1265,7 @@ class ReleasedFlagGateTests(RunbookFixture):
         # Parser-level default (finding 1): status keeps an explicit flag.
         self.write_pair()
         argv = ["status", "--output-dir", str(self.output_dir),
-                "--require-released"]
+                "--root", str(self.root), "--require-released"]
         stdout = io_string()
         units = FakeUnits(self.marker_path,
                           {unit: "active" for unit in TRIGGERS})
@@ -1642,7 +1645,11 @@ class CLITests(RunbookFixture):
             raise AssertionError("effects constructed before the active-unit "
                                  "guard")
 
-        listing = "active active running crq-tick.timer\n"
+        # Real --no-legend shape: UNIT LOAD ACTIVE SUB DESCRIPTION. The
+        # fabricated `active active running ...` line this test used to supply
+        # is not what systemctl prints, which is how the guard stayed dead.
+        listing = ("crq-repair.timer loaded active waiting Repair timer\n"
+                   "crq-backfill.path loaded active waiting Backfill path\n")
         with mock.patch.object(rb, "load_module") as load, \
                 mock.patch.object(rb.subprocess, "run",
                                   return_value=mock.Mock(returncode=0,
@@ -1651,6 +1658,39 @@ class CLITests(RunbookFixture):
                                         "live crq trigger units are active"):
                 rb.execute(args, effects_factory=refusing_factory)
             load.assert_not_called()
+
+    def test_inactive_real_listing_lets_an_authorized_run_proceed(self):
+        # The counterfactual to the parser defect: real-format lines whose
+        # state column is not active must NOT refuse. If the parser went back
+        # to checking the line prefix, this listing would still refuse and
+        # the guard would be wrong in the other direction.
+        args = self.args(rehearsal=False, operator_go=False)
+        listing = ("crq-repair.timer loaded inactive dead Repair timer\n"
+                   "crq-backfill.path loaded inactive dead Backfill path\n")
+        built = []
+
+        def factory(marker_path, effects_builder):
+            built.append(marker_path)
+            raise rb.Refused("past the guard")
+
+        with mock.patch.object(rb.subprocess, "run",
+                               return_value=mock.Mock(returncode=0,
+                                                      stdout=listing)):
+            with self.assertRaisesRegex(rb.Refused, "past the guard"):
+                rb.execute(args, effects_factory=factory)
+        self.assertEqual(len(built), 1, "the guard refuses only active units")
+
+    def test_unparsable_listing_refuses_instead_of_assuming_inactive(self):
+        # Fail closed: a listing line that cannot be UNIT LOAD ACTIVE SUB is
+        # refused, because "nothing looked active" is precisely how the
+        # column-parsing defect hid.
+        args = self.args(rehearsal=False, operator_go=False)
+        with mock.patch.object(rb.subprocess, "run",
+                               return_value=mock.Mock(returncode=0,
+                                                      stdout="crq-tick.timer active\n")):
+            with self.assertRaisesRegex(rb.Refused,
+                                        "not UNIT LOAD ACTIVE SUB DESCRIPTION"):
+                rb.execute(args, effects_factory=lambda m, b: None)
 
     def test_operator_go_probe_is_skipped(self):
         # Authorized invocations never run the authorization probe: no
@@ -1935,8 +1975,11 @@ class CLIStatusGateTests(RunbookFixture):
         rb.durable_write(self.output_dir / "marker.path",
                          {"path": str(self.marker_path)})
 
-    def status_argv(self):
+    def status_argv(self, root=None):
+        # --root is required by the interface: the recorded marker path is an
+        # absolute host path, so the answer must name the checkout it binds to.
         return ["status", "--output-dir", str(self.output_dir),
+                "--root", str(self.root if root is None else root),
                 "--require-released"]
 
     def run_status(self, units=None):
@@ -1967,6 +2010,138 @@ class CLIStatusGateTests(RunbookFixture):
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
         self.assertEqual(json.loads(stdout)["operation"], "status")
+
+    def test_pinned_siblings_match_the_reviewed_bytes(self):
+        # The runbook's bootstrap pins digests.py and the schema by hash with
+        # stdlib hashlib before importing or loading either. Those constants
+        # are only meaningful if they name the bytes in this tree, so they are
+        # recomputed here: a stale constant fails in CI instead of refusing a
+        # correct deploy, and a changed sibling without a constant update
+        # fails too.
+        for name, want in rb.REVIEWED_SIBLING_SHA256.items():
+            got = hashlib.sha256(
+                (rb.OPS_DIR / name).read_bytes()).hexdigest()
+            self.assertEqual(got, want, name + " drifted from its reviewed digest")
+        self.assertEqual(
+            rb.RUNBOOK_SELF_DIGEST,
+            hashlib.sha256(Path(rb.__file__).resolve().read_bytes()).hexdigest(),
+            "the self digest must be the stdlib hash of this file")
+
+    def test_a_coerced_digests_module_cannot_change_the_self_digest(self):
+        # The counterfactual to F3: with a substituted digests.py whose
+        # file_digest returns a constant, the module must not report that
+        # constant as its own digest - and must refuse to start at all, since
+        # the sibling no longer matches its reviewed digest.
+        with tempfile.TemporaryDirectory() as workdir:
+            ops = Path(workdir)
+            for name in ("deploy-runbook.py", "deploy-invariants.schema.json"):
+                shutil.copy2(rb.OPS_DIR / name, ops / name)
+            (ops / "digests.py").write_text(
+                'def file_digest(path):\n    return "0" * 64\n\n'
+                'def tree_digest(path):\n    return "0" * 64\n')
+            stdout = io_string()
+            with self.assertRaisesRegex(Exception,
+                                       "does not match the reviewed digest"), \
+                    contextlib.redirect_stdout(stdout):
+                _load("probe_coerced_runbook", ops / "deploy-runbook.py")
+            # The refusal is one machine-readable document, emitted before
+            # anything from the ops directory is imported or executed.
+            document = json.loads(stdout.getvalue())
+            self.assertEqual(document["error"]["kind"], "unverified_ops_bytes")
+            self.assertIn("digests.py", document["error"]["message"])
+            self.assertEqual(stdout.getvalue().count("\"error\""), 1,
+                             "exactly one error document on stdout")
+
+    def test_the_digests_module_is_built_from_the_verified_buffer(self):
+        # The pin is only a pin if the bytes it checked are the bytes that
+        # execute: an import would re-open the file, so the module is executed
+        # from the verified buffer and registered under the import name.
+        self.assertIs(sys.modules["digests"], rb.digests)
+        self.assertEqual(rb.digests.__file__,
+                         str(rb.OPS_DIR / "digests.py"))
+        self.assertIsNone(getattr(rb.digests, "__loader__", None),
+                          "exec'd modules have no loader; an import has one")
+        self.assertIn(b"def file_digest", rb.VERIFIED_SIBLING_BYTES["digests.py"])
+
+    def test_the_schema_applied_comes_from_the_verified_buffer(self):
+        # Reread mismatch: if the schema were loaded from the path, a file
+        # edited after the hash check would decide validation. The buffer is
+        # what validates, so the path is never read again.
+        with mock.patch.object(rb, "load_json",
+                               side_effect=AssertionError("schema re-read")):
+            self.assertIsNotNone(rb.verified_schema())
+        # Widening the buffer (not the file) changes the verdict, which is the
+        # proof that the buffer is the source.
+        pinned = rb.VERIFIED_SIBLING_BYTES["deploy-invariants.schema.json"]
+        try:
+            rb.VERIFIED_SIBLING_BYTES["deploy-invariants.schema.json"] = (
+                b'{"type": "object", "required": ["never_present"]}')
+            rb._VERIFIED_SCHEMA = None
+            handle = tempfile.NamedTemporaryFile("w", suffix=".json",
+                                                 delete=False)
+            handle.write("{}")
+            handle.close()
+            path = Path(handle.name)
+            try:
+                digest = rb.digests.file_digest(path)
+                with self.assertRaisesRegex(rb.Refused, "never_present"):
+                    rb.validate_manifest_document(
+                        {"schema_version": 1}, path, digest)
+            finally:
+                path.unlink()
+        finally:
+            rb.VERIFIED_SIBLING_BYTES["deploy-invariants.schema.json"] = pinned
+            rb._VERIFIED_SCHEMA = None
+
+    def test_status_accepts_an_alias_of_the_bound_root(self):
+        # F5: the binding is by resolved path, so a relative or symlinked
+        # spelling of the same checkout still binds - and an omission cannot
+        # bypass the check because --root is required.
+        self.write_released()
+        alias = self.base / "root-alias"
+        if not alias.exists():
+            alias.symlink_to(self.root, target_is_directory=True)
+        for root in (alias, pathlib.Path(os.path.relpath(self.root))):
+            stdout = io_string()
+            units = FakeUnits(self.marker_path)
+            argv = ["status", "--output-dir", str(self.output_dir),
+                    "--root", str(root), "--require-released"]
+            with mock.patch.object(sys, "stdout", stdout):
+                code = rb.main(argv, status_units=units)
+            self.assertEqual(code, 0, str(root))
+
+    def test_status_requires_the_bound_root(self):
+        # An optional binding is one the next invocation can omit, and then
+        # the record answers for whatever checkout wrote it.
+        with self.assertRaises(SystemExit) as raised:
+            rb.main(["status", "--output-dir", str(self.output_dir)])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_status_refuses_a_record_from_another_checkout(self):
+        # Finding F5: the record holds an absolute marker path, so with an
+        # explicit --root the record must name THIS checkout's marker; a
+        # copied output dir must not report on another tree's hold.
+        self.write_released()
+        units = FakeUnits(self.marker_path)
+        argv = self.status_argv(root=self.base / "other-root")
+        stdout = io_string()
+        with mock.patch.object(sys, "stdout", stdout):
+            code = rb.main(argv, status_units=units)
+        document = json.loads(stdout.getvalue())
+        self.assertNotEqual(code, 0)
+        self.assertIn("is not the marker of --root", json.dumps(document))
+
+    def test_status_with_the_matching_root_reports_released(self):
+        # The same record passes when --root is the checkout it names: the
+        # check binds the answer to a tree, it does not refuse status.
+        self.write_released()
+        units = FakeUnits(self.marker_path)
+        argv = self.status_argv()
+        stdout = io_string()
+        with mock.patch.object(sys, "stdout", stdout):
+            code = rb.main(argv, status_units=units)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["released"], True)
 
     def test_live_trigger_drift_refuses(self):
         # Requirement 2: one trigger not in final_triggers state refuses the
@@ -2259,6 +2434,52 @@ class MarkerPathTests(RunbookFixture):
             rb.execute(args, effects_factory=factory)
         self.assertEqual(built, [])
         self.assertFalse(self.marker_path.exists())
+
+    def test_an_alias_of_the_approved_root_is_accepted(self):
+        # The root guard compares resolved paths, so a symlinked spelling of
+        # the approved checkout binds instead of refusing: the hold the run
+        # writes is the one the live tick of that same tree reads, and the
+        # recorded root is the resolved one either way.
+        self.build_repo()
+        alias = self.base / "root-alias"
+        if not alias.exists():
+            alias.symlink_to(self.root, target_is_directory=True)
+        args = self.args(manifest_path=self.write_manifest(self.manifest()),
+                         root=alias)
+        reached = []
+
+        class _Reached(Exception):
+            pass
+
+        def factory(marker, builder):
+            reached.append(marker)
+            raise _Reached
+
+        try:
+            rb.execute(args, effects_factory=factory)
+        except _Reached:
+            pass
+        except rb.Refused as refusal:
+            self.assertNotIn("deployment root mismatch", str(refusal))
+        self.assertEqual(len(reached), 1,
+                         "the alias must reach the effects factory")
+
+    def test_a_wrong_root_refuses_before_the_probe_and_the_imports(self):
+        # The ordering is the finding: a root the manifest does not approve
+        # must refuse without reading host state and without executing
+        # candidate code, so neither the probe nor load_module may run.
+        self.build_repo()
+        document = self.manifest()
+        document["marker"]["root"] = str(self.base / "other-checkout")
+        args = self.args(manifest_path=self.write_manifest(document))
+        with mock.patch.object(
+                rb, "check_active_trigger_authorization") as probe, \
+             mock.patch.object(rb, "load_module") as loader:
+            with self.assertRaisesRegex(rb.Refused,
+                                        "deployment root mismatch"):
+                rb.execute(args, effects_factory=lambda m, b: FakeUnits(m))
+        self.assertFalse(probe.called, "the host probe must not run")
+        self.assertFalse(loader.called, "candidate modules must not be imported")
 
     def test_manifest_root_must_be_absolute(self):
         # A relative approved root could mean anything from a different

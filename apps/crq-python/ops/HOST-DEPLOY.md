@@ -63,7 +63,7 @@ Example only; replace every host value privately:
 {
   "schema_version": 1,
   "deploy_root": "/srv/crq-deploy",
-  "record_dir": "/srv/private/crq-deploy-records",
+  "record_dir": "/private/crq-deploy-records",
   "fleet_reader": {
     "ssh_host": "queue.example.invalid",
     "source": "/srv/operator-state/crq/summary.json"
@@ -490,7 +490,7 @@ python3 -B apps/crq-python/ops/deploy-runbook.py \
 # Then, before any start:
 python3 -B apps/crq-python/ops/deploy-runbook.py ... \
   status --output-dir /private/crq-deploy-records/run-YYYYMMDD \
-  --require-released
+  --root /srv/crq-deploy --require-released
 ```
 
 `status --require-released` re-reads `release.json` and `phase.json` from
