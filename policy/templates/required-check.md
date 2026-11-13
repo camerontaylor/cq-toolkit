@@ -179,6 +179,12 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: {{INSTALL_CMD}}
+      # The unit suite runs outside the static-gate composite, so it must
+      # install the same harness dependency the composite's first step does.
+      # Without real ripgrep the search-tool tests fail on CI by design
+      # (test/driver/ai-sdk.rg-floor.test.ts refuses to skip).
+      - name: Install ripgrep for harness search tools
+        uses: ./.github/actions/install-ripgrep
       # pnpm forwards the flag verbatim; do not add `--` (pnpm 12 forwards a
       # literal `--`, which vitest reads as end-of-options). Vitest shards the
       # selection by hashing each test file's path, so the four shards are
