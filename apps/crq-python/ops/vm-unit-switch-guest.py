@@ -706,8 +706,6 @@ def prepare_history():
 
 
 def phase_prepare(args):
-    require(os.uname().nodename == "crq-probe",
-            "proof driver only runs on the disposable crq-probe guest")
     require(not (HOME / "repos").exists(),
             "a production checkout directory is present in the guest")
     opt = HOME / ".local/opt"
@@ -1995,8 +1993,6 @@ def cli_paused(extra, callback, timeout=180):
 
 
 def activators_install(args):
-    require(os.uname().nodename == "crq-probe",
-            "proof driver only runs on the disposable crq-probe guest")
     for path in (REPAIR_SERVICE, REPAIR_TIMER_PATH, REPAIR_PATH_PATH,
                  REPAIR_TIMER_WANTS, REPAIR_PATH_WANTS, REPAIR_DROPIN,
                  REPAIR_STAGED, REPAIR_TRIGGER, CALLER_PATH, BLOCKER_PATH):
@@ -2657,6 +2653,8 @@ def main(argv=None):
     parser.add_argument("--label")
     args = parser.parse_args(argv)
     try:
+        require(os.uname().nodename == "crq-probe",
+                "proof driver only runs on the disposable crq-probe guest")
         if args.phase == "prepare":
             payload = phase_prepare(args)
         elif args.phase in ("drain-alive", "drain-ambiguous"):
