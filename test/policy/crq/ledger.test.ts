@@ -373,19 +373,23 @@ describe('ledger records are pure and self-describing', () => {
 
   test('an invalid calendar timestamp keeps the Python ValueError class', () => {
     expect(() => ledgerTimestamp('2026-02-30T00:00:00Z')).toThrow(LedgerTimestampError);
-    expect(() => ledgerTimestamp('٢٠٢٦-١١-٠٩T٠٠:٠٠:٠٠Z')).toThrow(LedgerTimestampError);
   });
 
-  test("timestamp reproduces strptime's Unicode digit grammar", () => {
-    expect(ledgerTimestamp('٢٠٢٦-11-09T00:00:00Z').year).toBe(2026);
-    expect(ledgerTimestamp('२०२६-11-09T00:00:00Z').year).toBe(2026);
-    expect(ledgerTimestamp('2026-11-1٢T00:00:00Z').day).toBe(12);
-    expect(ledgerTimestamp('2026-11-09T0٢:00:00Z').hour).toBe(2);
-    expect(ledgerTimestamp('2026-11-09T00:5٩:00Z').minute).toBe(59);
-    expect(ledgerTimestamp('2026-11-09T00:00:5٩Z').second).toBe(59);
-    // %m is ASCII-only and a leading non-ASCII digit is refused.
-    expect(() => ledgerTimestamp('2026-١١-09T00:00:00Z')).toThrow(LedgerTimestampError);
-    expect(() => ledgerTimestamp('2026-11-٢٢T00:00:00Z')).toThrow(LedgerTimestampError);
+  test('a non-ASCII decimal digit is refused by the ASCII-only shape check', () => {
+    // Python's shape check is `[0-9]`, not the Unicode-aware `\d`, so the
+    // refusal happens before strptime and is an integrity error at every
+    // position, not a field-grammar one.
+    for (const timestamp of [
+      '٢٠٢٦-11-09T00:00:00Z',
+      '२०२६-11-09T00:00:00Z',
+      '2026-١١-09T00:00:00Z',
+      '2026-11-1٢T00:00:00Z',
+      '2026-11-09T0٢:00:00Z',
+      '2026-11-09T00:5٩:00Z',
+      '2026-11-09T00:00:5٩Z',
+    ]) {
+      expect(() => ledgerTimestamp(timestamp), timestamp).toThrow(LedgerIntegrityError);
+    }
   });
 
   test('a record whose id does not match its digest is refused', () => {
