@@ -47,9 +47,9 @@ RUNNER_DISABLED_OUTCOME = 'runner-disabled'
 def runner_disabled():
     """True while a host handover holds the runner inert.
 
-    Read only at admission points: the start of a pass and before each item.
-    A check mid-item or mid-job would abandon a paid worker, so nothing deeper
-    in the pass calls this.
+    Read only at admission points: CLI dispatch, the start of a pass, before
+    each item, and before each serial job of an item. A check inside a running
+    job would abandon paid work, so nothing deeper in the pass calls this.
     """
     return (ROOT / 'state/runner-disabled').exists()
 
