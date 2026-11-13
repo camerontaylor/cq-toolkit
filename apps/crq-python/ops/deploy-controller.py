@@ -1415,7 +1415,7 @@ def recover_unit(effects, adapter, path, *, adapter_factory=None):
     """
     if adapter is None and adapter_factory is None:
         raise Refused("no unit recovery adapter")
-    path = Path(path)
+    path = absolute_record_dir(Path(path))
     with effects.controller_lock():
         effects.record_preflight()
         if path.parent != effects.record_dir or path.is_symlink():
