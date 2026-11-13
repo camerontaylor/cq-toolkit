@@ -1,0 +1,3106 @@
+{
+  "schema": "cq.crq-a1-status-vector/v1",
+  "family": "merged-current",
+  "note": "receipt-bound merged-current projection",
+  "cases": [
+    {
+      "name": "verified-no-current-code-counts-deleted-exclusion",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "no-current-code",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "gone.py",
+                    "disposition": "deleted"
+                  }
+                ],
+                "scope_digest": "78989f0ad22d63820bbde93a7ef878cbcefc0b59a51036d58b54e6286660db64",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "6e608acd343b941ec77a070b6de3547e588840ded279199703bee8d98939d1b2"
+              },
+              "receipt_id": "f4ff6879d36ae6e67763218532fcbb6e92d3b147b64c9eb5e81f8e64760614a4"
+            }
+          ]
+        },
+        "receipts": {
+          "f4ff6879d36ae6e67763218532fcbb6e92d3b147b64c9eb5e81f8e64760614a4": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1
+            },
+            "capture": {
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "gone.py",
+                  "disposition": "deleted"
+                }
+              ],
+              "scope_digest": "78989f0ad22d63820bbde93a7ef878cbcefc0b59a51036d58b54e6286660db64",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "6e608acd343b941ec77a070b6de3547e588840ded279199703bee8d98939d1b2"
+            },
+            "outcome": "no-current-code",
+            "counted": false,
+            "classification": null
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 0,
+            "no_current_code": 1,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {
+            "deleted": 1
+          },
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        }
+      }
+    },
+    {
+      "name": "verified-partial-scope",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "gone.py",
+                    "disposition": "deleted"
+                  }
+                ],
+                "scope_digest": "78989f0ad22d63820bbde93a7ef878cbcefc0b59a51036d58b54e6286660db64",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "6e608acd343b941ec77a070b6de3547e588840ded279199703bee8d98939d1b2"
+              },
+              "receipt_id": "6489a21fbbc7a20f22a0e132f9774a2c16170fa8af932dc1b51db8ac259c79cc"
+            }
+          ]
+        },
+        "receipts": {
+          "6489a21fbbc7a20f22a0e132f9774a2c16170fa8af932dc1b51db8ac259c79cc": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1
+            },
+            "capture": {
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "gone.py",
+                  "disposition": "deleted"
+                }
+              ],
+              "scope_digest": "78989f0ad22d63820bbde93a7ef878cbcefc0b59a51036d58b54e6286660db64",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "6e608acd343b941ec77a070b6de3547e588840ded279199703bee8d98939d1b2"
+            },
+            "outcome": "partial-scope",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 0,
+            "no_current_code": 0,
+            "partial_scope": 1,
+            "unsupported": 0
+          },
+          "path_exclusions": {
+            "deleted": 1
+          },
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        }
+      }
+    },
+    {
+      "name": "verified-terminal-with-findings",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f"
+              },
+              "receipt_id": "c014e572237973e35da1e50b5a014bc77513f3be4eeba180adb5563f834de6d2"
+            }
+          ]
+        },
+        "receipts": {
+          "c014e572237973e35da1e50b5a014bc77513f3be4eeba180adb5563f834de6d2": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1
+            },
+            "capture": {
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 1,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        }
+      }
+    },
+    {
+      "name": "tampered-receipt-is-unverified",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f"
+              },
+              "receipt_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ]
+        },
+        "receipts": {
+          "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1
+            },
+            "capture": {
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 1,
+            "proven_terminal": 0,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        }
+      }
+    },
+    {
+      "name": "missing-receipt-is-unverified",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f"
+              },
+              "receipt_id": "c014e572237973e35da1e50b5a014bc77513f3be4eeba180adb5563f834de6d2"
+            }
+          ]
+        },
+        "receipts": {}
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 1,
+            "proven_terminal": 0,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        }
+      }
+    },
+    {
+      "name": "reused-lineage-verified",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "original",
+              "kind": "merged-current",
+              "state": "done",
+              "receipt_id": "c014e572237973e35da1e50b5a014bc77513f3be4eeba180adb5563f834de6d2",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f"
+              }
+            },
+            {
+              "id": "reused",
+              "kind": "merged-current",
+              "state": "done",
+              "receipt_id": "c014e572237973e35da1e50b5a014bc77513f3be4eeba180adb5563f834de6d2",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 2
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f",
+                "captured_at": "later",
+                "base": "cccccccccccccccccccccccccccccccccccccccc"
+              },
+              "reused_from": "original"
+            }
+          ]
+        },
+        "receipts": {
+          "c014e572237973e35da1e50b5a014bc77513f3be4eeba180adb5563f834de6d2": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1
+            },
+            "capture": {
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 2,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        }
+      }
+    },
+    {
+      "name": "reused-lineage-missing-parent",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "original",
+              "kind": "merged-current",
+              "state": "done",
+              "receipt_id": "c014e572237973e35da1e50b5a014bc77513f3be4eeba180adb5563f834de6d2",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f"
+              }
+            },
+            {
+              "id": "reused",
+              "kind": "merged-current",
+              "state": "done",
+              "receipt_id": "c014e572237973e35da1e50b5a014bc77513f3be4eeba180adb5563f834de6d2",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 2
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f",
+                "captured_at": "later",
+                "base": "cccccccccccccccccccccccccccccccccccccccc"
+              },
+              "reused_from": "missing"
+            }
+          ]
+        },
+        "receipts": {
+          "c014e572237973e35da1e50b5a014bc77513f3be4eeba180adb5563f834de6d2": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1
+            },
+            "capture": {
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 1,
+            "proven_terminal": 1,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        }
+      }
+    },
+    {
+      "name": "reused-lineage-cycle",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "original",
+              "kind": "merged-current",
+              "state": "done",
+              "receipt_id": "c014e572237973e35da1e50b5a014bc77513f3be4eeba180adb5563f834de6d2",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f"
+              }
+            },
+            {
+              "id": "reused",
+              "kind": "merged-current",
+              "state": "done",
+              "receipt_id": "c014e572237973e35da1e50b5a014bc77513f3be4eeba180adb5563f834de6d2",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 2
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f",
+                "captured_at": "later",
+                "base": "cccccccccccccccccccccccccccccccccccccccc"
+              },
+              "reused_from": "reused"
+            }
+          ]
+        },
+        "receipts": {
+          "c014e572237973e35da1e50b5a014bc77513f3be4eeba180adb5563f834de6d2": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1
+            },
+            "capture": {
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 1,
+            "proven_terminal": 1,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        }
+      }
+    },
+    {
+      "name": "reused-lineage-capture-target-mismatch",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "original",
+              "kind": "merged-current",
+              "state": "done",
+              "receipt_id": "c014e572237973e35da1e50b5a014bc77513f3be4eeba180adb5563f834de6d2",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f"
+              }
+            },
+            {
+              "id": "reused",
+              "kind": "merged-current",
+              "state": "done",
+              "receipt_id": "c014e572237973e35da1e50b5a014bc77513f3be4eeba180adb5563f834de6d2",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 2
+              },
+              "capture": {
+                "target": "dddddddddddddddddddddddddddddddddddddddd",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f",
+                "captured_at": "later",
+                "base": "cccccccccccccccccccccccccccccccccccccccc"
+              },
+              "reused_from": "original"
+            }
+          ]
+        },
+        "receipts": {
+          "c014e572237973e35da1e50b5a014bc77513f3be4eeba180adb5563f834de6d2": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1
+            },
+            "capture": {
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "c7a79f0dfb8d0d2adb5e7d1f4e6bb6ed5bbd8e5cd11d7efd5913fbeb8ecc070f"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 1,
+            "proven_terminal": 1,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        }
+      }
+    },
+    {
+      "name": "verified-unsupported-terminal",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "unsupported",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "gone.py",
+                    "disposition": "deleted"
+                  }
+                ],
+                "scope_digest": "78989f0ad22d63820bbde93a7ef878cbcefc0b59a51036d58b54e6286660db64",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "6e608acd343b941ec77a070b6de3547e588840ded279199703bee8d98939d1b2"
+              },
+              "receipt_id": "11c9dbddf0d57cccb55b4b45b94e5edd54acc74dc6cbfd55825f49a2448f01b1"
+            }
+          ]
+        },
+        "receipts": {
+          "11c9dbddf0d57cccb55b4b45b94e5edd54acc74dc6cbfd55825f49a2448f01b1": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1
+            },
+            "capture": {
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "gone.py",
+                  "disposition": "deleted"
+                }
+              ],
+              "scope_digest": "78989f0ad22d63820bbde93a7ef878cbcefc0b59a51036d58b54e6286660db64",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "6e608acd343b941ec77a070b6de3547e588840ded279199703bee8d98939d1b2"
+            },
+            "outcome": "unsupported",
+            "counted": false,
+            "classification": null
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 0,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 1
+          },
+          "path_exclusions": {
+            "deleted": 1
+          },
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        }
+      }
+    },
+    {
+      "name": "empty-path-list-is-no-current-code",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "no-current-code",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [],
+                "scope_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "c38b8c9a29f1e6cb281898c5b1f2461780bd847337f05269449294cce7dc2cf0"
+              },
+              "receipt_id": "7510c030773b8170619f1c17d564db86ceb041a9825bac02a38cce8061fb3c81"
+            }
+          ]
+        },
+        "receipts": {
+          "7510c030773b8170619f1c17d564db86ceb041a9825bac02a38cce8061fb3c81": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1
+            },
+            "capture": {
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [],
+              "scope_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "c38b8c9a29f1e6cb281898c5b1f2461780bd847337f05269449294cce7dc2cf0"
+            },
+            "outcome": "no-current-code",
+            "counted": false,
+            "classification": null
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 0,
+            "no_current_code": 1,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        }
+      }
+    },
+    {
+      "name": "excluded-empty-current-file-is-no-current-code",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "no-current-code",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "blank.py",
+                    "disposition": "excluded-with-reason",
+                    "reason": "empty current file"
+                  }
+                ],
+                "scope_digest": "583d58c5a544f6dce6fc0251585d5ed2f4d48175b8a8697b619c00866a6eb5bd",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "32a6056b84be1c3ba7ba3ea58051716b10d70cc18697fa03a3638605f2149e13"
+              },
+              "receipt_id": "3b064cee40c74a6d45c14e338b4c1e4d52f8c06a99a67394482f4983aeca6216"
+            }
+          ]
+        },
+        "receipts": {
+          "3b064cee40c74a6d45c14e338b4c1e4d52f8c06a99a67394482f4983aeca6216": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1
+            },
+            "capture": {
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "blank.py",
+                  "disposition": "excluded-with-reason",
+                  "reason": "empty current file"
+                }
+              ],
+              "scope_digest": "583d58c5a544f6dce6fc0251585d5ed2f4d48175b8a8697b619c00866a6eb5bd",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "32a6056b84be1c3ba7ba3ea58051716b10d70cc18697fa03a3638605f2149e13"
+            },
+            "outcome": "no-current-code",
+            "counted": false,
+            "classification": null
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 0,
+            "no_current_code": 1,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {
+            "excluded-with-reason": 1
+          },
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        }
+      }
+    },
+    {
+      "name": "captured-targets-are-sorted-and-bounded",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1000
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000000",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "0845aacf9300cb2933c28f9bcdfab6125fdb7d5c41538dc18e477f9bae396917"
+              },
+              "receipt_id": "a30536b630df001607d6506ff7f06c37f219c60fca6c94d91efe40fbf3684dfd"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1001
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000001",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "d35d2f03093f4b538033e184a50697a06719c061fb180795297faa18f57c3f9b"
+              },
+              "receipt_id": "0292c789585154f83bedd48e0326ea9859aff34fdfa0d739c63d564f31b185c1"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1002
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000002",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "a95abc19176f3d04bad7bf34b25f86e6846fbaefb7ffb100ca21c3ce10c4e8b9"
+              },
+              "receipt_id": "97b6ce5ae97ce34eee0c0bef3c5456e35f3a9609632c2426c8994dbbe564a991"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1003
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000003",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "f2ef2bf2a941950d04eb8da5907901966601dfe54466945955083598727fde0b"
+              },
+              "receipt_id": "a70cb89bceb736eea55a632379d1672b818b42d64112600eda2efed9285b3df1"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1004
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000004",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "fd289ab6cd3de1210eabfe07e87555bb0b1b8400cf73b2cc4652ce648e72178f"
+              },
+              "receipt_id": "8092624b0b5a329e5bcc9beee9120e9b1a319451e8fff9cce2cc5d90144dc317"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1005
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000005",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "4fb2e7ce24ee34e8ef8d9cb33aa00050cfb40ea5ceedee4e8bc57d822bc8973f"
+              },
+              "receipt_id": "0b8ddd93468dcd85889249419ad4145c6f02f85038aed5f301164f977c3cd398"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1006
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000006",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "5f94306e8589c1446123edc171cf275d0b0580318edde8a1fc8fd12858e540ac"
+              },
+              "receipt_id": "d53a8a40cdda27984a22e8db0219414358d7c551bc4d3226808d1c2489a23e90"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1007
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000007",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "280170b3a35df4bbbcc0063a31631ac34be3515fe2f15bdfee92b5bd7ea9b9c5"
+              },
+              "receipt_id": "d61e01e02b6e328e8e5fa22fba88b093b9d46ec3c19383f58c1d8d82d28a74b7"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1008
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000008",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "0946483d501246f43c0074240f2afcb118b0e2985d2fa703673fb51be8153c7c"
+              },
+              "receipt_id": "f41b7215c22ac73aa279b822e4f1a71907d2ef6ba0bd3ad95e785aee68377715"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1009
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000009",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "98e65cc65b33c795783e477abd6d2da7f337bb2e13fd7ef8b8a9fd58b9fa793a"
+              },
+              "receipt_id": "c58f5db5044edd003b6c05e17d5423e3d218a20f717aa513c5795940cc3a9468"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1010
+              },
+              "capture": {
+                "target": "000000000000000000000000000000000000000a",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "f55319b61a4e2a03f4f1a3c644b5e47a4b1fdfafabfd48a1b5011a0fca2b2165"
+              },
+              "receipt_id": "468ee819fce5ab153049bc9fa45443b15a0ddab5cd5cdfd77caeac40f29b0f17"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1011
+              },
+              "capture": {
+                "target": "000000000000000000000000000000000000000b",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "378ab2b472a1b751afbac56446338e365da7164ca6955aea61889725cac1d469"
+              },
+              "receipt_id": "bd17202c07471b7e29dc1e6ba63b312eacbe00f139b1bc6edbe8aa65a5f9000d"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1012
+              },
+              "capture": {
+                "target": "000000000000000000000000000000000000000c",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "017fe84e20762bdca22a50b6baa6a2b2251353a45d23b5cd55cbbffde9ca52e4"
+              },
+              "receipt_id": "fd15840768313895ff7b23abbebdfa532013370a338353c5a1ffc6e90b3c3ce2"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1013
+              },
+              "capture": {
+                "target": "000000000000000000000000000000000000000d",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "d17665a989c36a2d511028672d7ce6b47ad9e8fe9e8633fca279621b104d9971"
+              },
+              "receipt_id": "1f120d76ef9f2690ff0db99ebcb5eeb287317897c51d8489b48cdd73df6c2733"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1014
+              },
+              "capture": {
+                "target": "000000000000000000000000000000000000000e",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "b1fb849ac1c2dafe9d4025944f2bff564fc35026583295fb513b0f9571595ca0"
+              },
+              "receipt_id": "f74b1c5e71d875ff2bbf68b200b29991d774dd68f94fb2bb0609b0b4d6fecd35"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1015
+              },
+              "capture": {
+                "target": "000000000000000000000000000000000000000f",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "504ebd9c3e370c9ff2d93dd98467a1cbf20c0064d8a3a1617423c2521789158b"
+              },
+              "receipt_id": "f034f5543e7ecb2d5d38cc5a80e8c7e6180b5de0c6d2f6b2f7cc2a71f82f549e"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1016
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000010",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "f90c9fb80a7de270964fef67c0c63cd6c4314670fb31b965d3155c44ef446813"
+              },
+              "receipt_id": "0c6a9756b2706bbca88774be5b190310e9da54a8512b750987a684004f25ce43"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1017
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000011",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "3c51f063ec84ef927eb3f1a006a9002d7150cfec17b828bf66cc5c61289f34c6"
+              },
+              "receipt_id": "b0442d2a2ae154efc2e3ba6f327fdf654e30682bc169a64c598557255fa97700"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1018
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000012",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "a091d76c4605046f8c1b122bb4294fc3350d49311326a908ae2470eceb0742ed"
+              },
+              "receipt_id": "86aec13ac30761ad32d8776183b89b4902aa1106cdf33c58c11c76912aad19d6"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1019
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000013",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "2108893f43ad3c82256ca9fa9a9f18900c312cdfec96efeed9a1396974f2305f"
+              },
+              "receipt_id": "8a58251d66323672e0ab74df84ee7a4b97af6c1713736404b85b145663876a9d"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1020
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000014",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "fc6b52ddf7c4d630def72a62c244aded89a39d0eb433612ff6e3e45e5b71bf85"
+              },
+              "receipt_id": "bf96979d6e96d0e5da952ea7e122550db0d4cdc1efa157f0a3d7cf177f3b2130"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1021
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000015",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "028d2978bd46344cf15bdc567bee0e6923674f2d64d3065f47ed83aa00e1b241"
+              },
+              "receipt_id": "d600f7e77e3796e48ca90b2552eb20376338eaa2de474b42fba0bb59edfd5401"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1022
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000016",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "d5dad7de11a4c7765e6a95a32e6703ab66ad089ebd0d8aa655047e18c4df0c95"
+              },
+              "receipt_id": "4224736465eaf99aff43260fbb620631b04b6ffa2cead6bad971e89664fe033d"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1023
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000017",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "c0f50db9d2f1972128bf1980eae5bf3158aca1a6efd05c05376539358a4f4d1b"
+              },
+              "receipt_id": "a3ca35cdfc7a55f40e3627b7115eb97832fbcd7037902747843b7c7b8c3c46b1"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1024
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000018",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "82fbc4ec079f42ba7cde93c24bf65f0025f0f04eb2fa32f123e498d1961aa56e"
+              },
+              "receipt_id": "82aeb650a19383a9920f9ab902c4431c4fa7d7656361c8c02f53483432871f22"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1025
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000019",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "731040bc4cad74556e7db15f45fa7028714a76a84f1a4e08a462a5095eaffe2c"
+              },
+              "receipt_id": "5e315da0cfd5db2a5b0527c7637a0d79e7611dff116617725a71a32a6df36bf9"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1026
+              },
+              "capture": {
+                "target": "000000000000000000000000000000000000001a",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "245f432fa2ef88605c4657565b779e94550fa410d75079c5daa71ee5c324d49c"
+              },
+              "receipt_id": "1d48abf78b5f1b8009987b6796ba7756c080b02dcb0069acb13534415ae85f4e"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1027
+              },
+              "capture": {
+                "target": "000000000000000000000000000000000000001b",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "7a83e8bae8ddd2079986217011387bf3e92ad20fa641e9d7fe0eb4c4ef7dda04"
+              },
+              "receipt_id": "ce3bbcebc5ed36dfb613995d4660bc1656ab351d96167b79b345be16db5d1ab9"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1028
+              },
+              "capture": {
+                "target": "000000000000000000000000000000000000001c",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "04cb5eab88dcc0799b9dbf2db82fc2af9d0cb6b16fd0ff99aacccde7858a4443"
+              },
+              "receipt_id": "eea9fd125fac36922c36574ef1f775935ec4b20f2c526c595495d18c2517e741"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1029
+              },
+              "capture": {
+                "target": "000000000000000000000000000000000000001d",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "e420e20cbed8cf787bfcd3fe298c19e9ad451bba75e8e6214443add947ddb696"
+              },
+              "receipt_id": "729bfdf413f813166c44d43a0c9a88dcea54486e0d9a67a3246a8db3f7ed1aa5"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1030
+              },
+              "capture": {
+                "target": "000000000000000000000000000000000000001e",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "06599b154390e1aebbf83106464e0e83a81bc4a51ddf330d04ead4c80cb1d1e0"
+              },
+              "receipt_id": "7c21c25c8b3b0fde722ed06c3e86f3bc199089a38a507ef4b72fd6220ca06919"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1031
+              },
+              "capture": {
+                "target": "000000000000000000000000000000000000001f",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "253a83835b3769d080a196a155fe6f53236f363ab29971566d0f24ab637991b6"
+              },
+              "receipt_id": "d58b6d14bdea7734e69c66a2e3bcc6d47a2d29601cfcf571821df97c8b3bd6d8"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1032
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000020",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "0c4f8b1966bf0b719ec060a4dcdf815bfd56d2d83d02cbd3edcaf7917a3af9d9"
+              },
+              "receipt_id": "0b4d2b636c57ce819b0599f051fbc93e64624384178b58599e757cfb9fa1f921"
+            },
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1033
+              },
+              "capture": {
+                "target": "0000000000000000000000000000000000000021",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "kept.py",
+                    "disposition": "included"
+                  }
+                ],
+                "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "fa08af0518b7519abd0293dd423adad002d34b3fc71cffaac1c88d0deda864f8"
+              },
+              "receipt_id": "1e039452ddc51cad87c3b9b8e22139f2a4e0fd2c6f8555cbaa54a5b637f08f44"
+            }
+          ],
+          "merged_discovery": {
+            "after": "2026-11-08T00:00:00Z",
+            "before": "2026-11-09T00:00:00Z",
+            "complete": false,
+            "error": "transient",
+            "reason": "budget"
+          },
+          "merged_reconcile": {
+            "after": "2026-11-08T00:00:00Z",
+            "before": "2026-11-09T00:00:00Z",
+            "complete": true,
+            "reason": "budget-exhausted",
+            "pages_read": 0,
+            "transient_failures": 2
+          },
+          "merged_watermark": "2026-11-09T00:00:00Z"
+        },
+        "receipts": {
+          "a30536b630df001607d6506ff7f06c37f219c60fca6c94d91efe40fbf3684dfd": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1000
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000000",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "0845aacf9300cb2933c28f9bcdfab6125fdb7d5c41538dc18e477f9bae396917"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "0292c789585154f83bedd48e0326ea9859aff34fdfa0d739c63d564f31b185c1": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1001
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000001",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "d35d2f03093f4b538033e184a50697a06719c061fb180795297faa18f57c3f9b"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "97b6ce5ae97ce34eee0c0bef3c5456e35f3a9609632c2426c8994dbbe564a991": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1002
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000002",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "a95abc19176f3d04bad7bf34b25f86e6846fbaefb7ffb100ca21c3ce10c4e8b9"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "a70cb89bceb736eea55a632379d1672b818b42d64112600eda2efed9285b3df1": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1003
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000003",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "f2ef2bf2a941950d04eb8da5907901966601dfe54466945955083598727fde0b"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "8092624b0b5a329e5bcc9beee9120e9b1a319451e8fff9cce2cc5d90144dc317": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1004
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000004",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "fd289ab6cd3de1210eabfe07e87555bb0b1b8400cf73b2cc4652ce648e72178f"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "0b8ddd93468dcd85889249419ad4145c6f02f85038aed5f301164f977c3cd398": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1005
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000005",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "4fb2e7ce24ee34e8ef8d9cb33aa00050cfb40ea5ceedee4e8bc57d822bc8973f"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "d53a8a40cdda27984a22e8db0219414358d7c551bc4d3226808d1c2489a23e90": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1006
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000006",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "5f94306e8589c1446123edc171cf275d0b0580318edde8a1fc8fd12858e540ac"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "d61e01e02b6e328e8e5fa22fba88b093b9d46ec3c19383f58c1d8d82d28a74b7": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1007
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000007",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "280170b3a35df4bbbcc0063a31631ac34be3515fe2f15bdfee92b5bd7ea9b9c5"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "f41b7215c22ac73aa279b822e4f1a71907d2ef6ba0bd3ad95e785aee68377715": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1008
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000008",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "0946483d501246f43c0074240f2afcb118b0e2985d2fa703673fb51be8153c7c"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "c58f5db5044edd003b6c05e17d5423e3d218a20f717aa513c5795940cc3a9468": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1009
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000009",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "98e65cc65b33c795783e477abd6d2da7f337bb2e13fd7ef8b8a9fd58b9fa793a"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "468ee819fce5ab153049bc9fa45443b15a0ddab5cd5cdfd77caeac40f29b0f17": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1010
+            },
+            "capture": {
+              "target": "000000000000000000000000000000000000000a",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "f55319b61a4e2a03f4f1a3c644b5e47a4b1fdfafabfd48a1b5011a0fca2b2165"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "bd17202c07471b7e29dc1e6ba63b312eacbe00f139b1bc6edbe8aa65a5f9000d": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1011
+            },
+            "capture": {
+              "target": "000000000000000000000000000000000000000b",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "378ab2b472a1b751afbac56446338e365da7164ca6955aea61889725cac1d469"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "fd15840768313895ff7b23abbebdfa532013370a338353c5a1ffc6e90b3c3ce2": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1012
+            },
+            "capture": {
+              "target": "000000000000000000000000000000000000000c",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "017fe84e20762bdca22a50b6baa6a2b2251353a45d23b5cd55cbbffde9ca52e4"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "1f120d76ef9f2690ff0db99ebcb5eeb287317897c51d8489b48cdd73df6c2733": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1013
+            },
+            "capture": {
+              "target": "000000000000000000000000000000000000000d",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "d17665a989c36a2d511028672d7ce6b47ad9e8fe9e8633fca279621b104d9971"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "f74b1c5e71d875ff2bbf68b200b29991d774dd68f94fb2bb0609b0b4d6fecd35": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1014
+            },
+            "capture": {
+              "target": "000000000000000000000000000000000000000e",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "b1fb849ac1c2dafe9d4025944f2bff564fc35026583295fb513b0f9571595ca0"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "f034f5543e7ecb2d5d38cc5a80e8c7e6180b5de0c6d2f6b2f7cc2a71f82f549e": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1015
+            },
+            "capture": {
+              "target": "000000000000000000000000000000000000000f",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "504ebd9c3e370c9ff2d93dd98467a1cbf20c0064d8a3a1617423c2521789158b"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "0c6a9756b2706bbca88774be5b190310e9da54a8512b750987a684004f25ce43": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1016
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000010",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "f90c9fb80a7de270964fef67c0c63cd6c4314670fb31b965d3155c44ef446813"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "b0442d2a2ae154efc2e3ba6f327fdf654e30682bc169a64c598557255fa97700": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1017
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000011",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "3c51f063ec84ef927eb3f1a006a9002d7150cfec17b828bf66cc5c61289f34c6"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "86aec13ac30761ad32d8776183b89b4902aa1106cdf33c58c11c76912aad19d6": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1018
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000012",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "a091d76c4605046f8c1b122bb4294fc3350d49311326a908ae2470eceb0742ed"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "8a58251d66323672e0ab74df84ee7a4b97af6c1713736404b85b145663876a9d": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1019
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000013",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "2108893f43ad3c82256ca9fa9a9f18900c312cdfec96efeed9a1396974f2305f"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "bf96979d6e96d0e5da952ea7e122550db0d4cdc1efa157f0a3d7cf177f3b2130": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1020
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000014",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "fc6b52ddf7c4d630def72a62c244aded89a39d0eb433612ff6e3e45e5b71bf85"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "d600f7e77e3796e48ca90b2552eb20376338eaa2de474b42fba0bb59edfd5401": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1021
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000015",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "028d2978bd46344cf15bdc567bee0e6923674f2d64d3065f47ed83aa00e1b241"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "4224736465eaf99aff43260fbb620631b04b6ffa2cead6bad971e89664fe033d": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1022
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000016",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "d5dad7de11a4c7765e6a95a32e6703ab66ad089ebd0d8aa655047e18c4df0c95"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "a3ca35cdfc7a55f40e3627b7115eb97832fbcd7037902747843b7c7b8c3c46b1": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1023
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000017",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "c0f50db9d2f1972128bf1980eae5bf3158aca1a6efd05c05376539358a4f4d1b"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "82aeb650a19383a9920f9ab902c4431c4fa7d7656361c8c02f53483432871f22": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1024
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000018",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "82fbc4ec079f42ba7cde93c24bf65f0025f0f04eb2fa32f123e498d1961aa56e"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "5e315da0cfd5db2a5b0527c7637a0d79e7611dff116617725a71a32a6df36bf9": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1025
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000019",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "731040bc4cad74556e7db15f45fa7028714a76a84f1a4e08a462a5095eaffe2c"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "1d48abf78b5f1b8009987b6796ba7756c080b02dcb0069acb13534415ae85f4e": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1026
+            },
+            "capture": {
+              "target": "000000000000000000000000000000000000001a",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "245f432fa2ef88605c4657565b779e94550fa410d75079c5daa71ee5c324d49c"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "ce3bbcebc5ed36dfb613995d4660bc1656ab351d96167b79b345be16db5d1ab9": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1027
+            },
+            "capture": {
+              "target": "000000000000000000000000000000000000001b",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "7a83e8bae8ddd2079986217011387bf3e92ad20fa641e9d7fe0eb4c4ef7dda04"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "eea9fd125fac36922c36574ef1f775935ec4b20f2c526c595495d18c2517e741": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1028
+            },
+            "capture": {
+              "target": "000000000000000000000000000000000000001c",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "04cb5eab88dcc0799b9dbf2db82fc2af9d0cb6b16fd0ff99aacccde7858a4443"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "729bfdf413f813166c44d43a0c9a88dcea54486e0d9a67a3246a8db3f7ed1aa5": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1029
+            },
+            "capture": {
+              "target": "000000000000000000000000000000000000001d",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "e420e20cbed8cf787bfcd3fe298c19e9ad451bba75e8e6214443add947ddb696"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "7c21c25c8b3b0fde722ed06c3e86f3bc199089a38a507ef4b72fd6220ca06919": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1030
+            },
+            "capture": {
+              "target": "000000000000000000000000000000000000001e",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "06599b154390e1aebbf83106464e0e83a81bc4a51ddf330d04ead4c80cb1d1e0"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "d58b6d14bdea7734e69c66a2e3bcc6d47a2d29601cfcf571821df97c8b3bd6d8": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1031
+            },
+            "capture": {
+              "target": "000000000000000000000000000000000000001f",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "253a83835b3769d080a196a155fe6f53236f363ab29971566d0f24ab637991b6"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "0b4d2b636c57ce819b0599f051fbc93e64624384178b58599e757cfb9fa1f921": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1032
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000020",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "0c4f8b1966bf0b719ec060a4dcdf815bfd56d2d83d02cbd3edcaf7917a3af9d9"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          },
+          "1e039452ddc51cad87c3b9b8e22139f2a4e0fd2c6f8555cbaa54a5b637f08f44": {
+            "version": 1,
+            "source": {
+              "repo": "owner/repo",
+              "pr": 1033
+            },
+            "capture": {
+              "target": "0000000000000000000000000000000000000021",
+              "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "paths": [
+                {
+                  "path": "kept.py",
+                  "disposition": "included"
+                }
+              ],
+              "scope_digest": "fe14f5e6ae79c2b933984289081ab517e73c7cd17a013d553f0753c06568a4ec",
+              "policy": "affected-current-additions-v1",
+              "projection": "current-affected-files/full-file-addition-projection",
+              "reviewer": "coderabbit-review-agent-committed-v1",
+              "reviewer_version": "fixture",
+              "equivalence": "fa08af0518b7519abd0293dd423adad002d34b3fc71cffaac1c88d0deda864f8"
+            },
+            "outcome": "terminal-with-findings",
+            "counted": true,
+            "classification": {
+              "counted": true,
+              "outcome": "completed"
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {
+            "after": "2026-11-08T00:00:00Z",
+            "before": "2026-11-09T00:00:00Z",
+            "complete": false,
+            "error": "transient",
+            "reason": "budget"
+          },
+          "discovery": {
+            "after": "2026-11-08T00:00:00Z",
+            "before": "2026-11-09T00:00:00Z",
+            "complete": true,
+            "reason": "budget-exhausted",
+            "pages_read": 0,
+            "transient_failures": 2
+          },
+          "watermark": "2026-11-09T00:00:00Z",
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 34,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "0000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000001",
+            "0000000000000000000000000000000000000002",
+            "0000000000000000000000000000000000000003",
+            "0000000000000000000000000000000000000004",
+            "0000000000000000000000000000000000000005",
+            "0000000000000000000000000000000000000006",
+            "0000000000000000000000000000000000000007",
+            "0000000000000000000000000000000000000008",
+            "0000000000000000000000000000000000000009",
+            "000000000000000000000000000000000000000a",
+            "000000000000000000000000000000000000000b",
+            "000000000000000000000000000000000000000c",
+            "000000000000000000000000000000000000000d",
+            "000000000000000000000000000000000000000e",
+            "000000000000000000000000000000000000000f",
+            "0000000000000000000000000000000000000010",
+            "0000000000000000000000000000000000000011",
+            "0000000000000000000000000000000000000012",
+            "0000000000000000000000000000000000000013",
+            "0000000000000000000000000000000000000014",
+            "0000000000000000000000000000000000000015",
+            "0000000000000000000000000000000000000016",
+            "0000000000000000000000000000000000000017",
+            "0000000000000000000000000000000000000018",
+            "0000000000000000000000000000000000000019",
+            "000000000000000000000000000000000000001a",
+            "000000000000000000000000000000000000001b",
+            "000000000000000000000000000000000000001c",
+            "000000000000000000000000000000000000001d",
+            "000000000000000000000000000000000000001e",
+            "000000000000000000000000000000000000001f"
+          ],
+          "additional_captured_targets": 2,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        }
+      }
+    }
+  ]
+}

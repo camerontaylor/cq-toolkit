@@ -1,7 +1,8 @@
 // Split provenance: test/ops/review/address-local.test.ts was split into
 // subject files sharing ./address-local.helpers.ts. This file holds the
 // cancellation case for a whole injected review.
-import { readFile, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { readFile, writeFile, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test } from 'vitest';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
@@ -114,7 +115,16 @@ test('cancelled whole injected review drains finally writes but cannot claim ter
     await expect(readFile(result.report!.reportPath)).rejects.toHaveProperty('code', 'ENOENT');
     const retry = await f.op({ repoRoot: f.repo.root, source: 'local', journalDir: f.journalDir });
     expect(retry.status).toBe('needs-human');
-    expect(retry.report?.reasons.join(' ')).toContain('could not acquire');
+    const common = await realpath(
+      f.repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim(),
+    );
+    const gitDir = await realpath(f.repo.git('rev-parse', '--absolute-git-dir').trim());
+    const lock = join(
+      common,
+      'cq-review/slots',
+      `checkout-${createHash('sha256').update(gitDir).digest('hex')}.lock`,
+    );
+    expect(retry.status === 'needs-human' && retry.reason).toBe(`Slot busy: ${lock}`);
     expect(f.models).toEqual([]);
     expect(f.repo.git('ls-remote', '--heads', 'origin', 'cq-address/*')).toBe('');
   } finally {

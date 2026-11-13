@@ -160,13 +160,21 @@ Only confirmed, verified current anchors of critical, major or minor severity
 enter the repair inbox automatically. Canonical minor findings use the same
 current delivered-receipt checks in normal drain and prepared selection;
 legacy minor jobs remain excluded. Triage
-never invents GitHub threads. Ambiguous judgements remain `needs-human`.
+never invents GitHub threads. Untyped unsure judgments enter bounded fixer
+investigation using verified anchors; transient provider failures defer.
 The inventory report's `finding_triage` and `crq status` show current counts by
 status and the needs-human list (finding ID, canonical ID, path, title,
 severity, target and event ID). Status previews retain at most 32 needs-human
 entries and report `needs_human_count` and `needs_human_omitted`; durable rows
-and inventory reports retain the full list. Malformed rows do not stop status
-publication: `error_count`, a bounded `errors` list and `errors_omitted` expose
+and inventory reports retain the full list. The additive `owner_decisions` and
+`operator_attention` lists split this status by failure class. Only an explicit
+typed `owner-decision` counts as an owner decision; rows with an absent,
+unrecognized or non-string class are operator attention, reported in the
+additive `unknown_failure_class` list with `unknown_failure_class_count`, an
+`unknown_failure_class_note` caveat, and `unknown_failure_class_omitted` in
+bounded reports; their rows appear only in the unknown list and their count is
+included in `operator_attention_count`. Malformed rows do not stop status publication:
+`error_count`, a bounded `errors` list and `errors_omitted` expose
 them, and `counts_complete: false` marks counts as partial (valid rows only).
 The needs-human count is also partial in that case. Inventory remains strict
 on malformed rows. The event ID links to the retained decision
@@ -175,8 +183,10 @@ unique repair jobs. `backfill.py triage` with an actor/reason remains the
 operator override, and `backfill.py deliver` remains available for confirmed
 findings. A receipt means delivered; `fixed` requires fixing commit and
 verification evidence. Repair outcomes write back into the same finding-event
-chain: merged fixes become `fixed`, stale jobs need retriage, invalid findings
-are dismissed, and failures remain visible as `needs-human`. Duplicate linking
+chain: merged fixes become `fixed`, and failed or evidence-less unchanged
+repairs enter bounded `needs-retriage`. Exhausted retries become `needs-human`
+with their operational failure class; an explicit fixer `needs_human` is an
+owner decision. Duplicate linking
 preserves each occurrence. These operations do not authorize the old draft
 posting workflow.
 

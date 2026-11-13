@@ -659,7 +659,7 @@ export interface AddressManyRow {
   detail?: string;
   scope: { repo: string; number: number; headOid: string };
   status: AddressManyRowStatus;
-  /** `trusted` only when the report's first reviewed head equals the admitted head. */
+  /** `trusted` only when the report's immutable `admissionHead` equals the admitted head. */
   attribution: 'trusted' | 'unattributed' | 'absent';
   result?: ReviewAddressResult;
   reason?: string;
@@ -841,8 +841,9 @@ export function aggregateAddressMany(input: {
         attribution: 'absent',
         reason: outcome.exception,
         fixesPerRun: 0,
-        // A leg that threw may have begun work and left durable author debt; with
-        // no report there is no evidence either way, so debt is `unknown`.
+        // The leg was dispatched and threw, so it may have created durable author
+        // debt before it failed. With no report there is no evidence either way,
+        // and an unknown debt state must never be reported as `absent`.
         deferredVendorDebt: 'unknown',
       });
       continue;
@@ -927,11 +928,11 @@ export function aggregateAddressMany(input: {
 
     const fixesPerRun = trusted ? report.fixesPerRun : 0;
     totals.fixesPerRun += fixesPerRun;
-    // Debt is `absent` only with evidence: a trusted report that records none. A
-    // leg that settled without a report (or was not attributable) may have left
-    // durable author debt, so its debt state is `unknown`, never asserted absent.
+    // A dispatched leg with no report is not evidence of no debt: it may have
+    // created durable author debt before it failed. Only a trusted report can
+    // say `absent`; everything else with a run behind it is `unknown`.
     const debt: AddressManyRow['deferredVendorDebt'] =
-      trusted && report !== undefined
+      report !== undefined && trusted
         ? report.deferredVendorDebt === undefined
           ? 'absent'
           : 'present'
@@ -940,7 +941,7 @@ export function aggregateAddressMany(input: {
     if (debt === 'unknown')
       reasons.push(
         report === undefined
-          ? `#${candidate.number} debt state unknowable; the leg produced no report`
+          ? `#${candidate.number} returned no report; debt state unknowable`
           : `#${candidate.number} debt state unknowable at an unattributed head`,
       );
     if (enrollment.state !== 'not-requested')

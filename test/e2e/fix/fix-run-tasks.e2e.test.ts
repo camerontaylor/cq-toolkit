@@ -36,7 +36,7 @@ test('journal symlink alias preserves broader-probe task identity and commits bo
 test('one failing task has a failed-attempt commit while a passing sibling remains committed', async () => {
   const f = await fixture();
   try {
-    const result = await makeFixRun({ drivers: scripted('fail-b') })(input(f));
+    const result = await makeFixRun({ drivers: scripted('fail-b-safe-change') })(input(f));
     expect(result.status).toBe('needs-human');
     expect(reportOf(result).tasks.map((task) => task.outcome)).toEqual([
       'fixed',

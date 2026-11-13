@@ -330,3 +330,33 @@ test('analysis refuses configs with only address checks instead of reporting an 
   expect(resolved.ok).toBe(false);
   if (!resolved.ok) expect(resolved.error).toContain('no repository checks');
 });
+
+// The configured `CqCheck[]` can be handed over as explicit `checks`, so the
+// address-only rule must hold on the explicit path too: those checks need
+// review.address's finding-file scope and cannot run repository-wide.
+const ADDRESS_ONLY_CHECK = { ...TSC_CHECK, addressOnly: true };
+
+test('explicit checks: an address-only check is skipped, the repository check still runs', async () => {
+  const dir = project({ 'src/index.ts': 'const n: number = "x";\n' });
+  const run = scripted([{ stdout: TS2322, exitCode: 1 }]);
+  const result = await makeAnalyzeRun(run)({ dir, checks: [ADDRESS_ONLY_CHECK, TSC_CHECK] });
+  expect(result.status).toBe('ok');
+  if (result.status !== 'ok') return;
+  // Exactly one check ran: the address-only one never reached the runner.
+  expect(run.calls).toHaveLength(1);
+  expect(result.value.checks.map((check) => check.adapter)).toEqual(['tsc-lines']);
+  expect(result.value.failureCount).toBe(1);
+});
+
+test('explicit checks: an all-address-only list is refused instead of an empty clean run', async () => {
+  const dir = project({ 'src/index.ts': 'x\n' });
+  const run = scripted([]);
+  const result = await makeAnalyzeRun(run)({ dir, checks: [ADDRESS_ONLY_CHECK] });
+  expect(result.status).toBe('failed');
+  if (result.status === 'failed') expect(result.error).toContain('no repository checks');
+  expect(run.calls).toEqual([]);
+  expect(existsSync(join(dir, '.cq'))).toBe(false);
+  const resolved = resolveChecks(dir, { checks: [ADDRESS_ONLY_CHECK] });
+  expect(resolved.ok).toBe(false);
+  if (!resolved.ok) expect(resolved.error).toContain('no repository checks');
+});

@@ -13,8 +13,8 @@
 // destructuring `{ env } = process` in declarations, assignments and
 // parameters, `import { env } from 'node:process'`, and `.env` on a default
 // or namespace import of `node:process` / `process`, a local alias
-// (`const p = process`), and TS assertions around any of these. Not caught: an
-// assignment alias (`let p; p = process`).
+// (`const p = process` or `p = process`), and TS assertions. Not tracked:
+// interprocedural control flow. Writes in unrelated functions are ignored.
 
 const WRAPPERS = new Set([
   'TSAsExpression',
@@ -62,11 +62,77 @@ export default {
     },
   },
   create(context) {
-    const processNames = new Set(); // local names bound to the process module
+    const processBindings = new Map();
+    const bindingOf = (node) => {
+      for (let scope = context.sourceCode.getScope(node); scope; scope = scope.upper) {
+        const binding = scope.set.get(node.name);
+        if (binding) return binding;
+      }
+      return null;
+    };
+    const addAlias = (node) => {
+      const binding = bindingOf(node);
+      if (!binding) return;
+      let writes = processBindings.get(binding);
+      if (!writes) processBindings.set(binding, (writes = new Set()));
+      writes.add(node.range[0]);
+    };
+    // Keep a possible alias when a write is guarded by a branch/loop that
+    // does not also contain the read. This is deliberately not a CFG analysis.
+    const isGuardedWrite = (identifier, read, executionBlock) => {
+      for (let child = identifier; child.parent && child !== executionBlock; child = child.parent) {
+        const parent = child.parent;
+        if (
+          /^(IfStatement|ConditionalExpression|LogicalExpression|ForStatement|ForInStatement|ForOfStatement|WhileStatement|DoWhileStatement|SwitchCase|TryStatement|CatchClause|AssignmentPattern|ChainExpression)$/.test(
+            parent.type,
+          ) &&
+          !(child.range[0] <= read.range[0] && child.range[1] >= read.range[1])
+        )
+          return true;
+      }
+      return false;
+    };
     const isProcessNode = (raw) => {
       const node = unwrap(raw);
-      return isProcess(node) || (node.type === 'Identifier' && processNames.has(node.name));
+      // These expressions can return process on either path. For && only
+      // the right operand can be the result when the value is process (truthy).
+      if (node.type === 'LogicalExpression') {
+        return (node.operator !== '&&' && isProcessNode(node.left)) || isProcessNode(node.right);
+      }
+      if (node.type === 'ConditionalExpression') {
+        return isProcessNode(node.consequent) || isProcessNode(node.alternate);
+      }
+      if (node.type !== 'Identifier') return isProcess(node);
+      const binding = bindingOf(node);
+      if (!binding || binding.defs.length === 0) return isProcess(node);
+      const aliases = processBindings.get(binding);
+      if (!aliases) return false;
+      // A function body can precede a read without ever executing. Only writes
+      // in this execution scope or an enclosing one can invalidate this read.
+      const readScope = context.sourceCode.getScope(node);
+      let latestWrite;
+      for (const ref of binding.references) {
+        if (!ref.isWrite()) continue;
+        if ((ref.writeExpr?.range[1] ?? ref.identifier.range[1]) > node.range[0]) continue;
+        const writeScope = ref.from.variableScope;
+        let scope = readScope;
+        while (scope && scope !== writeScope) scope = scope.upper;
+        if (!scope) continue;
+        if (
+          !aliases.has(ref.identifier.range[0]) &&
+          isGuardedWrite(ref.identifier, node, writeScope.block)
+        )
+          continue;
+        if (!latestWrite || ref.identifier.range[0] > latestWrite.identifier.range[0]) {
+          latestWrite = ref;
+        }
+      }
+      // Imports have no initializing write reference.
+      return latestWrite
+        ? aliases.has(latestWrite.identifier.range[0])
+        : binding.defs.some((def) => def.type === 'ImportBinding');
     };
+
     const hasEnvKey = (pattern) =>
       pattern.properties.some(
         (p) =>
@@ -93,9 +159,9 @@ export default {
           if (spec.type === 'ImportSpecifier') {
             const imported = spec.imported.name ?? spec.imported.value;
             if (imported === 'env') context.report({ node: spec, messageId: 'processEnv' });
-            if (imported === 'default') processNames.add(spec.local.name);
+            if (imported === 'default') addAlias(spec.local);
           } else {
-            processNames.add(spec.local.name);
+            addAlias(spec.local);
           }
         }
       },
@@ -107,11 +173,18 @@ export default {
       VariableDeclarator(node) {
         // A plain alias: `const p = process;` makes `p.env` a process.env read.
         if (node.id.type === 'Identifier' && node.init && isProcessNode(node.init)) {
-          processNames.add(node.id.name);
+          addAlias(node.id);
         }
         checkPattern(node.id, node.init, node);
       },
       AssignmentExpression(node) {
+        if (
+          node.left.type === 'Identifier' &&
+          ((['=', '||=', '??=', '&&='].includes(node.operator) && isProcessNode(node.right)) ||
+            (['||=', '??='].includes(node.operator) && isProcessNode(node.left)))
+        ) {
+          addAlias(node.left);
+        }
         checkPattern(node.left, node.right, node);
       },
       AssignmentPattern(node) {

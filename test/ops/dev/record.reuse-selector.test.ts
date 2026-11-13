@@ -147,24 +147,27 @@ describe('findReusableCycle', () => {
     ).toBeNull();
   });
 
-  test('the LATEST same-identity no-fresh tail yields the resolution with its id', () => {
-    const selection = findReusableCycle(
-      [
-        cycleRecord(),
-        cycleRecord({
-          cycleId: 'c002-aaaaaaaa',
-          completion: { kind: 'blocked', reason: NO_FRESH_REASON },
-        }),
-      ],
-      REQUEST,
-    );
-    expect(selection).not.toBeNull();
-    expect(selection).toMatchObject({
-      basis: 'no-fresh-tail',
-      cycle: { cycleId: 'c001-aaaaaaaa' },
-      resolvesCycleId: 'c002-aaaaaaaa',
-    });
-  });
+  test.each([NO_FRESH_REASON, `skipped:no-fresh: ${NO_FRESH_REASON}`])(
+    'the LATEST same-identity no-fresh tail yields the resolution: %s',
+    (reason) => {
+      const selection = findReusableCycle(
+        [
+          cycleRecord(),
+          cycleRecord({
+            cycleId: 'c002-aaaaaaaa',
+            completion: { kind: 'blocked', reason },
+          }),
+        ],
+        REQUEST,
+      );
+      expect(selection).not.toBeNull();
+      expect(selection).toMatchObject({
+        basis: 'no-fresh-tail',
+        cycle: { cycleId: 'c001-aaaaaaaa' },
+        resolvesCycleId: 'c002-aaaaaaaa',
+      });
+    },
+  );
 
   test('a genuine later blocker (error/auth/kill) refuses reuse even with an earlier terminal', () => {
     for (const reason of [

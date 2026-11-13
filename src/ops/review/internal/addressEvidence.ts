@@ -1,4 +1,7 @@
-import { checkoutWriterStdio, trackCheckoutWriter } from '../../../shared/checkoutWriterContext.js';
+import {
+  checkoutTerminalWriterStdio as checkoutWriterStdio,
+  trackCheckoutWriter,
+} from '../../../shared/checkoutWriterContext.js';
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import {
@@ -7,6 +10,7 @@ import {
   realpath,
   mkdir,
   open,
+  readlink,
   writeFile,
   unlink,
   readdir,
@@ -460,13 +464,16 @@ async function terminalGit(
   return output;
 }
 
-async function terminalPath(root: string, file: string, allowGlob = false) {
+// Glob characters in a real file name (a Next.js route such as
+// `pages/[id].tsx`) are safe here: every terminal Git command is hardened
+// with --literal-pathspecs, so the name is never interpreted as a pattern,
+// and every check below is a byte or identity comparison.
+async function terminalPath(root: string, file: string) {
   if (
     !file ||
     isAbsolute(file) ||
     file.startsWith('-') ||
-    file.split(/[\\/]/).some((part) => part === '..') ||
-    (!allowGlob && /[*?\[\]{}]/.test(file))
+    file.split(/[\\/]/).some((part) => part === '..')
   )
     throw new Error('terminal literal file refused');
   const canonical = await realpath(root);
@@ -673,11 +680,15 @@ export async function recordAddressTerminalEvidence(
 // Hash worktree bytes directly: even a hardened worktree `git diff` can run
 // repository clean filters. The fixed scratch buffer is never retained as
 // evidence; unsupported non-RAW/large foreign files refuse conservatively.
+// `shared` admits hard-linked foreign files: verification only reads, and a
+// write through another link would move size/mtime/ctime and be refused by
+// the identity re-checks below. The attempted file always stays exclusive.
 async function terminalBlobIdentity(
   token: object,
   path: string,
   oidLength: number,
   expected: { dev: number; ino: number; mode: number },
+  shared = false,
 ): Promise<string> {
   await validateEvidenceAuthority(token, true);
   const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -685,7 +696,7 @@ async function terminalBlobIdentity(
     const before = await fd.stat();
     if (
       !before.isFile() ||
-      before.nlink !== 1 ||
+      (!shared && before.nlink !== 1) ||
       before.size > SOURCE_CAP ||
       !sameFile(before, expected) ||
       before.mode !== expected.mode
@@ -723,6 +734,26 @@ async function terminalBlobIdentity(
   }
 }
 
+// A tracked symlink's blob is the raw link-target text: hash the `readlink`
+// bytes without ever opening or following the link, then re-check the
+// identity so a swap between the read and the re-stat is refused.
+async function terminalLinkIdentity(
+  token: object,
+  path: string,
+  oidLength: number,
+  expected: { dev: number; ino: number; mode: number },
+): Promise<string> {
+  await validateEvidenceAuthority(token, true);
+  const target = await readlink(path, { encoding: 'buffer' });
+  const named = await lstat(path);
+  if (!named.isSymbolicLink() || !sameFile(named, expected) || target.length > SOURCE_CAP)
+    throw new Error('terminal foreign source identity/size refused');
+  const hash = createHash(oidLength === 40 ? 'sha1' : 'sha256');
+  hash.update(`blob ${target.length}\0`);
+  hash.update(target);
+  return hash.digest('hex');
+}
+
 export async function settleAddressTerminalEvidence(
   token: object,
   attempts: readonly AddressTerminalAttempt[],
@@ -744,6 +775,13 @@ export async function settleAddressTerminalEvidence(
         ...(index ? { index } : {}),
         ...(input ? { input } : {}),
       });
+    // The worktree representation of a tracked symlink follows core.symlinks;
+    // read it at most once per attempt (unset means Git's default, true).
+    let symlinks: Promise<boolean> | undefined;
+    const symlinksEnabled = () =>
+      (symlinks ??= git(['config', '--bool', '--default=true', 'core.symlinks']).then(
+        (value) => value.toString().trim() !== 'false',
+      ));
     const verify = async (expected?: Buffer) => {
       await validateEvidenceAuthority(token, true);
       const source = await terminalPath(attempt.root, attempt.file);
@@ -788,23 +826,62 @@ export async function settleAddressTerminalEvidence(
       while (cursor < tracked.length) {
         const end = tracked.indexOf('\0', cursor);
         if (end < 0) throw new Error('terminal index output incomplete');
-        const entry = /^(100644|100755) ([a-f0-9]{40,64}) 0\t(.+)$/.exec(
+        const entry = /^(100644|100755|120000|160000) ([a-f0-9]{40,64}) 0\t(.+)$/.exec(
           tracked.slice(cursor, end),
         );
         if (!entry) throw new Error('terminal foreign index entry unsupported');
         cursor = end + 1;
         const file = entry[3]!;
         if (paths.has(`${attempt.root}\0${file}`)) continue;
-        // Foreign tracked paths only get read and hashed: never interpreted by
-        // git pathspecs here, so glob characters in real file names are safe.
-        const foreign = await terminalPath(attempt.root, file, true);
-        const mode = foreign.stat.mode & 0o111 ? '100755' : '100644';
+        // A submodule pointer is a directory reference workers can neither
+        // stage nor edit; hashing it would mean running Git inside the
+        // submodule, so it is skipped like the receipt paths above.
+        if (entry[1] === '160000') continue;
+        // Foreign tracked paths only get read and hashed: never interpreted
+        // by git pathspecs here (every terminal command is hardened with
+        // --literal-pathspecs, so glob characters in real file names are
+        // safe), and never followed through a symlink.
         if (
-          mode !== entry[1] ||
-          (await terminalBlobIdentity(token, foreign.path, entry[2]!.length, foreign.stat)) !==
-            entry[2]
+          !file ||
+          isAbsolute(file) ||
+          file.startsWith('-') ||
+          file.split(/[\\/]/).some((part) => part === '..')
         )
+          throw new Error('terminal foreign index entry unsupported');
+        const foreign = resolve(attempt.root, file);
+        const stat = await lstat(foreign);
+        // An ancestor replaced by a symlink must not redirect the read.
+        if ((await realpath(dirname(foreign))) !== dirname(foreign))
           throw new Error('terminal foreign changed path; caller bytes retained');
+        const changed = new Error('terminal foreign changed path; caller bytes retained');
+        if (entry[1] === '120000') {
+          // A tracked symlink's blob is its target text. The worktree entry
+          // may legitimately be the link itself under either core.symlinks
+          // setting (a caller tree checked out while symlinks was enabled,
+          // or before the config was flipped: Git never rewrites existing
+          // entries, and with symlinks=false it reads the link's target text
+          // and treats the entry clean). An ordinary FILE is legitimate only
+          // while core.symlinks=false — under true, Git shows it as a dirty
+          // type change, so it refuses as tampered even when the bytes match.
+          if (stat.isSymbolicLink()) {
+            if ((await terminalLinkIdentity(token, foreign, entry[2]!.length, stat)) !== entry[2])
+              throw changed;
+          } else if (stat.isFile()) {
+            if (await symlinksEnabled()) throw changed;
+            if (
+              (await terminalBlobIdentity(token, foreign, entry[2]!.length, stat, true)) !==
+              entry[2]
+            )
+              throw changed;
+          } else throw changed;
+        } else {
+          if (!stat.isFile()) throw changed;
+          if ((stat.mode & 0o111 ? '100755' : '100644') !== entry[1]) throw changed;
+          if (
+            (await terminalBlobIdentity(token, foreign, entry[2]!.length, stat, true)) !== entry[2]
+          )
+            throw changed;
+        }
       }
       const untracked = (await git(['ls-files', '--others', '--exclude-standard', '-z']))
         .toString()
@@ -948,7 +1025,7 @@ export async function persistAddressTerminalReport(
   let estimate = 0;
   const seen = new Set<object>();
   const visit = (value: unknown, depth: number) => {
-    if (depth > 64 || estimate > REPORT_CAP) throw new Error('terminal report bound reached');
+    if (depth > 64) throw new Error('terminal report bound reached');
     if (typeof value === 'string') estimate += Buffer.byteLength(value) * 6 + 2;
     else if (value && typeof value === 'object') {
       if (seen.has(value)) throw new Error('terminal report cycle refused');
@@ -961,6 +1038,7 @@ export async function persistAddressTerminalReport(
         }
       seen.delete(value);
     } else estimate += 32;
+    if (estimate > REPORT_CAP) throw new Error('terminal report bound reached');
   };
   visit(report, 0);
   const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);

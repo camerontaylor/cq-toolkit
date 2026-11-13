@@ -1,6 +1,7 @@
 // Split provenance: test/plans/review-loop.helpers.ts was split by subject;
 // this module carries the routed git fake (prWorktree's model: a reusable
 // on-label tree, the per-stage head reads and pushes).
+import { join } from 'node:path';
 import type { GhFn } from '../../src/adapters/forge-github/gh.js';
 import { ok } from './review-loop.argv.js';
 import {
@@ -26,7 +27,12 @@ export const DEFAULT_WORLD_FILES: Record<string, number> = {
   'src/huge.ts': -1,
 };
 
-export const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn => {
+export const fakeGit = (
+  world: LoopWorld,
+  log: string[][],
+  worktreePath: string,
+  opts: { ownershipIdentityReads?: number } = {},
+): GhFn => {
   /** The tree at `<sha>:<path>`'s sha: a per-commit override, else the world's files. */
   const treeAt = (object: string): Record<string, number> =>
     world.filesAt?.[object.slice(0, 40)] ?? world.files ?? DEFAULT_WORLD_FILES;
@@ -38,8 +44,9 @@ export const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string)
     // prWorktree composes every git argv with a leading '-C <path>' — the
     // subcommand starts at index 2 in that form, at 0 without it.
     const rest = args[0] === '-C' ? args.slice(2) : args;
-    if (rest[0] === 'rev-parse' && rest.includes('--git-common-dir')) {
-      return ok('/fake/git-dir\n');
+    if (rest[0] === 'rev-parse' && rest.includes('--git-common-dir')) return ok('/fake/git-dir\n');
+    if (rest[0] === 'rev-parse' && rest[1] === '--absolute-git-dir') {
+      return ok(`${join(worktreePath, '.git')}\n`);
     }
     if (rest[0] === 'remote' && rest[1] === 'get-url')
       return ok(
@@ -107,9 +114,13 @@ export const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string)
         : [];
       return ok(`${shas.join('\n')}${shas.length > 0 ? '\n' : ''}`);
     }
-    if (rest[0] === 'diff' && rest[1] === '--quiet') {
-      return { code: world.diffCode ?? 1, stdout: '', stderr: '' };
+    if (rest[0] === 'diff' && rest.includes('--quiet')) {
+      // Admission's worktree/index checks differ from the commit-range evidence gate.
+      const range = rest.some((arg) => arg.includes('..'));
+      return { code: range ? (world.diffCode ?? 1) : world.dirty ? 1 : 0, stdout: '', stderr: '' };
     }
+    if (rest[0] === 'ls-files' && rest.includes('--others')) return ok('');
+    if (rest[0] === 'symbolic-ref' && rest[1] === 'HEAD') return ok(`refs/heads/${LABEL}\n`);
     if (rest[0] === 'log' && rest[1] === '-1') {
       // Per-item attribution (round-3 finding 3): the commit message the
       // world carries for this sha.
@@ -128,16 +139,20 @@ export const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string)
         // headReadFailsAfter FAIL, as does the single headReadFailsAt read
         // (round 3 + final bot slice P1: drives the fail-closed
         // head-unreadable gate for both its shapes).
+        // Ownership rechecks the selected HEAD twice before the loop's stage
+        // boundaries. Those probes observe the same pre-fix snapshot; scripted
+        // transitions/faults remain attached to the documented stage reads.
+        const identityReads = opts.ownershipIdentityReads ?? 0;
         worktreeHeadReads += 1;
+        const stageRead = Math.max(1, worktreeHeadReads - identityReads);
         if (
-          (world.headReadFailsAfter !== undefined &&
-            worktreeHeadReads > world.headReadFailsAfter) ||
-          world.headReadFailsAt === worktreeHeadReads
+          (world.headReadFailsAfter !== undefined && stageRead > world.headReadFailsAfter) ||
+          world.headReadFailsAt === stageRead
         ) {
           return { code: 128, stdout: '', stderr: 'fatal: unreadable HEAD' };
         }
         const advanced =
-          world.worktreeAdvancesAt !== undefined && worktreeHeadReads > world.worktreeAdvancesAt;
+          world.worktreeAdvancesAt !== undefined && stageRead > world.worktreeAdvancesAt;
         const base = world.worktreeHead ?? (world.worktreeFollowsOrigin === true ? world.sha : SHA);
         return ok(`${advanced ? (world.worktreeAdvancesTo ?? '4444'.repeat(10)) : base}\n`);
       }

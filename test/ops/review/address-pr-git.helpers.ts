@@ -1,3 +1,6 @@
+import { makeAddressBookkeepingReceipt } from '../../../src/ops/review/internal/addressBookkeeping.js';
+import { readSlotMetadata } from '../../../src/adapters/lock/slotLock.js';
+import { slotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegistry.js';
 // Split provenance: test/ops/review/address-pr-git.test.ts was split into
 // address-pr-git.pr-adapter.test.ts, address-pr-git.rejectionCarry.test.ts and
 // this shared helper module. The case bodies below are moved byte-identically;
@@ -25,7 +28,7 @@ import type { DriverFactory, DriverRequest } from '../../../src/driver/factory.j
 import { makeTestRepo } from '../dev/repo.js';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
-import { fileWorktreeRegistry, resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
+import { resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import {
   replySignature,
@@ -75,6 +78,8 @@ export async function teardownReviewFixture(
 export type PrAdapterMode =
   | 'local-only'
   | 'publish'
+  | 'publish-reuse-removed'
+  | 'publish-reuse-dirty'
   | 'publish-reuse'
   | 'publish-reuse-alias'
   | 'publish-reuse-bulk'
@@ -118,7 +123,9 @@ export async function runPrAdapterCase(
     reuse &&
     mode !== 'publish-reuse' &&
     mode !== 'publish-reuse-alias' &&
-    mode !== 'publish-reuse-bulk';
+    mode !== 'publish-reuse-bulk' &&
+    mode !== 'publish-reuse-removed' &&
+    mode !== 'publish-reuse-dirty';
   const publish = mode === 'publish' || reuse || siblings;
   const earlyTamper = mode === 'bookkeeping-before-disposition';
   const tampered = mode === 'bookkeeping-tamper' || earlyTamper;
@@ -609,10 +616,11 @@ export async function runPrAdapterCase(
     const report = result.status === 'ok' ? result.value : result.report!;
     if (rejection) {
       expect(report.fixesPerRun, JSON.stringify(report.reasons)).toBe(1);
-      expect(result.status, JSON.stringify(report.reasons)).toBe(
-        refreshedRejection ? 'needs-human' : 'ok',
-      );
+      expect(result.status, JSON.stringify(report.reasons)).toBe('needs-human');
       expect(report.openBlocking.some((finding) => finding.id === 'T2')).toBe(refreshedRejection);
+      expect(
+        (await readSlotMetadata(join(repo.root, '.git/cq-review/slots/pr-7.json')))?.incomplete,
+      ).toBe(true);
       expect(report.findings.find((finding) => finding.id === 'T2')?.status).toBe(
         refreshedRejection ? 'open' : 'rejected',
       );
@@ -712,7 +720,17 @@ export async function runPrAdapterCase(
     if (tampered) expect(scanCount).toBe(3);
     else expect(scanCount).toBeGreaterThan(3);
     if (publish) {
-      expect(result.status, JSON.stringify(report.reasons)).toBe('ok');
+      expect(result.status, JSON.stringify(report.reasons)).toBe(
+        ledgerSnapshot || admissionTransition ? 'needs-human' : 'ok',
+      );
+      if (ledgerSnapshot || admissionTransition) {
+        expect(report.reasons).toContain(
+          'opaque invocation write-set unconfirmed; checkout retained incomplete',
+        );
+        expect(
+          (await readSlotMetadata(join(repo.root, '.git/cq-review/slots/pr-7.json')))?.incomplete,
+        ).toBe(true);
+      }
       expect(actions).toEqual(
         siblings
           ? ['reply', 'reply', 'resolve', 'resolve', 'rerequest']
@@ -850,25 +868,47 @@ export async function runPrAdapterCase(
       }
       const protectedBytes = protectedPath ? await readFile(protectedPath) : undefined;
       const previousHead = repo.git('-C', workerRoot, 'rev-parse', 'HEAD').trim();
+      expect(repo.git('ls-remote', 'origin', 'refs/pull/7/head').split('\t')[0]).toBe(previousHead);
       const invocationCount = invocations.length;
       const actionCount = actions.length;
       const callerAlias = join(journal, 'caller-alias');
       if (mode === 'publish-reuse-alias') await symlink(repo.root, callerAlias, 'dir');
       reuseRound = true;
       // A fresh default invocation must discover and reuse the same no-ignore checkout.
-      const second = await makeReviewAddress({
-        gh,
-        git,
-        drivers,
-        ...(mode !== 'publish-reuse-bulk'
-          ? { coordinationRoot: join(journal, 'shared-state') }
-          : {}),
-      })({
-        repoRoot: mode === 'publish-reuse-alias' ? callerAlias : repo.root,
-        source: 'pr:7',
-        rounds: 1,
-        push: true,
-      });
+      const invokeAgain = () =>
+        makeReviewAddress({
+          gh,
+          git,
+          drivers,
+          ...(mode !== 'publish-reuse-bulk'
+            ? { coordinationRoot: join(journal, 'shared-state') }
+            : {}),
+        })({
+          repoRoot: mode === 'publish-reuse-alias' ? callerAlias : repo.root,
+          source: 'pr:7',
+          rounds: 1,
+          push: true,
+        });
+      if (mode === 'publish-reuse-removed') {
+        // Retire only this fixture's authenticated bookkeeping before an external non-forced removal.
+        await rm(join(originalRoot, '.cq'), { recursive: true, force: true });
+        repo.git('worktree', 'remove', originalRoot);
+      }
+      const originalReadme = await readFile(join(repo.root, 'README.md'));
+      if (mode === 'publish-reuse-dirty')
+        await writeFile(join(originalRoot, 'README.md'), 'dirty caller bytes');
+      let second = await invokeAgain();
+      if (mode === 'publish-reuse-dirty') {
+        expect(second.status, JSON.stringify(second)).toBe('needs-human');
+        expect(second.status === 'needs-human' && second.reason).toMatch(/dirty/);
+        expect(second.status === 'failed').toBe(false);
+        for (const common of [join(repo.root, '.git'), join(journal, 'shared-state')])
+          expect(
+            (await readSlotMetadata(join(common, 'cq-review/slots/pr-7.json')))?.incomplete,
+          ).toBe(false);
+        await writeFile(join(originalRoot, 'README.md'), originalReadme);
+        second = await invokeAgain();
+      }
       const again = second.status === 'ok' ? second.value : second.report!;
       if (refusedReuse) {
         expect(second.status, JSON.stringify(again.reasons)).toBe('needs-human');
@@ -883,6 +923,12 @@ export async function runPrAdapterCase(
       }
       expect(again.fixesPerRun, JSON.stringify(again.reasons)).toBe(1);
       expect(second.status, JSON.stringify(again.reasons)).toBe('ok');
+      for (const common of [join(repo.root, '.git'), join(journal, 'shared-state')]) {
+        if (mode === 'publish-reuse-bulk' && common.endsWith('shared-state')) continue;
+        expect(
+          (await readSlotMetadata(join(common, 'cq-review/slots/pr-7.json')))?.incomplete,
+        ).toBe(false);
+      }
       expect(await realpath(workerRoot)).toBe(await realpath(originalRoot));
       expect(repo.git('-C', workerRoot, 'show', 'HEAD:src/a.ts')).toContain('BETTER');
       expect(await readFile(devLedgerPath(workerRoot, 'cq-review/pr-7'), 'utf8')).toContain('T2');
@@ -911,7 +957,9 @@ export async function runPersistedRejectionCase(mode: RejectionMode): Promise<vo
     repo.commitAll('ignore engine state');
     const head = repo.git('rev-parse', 'HEAD').trim();
     repo.git('push', '-q', 'origin', 'HEAD:refs/pull/7/head');
-    const registry = fileWorktreeRegistry(join(journal, 'worktrees.json'));
+    const registry = slotWorktreeRegistry(
+      repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim(),
+    );
     const worktree = await resolvePrWorktree({
       repoRoot: repo.root,
       pr: 7,
@@ -920,12 +968,14 @@ export async function runPersistedRejectionCase(mode: RejectionMode): Promise<vo
       run: makeGhRunner({ bin: 'git' }),
       nowMs: Date.now(),
     });
+    const priorHead = repo.git('rev-parse', 'HEAD^').trim();
     const effects = makeSubprocessDevEffects(worktree.path);
     effects.openLedger(worktree.branch).save({
       version: DEV_LEDGER_VERSION,
       branch: worktree.branch,
       records: [
         cycleRecord({
+          base: priorHead,
           head,
           findings: [{ id: 'T1', severity: 'major', excerpt: 'False positive' }],
         }),
@@ -937,12 +987,42 @@ export async function runPersistedRejectionCase(mode: RejectionMode): Promise<vo
                 findingId: 'T1',
                 action: 'rejected' as const,
                 why: 'Verified false positive',
-                head: mode === 'record-other-head' ? 'a'.repeat(40) : head,
+                head: mode === 'record-other-head' ? priorHead : head,
                 at: new Date().toISOString(),
               },
             ]),
       ],
     });
+    // Supply the receipt and real ancestry required by the resolver's admission.
+    // These bytes remain historical evidence; the carry checks below still
+    // require the current authenticated reply and matching disposition head.
+    const namespace = createHash('sha256')
+      .update(
+        JSON.stringify(['octo', 'widget', 7, 'main', null, 'octo/widget', 'feature/x', 'author']),
+      )
+      .digest('hex');
+    const directory = join(repo.root, '.git/cq-review-address', namespace);
+    await mkdir(directory, { recursive: true });
+    const ledgerPath = devLedgerPath(worktree.path, worktree.branch);
+    const receipt = makeAddressBookkeepingReceipt({
+      path: join(directory, 'bookkeeping.json'),
+      identity: namespace,
+      fingerprints: new Map([
+        [
+          ledgerPath,
+          createHash('sha256')
+            .update(await readFile(ledgerPath))
+            .digest('hex'),
+        ],
+      ]),
+      git: async (root, args) => {
+        const result = await makeGhRunner({ bin: 'git' })(['-C', root, ...args]);
+        if (result.code !== 0) throw new Error(result.stderr);
+        return result.stdout.trim();
+      },
+    });
+    await receipt.prepare(worktree.path);
+    await receipt.persist();
     const body = 'False positive';
     const round = settleRound({ id: 'T1', body }, []);
     const reply =
@@ -1067,9 +1147,13 @@ export async function runPersistedRejectionCase(mode: RejectionMode): Promise<vo
       }),
     })({ repoRoot: repo.root, source: 'pr:7', journalDir: journal, rounds: 1 });
     const report = result.status === 'ok' ? result.value : result.report!;
-    expect(result.status, JSON.stringify(report.reasons)).toBe(
-      mode === 'proven' ? 'ok' : 'needs-human',
+    expect(result.status, JSON.stringify(report.reasons)).toBe('needs-human');
+    expect(report.reasons).toContain(
+      'opaque invocation write-set unconfirmed; checkout retained incomplete',
     );
+    expect(
+      (await readSlotMetadata(join(repo.root, '.git/cq-review/slots/pr-7.json')))?.incomplete,
+    ).toBe(true);
     if (mode === 'proven')
       expect(report.findings.find((finding) => finding.id === 'T1')?.status).toBe('rejected');
     else

@@ -30,16 +30,27 @@ export const TEST_FIX_FIXER = 'test-fix';
 export type TestFixPlanConfig = Omit<SweepPlanConfig, 'fixers'> & { fixers?: string[] };
 
 /**
-/**
  * Author the EXPANDED test-fix plan (phase B) — buildSweepPlan under the
- * test-fix id with `fixers` pinned to the one test-only label AND the
- * test-file stage allowlist layered onto every unit job (the restriction is
- * ENFORCED at the staged set, not just declared by the label). A caller
- * passing `fixers` here gets it REPLACED, never merged: the plan's identity
- * is the test-only restriction. The phase-A report must agree EVERYWHERE: a
- * report whose units OR whose embedded unit-job inputs carry a fixer outside
- * the test-only set is a caller/planner mismatch — plan corruption, thrown
- * here before foreign units can be embedded.
+ * test-fix id with `fixers` pinned to the one test-only label AND
+ * `proposeOnly: true` layered onto every unit job. The test-only restriction
+ * is enforced by `proposeOnly` alone: the overlay carries NO
+ * `stagePathAllowlist`, so each unit job keeps the DEFAULT package scope from
+ * `unitStagePathAllowlist` (package path plus the unit's files) — wider than
+ * the test files — while `proposeOnly` keeps ANY staged path from being
+ * probed, committed to the unit branch, or pushed (every non-empty staged
+ * set escalates to needs-human review). One nuance for `taskLoop` jobs: a
+ * refused attempt can still be recorded by the loop as a LOCAL failed-attempt
+ * commit on its own `refs/heads/<runPrefix>/failed/...` branch (never the
+ * unit branch, and pushed only when `pushFailed` and the bindings'
+ * `publishFailedAttempts` both allow it), after which the worktree is
+ * restored. The retained proposal in that case is the failed-attempt ref,
+ * not a commit on the unit branch. A caller passing `fixers` here gets it
+ * REPLACED, never
+ * merged: the plan's identity is the test-only restriction. The phase-A
+ * report must agree EVERYWHERE: a report whose units OR whose embedded
+ * unit-job inputs carry a fixer outside the test-only set is a
+ * caller/planner mismatch — plan corruption, thrown here before foreign
+ * units can be embedded.
  */
 export function buildTestFixPlan(
   config: TestFixPlanConfig,

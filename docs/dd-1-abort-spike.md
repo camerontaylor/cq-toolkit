@@ -31,11 +31,16 @@ records, per lane:
 **Client-side honesty limit:** no client can observe provider-side metering
 or tokens already in flight when the request died. `spendStopped` is the
 client-observable verdict — the worker stopped producing and nothing of ours
-kept running — not an invoice. The lanes route through Z.AI's
-anthropic-compatible endpoint (`ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic`,
-auth via the `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` child env the
-drivers inject from `ZAI_API_KEY`); keys are read from the environment and
-never printed or persisted.
+kept running — not an invoice. Each lane reaches Z.AI on its OWN wire. The
+`claude-agent` lane routes through Z.AI's anthropic-compatible endpoint
+(`ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic`, auth via the
+`ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` child env the driver injects
+from `ZAI_API_KEY`). The `ai-sdk` lane (`@ai-sdk/zai`) routes through the
+OpenAI-compatible host instead — `ZAI_BASE_URL`, defaulting to the GLM
+Coding Plan wire `https://api.z.ai/api/coding/paas/v4` (the pay-as-you-go
+`https://api.z.ai/api/paas/v4` is a `ZAI_BASE_URL` override; see the outage
+note under the `ai-sdk` table). Keys are read from the environment and never
+printed or persisted.
 
 ## Measured — lane `ai-sdk` (`@ai-sdk/zai`, OpenAI-compat host)
 

@@ -58,7 +58,7 @@ export async function leasedPush(
   // other remote tip or retry old work against a refreshed expectation.
   try {
     const remote = await run(['-C', path, 'ls-remote', '--refs', target, ref]);
-    if (remote.code === 0 && remote.stdout.trim() === `${sha}\t${ref}`)
+    if (remote.code === 0 && remote.stdout.trim() === `${sha.toLowerCase()}\t${ref}`)
       return { code: 0, stdout: '', stderr: '' };
   } catch {
     /* Remote state remains uncertain: withhold publication effects. */

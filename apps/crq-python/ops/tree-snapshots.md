@@ -1,12 +1,20 @@
 # Tree snapshots (P5)
 
+> **S2b-ii retirement (2026-11-12).** The `cq dev.review --action=enroll --tree`
+> client route is retired with the author-admission branch. Snapshot capture and
+> `CQ_AUTHOR_SNAPSHOT_SCANNER` remain live for unpublished `review.submit` and
+> managed `dev.review`/`review.run` commits.
+
 P4's commit request and P3's lease/state bytes stay unchanged. The worker may
 instead supply `--tree=<40hex>` to `cq dev.review`; exactly one of `--head` and
 `--tree` is required. The base is an immutable commit already available in the
 runner clone. The tree must already exist in the worker repository. For example,
 `git write-tree` names the staged snapshot; later working-file edits are excluded.
 P5 itself never stages files, changes HEAD/the real index, or checks out content.
-It reads `CQ_AUTHOR_REPO` (default cwd). No model/provider choice is built in.
+The retired client read `CQ_AUTHOR_REPO` (default cwd). No model/provider choice
+was built in.
+
+Historical client spelling (retired by S2b-ii; the server envelope below remains):
 
 ```sh
 cq dev.review --action=enroll --requestId=tree-cycle-1 --base=<40hex> --tree=<40hex> --target=origin/main --cycle=1 --json
@@ -47,8 +55,9 @@ binding. Status/fallback derive this same SHA locally and send the original v1
 request without re-uploading objects or rescanning. They retain P3's one-shot
 fallback rule, immutable binding, timeout policy and author-start quota.
 
-Enrollment uses the same separate `author-v1` forced command as P4, never the
-promotion spool. The new envelope is `{v:2,op:"enroll",binding,snapshot}`;
+The retired client enrolled through the same separate `author-v1` forced command
+as P4, never the promotion spool. The server-side envelope remains
+`{v:2,op:"enroll",binding,snapshot}`;
 `snapshot` is `{v:1,tree,objects,sha256}`. Objects are the exact reachable
 `head ^base` closure, sorted by unique OID, with `{oid,type,data}` fields. Data is
 canonical base64 of **uncompressed** Git-object content; no archive extraction,

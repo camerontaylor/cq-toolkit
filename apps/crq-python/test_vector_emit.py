@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import admission_history
 import backfill_accounting
@@ -215,6 +216,13 @@ def invoke(source, inputs):
 class VectorFileTest(unittest.TestCase):
     def test_checked_in_files_match_the_emitter(self):
         self.assertEqual(vector_emit.check(), 0)
+
+    def test_check_rejects_byte_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "canonical.json"
+            path.write_text(vector_emit.encode(vector_emit.build()["canonical"]) + " ")
+            with patch.object(vector_emit, "filenames", return_value={"canonical": path}):
+                self.assertEqual(vector_emit.check(), 1)
 
     def test_build_is_reproducible_in_process(self):
         self.assertEqual(vector_emit.encode(vector_emit.build()),

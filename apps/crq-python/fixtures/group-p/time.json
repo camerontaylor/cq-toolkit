@@ -94,6 +94,188 @@
       }
     },
     {
+      "name": "fraction-truncates-to-microseconds",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T00:00:00.1234567Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.123456Z"
+        }
+      }
+    },
+    {
+      "name": "comma-fraction",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T00:00:00,5Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.500000Z"
+        }
+      }
+    },
+    {
+      "name": "basic-date-and-time",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "20261108T0000Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "hour-only",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T00"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "midnight-rollover",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T24:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-09T00:00:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "lowercase-separator",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08t00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "space-separator",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08 00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "iso-week-without-weekday",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-W45T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-02T00:00:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "iso-week-53-exists",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-W53-1"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-12-28T00:00:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "offset-hour-only",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T00:00:00+10"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-07T14:00:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "offset-basic",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T00:00:00+1000"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-07T14:00:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "offset-with-seconds-and-fraction",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T00:00:00+10:00:30.5"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-07T13:59:29.500000Z"
+        }
+      }
+    },
+    {
+      "name": "negative-zero-offset",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T00:00:00-00:00"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "leap-day",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2024-02-29T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2024-02-29T00:00:00.000000Z"
+        }
+      }
+    },
+    {
       "name": "non-string",
       "source": "queue_time.parse_utc",
       "input": {
@@ -146,6 +328,84 @@
       }
     },
     {
+      "name": "invalid-leap-day",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-02-29T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": null
+        }
+      }
+    },
+    {
+      "name": "year-zero",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "0000-01-01T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": null
+        }
+      }
+    },
+    {
+      "name": "iso-week-53-missing",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2025-W53-1"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": null
+        }
+      }
+    },
+    {
+      "name": "offset-exceeds-day",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T00:00:00+24:00"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": null
+        }
+      }
+    },
+    {
+      "name": "offset-seconds-out-of-range",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T00:00:00+23:59:60"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": null
+        }
+      }
+    },
+    {
+      "name": "fraction-separator-without-digits",
+      "source": "queue_time.parse_utc",
+      "input": {
+        "value": "2026-11-08T00:00:00."
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": null
+        }
+      }
+    },
+    {
       "name": "offset-overflow",
       "source": "queue_time.parse_utc",
       "input": {
@@ -185,6 +445,19 @@
       }
     },
     {
+      "name": "iso-non-padded-components",
+      "source": "crq.parse_iso",
+      "input": {
+        "value": "2026-11-8T0:0:0Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.000000Z"
+        }
+      }
+    },
+    {
       "name": "iso-nonzero-fraction-raises",
       "source": "crq.parse_iso",
       "input": {
@@ -209,6 +482,30 @@
       }
     },
     {
+      "name": "iso-four-zero-fraction-shifts-and-raises",
+      "source": "crq.parse_iso",
+      "input": {
+        "value": "2026-11-08T00:00:00.0000Z"
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "time data '2026-11-08T00:00:000Z' does not match format '%Y-%m-%dT%H:%M:%SZ'"
+      }
+    },
+    {
+      "name": "iso-nonzero-fraction-after-zero-milliseconds-raises",
+      "source": "crq.parse_iso",
+      "input": {
+        "value": "2026-11-08T00:00:00.000123Z"
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "time data '2026-11-08T00:00:001Z' does not match format '%Y-%m-%dT%H:%M:%SZ'"
+      }
+    },
+    {
       "name": "iso-offset-raises",
       "source": "crq.parse_iso",
       "input": {
@@ -230,6 +527,32 @@
         "ok": false,
         "error": "ValueError",
         "message": "time data '2026-11-08Z' does not match format '%Y-%m-%dT%H:%M:%SZ'"
+      }
+    },
+    {
+      "name": "iso-trailing-newline-is-trimmed-by-slice",
+      "source": "crq.parse_iso",
+      "input": {
+        "value": "2026-11-08T00:00:00Z\n"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.000000Z"
+        }
+      }
+    },
+    {
+      "name": "iso-double-z-is-trimmed",
+      "source": "crq.parse_iso",
+      "input": {
+        "value": "2026-11-08T00:00:00ZZ"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utc": "2026-11-08T00:00:00.000000Z"
+        }
       }
     },
     {

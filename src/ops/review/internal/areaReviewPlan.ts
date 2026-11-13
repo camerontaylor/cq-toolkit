@@ -51,6 +51,13 @@ export function createAreaReviewPlan(input: CreateReviewPlanInput): ReviewPlan {
     }
     sessions.push({ id: 'cross-area', prompt, placements: [], tools: true, contextOnly: true });
   }
+  // Retain messages specific to the area sessions actually returned.
+  for (const plan of plans) {
+    for (const limitation of plan.limitations)
+      if (!original.limitations.includes(limitation)) original.limitations.push(limitation);
+    for (const advisory of plan.advisories)
+      if (!original.advisories.includes(advisory)) original.advisories.push(advisory);
+  }
   original.sessions = sessions;
   original.coverage.mode = 'partitioned';
   original.coverage.modeReason = `area review: ${areas.areas.length} areas; cross-area pass ${areas.crossAreaPass.required ? 'required' : 'not required'}`;

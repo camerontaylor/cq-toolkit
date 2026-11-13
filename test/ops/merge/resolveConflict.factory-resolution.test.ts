@@ -22,6 +22,7 @@ import {
   firstRequest,
   firstInvocation,
   fakeLoadPrompt,
+  scanClean,
 } from './resolveConflict.helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -37,6 +38,7 @@ describe('resolveConflict resolves its worker through the DriverFactory', () => 
       drivers: withHarness,
       loadPrompt: fakeLoadPrompt,
       harnessConfig: defaultHarnessConfig,
+      scan: scanClean,
     });
     await opWith(baseInput());
     expect(firstRequest(withHarness)).toEqual({
@@ -54,6 +56,7 @@ describe('resolveConflict resolves its worker through the DriverFactory', () => 
       effects: new FakeMergeEffects(),
       drivers: withoutHarness,
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
     await opWithout(baseInput());
     const request = firstRequest(withoutHarness);
@@ -79,6 +82,7 @@ describe('resolveConflict resolves its worker through the DriverFactory', () => 
       effects: new FakeMergeEffects(),
       drivers: normalised,
       loadPrompt: fakeLoadPrompt,
+      scan: scanClean,
     });
     await op({ ...baseInput(), modelSpec: { model: 'resolver-model', provider: 'ai-sdk' } });
     const invocation = firstInvocation(driver);

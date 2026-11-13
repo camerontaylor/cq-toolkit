@@ -253,7 +253,9 @@ export interface FindingDispositionView {
 export function findingDispositionView(finding: Finding): FindingDispositionView {
   const retained = finding.evidence;
   const evidence =
-    retained === undefined || (typeof retained === 'string' && retained.trim() === '')
+    retained === undefined ||
+    (typeof retained === 'string' && retained.trim() === '') ||
+    (Array.isArray(retained) && retained.length === 0)
       ? null
       : Array.isArray(retained)
         ? retained
@@ -280,7 +282,7 @@ export function findingDispositionView(finding: Finding): FindingDispositionView
     unknown('/observedHead', 'no observed head recorded; the disposition is tied to no head');
   if (finding.observedAt === undefined)
     unknown('/observedAt', 'no observed-at timestamp recorded; the adjudication time is unknown');
-  if (finding.acceptedRisk === undefined)
+  if (finding.acceptedRisk === undefined || finding.acceptedRisk === null)
     unknown(
       '/acceptedRisk',
       'the adjudicator recorded no accepted risk (null is unknown, never none)',
@@ -378,8 +380,12 @@ export function merge(records: readonly FindingsRecord[]): FindingsRecord {
       );
     if (record.branch !== first.branch || record.head !== first.head)
       throw new Error('findings records must describe the same branch and head');
-    for (const source of record.sources)
-      sources.set(`${source.kind}\0${source.cycleId ?? ''}`, source);
+    for (const source of record.sources) {
+      const sourceKey = `${source.kind}\0${source.cycleId ?? ''}`;
+      const previous = sources.get(sourceKey);
+      // A completion cannot overwrite a failed observation of the same cycle.
+      if (previous?.status !== 'blocked') sources.set(sourceKey, source);
+    }
     for (const advisory of record.advisories ?? []) advisories.add(advisory);
     for (const finding of record.findings) {
       const id = key(finding),

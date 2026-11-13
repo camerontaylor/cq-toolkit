@@ -5,8 +5,11 @@ import {
   JsonObject,
   JsonParseError,
   JsonValueError,
+  comparePythonNumbers,
   parseJsonValue,
+  pythonNumbersEqual,
   toPlainJson,
+  toPlainJsonRetainingNumbers,
   type JsonValue,
 } from '../../../src/policy/crq/jsonValue.js';
 import {
@@ -38,6 +41,67 @@ describe('lossless JSON values', () => {
   test('keeps object source order, including integer-like keys', () => {
     const object = parseJsonValue('{"10":1,"2":2,"a":3}') as JsonObject;
     expect(object.entries.map(([key]) => key)).toEqual(['10', '2', 'a']);
+  });
+
+  test('materialises containers without rounding or erasing Python numeric types', () => {
+    const document = parseJsonValue(
+      '{"a":1,"b":1.0,"c":9007199254740993,"d":[2,2.5],"e":{"f":-0.0}}',
+    );
+    const value = toPlainJsonRetainingNumbers(document) as {
+      a: JsonNumber;
+      b: JsonNumber;
+      c: JsonNumber;
+      d: [JsonNumber, JsonNumber];
+      e: { f: JsonNumber };
+    };
+    expect(value.a.kind).toBe('int');
+    expect(value.b.kind).toBe('float');
+    expect(value.c.integer).toBe(9007199254740993n);
+    expect(value.d[0].kind).toBe('int');
+    expect(value.d[1].float).toBe(2.5);
+    expect(Object.is(value.e.f.float, -0)).toBe(true);
+    expect(toPlainJson(document)).toMatchObject({ c: 9007199254740992 });
+  });
+
+  test('retaining materialisation keeps __proto__ as an own property', () => {
+    const document = parseJsonValue('{"__proto__":{"polluted":true},"x":1}');
+    const value = toPlainJsonRetainingNumbers(document) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(value, '__proto__')).toBe(true);
+    expect(Object.getPrototypeOf(value)).toBe(Object.prototype);
+    expect(({} as { polluted?: unknown }).polluted).toBeUndefined();
+  });
+
+  test('compares Python numbers exactly, including int-vs-float and adjacent bigints', () => {
+    expect(pythonNumbersEqual(JsonNumber.int(1), JsonNumber.float(1))).toBe(true);
+    expect(pythonNumbersEqual(true, JsonNumber.int(1))).toBe(true);
+    expect(pythonNumbersEqual(false, JsonNumber.float(0))).toBe(true);
+    expect(pythonNumbersEqual(JsonNumber.float(-0), JsonNumber.int(0))).toBe(true);
+    expect(pythonNumbersEqual(JsonNumber.float(0.1), JsonNumber.float(0.1))).toBe(true);
+    expect(
+      pythonNumbersEqual(JsonNumber.int(9007199254740992n), JsonNumber.int(9007199254740993n)),
+    ).toBe(false);
+    expect(
+      comparePythonNumbers(JsonNumber.int(9007199254740993n), JsonNumber.float(9007199254740992)),
+    ).toBe(1);
+    expect(
+      comparePythonNumbers(JsonNumber.int(9007199254740992n), JsonNumber.float(9007199254740992)),
+    ).toBe(0);
+    expect(
+      comparePythonNumbers(JsonNumber.float(Infinity), JsonNumber.int(9007199254740993n)),
+    ).toBe(1);
+    expect(
+      comparePythonNumbers(JsonNumber.float(-Infinity), JsonNumber.int(-9007199254740993n)),
+    ).toBe(-1);
+    expect(pythonNumbersEqual(JsonNumber.float(Number.NaN), JsonNumber.float(Number.NaN))).toBe(
+      false,
+    );
+    expect(comparePythonNumbers(JsonNumber.float(Number.NaN), JsonNumber.int(1))).toBe(0);
+    expect(pythonNumbersEqual(JsonNumber.int(1), '1')).toBeNull();
+    expect(comparePythonNumbers(JsonNumber.int(1), null)).toBeNull();
+    expect(comparePythonNumbers(9007199254740993n, 9007199254740992)).toBe(1);
+    expect(pythonNumbersEqual(JsonNumber.int(10n ** 21n), JsonNumber.float(1e21))).toBe(true);
+    expect(pythonNumbersEqual(JsonNumber.int(10n ** 21n + 1n), JsonNumber.float(1e21))).toBe(false);
+    expect(comparePythonNumbers(JsonNumber.int(2n ** 70n + 1n), JsonNumber.float(2 ** 70))).toBe(1);
   });
 
   test('duplicate keys follow json.loads (last value, first position) or refuse', () => {

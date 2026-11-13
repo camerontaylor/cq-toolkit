@@ -22,7 +22,7 @@ class ContextIsolationTest(FindingTest):
         inbox.ingest(self.value)
         broken, healthy = sorted((original['id'], second['id']))
         queue = {'items': []}
-        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True)
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True, scan_finding=lambda *_: True)
         invalid = {'stop': 'error', 'errorClass': 'output-invalid', 'model': 'fixture'}
         valid = {'stop': 'ok', 'verdict': 'valid', 'reason': 'source confirms',
                  'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'one'}
@@ -70,7 +70,7 @@ class ContextIsolationTest(FindingTest):
                 raise KeyError('missing blob')
             return real_context(repo, row, tip)
         queue = {'items': []}
-        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True)
+        transport = delivery.repair_transport(self.root, queue, lambda q: None, lambda *_: True, scan_finding=lambda *_: True)
         report = {'stop': 'ok', 'verdict': 'valid', 'reason': 'source confirms',
                   'current_path': 'a', 'current_lines': [[1, 1]], 'quoted_text': 'one'}
         with mock.patch.object(triage, 'context', side_effect=context):
