@@ -50,6 +50,7 @@ def _load_runbook():
 
 
 rb = _load_runbook()
+MARKER_RELPATH = rb.MARKER_RELPATH
 
 
 def sha256_file(path):
@@ -124,9 +125,16 @@ class RunbookFixture(unittest.TestCase):
         self.prior = self._artifact("prior")
         # The live runtime: the overlay points repair.cq_bin here, so the
         # live-dist assertion has a real tree to hash. It starts as a copy
-        # of the candidate dist (the deployed artifact), exactly as a
-        # completed deploy leaves it.
+        # of the candidate dist and node_modules (the deployed artifact),
+        # exactly as a completed deploy leaves it; the live-deps assertion
+        # added with the finding-4 fix hashes the runtime's node_modules
+        # against candidate_deps_sha256.
         shutil.copytree(self.candidate / "dist", self.base / "runtime/dist")
+        # ``symlinks=True`` keeps the fixture's dependency symlinks as links:
+        # following them would materialise extra files inside the target and
+        # change the deps digest away from candidate_deps_sha256.
+        shutil.copytree(self.candidate / "node_modules",
+                        self.base / "runtime/node_modules", symlinks=True)
         self.command = lambda *args: subprocess.run(
             ["git", "-C", str(self.root), *args], check=True,
             capture_output=True, text=True).stdout
@@ -140,6 +148,13 @@ class RunbookFixture(unittest.TestCase):
         self.baseline_sha = sha256_file(self.baseline_journal)
         self.marker_path = self.runner / "state" / "runner-disabled"
         self.units = FakeUnits(self.marker_path)
+        # A clean state queue: the D7 preflight gate reads it on the live
+        # tree, so every fixture starts from the shape the controller grants
+        # automatic rollback for. Tests that need a different queue rewrite
+        # it in their own setUp.
+        self.marker_path.parent.mkdir(parents=True, exist_ok=True)
+        (self.runner / "state" / "queue.json").write_text(
+            json.dumps({"items": [], "starts": []}) + "\n")
         self.output_dir = self.base / "out"
 
     # -- fixture construction --------------------------------------------
@@ -379,18 +394,46 @@ class RunbookFixture(unittest.TestCase):
         return args.root
 
     def fake_journal(self):
+        # D7 in the controller's own shape: a clean pre-switch queue is what
+        # rollback_compatible() grants, so the permission is True, and both
+        # records the controller's decision consumes are present (the
+        # pre-switch record under plan.preflight). The controller-derived
+        # shape is covered by test_journal_is_controller_shaped.
+        clean = {"checked": True, "schema_marker_present": False,
+                 "schema_observations": []}
         return {
             "operation": "deploy", "outcome": "completed",
             "prior_head": self.prior_sha, "target": self.target,
             "tag": self.target_tag, "helper_sha256": self.helper_sha,
-            "automatic_rollback_permitted": False,
-            "rollback_compatibility": {"checked": True,
-                                       "schema_marker_present": False,
-                                       "schema_observations": []},
+            "automatic_rollback_permitted": True,
+            "rollback_compatibility": dict(clean),
             "prior_tag": self.prior_tag,
             "prior_config_sha256": sha256_file(self.runner / "config.json"),
             "schema_version": 1, "transaction_id": "f" * 32,
+            "plan": {"preflight": {"rollback_compatibility": dict(clean)}},
         }
+
+    def capture(self, callable, stderr=False):
+        """Run a CLI callable with redirected std streams.
+
+        Returns (result, stdout[, stderr]); an exception raised by the
+        callable propagates after the streams are restored."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            result = callable()
+        if stderr:
+            return result, out.getvalue(), err.getvalue()
+        return result, out.getvalue()
+
+    def grant_rollback(self, run):
+        """The D7 evidence assert_journal records, for tests that drive
+        restore()/write_release() directly without running a journal."""
+        run.rollback = {"automatic_rollback_permitted": True,
+                        "statement": "test: automatic rollback remains "
+                                     "available"}
+        return run
 
     def install_fake_controller_journal(self, run, journal=None):
         """Fake controller journal: switch() writes one journal the real
@@ -604,7 +647,7 @@ class PinnedRevisionTests(RunbookFixture):
 
 
 class PreflightSplitTests(RunbookFixture):
-    """Observe-then-split and the conditional stop rule."""
+    """Hold, then observe, then split; and the conditional stop rule."""
 
     def setUp(self):
         super().setUp()
@@ -614,33 +657,40 @@ class PreflightSplitTests(RunbookFixture):
     def run_to_preflight(self, units, expect_inventory_ok=True):
         args = self.args()
         run = self.run_runbook(args, units)
+        # The hold is claimed before observation: every in-run read happens
+        # under this run's own marker.
+        run.acquire()
         inventory = run.observe_inventory()
         if expect_inventory_ok:
             run.assert_inventory(inventory)
         return run
 
-    def test_pre_existing_marker_refuses_before_any_stop(self):
+    def test_existing_marker_refuses_at_acquire_with_nothing_observed(self):
+        foreign = b"someone else's hold\n"
         units = FakeUnits(self.marker_path)
         self.marker_path.parent.mkdir(parents=True, exist_ok=True)
-        self.marker_path.write_bytes(b"someone else\n")
-        # The inventory assertion itself refuses: nothing was stopped.
-        run = self.run_to_preflight(units, expect_inventory_ok=False)
-        with self.assertRaisesRegex(rb.Refused, "marker already exists"):
-            run.assert_inventory(run.observe_inventory())
+        self.marker_path.write_bytes(foreign)
+        # The hold is claimed first, so the loser refuses before reading a
+        # single unit state and stops nothing.
+        run = self.run_runbook(self.args(), units)
+
+        def forbidden(*unused, **kwargs):
+            raise AssertionError("a unit was read or mutated")
+
+        units.inventory = forbidden
+        with self.assertRaisesRegex(rb.Refused, "foreign hold"):
+            run.run()
         self.assertEqual(units.stopped, [])
+        self.assertEqual(units.started, [])
+        self.assertEqual(self.marker_path.read_bytes(), foreign)
 
     def test_foreign_marker_is_never_removed(self):
         foreign = b"a foreign actor's hold; must survive the run\n"
         units = FakeUnits(self.marker_path)
         self.marker_path.parent.mkdir(parents=True, exist_ok=True)
         self.marker_path.write_bytes(foreign)
-        # The pre-run inventory refuses a pre-existing marker before any stop.
-        run = self.run_to_preflight(units, expect_inventory_ok=False)
-        with self.assertRaisesRegex(rb.Refused, "marker already exists"):
-            run.assert_inventory(run.observe_inventory())
-        self.assertEqual(self.marker_path.read_bytes(), foreign)
-        # Even a release path against a foreign marker refuses and leaves the
-        # bytes exactly as they were.
+        run = self.run_runbook(self.args(), units)
+        run.triggers = list(TRIGGERS)
         run.original = {unit: "inactive" for unit in TRIGGERS}
         run.split_map = dict(run.original)
         run.stopped_pre = {}
@@ -648,6 +698,7 @@ class PreflightSplitTests(RunbookFixture):
         with self.assertRaisesRegex(rb.Refused, "not ours"):
             run.release_marker()
         self.assertEqual(self.marker_path.read_bytes(), foreign)
+        self.assertFalse(run.released)
 
     def test_split_stops_only_active_long_triggers(self):
         states = {unit: "active" for unit in TRIGGERS}
@@ -662,33 +713,37 @@ class PreflightSplitTests(RunbookFixture):
                           "crq-repair.path": "active"})
         self.assertNotIn("crq-repair.timer", run.stopped_pre)
 
-    def test_pre_hold_failure_restarts_the_split(self):
-        # A preflight refusal after the split must not leave the host with
-        # the long triggers stopped and no hold: run() restores exactly the
-        # units this run stopped, then re-raises.
-        units = FakeUnits(self.marker_path)
-        run = self.run_to_preflight(units)
+    def test_preflight_failure_restores_only_its_own_intent_and_releases(self):
+        # A preflight refusal happens under the hold: run() restarts exactly
+        # the units this run's own recorded intent stopped, verifies them,
+        # and removes only this run's own marker.
+        states = {unit: "active" for unit in TRIGGERS}
+        states["crq-repair.timer"] = "inactive"
+        units = FakeUnits(self.marker_path, states)
+        run = self.run_runbook(self.args(), units)
         with mock.patch.object(run, "preflight",
                                side_effect=rb.Refused("preflight boom")):
             with self.assertRaisesRegex(rb.Refused, "preflight boom"):
                 run.run()
         self.assertTrue(run.pre_hold_restored)
         self.assertIsNone(run.pre_hold_restore_error)
-        self.assertEqual(sorted(units.stopped),
-                         sorted(run.stopped_pre))
-        for unit in run.stopped_pre:
-            self.assertEqual(units.state(unit), "active")
-            self.assertIn(unit, units.started)
+        self.assertEqual(sorted(run.stopped_pre),
+                         ["crq-backfill.timer", "crq-repair.path"])
+        self.assertEqual(sorted(units.started),
+                         ["crq-backfill.timer", "crq-repair.path"],
+                         "only this run's own recorded intent is started")
+        self.assertNotIn("crq-repair.timer", units.started)
         self.assertFalse(self.marker_path.exists())
         phase = rb.load_json(run.output_dir / "phase.json")
-        self.assertEqual(phase["phase"], "recovery_required")
+        self.assertEqual(phase["phase"], "refused_released")
+        self.assertTrue(phase["released"])
         self.assertTrue(phase["pre_hold_restored"])
 
-    def test_pre_hold_failure_restore_failure_is_recorded(self):
-        # If even the pre-hold restore fails, the error is recorded in the
-        # recovery phase record; the original refusal still propagates.
+    def test_refusal_restore_failure_keeps_the_hold(self):
+        # If the restore itself fails, the marker stays: recovery_required,
+        # never a claim that the host is back.
         units = FakeUnits(self.marker_path)
-        run = self.run_to_preflight(units)
+        run = self.run_runbook(self.args(), units)
         with mock.patch.object(run, "preflight",
                                side_effect=rb.Refused("preflight boom")), \
                 mock.patch.object(units, "start",
@@ -697,23 +752,56 @@ class PreflightSplitTests(RunbookFixture):
                 run.run()
         self.assertFalse(run.pre_hold_restored)
         self.assertIn("start failed", run.pre_hold_restore_error)
+        self.assertTrue(self.marker_path.exists(), "hold retained")
         phase = rb.load_json(run.output_dir / "phase.json")
         self.assertEqual(phase["phase"], "recovery_required")
         self.assertFalse(phase["pre_hold_restored"])
-        self.assertIn("start failed", phase["pre_hold_restore_error"])
+        self.assertIn("start failed", phase["restore_error"])
+
+    def test_observation_and_split_happen_under_this_runs_hold(self):
+        # Ordering: the marker is claimed before the first inventory read, so
+        # no second run can find the host unheld while this one observes and
+        # splits it. The proof is the hold being owned at every read.
+        units = FakeUnits(self.marker_path)
+        run = self.run_runbook(self.args(), units)
+        held_at_read = []
+        real_inventory = units.inventory
+
+        def inventory():
+            held_at_read.append(run.owns_marker())
+            return real_inventory()
+
+        units.inventory = inventory
+        real_state = units.state
+        states_under_hold = []
+
+        def state(unit):
+            states_under_hold.append(run.owns_marker())
+            return real_state(unit)
+
+        units.state = state
+        self.assertEqual(run.run()["outcome"], "completed")
+        self.assertEqual(held_at_read, [True],
+                         "the inventory read must happen under the hold")
+        self.assertTrue(states_under_hold)
+        self.assertTrue(all(states_under_hold),
+                        "every state read must happen under the hold")
 
     def test_restore_starts_exactly_the_original_active_set(self):
         states = {unit: "active" for unit in TRIGGERS}
         states["crq-repair.timer"] = "inactive"
         units = FakeUnits(self.marker_path, states)
         run = self.run_to_preflight(units)
+        # Pre-split capture (crq finding F1): the F4 proof needs the states
+        # from BEFORE the split; the post-split map reads the long triggers
+        # inactive and would accept leaving them stopped.
+        pre_split = {unit: units.state(unit) for unit in run.triggers}
         run.split_long_triggers()
-        run.original = {unit: units.state(unit) for unit in run.triggers}
+        self.assertEqual(run.original, pre_split)
         # Simulate the end-of-run state: all stopped, marker owned.
         for unit in run.triggers:
             units.states[unit] = "inactive"
         run.output_dir.mkdir(parents=True, exist_ok=True)
-        run.acquire()
         run.restore()
         # F4: restore targets self.original. crq-repair.timer was inactive
         # before the run, so it must NOT be started.
@@ -857,6 +945,7 @@ class F4RegressionTests(RunbookFixture):
         run.acquire()
         run.restore()
         run.phase("released")
+        self.grant_rollback(run)
         run.write_release()
         self.assertEqual({unit: units.state(unit) for unit in run.triggers},
                          run.original)
@@ -1086,6 +1175,7 @@ class RecordNamingTests(RunbookFixture):
         run.acquire()
         run.final_triggers = dict(run.original)
         run.release_marker()
+        self.grant_rollback(run)
         run.write_release()
         run.write_range_note()
         note = json.loads((self.output_dir / "range-note.json").read_text())
@@ -1119,17 +1209,18 @@ class JournalAssertionTests(RunbookFixture):
         self.build_repo()
 
     def base_journal(self):
+        clean = {"checked": True, "schema_marker_present": False,
+                 "schema_observations": []}
         return {
             "operation": "deploy", "outcome": "completed",
             "prior_head": self.prior_sha, "target": self.target,
             "tag": self.target_tag, "helper_sha256": self.helper_sha,
-            "automatic_rollback_permitted": False,
-            "rollback_compatibility": {"checked": True,
-                                       "schema_marker_present": False,
-                                       "schema_observations": []},
+            "automatic_rollback_permitted": True,
+            "rollback_compatibility": dict(clean),
             "prior_tag": self.prior_tag,
             "prior_config_sha256": sha256_file(self.runner / "config.json"),
             "schema_version": 1, "transaction_id": "abc123",
+            "plan": {"preflight": {"rollback_compatibility": dict(clean)}},
         }
 
     def assert_journal_field(self, key, value):
@@ -1156,13 +1247,117 @@ class JournalAssertionTests(RunbookFixture):
                          ("prior_head", "0" * 40), ("target", "1" * 40),
                          ("tag", "crq-runner/19990101-1"),
                          ("helper_sha256", "3" * 64),
-                         ("automatic_rollback_permitted", True),
+                         ("automatic_rollback_permitted", False),
+                         ("automatic_rollback_permitted", None),
                          ("rollback_compatibility", {"checked": False}),
+                         ("rollback_compatibility", None),
+                         ("plan", None),
                          ("prior_tag", "crq-runner/19990101-2"),
                          ("schema_version", 2), ("transaction_id", None)):
-            with self.subTest(key=key):
+            with self.subTest(key=key, bad=bad):
                 message = self.assert_journal_field(key, bad)
                 self.assertTrue(message)
+
+    def test_journal_is_controller_shaped(self):
+        # The D7 blocker: a test that only passes against a fabricated
+        # journal proves nothing. This journal is BUILT BY THE CONTROLLER:
+        # compatibility_record reads the fixture queue through the real
+        # Effects seam, and deploy_journal shapes the document exactly as
+        # deploy_plan writes it, including the rollback_compatible()
+        # decision over that record. The assert set must accept the one
+        # shape production can produce.
+        self.write_queue([{"id": "done", "run": None}])
+        document = self.manifest()
+        args = self.args(manifest_path=self.write_manifest(document))
+        run = self.run_runbook(args)
+        effects = dc.Effects(self.root,
+                             Path(args.output_dir) / "controller-records")
+        compatibility = dc.compatibility_record(effects, args.target_sha)
+        prior_state = {"prior_head": self.prior_sha,
+                       "prior_config_sha256":
+                           sha256_file(self.runner / "config.json")}
+        plan = {"helper_sha256": self.helper_sha,
+                "preflight": {"rollback_compatibility": compatibility},
+                "rollback_compatibility_after": compatibility,
+                "automatic_rollback_permitted":
+                    dc.rollback_compatible(compatibility)}
+        journal = dc.deploy_journal(prior_state, args.target_sha,
+                                    args.target_tag, plan,
+                                    prior_tag=self.prior_tag)
+        journal["outcome"] = "completed"
+        journal["transaction_id"] = "controller-shaped"
+        self.assertIs(journal["automatic_rollback_permitted"], True)
+        self.assertFalse(journal["rollback_compatibility"]
+                         ["schema_marker_present"])
+        # The full assertion set accepts the controller-shaped journal, and
+        # it records the granted permission for the release.
+        run.assert_journal(journal)
+        self.assertTrue(run.rollback["automatic_rollback_permitted"])
+        self.assertIn("automatic rollback remains available",
+                      run.rollback["statement"])
+
+    def test_impossible_pair_refuses(self):
+        # The fabricating pair the old rehearsal wrote: permission False
+        # beside a clean marker-free record. rollback_compatible() grants
+        # True for exactly that record, so this journal is not one the
+        # controller can emit, and the assertion set must refuse it.
+        message = self.assert_journal_field("automatic_rollback_permitted",
+                                            False)
+        self.assertIn("automatic_rollback_permitted", message)
+
+    def test_granted_permission_requires_clean_evidence(self):
+        # A marker present or an author_* observation with permission True
+        # is the fail-closed shape; the evidence assertion refuses it.
+        bad = self.base_journal()
+        bad["rollback_compatibility"] = {"checked": True,
+                                         "schema_marker_present": True,
+                                         "schema_observations": []}
+        document = self.manifest()
+        args = self.args(manifest_path=self.write_manifest(document))
+        run = self.run_runbook(args)
+        with self.assertRaisesRegex(rb.Refused, "clean shape"):
+            run.assert_journal(bad)
+        bad2 = self.base_journal()
+        bad2["rollback_compatibility"] = {"checked": True,
+                                          "schema_marker_present": False,
+                                          "schema_observations":
+                                              ["author_requests"]}
+        with self.assertRaisesRegex(rb.Refused, "clean shape"):
+            run.assert_journal(bad2)
+
+    def test_pre_switch_record_must_be_clean(self):
+        # The pre-switch record is the evidence the prior target could read
+        # the queue this deploy started from; a marker or author_* key there
+        # means the permission True was never granted from evidence.
+        for dirty in ({"checked": True, "schema_marker_present": True,
+                       "schema_observations": []},
+                      {"checked": True, "schema_marker_present": False,
+                       "schema_observations": ["author_quota"]},
+                      {"checked": False, "schema_marker_present": False,
+                       "schema_observations": []}):
+            with self.subTest(dirty=dirty):
+                bad = self.base_journal()
+                bad["plan"] = {"preflight":
+                               {"rollback_compatibility": dirty}}
+                document = self.manifest()
+                args = self.args(
+                    manifest_path=self.write_manifest(document))
+                run = self.run_runbook(args)
+                with self.assertRaisesRegex(rb.Refused,
+                                            "pre-switch queue"):
+                    run.assert_journal(bad)
+
+    def test_release_records_the_granted_permission(self):
+        # The operator must know the controller's automatic rollback stays
+        # available after a deploy this runbook never rolls back.
+        units = FakeUnits(self.marker_path)
+        run = self.run_runbook(self.args(), units)
+        self.assertEqual(run.run()["outcome"], "completed")
+        release = rb.load_json(self.output_dir / "release.json")
+        self.assertIs(release["rollback"]
+                      ["automatic_rollback_permitted"], True)
+        self.assertIn("never invokes rollback",
+                      release["rollback"]["statement"])
 
 
 class AncestryRehearsalTests(RunbookFixture):
@@ -1181,10 +1376,9 @@ class AncestryRehearsalTests(RunbookFixture):
     def test_must_mode_passes_with_target_on_main(self):
         args = self.args()
         run = self.run_runbook(args, self.units)
-        code = run.run()
-        self.assertEqual(code, 0)
-        self.assertTrue(self.units.released if hasattr(self.units, "released")
-                        else not self.marker_path.exists())
+        result = run.run()
+        self.assertEqual(result["outcome"], "completed")
+        self.assertTrue(result["released"])
         phase = json.loads((self.output_dir / "phase.json").read_text())
         self.assertEqual(phase["phase"], "completed")
         self.assertTrue(phase["released"])
@@ -1197,12 +1391,18 @@ class AncestryRehearsalTests(RunbookFixture):
         with self.assertRaisesRegex(rb.Refused, "must be on origin/main"):
             run.run()
         phase = json.loads((self.output_dir / "phase.json").read_text())
-        self.assertEqual(phase["phase"], "recovery_required")
+        # The refusal is a pre-switch one: this run restores its own split
+        # and releases its own hold, so the host is back to its original
+        # states rather than left recovery-required.
+        self.assertEqual(phase["phase"], "refused_released")
+        self.assertFalse(self.marker_path.exists())
+        for unit in TRIGGERS:
+            self.assertEqual(self.units.state(unit), "active")
 
-    def test_must_not_mode_refuses_before_the_hold(self):
+    def test_must_not_mode_refuses_before_the_switch(self):
         # The helper's verify_target requires the target on origin/main, so
         # a must_not manifest cannot complete a real deploy: refuse before
-        # the hold; the pre-hold restore puts the split triggers back.
+        # the switch; the refusal restores the split and releases the hold.
         document = self.manifest()
         document["ancestry"]["target_on_origin_main"] = "must_not"
         args = self.args(manifest_path=self.write_manifest(document))
@@ -1307,9 +1507,12 @@ class CLITests(RunbookFixture):
             run.run()
         self.assertEqual(self.units.stopped, [])
         self.assertFalse(self.marker_path.exists())
+        # A second run needs its own durable map: the refused first attempt
+        # already wrote phase.json in the shared output dir.
+        self.output_dir = self.base / "out-right-host"
         run2 = self.run_runbook(self.args(hostname=self.observed_hostname()),
                                 self.units)
-        self.assertEqual(run2.run(), 0)
+        self.assertEqual(run2.run()["outcome"], "completed")
 
     def test_active_triggers_refuse_production_without_authorization(self):
         # A production invocation (operator_go False) with active triggers
@@ -1353,7 +1556,7 @@ class CLITests(RunbookFixture):
         # left stopped and the release completes.
         args = self.args(rehearsal=False, operator_go=True)
         run = self.run_runbook(args, self.units)
-        self.assertEqual(run.run(), 0)
+        self.assertEqual(run.run()["outcome"], "completed")
         phase = rb.load_json(self.output_dir / "phase.json")
         self.assertEqual(phase["phase"], "completed")
         self.assertTrue(phase["released"])
@@ -1375,7 +1578,7 @@ class CLITests(RunbookFixture):
                 run.run()
         with (self.output_dir / "phase.json").open() as handle:
             phase = rb.load_json(self.output_dir / "phase.json")
-        self.assertEqual(phase["phase"], "recovery_required")
+        self.assertEqual(phase["phase"], "refused_released")
         self.assertTrue(phase["original"])
         self.assertIsNotNone(phase["stopped_pre"])
         run2 = self.run_runbook(self.args(), FakeUnits(self.marker_path))
@@ -1503,6 +1706,65 @@ class CLITests(RunbookFixture):
                        effects_factory=self.with_fake_switch(factory))
         self.assertEqual(code, 0)
 
+    def test_deploy_prints_one_stdout_document(self):
+        # Review finding: the mutating deploy path printed nothing to
+        # stdout. Exactly one machine-readable result document lands on
+        # stdout for a completed run, and the exit status stays 0.
+        code, stdout = self.capture(
+            lambda: rb.main(self.cli_argv(),
+                            effects_factory=self.with_fake_switch()))
+        self.assertEqual(code, 0)
+        document = json.loads(stdout)
+        self.assertEqual(document["operation"], "deploy")
+        self.assertEqual(document["outcome"], "completed")
+        self.assertTrue(document["released"])
+        self.assertTrue(document["rehearsal"])
+        self.assertEqual(document["output_dir"], str(self.output_dir))
+        self.assertEqual(document["final_triggers"],
+                         {unit: "active" for unit in TRIGGERS})
+        self.assertEqual(sorted(document),
+                         ["final_triggers", "journal", "marker_path",
+                          "operation", "outcome", "output_dir", "prior_sha",
+                          "rehearsal", "released", "runbook_sha256",
+                          "target", "target_tag"])
+
+    def test_deploy_refusal_prints_stdout_document(self):
+        # A terminal refusal lands one machine-readable result document on
+        # stdout (outcome refused with the reason) and then propagates, so
+        # the process-level error envelope and exit status stay in __main__.
+        argv = self.cli_argv()
+        argv[argv.index("--target-sha") + 1] = "a" * 40  # unknown target
+
+        def refused():
+            with self.assertRaisesRegex(
+                    rb.Refused, "must equal the manifest identity target"):
+                rb.main(argv, effects_factory=self.with_fake_switch())
+
+        _result, stdout = self.capture(refused)
+        document = json.loads(stdout)
+        self.assertEqual(document["operation"], "deploy")
+        self.assertEqual(document["outcome"], "refused")
+        self.assertFalse(document["released"])
+        self.assertIn("must equal the manifest identity target",
+                      document["reason"])
+
+    def test_argparse_error_prints_envelope_and_exits_2(self):
+        # Argument errors used to bypass the JSON envelope entirely (usage
+        # text on stderr, empty stdout). argparse's exit raises SystemExit;
+        # the envelope lands on stdout with exit status 2.
+        argv = []  # no deploy arguments at all
+
+        def failing():
+            with self.assertRaises(SystemExit) as caught:
+                rb.main(argv)
+            self.assertEqual(caught.exception.code, 2)
+
+        _result, stdout = self.capture(failing)
+        envelope = json.loads(stdout)
+        self.assertEqual(envelope["error"]["kind"], "argument_error")
+        self.assertIn("required for a deploy run",
+                      envelope["error"]["message"])
+
 
 class CLIStatusGateTests(RunbookFixture):
     """The status gate through the CLI: digest self-verification (requirement
@@ -1551,6 +1813,18 @@ class CLIStatusGateTests(RunbookFixture):
         self.assertIn("runbook digest mismatch", artifact["refusal"])
         self.assertIn("3" * 64, artifact["refusal"])
         self.assertIn(self.digest, artifact["refusal"])
+
+    def test_status_stdout_document_and_empty_stderr(self):
+        # Machine mode: the status gate prints its document on stdout and
+        # narrates nothing, so a consumer parses one document.
+        self.write_released()
+        units = FakeUnits(self.marker_path)
+        code, stdout, stderr = self.capture(
+            lambda: rb.main(self.status_argv(), status_units=units),
+            stderr=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(json.loads(stdout)["operation"], "status")
 
     def test_live_trigger_drift_refuses(self):
         # Requirement 2: one trigger not in final_triggers state refuses the
@@ -1648,6 +1922,7 @@ class RunbookMarkerUniquenessTests(RunbookFixture):
         units = FakeUnits(self.marker_path)
         args = self.args()
         run = self.run_runbook(args, units)
+        run.acquire()
         observed = run.observe_inventory()
         run.assert_inventory(observed)
         run.split_long_triggers()
@@ -1769,6 +2044,364 @@ class TargetRenderDigestTests(RunbookFixture):
         with self.assertRaisesRegex(rb.Refused,
                                     "target rendered config digest mismatch"):
             run.run()
+
+
+class MarkerPathTests(RunbookFixture):
+    """The hold must be the file the repair tick polls, and only that file.
+
+    crq.py refuses to do work while ``<repo>/apps/crq-python/state/
+    runner-disabled`` exists. A runbook marker anywhere else is not a hold,
+    and a manifest that names a different path must be refused rather than
+    kept as a second source of truth."""
+
+    def test_marker_is_the_ticks_own_file(self):
+        self.build_repo()
+        self.assertEqual(rb.marker_path(self.root),
+                         self.runner / "state" / "runner-disabled")
+        self.assertEqual(MARKER_RELPATH, "state/runner-disabled")
+        # The claim is that this is the file the tick polls, so read the
+        # tick's source: it derives STATE from the module root and tests
+        # STATE / "runner-disabled". Both halves must be true of the path
+        # this module computes.
+        tick = (ROOT / "crq.py").read_text()
+        self.assertIn('STATE = ROOT / "state"', tick)
+        self.assertIn('STATE / "runner-disabled"', tick)
+        self.assertEqual(MARKER_RELPATH, "state/runner-disabled")
+
+    def test_manifest_marker_path_must_equal_the_tick_path(self):
+        self.build_repo()
+        document = self.manifest()
+        document["marker"]["path"] = "state/somewhere-else"
+        args = self.args(manifest_path=self.write_manifest(document))
+        built = []
+
+        def factory(marker, effects_builder):
+            built.append(marker)
+            return FakeUnits(marker)
+
+        # Through execute(), where the manifest is validated: the refusal
+        # lands before any effect is constructed, so the wrong path can
+        # never become a second hold.
+        with self.assertRaisesRegex(rb.Refused,
+                                    "marker.path must be exactly"):
+            rb.execute(args, effects_factory=factory)
+        self.assertEqual(built, [])
+        self.assertFalse((self.runner / "state" / "somewhere-else").exists())
+        self.assertFalse(self.marker_path.exists())
+
+    def test_execute_hands_the_provider_the_tick_path(self):
+        # The value execute() derives is --root's tick file, not the manifest
+        # string: the marker the run creates is the one the tick polls. The
+        # two acceptance tests above pin that path to crq.py's own test; this
+        # pins that execute() passes exactly what marker_path() computes.
+        self.build_repo()
+        args = self.args()
+        seen = []
+
+        def factory(marker, effects_builder):
+            seen.append(Path(marker))
+            raise rb.Refused("stop after the provider is built")
+
+        with self.assertRaisesRegex(rb.Refused, "stop after the provider"):
+            rb.execute(args, effects_factory=factory)
+        self.assertEqual(seen, [self.runner / "state" / "runner-disabled"])
+        self.assertFalse(self.marker_path.exists())
+
+
+class ReviewRoundTests(RunbookFixture):
+    """The withdrawn-PASS blocker and the four companion findings.
+
+    Blocker (D7): the journal assertion set accepts exactly the journal
+    shape deploy_plan() produces, the permission True is backed by a live
+    preflight refusal, and the fabricated pair the old rehearsal wrote is
+    refused. Findings: a reused --output-dir never overwrites recovery
+    evidence; a losing run refuses at the hold so it never restores beneath
+    another run's marker; a rehearsal completes an approved
+    head_invariance-false delta through the real checkout; and the live
+    runtime's node_modules is verified against candidate_deps_sha256 before
+    anything restarts."""
+
+    def setUp(self):
+        super().setUp()
+        self.build_repo()
+        state = self.runner / "state"
+        state.mkdir(exist_ok=True)
+        (state / "queue.json").write_text(
+            json.dumps({"items": [{"id": "done", "run": None}],
+                        "starts": []}) + "\n")
+
+    # -- blocker: D7 against controller-shaped input ----------------------
+    def test_full_run_accepts_the_controller_derived_journal(self):
+        # The whole run at the pinned revision, with the fake switch
+        # writing a journal BUILT by the controller's deploy_journal +
+        # compatibility_record (not hand-written): the runbook must
+        # complete against the one shape production can produce.
+        args = self.args()
+
+        def controller_built_switch(record_dir):
+            record_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            subprocess.run(["git", "-C", str(args.root), "checkout", "-q",
+                            "--", "apps/crq-python/config.json"],
+                           check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(args.root), "checkout", "-q",
+                            "--detach", args.target_sha],
+                           check=True, capture_output=True)
+            effects = dc.Effects(args.root, record_dir)
+            compatibility = dc.compatibility_record(effects,
+                                                    args.target_sha)
+            self.assertTrue(dc.rollback_compatible(compatibility))
+            prior_state = {"prior_head": self.prior_sha,
+                           "prior_config_sha256": sha256_file(
+                               self.runner / "config.json")}
+            plan = {"helper_sha256": self.helper_sha,
+                    "preflight": {"rollback_compatibility": compatibility},
+                    "rollback_compatibility_after": compatibility,
+                    "automatic_rollback_permitted":
+                        dc.rollback_compatible(compatibility)}
+            journal = dc.deploy_journal(prior_state, args.target_sha,
+                                        args.target_tag, plan,
+                                        prior_tag=self.prior_tag)
+            journal["outcome"] = "completed"
+            journal["transaction_id"] = "controller-built"
+            (record_dir / "controller-built.json").write_text(
+                json.dumps(journal, indent=2, sort_keys=True) + "\n")
+
+        run = self.run_runbook(args, self.units)
+        run.run_controller_switch = controller_built_switch
+        self.assertEqual(run.run()["outcome"], "completed")
+        phase = rb.load_json(self.output_dir / "phase.json")
+        self.assertEqual(phase["phase"], "completed")
+        journal = rb.load_json(Path(phase["journal"]["path"]))
+        self.assertIs(journal["automatic_rollback_permitted"], True)
+        self.assertEqual(sorted(journal["rollback_compatibility"]),
+                         ["checked", "queue_schema", "schema_marker_present",
+                          "schema_observations", "target_sha"])
+        release = rb.load_json(self.output_dir / "release.json")
+        self.assertTrue(release["rollback"]["automatic_rollback_permitted"])
+
+    def test_rehearsal_journal_is_controller_shaped(self):
+        # The CLI rehearsal's journal comes from the controller's own
+        # deploy_journal + compatibility_record, so its permission flag is
+        # the granted True beside clean evidence: the pair the controller
+        # actually emits. The rehearsal at the pinned revision completes.
+        argv = self.cli_argv()
+        with mock.patch.object(rb, "RealUnits") as real_units:
+            code, _stdout = self.capture(lambda: rb.main(argv))
+        self.assertEqual(code, 0)
+        real_units.assert_not_called()
+        phase = rb.load_json(self.output_dir / "phase.json")
+        self.assertEqual(phase["phase"], "completed")
+        journal = rb.load_json(Path(phase["journal"]["path"]))
+        self.assertTrue(journal["automatic_rollback_permitted"])
+        self.assertFalse(
+            journal["rollback_compatibility"]["schema_marker_present"])
+        self.assertEqual(sorted(journal["rollback_compatibility"]),
+                         ["checked", "queue_schema", "schema_marker_present",
+                          "schema_observations", "target_sha"])
+        # The rehearsal journal carries the same pre-switch record the
+        # controller writes, so the assertion set exercised both halves.
+        self.assertTrue(journal["plan"]["preflight"]
+                        ["rollback_compatibility"]["checked"])
+
+    def cli_argv(self, **overrides):
+        """The deploy invocation for a rehearsal through main()."""
+        args = self.args(**overrides)
+        argv = ["--target-sha", str(args.target_sha),
+                "--target-tag", args.target_tag,
+                "--candidate-root", str(args.candidate_root),
+                "--prior-root", str(args.prior_root),
+                "--prior-sha", args.prior_sha,
+                "--prior-tag", args.prior_tag,
+                "--root", str(args.root),
+                "--overlay", str(args.overlay),
+                "--baseline-journal", str(args.baseline_journal),
+                "--manifest", str(args.manifest),
+                "--manifest-sha256", args.manifest_sha256,
+                "--runbook-sha256", args.runbook_sha256,
+                "--output-dir", str(args.output_dir)]
+        if args.controller is not None:
+            argv += ["--controller", str(args.controller)]
+        if args.rehearsal:
+            argv += ["--rehearsal"]
+        return argv
+
+    def test_host_queue_that_denies_rollback_refuses_before_the_switch(self):
+        # D7 from host truth: the permission the journal must carry is only
+        # safe because preflight runs the controller's own compatibility
+        # computation on the LIVE queue and refuses when it denies rollback.
+        # A schema marker and an author_* key are both refusals, named.
+        for queue, pattern in (
+                ({"schema_version": "unmarked",
+                  "items": [{"id": "done", "run": None}]},
+                 "explicit schema marker"),
+                ({"author_quota": {}, "items": []},
+                 "author_quota")):
+            with self.subTest(pattern=pattern):
+                self.output_dir = self.base / ("out-" + pattern[:4])
+                (self.runner / "state" / "queue.json").write_text(
+                    json.dumps(queue) + "\n")
+                run = self.run_runbook(self.args(), self.units)
+                with self.assertRaisesRegex(rb.Refused, pattern):
+                    run.run()
+                phase = rb.load_json(self.output_dir / "phase.json")
+                self.assertEqual(phase["phase"], "refused_released")
+                self.assertFalse(self.marker_path.exists(),
+                                 "this run's own hold is released")
+                for unit in TRIGGERS:
+                    self.assertEqual(self.units.state(unit), "active",
+                                     "the split this run made is restored")
+                self.units = FakeUnits(self.marker_path)
+
+    # -- finding 1: reused output dir --------------------------------------
+    def test_reused_output_dir_never_overwrites_recovery_evidence(self):
+        # A first run retains its recovery record; a retry into the same
+        # --output-dir refuses BEFORE writing anything, and the original
+        # phase.json evidence is byte-identical afterwards.
+        units = FakeUnits(self.marker_path)
+        args = self.args()
+        run = self.run_runbook(args, units)
+        with mock.patch.object(run, "preflight",
+                               side_effect=rb.Refused("first failure")):
+            with self.assertRaisesRegex(rb.Refused, "first failure"):
+                run.run()
+        first = (self.output_dir / "phase.json").read_bytes()
+        self.assertIn(b"refused_released", first)
+        retry = self.run_runbook(self.args(), FakeUnits(self.marker_path))
+        with self.assertRaisesRegex(rb.Refused, "fresh --output-dir"):
+            retry.run()
+        self.assertEqual((self.output_dir / "phase.json").read_bytes(), first)
+        self.assertFalse(self.marker_path.exists())
+
+    # -- finding 2: a loser never acts beneath another run's hold ----------
+    def test_acquire_refuses_a_foreign_hold_before_any_observation(self):
+        # The race: another run takes the marker before this run can. The
+        # loser refuses at acquire, having read and stopped nothing, and the
+        # winner's bytes are untouched.
+        units = FakeUnits(self.marker_path)
+        self.marker_path.parent.mkdir(parents=True, exist_ok=True)
+        foreign = b"another run's hold; not ours\n"
+        self.marker_path.write_bytes(foreign)
+        run = self.run_runbook(self.args(), units)
+
+        def forbidden(*unused, **kwargs):
+            raise AssertionError("loser read a unit")
+
+        units.inventory = forbidden
+        with self.assertRaisesRegex(rb.Refused, "foreign hold"):
+            run.run()
+        self.assertEqual(units.stopped, [])
+        self.assertEqual(units.started, [])
+        self.assertEqual(self.marker_path.read_bytes(), foreign)
+        self.assertFalse(run.acquired)
+        self.assertFalse(run.released)
+
+    def test_losing_run_does_not_restore_under_a_foreign_hold(self):
+        # The risk the ordering removed: a run whose split had already
+        # stopped units must not restart them beneath another run's hold.
+        # The hold-first sequence means a loser never stops anything, and a
+        # refusal that did stop units restores only its own recorded intent
+        # before releasing its own marker (covered in PreflightSplitTests).
+        # Here the marker is foreign from the start and no stop ever happens.
+        units = FakeUnits(self.marker_path)
+        self.marker_path.parent.mkdir(parents=True, exist_ok=True)
+        self.marker_path.write_bytes(b"another run's hold\n")
+        run = self.run_runbook(self.args(), units)
+        with self.assertRaisesRegex(rb.Refused, "foreign hold"):
+            run.run()
+        self.assertEqual(units.stopped, [],
+                         "a loser never stops a unit")
+        self.assertEqual(units.started, [],
+                         "no trigger may start beneath a foreign hold")
+        self.assertFalse(run.pre_hold_restored)
+        self.assertIsNone(run.pre_hold_restore_error,
+                          "nothing was ours to restore or report")
+
+    # -- finding 3: rehearsal completes an approved delta -------------------
+    def test_rehearsal_completes_approved_delta_through_real_checkout(self):
+        # The exact case the rehearsal exists for: head_invariance false
+        # with a real committed config delta. The rehearsal switch now
+        # performs the real checkout, so the post-switch live render the
+        # target-state digest pins is the one the rehearsal itself wrote.
+        state = self.runner / "state"
+        state.mkdir(exist_ok=True)
+        (state / "queue.json").write_text(
+            json.dumps({"items": [{"id": "done", "run": None}],
+                        "starts": []}) + "\n")
+        host_mod = _load("rehearsal_delta_host",
+                         self.candidate / "apps/crq-python/ops/prepare-host.py")
+        overlay, _raw = host_mod.load_overlay(self.overlay_path)
+        committed = json.loads((self.runner / "config.json").read_text())
+        committed["schema_version"] = committed.get("schema_version", 1) + 1
+        delta_bytes = (json.dumps(committed, indent=2, sort_keys=True)
+                       + "\n").encode()
+        self.runner.joinpath("config.json").write_bytes(delta_bytes)
+        self.command("commit", "-qam", "target config delta: schema_version")
+        self.target = self.command("rev-parse", "HEAD").strip()
+        self.target_tag = "crq-runner/20261113-12"
+        self.command("tag", "-a", self.target_tag, "-m",
+                     "fixture rehearsal delta", self.target)
+        self.command("update-ref", "refs/remotes/origin/main", self.target)
+        shutil.copy(self.runner / "config.json",
+                    self.candidate / "apps/crq-python/config.json")
+        self.command("checkout", "-q", "--detach", self.prior_sha)
+        (self.runner / "config.json").write_bytes(
+            host_mod.render(self.root, overlay, self.prior_sha))
+        document = self.manifest()
+        committed_bytes = subprocess.run(
+            ["git", "-C", str(self.root), "show",
+             self.target + ":apps/crq-python/config.json"],
+            check=True, capture_output=True).stdout
+        document["config"]["target_state_config_sha256"] = \
+            hashlib.sha256(host_mod.render(
+                self.root, overlay, self.target)).hexdigest()
+        document["config"]["head_invariance"] = False
+        document["config"]["committed_config_sha256"] = \
+            hashlib.sha256(committed_bytes).hexdigest()
+        args = self.args(manifest_path=self.write_manifest(document),
+                         target_sha=self.target,
+                         target_tag=self.target_tag)
+        self.assertEqual(args.target_sha, self.target)
+        # Through --rehearsal (main -> make_rehearsal_effects_factory ->
+        # install_rehearsal_journal), not the test fake: the rehearsal path
+        # itself must complete an approved delta.
+        code, _stdout = self.capture(lambda: rb.main(self.cli_argv(
+            manifest_path=self.write_manifest(document),
+            target_sha=self.target, target_tag=self.target_tag)))
+        self.assertEqual(code, 0)
+        phase = rb.load_json(self.output_dir / "phase.json")
+        self.assertEqual(phase["phase"], "completed")
+        self.assertTrue(phase["rehearsal"])
+        # The rehearsal's checkout actually moved HEAD to the delta target.
+        head = subprocess.run(
+            ["git", "-C", str(self.root), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(head, self.target)
+        self.assertNotEqual(
+            sha256_file(self.runner / "config.json"),
+            sha256_file(self.prior / "apps/crq-python/config.json"),
+            "the delta must actually be rendered live after the switch")
+
+    # -- finding 4: live node_modules verified ------------------------------
+    def test_stale_live_node_modules_refuses_before_restore(self):
+        # The finding: an approved dist copied over stale deps passes a
+        # dist-only check. With the runtime's node_modules diverging from
+        # candidate_deps_sha256, the release refuses at the journal
+        # boundary; the hold is retained and NOTHING is restarted.
+        shutil.rmtree(self.base / "runtime/node_modules")
+        (self.base / "runtime/node_modules").mkdir()
+        (self.base / "runtime/node_modules" / "pkg-stale").mkdir()
+        (self.base / "runtime/node_modules" / "pkg-stale" / "index.js") \
+            .write_text("stale\n")
+        args = self.args()
+        run = self.run_runbook(args, self.units)
+        with self.assertRaisesRegex(rb.Refused, "live deps digest mismatch"):
+            run.run()
+        phase = rb.load_json(self.output_dir / "phase.json")
+        self.assertEqual(phase["phase"], "recovery_required")
+        self.assertTrue(self.marker_path.exists(), "hold retained")
+        self.assertEqual(self.units.started, [], "nothing restarted")
+        self.assertEqual(self.units.states,
+                         {unit: "inactive" for unit in TRIGGERS})
 
 
 class TreeDigestRefusalTests(RunbookFixture):

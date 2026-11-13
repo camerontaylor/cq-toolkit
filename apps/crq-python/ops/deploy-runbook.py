@@ -29,6 +29,39 @@ The two defects the sequence must not inherit (measured, programme lead
   nothing killed). The 180-second service-name drain stays as the first
   bound.
 
+Rollback policy (D7) is the controller's own semantics, asserted for
+coherence rather than against a fixed answer. ``deploy_plan`` computes
+``automatic_rollback_permitted = rollback_compatible({**pre, **post})``:
+the permission follows the evidence in BOTH compatibility records. The
+runbook asserts four facts of one journal:
+
+* the PRE-switch record lives at
+  ``journal["plan"]["preflight"]["rollback_compatibility"]`` and proves the
+  queue this deploy started from was readable by the prior target
+  (``checked`` true, marker ABSENT, no observations);
+* the top-level ``rollback_compatibility`` is the POST-switch record:
+  ``checked`` true, ``schema_marker_present`` a real boolean, and
+  ``schema_observations`` a list;
+* ``automatic_rollback_permitted`` is True, which is the only value the
+  controller can record beside those clean records: ``rollback_compatible()``
+  grants True exactly on a marker-free, author-free queue;
+* that True is made safe BEFORE the switch, from host truth: preflight calls
+  the controller's own ``compatibility_record``/``rollback_compatible`` on the
+  live queue and refuses, naming the marker or ``author_*`` keys, when the
+  permission would be denied. A host where the controller would deny
+  automatic rollback therefore never reaches the switch, so the journal's
+  True is evidence rather than hope. The refusal is also a runbook policy
+  statement: this runbook never invokes rollback, and a host whose queue the
+  prior target is not proven to read is not deployable by it.
+
+The release records the granted permission and the operator is told: the
+controller's automatic rollback remains available after this deploy, and it
+is this runbook's sequence (no rollback call, owner-only recovery) that does
+not exercise it. Because the controller both records and consumes this
+pair, the rehearsal journal is built by the controller's own
+``compatibility_record``/``deploy_journal`` code over a real queue, so a
+rehearsal exercises the assertion set on controller-shaped input.
+
 Fail-stop structure kept from the audited wrappers: record intent before
 systemctl; restart only what was stopped; never remove a foreign marker;
 hold admission until every prior trigger state is verified; acquisition
@@ -75,6 +108,19 @@ DEAD_STATES = ("inactive", "failed")
 DEFAULT_SERVICE_DRAIN_S = 180
 DEFAULT_POLL_INTERVAL_S = 15
 DEFAULT_DRAIN_DEADLINE_S = 900
+# The one admission marker file, relative to the checkout's apps/crq-python
+# root: exactly the file the tick reads (crq.py ``STATE / "runner-disabled"``
+# with ``STATE = ROOT / "state"`` and ``ROOT = apps/crq-python``). The manifest
+# restates this path for review, and execute() refuses any other value so the
+# two can never drift.
+MARKER_RELPATH = "state/runner-disabled"
+
+
+def marker_path(root) -> Path:
+    """The admission marker for a deployment checkout ``root``: the same
+    file the tick's own ROOT/STATE constants resolve to, derived once here
+    instead of at each call site."""
+    return Path(root) / "apps" / "crq-python" / MARKER_RELPATH
 
 
 class Refused(Exception):
@@ -84,6 +130,12 @@ class Refused(Exception):
 def require(condition, message):
     if not condition:
         raise Refused(message)
+
+
+def narrate(message):
+    """Operator-facing narration on stderr. Stdout stays machine-readable:
+    the status subcommand's one JSON document is the only stdout write."""
+    print(message, file=sys.stderr)
 
 
 # ------------------------------------------------------------ schema checker
@@ -277,10 +329,9 @@ class RunEffects:
     ``main`` builds one through the injectable ``effects_factory`` so tests
     and rehearsals can prove which providers a CLI invocation constructs;
     production supplies ``RealUnits``, the controller module's ``Effects``
-    and no hook. The rehearsal's hook binds the fake controller journal, so
-    no rehearsal can spawn the real switch subprocess (whose helper path
-    reads the live unit states).
-    """
+    and no hook. The rehearsal's hook binds the controller-shaped journal
+    (``deploy_journal``) and performs the real target checkout, so no
+    rehearsal can spawn the real switch subprocess."""
 
     def __init__(self, units, host_effects, prepare_run=None):
         self.units = units
@@ -381,8 +432,11 @@ class Run:
         self.released = False
         self.final_triggers = None
         self.journal = None
+        # The D7 rollback evidence the release records (assert_journal).
+        self.rollback = None
         self.pre_hold_restored = False
         self.pre_hold_restore_error = None
+        self.preflight_passed = False
         self._current_phase = "started"
         self.run_id = uuid.uuid4().hex
         self.marker = Path(units.marker)
@@ -392,6 +446,7 @@ class Run:
         durable_write(self.output_dir / "phase.json",
                       {"phase": name,
                        "released": self.released,
+                       "run_id": self.run_id,
                        "rehearsal": bool(getattr(self.args, "rehearsal", False)),
                        "runbook_sha256": self.args.runbook_sha256,
                        "final_triggers": self.final_triggers,
@@ -421,10 +476,29 @@ class Run:
             return False
 
     def acquire(self):
+        # The hold is claimed before any observation or split, so a run that
+        # loses the race to a foreign marker refuses here having read and
+        # stopped nothing, and has nothing of its own to restore. The pre-hold
+        # owner check also refuses a marker whose bytes are not ours (a
+        # concurrent acquisition), and the O_EXCL create below closes the
+        # remaining check-to-create window; acquired stays false on that
+        # failure.
+        if self.marker.exists() and not self.owns_marker():
+            raise Refused(
+                "admission marker already exists (foreign hold); refusing "
+                "to proceed beneath another run's hold")
         self.marker.parent.mkdir(parents=True, exist_ok=True)
         payload = self.marker_bytes()
-        descriptor = os.open(self.marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                             0o600)
+        try:
+            descriptor = os.open(self.marker,
+                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            # The window between the check above and this create: whatever
+            # landed is not ours, so the loser still refuses as a foreign
+            # hold rather than surfacing a raw errno.
+            raise Refused(
+                "admission marker already exists (foreign hold); refusing "
+                "to proceed beneath another run's hold") from None
         self.acquired = True
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(payload)
@@ -451,51 +525,129 @@ class Run:
         # state the released-flag gate reads.
         self.released = True
 
+    # -- result ---------------------------------------------------------------
+    def result_document(self):
+        """The run's machine-readable result: exactly one stdout artifact
+        per invocation (repo contract). Narration and the process-level
+        error envelope stay on stderr; this document is what automation
+        reads instead of scrollback. A released completed run prints
+        outcome completed/released true; every earlier terminal state
+        prints the phase it stopped in with released false."""
+        return {"operation": "deploy",
+                "outcome": "completed" if self.released else "refused",
+                "released": bool(self.released),
+                "rehearsal": bool(getattr(self.args, "rehearsal", False)),
+                "output_dir": str(self.output_dir),
+                "runbook_sha256": self.args.runbook_sha256,
+                "target": self.args.target_sha,
+                "target_tag": self.args.target_tag,
+                "prior_sha": self.args.prior_sha,
+                "marker_path": str(self.marker),
+                "journal": (self.journal or {}).get("transaction_id"),
+                "final_triggers": self.final_triggers}
+
     # -- sequence --------------------------------------------------------
     def run(self):
+        # A retry into a reused --output-dir would destroy the previous run's
+        # durable recovery evidence (phase.json's original/stopped_pre map)
+        # before observing any trigger state: the retry's first phase write
+        # replaces the map with its own, or with nulls when it fails before
+        # the split. Recovering a previous run is an owner operation on its
+        # own records, so a directory that already holds a run's map refuses;
+        # only a bare directory (no phase.json) may be reused.
+        existing_phase = self.output_dir / "phase.json"
+        if existing_phase.exists() or existing_phase.is_symlink():
+            raise Refused(
+                "output-dir already holds a run's map (phase.json exists); "
+                "refusing to overwrite recovery evidence. Use a fresh "
+                "--output-dir; recovering the old run is an owner operation "
+                "on its existing records")
         self.output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
             return self._run_body()
         except BaseException as exc:
-            self._pre_hold_restore(exc)
-            self._fail_stop(exc)
+            self._refusal_cleanup(exc)
             raise
 
-    def _pre_hold_restore(self, exc):
-        """Pre-hold failure path: restart what split_long_triggers stopped.
+    def _refusal_cleanup(self, exc):
+        """Terminal cleanup for a failure, split by what the host can prove.
 
-        Before the hold is acquired there is no admission marker, so the
-        host must not be left with the long triggers stopped and no hold.
-        Best effort, never masks the original failure: any exception here
-        is recorded in the phase record as a recovery error.
+        Before this run's preflight has passed, nothing has left a state the
+        owner must recover by hand: the only mutations are this run's own
+        recorded split stops. So restore exactly the units this run's own
+        intent recorded stopped, verify them, and remove only this run's own
+        marker. Once preflight has passed the sequence has locked admission
+        and is draining or switching, where releasing the hold would be the
+        unsafe act: keep the hold (recovery_required) exactly as before.
         """
-        if self.acquired or not self.stopped_pre:
+        if not self.preflight_passed:
+            self._release_own_refusal(exc)
             return
+        self._fail_stop(exc)
+
+    def _release_own_refusal(self, exc):
+        """Undo this run's pre-switch intent and release this run's hold.
+
+        Ownership is exact: only units in this run's durable ``stopped_pre``
+        map are started (a long trigger already inactive before the run was
+        never started and is never taken for one this run stopped), and only
+        a marker whose bytes are this run's own is removed. A restore failure
+        keeps the hold and records recovery_required instead; it never
+        pretends the host is back.
+        """
+        error = None
         try:
-            self.units.start(sorted(self.stopped_pre))
-            observed = {unit: self.units.state(unit)
-                        for unit in self.stopped_pre}
-            require(observed == {unit: "active"
-                                 for unit in self.stopped_pre},
-                    "pre-hold split restore mismatch: observed "
-                    + repr(observed))
-            self.pre_hold_restored = True
-            self.phase("pre_hold_restored", stopped_pre=sorted(self.stopped_pre))
+            if self.stopped_pre:
+                owned = [unit for unit in sorted(self.stopped_pre)
+                         if self.units.state(unit) == "inactive"]
+                skipped = sorted(set(self.stopped_pre) - set(owned))
+                require(not skipped,
+                        "units this run stopped are no longer inactive; "
+                        "refusing to act on them: " + ", ".join(skipped))
+                self.units.start(owned)
+                observed = {unit: self.units.state(unit) for unit in owned}
+                require(observed == {unit: "active" for unit in owned},
+                        "pre-switch restore mismatch: observed "
+                        + repr(observed))
+            if self.acquired and self.owns_marker():
+                self.release_marker()
         except BaseException as failure:
-            self.pre_hold_restore_error = repr(failure)
+            error = repr(failure)
+        if error is not None:
+            self.pre_hold_restore_error = error
+            self.phase("recovery_required", error=repr(exc),
+                       restore_error=self.pre_hold_restore_error,
+                       pre_hold_restored=False,
+                       stopped_pre=sorted(self.stopped_pre))
+            return
+        if self.acquired and not self.released:
+            self.pre_hold_restore_error = (
+                "refusal cleanup could not release this run's own marker")
+            self.phase("recovery_required", error=repr(exc),
+                       restore_error=self.pre_hold_restore_error,
+                       pre_hold_restored=False,
+                       stopped_pre=sorted(self.stopped_pre))
+            return
+        self.pre_hold_restored = bool(self.stopped_pre)
+        self.phase("refused_released" if self.acquired else "refused",
+                   error=repr(exc), stopped_pre=sorted(self.stopped_pre),
+                   pre_hold_restored=self.pre_hold_restored)
 
     def _run_body(self):
         durable_write(self.output_dir / "marker.path",
                       {"path": str(self.marker.resolve())})
-        inventory = self.observe_inventory()
-        self.assert_inventory(inventory)
-        self.split_long_triggers()
-        self.wait_services_settle()
-        self.preflight()
+        # Claim the hold BEFORE any observation or split. The split and the
+        # inventory read both mutate or judge admission state, so doing them
+        # unheld let a second run find no marker in that window. With the
+        # hold first, the loser refuses at acquire having observed and
+        # stopped nothing, so there is no ownership hazard to guard: it
+        # cannot restore a unit it never stopped or release a hold it never
+        # took.
+        self.acquire()
+        self.phase("held")
+        self.observe_and_preflight()
         self.phase("preflight_ok", triggers=self.split_map,
                    stopped_pre=sorted(self.stopped_pre))
-        self.acquire()
-        self.phase("held", triggers=self.split_map)
         self.stop_triggers(self.triggers)
         self.phase("draining", triggers=self.split_map)
         self.drain_services()
@@ -513,7 +665,18 @@ class Run:
         self.write_release()
         self.write_range_note()
         self.phase("completed", triggers=self.split_map)
-        return 0
+        return self.result_document()
+
+    def observe_and_preflight(self):
+        """Observation, conditional split, quiescence and preflight, all
+        inside this run's hold."""
+        require(self.owns_marker(), "hold lost before observation")
+        inventory = self.observe_inventory()
+        self.assert_inventory(inventory)
+        self.split_long_triggers()
+        self.wait_services_settle()
+        self.preflight()
+        self.preflight_passed = True
 
     # -- step 1: validate and inventory ----------------------------------
     def observe_inventory(self):
@@ -537,8 +700,9 @@ class Run:
         if hostname:
             observed = subprocess.check_output(["hostname"], text=True).strip()
             require(observed == hostname, "wrong host: " + observed)
-        require(not self.marker.is_symlink() and not self.marker.exists(),
-                "marker already exists")
+        # The hold was claimed before this read: what must hold now is
+        # ownership of it, not its absence.
+        require(self.owns_marker(), "hold lost before inventory")
         self.verify_target_tag()
 
     def verify_target_tag(self):
@@ -574,6 +738,9 @@ class Run:
         self.phase("split_intent", triggers=self.split_map,
                    original=self.original,
                    stopped_pre=sorted(self.stopped_pre))
+        # Stop only while this run holds admission: another run cannot be
+        # beneath the same marker, and a lost hold must not stop units.
+        require(self.owns_marker(), "hold lost before the split stop")
         self.units.stop(sorted(self.stopped_pre))
         observed = {unit: self.units.state(unit) for unit in self.triggers}
         require(observed == self.split_map, "split mismatch: observed "
@@ -616,11 +783,43 @@ class Run:
                 "candidate_deps digest mismatch")
         self.assert_ancestry(root, ancestry)
         self.assert_cq_bin_policy(candidate)
-        require(not self.marker.is_symlink() and not self.marker.exists(),
-                "marker appeared during preflight")
+        require(self.owns_marker(), "marker ownership lost during preflight")
         require({unit: self.units.state(unit) for unit in self.triggers}
                 == self.split_map, "preflight trigger drift")
         self.assert_baseline_journal()
+        # D7 from host truth, last so every earlier refusal keeps its order:
+        # the controller's own compatibility computation on the LIVE queue.
+        # The journal assertion then demands the permission True the
+        # controller records, which is only sound because a host where it
+        # would be denied never reaches the switch.
+        compatibility = self.controller.compatibility_record(
+            self.effects, self.args.target_sha)
+        require(self.controller.rollback_compatible(compatibility),
+                "D7: the live queue denies the controller's automatic "
+                "rollback, so this runbook will not deploy against it: "
+                + self.compatibility_reason(compatibility))
+
+    @staticmethod
+    def compatibility_reason(record):
+        """The evidence that denied automatic rollback, named for the
+        operator. Never paraphrases a value it did not read."""
+        if not isinstance(record, dict) or record.get("checked") is not True:
+            return "the compatibility record was not checked"
+        if record.get("schema_marker_present") is not False:
+            schema = record.get("queue_schema")
+            if isinstance(schema, str) and schema.startswith("unreadable: "):
+                return ("the state queue could not be read ("
+                        + schema[len("unreadable: "):]
+                        + "), so the controller never proved the prior "
+                        "target can read it")
+            return ("the queue carries an explicit schema marker ("
+                    + repr(schema) + ") that the prior "
+                    "target's reader was never proven against")
+        observed = record.get("schema_observations")
+        if observed:
+            return ("the queue carries state keys the prior target was never "
+                    "proven to read: " + ", ".join(map(str, observed)))
+        return "the compatibility record is not the clean shape"
 
     def assert_config_relations(self, candidate, prior):
         config = self.manifest["config"]
@@ -805,7 +1004,6 @@ class Run:
         path (after the pointer render) must resolve to a tree whose
         digest equals candidate_dist_sha256, or the release refuses before
         any trigger restarts."""
-        identity = self.manifest["identity"]
         live = json.loads(
             (Path(self.args.root) / "apps/crq-python/config.json").read_text())
         pointer = (live.get("repair") or {}).get("cq_bin")
@@ -817,6 +1015,17 @@ class Run:
                 "live dist digest mismatch: the executed runtime at "
                 + str(live_dist) + " is not the verified candidate "
                 "artifact (candidate_dist_sha256)")
+        # Review finding: the controller's checkout never installs
+        # dependencies, and build.mjs emits unbundled output, so an
+        # approved dist over stale node_modules can be inert where cq_bin
+        # points here. The live runtime's dependency graph must equal the
+        # candidate_deps_sha256 pin before anything restarts.
+        live_deps = live_dist.parent / "node_modules"
+        require(digests.deps_digest(live_deps)
+                == self.manifest["artifacts"]["candidate_deps_sha256"],
+                "live deps digest mismatch: node_modules at " + str(live_deps)
+                + " is not the verified candidate dependency graph "
+                "(candidate_deps_sha256)")
 
     def switch(self):
         record_dir = self.output_dir / "controller-records"
@@ -858,7 +1067,17 @@ class Run:
                 "controller switch failed with exit " + str(completed.returncode))
 
     def assert_journal(self, journal):
-        """The full assertion set, not a subset (binding addition 3)."""
+        """The full assertion set, not a subset (binding addition 3).
+
+        D7 is the controller's own semantics, asserted in its shape: a
+        clean pre-switch queue (no schema marker, no ``author_*`` keys)
+        is exactly the record ``rollback_compatible()`` grants, so the
+        completed deploy journal must carry permission True beside clean
+        evidence. A False there is a journal no controller run can
+        produce and refuses. The runbook's own policy — the permission is
+        never exercised; rollback stays an owner operation — is a
+        sequence fact, not a journal flag, and is stated in the module
+        docstring and docs."""
         identity = self.manifest["identity"]
         require(journal.get("operation") == "deploy", "journal operation mismatch")
         require(journal.get("outcome") == "completed", "journal outcome not completed")
@@ -869,24 +1088,51 @@ class Run:
         require(journal.get("tag") == self.args.target_tag, "journal tag mismatch")
         require(journal.get("helper_sha256") == identity["helper_sha256"],
                 "journal helper_sha256 mismatch")
-        require(journal.get("automatic_rollback_permitted") is False,
-                "D7: journal automatic_rollback_permitted must be false")
-        require((journal.get("rollback_compatibility") or {}).get("checked") is True,
-                "journal rollback_compatibility must be checked")
-        # D7 is established from evidence recorded BEFORE the switch: the
-        # journal's compatibility record describes the pre-switch queue
-        # (captured at controller preflight), so an explicit schema marker
-        # there means automatic rollback was already impossible when the
-        # checkout moved. The runbook requires that fact to be clean, not
-        # discovered: automatic_rollback_permitted false must follow from
-        # evidence, not from the controller's post-switch computation.
+        require(journal.get("automatic_rollback_permitted") is True,
+                "D7: a clean pre-switch queue grants the controller's "
+                "automatic rollback; a journal claiming False beside "
+                "compatibility evidence is not one the controller writes "
+                "(assert automatic_rollback_permitted is True)")
+        # The permission is sound because preflight already ran the
+        # controller's own compatibility computation on the live queue and
+        # refused when it would deny rollback. The journal must then carry
+        # BOTH records the controller's decision consumes: the pre-switch
+        # record (evidence the prior target could read the queue this deploy
+        # started from) and the post-switch record (permission True beside
+        # clean evidence, the only pair the controller can emit).
+        pre = (((journal.get("plan") or {}).get("preflight") or {})
+               .get("rollback_compatibility"))
+        require(isinstance(pre, dict) and pre.get("checked") is True
+                and pre.get("schema_marker_present") is False
+                and not pre.get("schema_observations"),
+                "D7: the journal must record the pre-switch queue as "
+                "readable by the prior target (checked, no schema marker, "
+                "no author_* keys)")
         compatibility = journal.get("rollback_compatibility") or {}
-        require(compatibility.get("checked") is True
-                and compatibility.get("schema_marker_present") is False
+        require(compatibility.get("checked") is True,
+                "D7: post-switch rollback_compatibility must be checked")
+        require(isinstance(compatibility.get("schema_marker_present"), bool),
+                "D7: post-switch schema_marker_present must be a boolean")
+        require(isinstance(compatibility.get("schema_observations"), list),
+                "D7: post-switch schema_observations must be a list")
+        require(compatibility.get("schema_marker_present") is False
                 and not compatibility.get("schema_observations"),
-                "D7: pre-switch queue must be proven rollback-compatible "
-                "(no schema marker, no author_* keys); automatic rollback "
-                "must be impossible by evidence, never assumed")
+                "D7: the post-switch queue must still be the clean shape "
+                "that grants automatic rollback (no schema marker, no "
+                "author_* keys); a permission True beside dirty evidence "
+                "is not a journal the controller writes")
+        # The release records the granted permission and the operator is
+        # told: this runbook never invokes rollback, but the controller's
+        # automatic rollback stays available after this deploy.
+        self.rollback = {
+            "automatic_rollback_permitted": True,
+            "statement": ("automatic rollback remains available: the "
+                          "post-switch queue carries no schema marker and "
+                          "no author_* keys, so the controller's own "
+                          "compatibility check still grants it. This runbook "
+                          "never invokes rollback; recovery stays an owner "
+                          "operation.")}
+        narrate("D7: " + self.rollback["statement"])
         require(journal.get("prior_tag") == self.args.prior_tag,
                 "journal prior_tag mismatch")
         require(journal.get("prior_config_sha256")
@@ -965,12 +1211,20 @@ class Run:
     # -- step 9: record --------------------------------------------------------
     def write_release(self):
         require(self.released, "release.json requires a released run")
+        require(self.rollback is not None,
+                "release requires the D7 journal evidence")
         durable_write(self.output_dir / "release.json",
                       {"released_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                      time.gmtime()),
                        "final_triggers": self.final_triggers,
                        "rehearsal": bool(getattr(self.args, "rehearsal", False)),
+                       "rollback": self.rollback,
                        "runbook_sha256": self.args.runbook_sha256})
+        narrate("released " + self.args.target_sha[:10] + " "
+                + self.args.target_tag + "; automatic rollback "
+                + ("available (owner-only, never invoked by this runbook)"
+                   if self.rollback["automatic_rollback_permitted"]
+                   else "unavailable"))
 
     def write_range_note(self):
         annotations = {}
@@ -1136,14 +1390,15 @@ def rehearsal_effects_factory(marker_path, effects_builder):
                   "construct live systemd unit providers")
 
 
-def execute(args, effects_factory=None) -> int:
+def execute(args, effects_factory=None) -> dict:
     """Validate, build the run, execute it. Any Refused propagates.
 
     ``effects_factory`` is the injectable construction seam: a test or
     rehearsal passes a factory returning ``RunEffects`` with fake providers,
     and the test asserts on the factory's argument, proving no real effects
     were constructed. Production (factory None) builds ``RealUnits`` and the
-    controller's ``Effects``."""
+    controller's ``Effects``. Returns the run's result document (the caller
+    prints it; ``main`` maps it to an exit status)."""
     # The authorization guard runs first: a production invocation without
     # --operator-go must not import candidate code, construct effects or
     # touch record directories when active triggers sit on the host.
@@ -1174,6 +1429,14 @@ def execute(args, effects_factory=None) -> int:
             "--target-sha must equal the manifest identity target_sha: "
             "command line " + str(args.target_sha) + " manifest "
             + str(manifest["identity"]["target_sha"]))
+    # The manifest restates the marker path for review; the executable value
+    # is derived from --root (``marker_path``) so the two are the same file
+    # the tick reads. Any other manifest value is refused rather than kept as
+    # a second, unchecked source of truth.
+    require(manifest["marker"]["path"] == MARKER_RELPATH,
+            "manifest marker.path must be exactly " + MARKER_RELPATH
+            + " (the tick's own marker); got "
+            + repr(manifest["marker"]["path"]))
     if args.rehearsal:
         # Finding 3, defense in depth: even a direct execute() call with
         # --rehearsal must not fall through to the live factory.
@@ -1192,7 +1455,7 @@ def execute(args, effects_factory=None) -> int:
     # providers, journals or record directories.
     check_active_trigger_authorization(args)
     effects = effects_factory(
-        Path(args.root) / "apps/crq-python/state/runner-disabled",
+        marker_path(args.root),
         effects_builder)
     check_no_live_units_without_rehearsal(args, effects.units)
     run = Run(args, effects.units, host, controller, effects.host_effects,
@@ -1206,6 +1469,19 @@ def read_observed_triggers(units, manifest):
     """One read per trigger of the live unit states (requirement 2)."""
     return {unit: units.state(unit)
             for unit in sorted(manifest["triggers"]["expected"])}
+
+
+def print_result_document(args, payload):
+    """Print the deploy path's one machine-readable result document to
+    stdout. The repo contract: every operation invocation writes
+    machine-readable JSON to stdout; narration and error envelopes stay
+    on stderr. Called for the completed run and for terminal refusals, so
+    automation reads the outcome from the artifact either way."""
+    document = {"output_dir": str(args.output_dir),
+                "rehearsal": bool(getattr(args, "rehearsal", False)),
+                "runbook_sha256": args.runbook_sha256,
+                **payload}
+    print(json.dumps(document, indent=2, sort_keys=True))
 
 
 def cmd_status(args, units=None) -> int:
@@ -1328,8 +1604,11 @@ def main(argv=None, effects_factory=None, status_units=None) -> int:
     Finding 1: ``require_released`` exists at parser level with a default,
     so a deploy invocation never reads a missing attribute; the status
     subcommand keeps its own explicit flag. Finding 3: ``--rehearsal``
-    selects the in-memory provider and the fake controller journal — a
-    rehearsal constructs no real effects and cannot reach systemd."""
+    selects the in-memory provider and the controller-shaped rehearsal
+    journal — a rehearsal constructs no real effects and cannot reach
+    systemd. The deploy path prints exactly one result document to stdout
+    (success or terminal refusal); narration and the process error
+    envelope stay on stderr."""
     parser = build_arg_parser()
     parser.add_argument("--json", action="store_true",
                         help="accepted for interface parity; output is always JSON")
@@ -1341,6 +1620,18 @@ def main(argv=None, effects_factory=None, status_units=None) -> int:
     status.add_argument("--output-dir", required=True, type=Path)
     status.add_argument("--require-released", action="store_true",
                         dest="status_require_released", default=False)
+
+    def parser_error(message):
+        # Machine-mode boundary for argparse itself: argument errors used to
+        # bypass the JSON envelope entirely (usage text on stderr, empty
+        # stdout). The envelope goes to stdout; the narration and the
+        # argparse exit status stay on stderr/2.
+        print(json.dumps({"error": {"kind": "argument_error",
+                                     "message": str(message)[:400]}},
+                         indent=2, sort_keys=True))
+        parser.exit(2, "deploy-runbook: error: " + str(message) + "\n")
+
+    parser.error = parser_error
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     if args.operation == "status":
         return cmd_status(args, units=status_units)
@@ -1365,16 +1656,34 @@ def main(argv=None, effects_factory=None, status_units=None) -> int:
                      + ", ".join(missing))
     if args.rehearsal and effects_factory is None:
         effects_factory = make_rehearsal_effects_factory(args)
-    return execute(args, effects_factory)
+    try:
+        result = execute(args, effects_factory)
+    except Refused as exc:
+        print_result_document(args, {"operation": "deploy",
+                                     "outcome": "refused",
+                                     "released": False,
+                                     "reason": str(exc)[:400]})
+        raise
+    except TimeoutError as exc:
+        print_result_document(args, {"operation": "deploy",
+                                     "outcome": "timeout",
+                                     "released": False,
+                                     "reason": str(exc)[:400]})
+        raise
+    print_result_document(args, result)
+    if result.get("outcome") == "completed" and result.get("released") is True:
+        return 0
+    return 2
 
 
 def make_rehearsal_effects_factory(args):
     """The rehearsal binding: in-memory unit provider, the controller's
     Effects against the throwaway clone, and a prepare_run hook that binds
-    the rehearsal controller journal (derived from the run's own verified
-    facts) in place of the real switch subprocess. Returns a factory whose
-    marker argument the execute seam supplies; the rehearsal therefore
-    cannot construct real effects or run systemctl."""
+    the rehearsal controller journal (shaped by the controller's own
+    ``deploy_journal``) and the real target checkout in place of the real
+    switch subprocess. Returns a factory whose marker argument the execute
+    seam supplies; the rehearsal therefore cannot construct real effects
+    or run systemctl."""
     manifest_document = load_json(args.manifest)
     triggers = sorted(manifest_document["triggers"]["expected"])
     services = sorted(manifest_document["triggers"]["services"])
@@ -1390,37 +1699,62 @@ def make_rehearsal_effects_factory(args):
     return factory
 
 
-def rehearsal_journal(run):
-    """The rehearsal controller journal: every asserted field derived from
-    facts the runbook verified itself (manifest identity, live HEAD, pinned
-    helper digest), so the journal assertion set runs for real against it."""
+def rehearsal_journal(run, pre_record=None):
+    """The rehearsal controller journal, shaped by the controller's own
+    journal schema: ``compatibility_record`` reads the rehearsal queue
+    through the real Effects seam and ``deploy_journal`` shapes the document
+    exactly as ``deploy_plan`` writes it, including
+    ``plan["automatic_rollback_permitted"] = rollback_compatible(pre+post)``
+    — the key the controller's decision actually reads. The pre-switch record
+    is passed in when the caller captured it BEFORE the emulated checkout;
+    otherwise it is read from the same live queue, which the emulated
+    checkout does not touch. A rehearsal journal is therefore not
+    hand-written: its D7 pair is the one a controller run produces."""
     identity = run.manifest["identity"]
-    return {
-        "operation": "deploy", "outcome": "completed",
-        "prior_head": identity["prior_sha"],
-        "target": run.args.target_sha,
-        "tag": run.args.target_tag,
-        "helper_sha256": identity["helper_sha256"],
-        "automatic_rollback_permitted": False,
-        "rollback_compatibility": {"checked": True,
-                                   "schema_marker_present": False,
-                                   "schema_observations": []},
-        "prior_tag": run.args.prior_tag,
-        "prior_config_sha256":
-            run.manifest["config"]["running_config_sha256"],
-        "schema_version": RUNBOOK_SCHEMA_VERSION,
-        "transaction_id": "rehearsal-" + run.run_id,
-    }
+    pre = pre_record if pre_record is not None else \
+        run.controller.compatibility_record(run.effects, run.args.target_sha)
+    post = run.controller.compatibility_record(run.effects,
+                                               run.args.target_sha)
+    prior_state = {"prior_head": identity["prior_sha"],
+                   "prior_config_sha256":
+                       run.manifest["config"]["running_config_sha256"]}
+    plan = {"helper_sha256": identity["helper_sha256"],
+            "preflight": {"rollback_compatibility": pre},
+            "rollback_compatibility_after": post,
+            "automatic_rollback_permitted":
+                run.controller.rollback_compatible({**pre, **post})}
+    journal = run.controller.deploy_journal(
+        prior_state, run.args.target_sha, run.args.target_tag, plan,
+        prior_tag=run.args.prior_tag)
+    journal["outcome"] = "completed"
+    journal["transaction_id"] = "rehearsal-" + run.run_id
+    return journal
 
 
 def install_rehearsal_journal(run):
     """Bind the rehearsal journal writer over the real controller subprocess
-    invocation. The journal assertions in switch() still run on what lands."""
+    invocation. The journal assertions in switch() still run on what lands.
+    The rehearsal switch also performs the real target checkout (tracked
+    config restore + detach) exactly as the production controller does, so an
+    approved-delta rehearsal exercises the same post-switch live render the
+    production run sees; the later point() pins verify against what the
+    rehearsal itself wrote. The pre-switch compatibility record is captured
+    BEFORE the checkout, as the controller's preflight captures it."""
     original_switch = run.run_controller_switch
 
     def rehearsed_switch(record_dir):
+        pre = run.controller.compatibility_record(run.effects,
+                                                  run.args.target_sha)
+        # The production controller's helper restores the tracked config
+        # and detaches HEAD at the target; emulate both here.
+        subprocess.run(["git", "-C", str(run.args.root), "checkout", "-q",
+                        "--", "apps/crq-python/config.json"],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(run.args.root), "checkout", "-q",
+                        "--detach", run.args.target_sha],
+                       check=True, capture_output=True)
         record_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        payload = rehearsal_journal(run)
+        payload = rehearsal_journal(run, pre)
         (record_dir / "controller-rehearsal.json").write_text(
             json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
