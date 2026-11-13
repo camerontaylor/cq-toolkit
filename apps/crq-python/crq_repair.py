@@ -936,6 +936,16 @@ def drain_items(config, groups, order):
                     os.close(refused_r)
                     os.close(refused_w)
                     break
+                # The lock wait can outlast an admitted child's refusal and a
+                # marker write: re-sample both while admission is still ours,
+                # before this fork, or the wait itself becomes an admission.
+                stopped = refusal_published(active) or stopped
+                if stopped or runner_disabled():
+                    if runner_disabled():
+                        narrate(RUNNER_DISABLED + ': pass stopped before ' + str(item))
+                    os.close(refused_r)
+                    os.close(refused_w)
+                    break
                 # Fork duplicates this parent's stdout/stderr buffers; the child
                 # flushes its copy, so flush here or buffered parent lines (such
                 # as the backfill triage report) are written again per child.
@@ -978,6 +988,10 @@ def drain_items(config, groups, order):
                 finally:
                     os._exit(code)
             os.close(refused_w)
+            # Register the child BEFORE the blocking read: an interrupt that
+            # lands in the barrier must still find this admitted child in
+            # active, or the cleanup releases service.lock beneath it.
+            active[pid] = (item, refused_r)
             # Barrier: the child publishes its item-gate result before any work.
             # Accepted means the child passed the gate; refused or a dead child
             # (EOF) latches the coordinator stop.
@@ -986,7 +1000,6 @@ def drain_items(config, groups, order):
             except OSError:
                 admitted = False
             os.set_blocking(refused_r, False)
-            active[pid] = (item, refused_r)
             if not admitted:
                 stopped = True
     finally:
@@ -1141,6 +1154,13 @@ def recover_job(config, job_id):
     if not c.ran_locked(check_owner):
         raise RuntimeError('tick busy; recovery deferred')
     def judge(old, context, directory):
+        if runner_disabled():
+            # A handover can start during the tick-lock wait above; the attempt
+            # stays deferred, spends no budget and starts no model call.
+            narrate(RUNNER_DISABLED + ': recovery judge deferred')
+            publish_refusal()
+            return {'stop': 'configuration', 'errorClass': 'runner-disabled',
+                    'reason': 'runner disabled for host handover; recovery judge deferred'}
         if blocked(config['repair']):
             # The blackout can start during the tick-lock wait above; recover()
             # holds the attempt budget and defers the judgment, never a model call.
@@ -1243,6 +1263,11 @@ def main(argv=None):
             error = fetch_clone(config)
             if error:
                 narrate('repair recovery deferred: ' + error[:200])
+                return
+            # The marker can be written during the fetch's tick-lock wait or
+            # network call: recheck before the recovery judgment spends.
+            if runner_disabled():
+                narrate(RUNNER_DISABLED + ': recovery deferred for ' + args.recover_job)
                 return
             result = recover_job(config, args.recover_job)
             if result.get('report', {}).get('stop') == 'rate-limit':
