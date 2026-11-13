@@ -260,6 +260,221 @@ def summarize(status, queue, heartbeat, config, events, now):
         "outcomes_24h": outcomes, "other_outcomes_24h": other, "backlog": backlog,
         # Additive multi-repo block: schema stays 2; readers ignore unknown keys.
         "repos": repos_summary(queue, primary, config.get("repos") or ()),
+        # Additive S3c metrics block; schema stays 2; readers ignore unknown keys.
+        "review_metrics": review_metrics(queue, events, now),
+    }
+
+
+LATENCY_BUCKETS = ("lt_60s", "lt_600s", "lt_3600s", "gte_3600s")
+
+
+def _bucket(lag):
+    if lag < 60:
+        return "lt_60s"
+    if lag < 600:
+        return "lt_600s"
+    if lag < 3600:
+        return "lt_3600s"
+    return "gte_3600s"
+
+
+def _unknown(reason):
+    return {"state": "unknown", "reason": reason}
+
+
+def _latency_acc():
+    return {"count": 0, "buckets": dict.fromkeys(LATENCY_BUCKETS, 0)}
+
+
+def review_metrics(queue, events, now):
+    """Spec §14 counts derived from queue state and operation events.
+
+    Additive and bounded: counters only, no second reporting store, no new
+    poller and no unbounded list. A value the queue does not retain is
+    emitted as an explicit unknown with a reason, never coerced to zero; a
+    skipped invocation is never reported as a monetary saving.
+    """
+    items = {i.get("id"): i for i in queue.get("items", [])
+             if isinstance(i, dict) and isinstance(i.get("id"), str)}
+
+    def is_repeat(item):
+        return (item.get("generation", 1) > 1 or
+                item.get("repeat_requested") is True or
+                item.get("ancestry_repeat") is True)
+
+    requests = queue.get("review_requests") or {}
+    created = joined = reused = action_unknown = pr_reuse = 0
+    dedup_completed = 0
+    predecessor_links = supersede_links = 0
+    request_items = set()
+    for binding in requests.values():
+        if not isinstance(binding, dict):
+            action_unknown += 1
+            continue
+        if binding.get("predecessor") is not None:
+            predecessor_links += 1
+        if binding.get("supersedes") is not None:
+            supersede_links += 1
+        item = items.get(binding.get("item"))
+        req_at = timestamp(binding.get("created_at"))
+        if item is None or item.get("kind") != "local-review" or req_at is None:
+            action_unknown += 1
+            continue
+        request_items.add(item["id"])
+        item_created = timestamp(item.get("created_at"))
+        if item_created is not None and req_at <= item_created:
+            created += 1
+        else:
+            completed_at = timestamp(item.get("completed_at"))
+            if completed_at is not None and req_at >= completed_at:
+                reused += 1
+                if item.get("pr") is not None:
+                    pr_reuse += 1
+                if item.get("state") == "done" and item.get("scope_adequate") is True:
+                    dedup_completed += 1
+            else:
+                joined += 1
+    starts = failed = unknown_attempts = 0
+    wait = {"interactive": _latency_acc(), "background": _latency_acc()}
+    wait_class = {"first": _latency_acc(), "repeat": _latency_acc()}
+    completion = {"interactive": _latency_acc(), "background": _latency_acc()}
+    completion_class = {"first": _latency_acc(), "repeat": _latency_acc()}
+    repeat_items = completed_repeats = pr_items = 0
+    app_items = app_attempts = 0
+    for item in items.values():
+        if item.get("kind") != "local-review":
+            request = item.get("pr_review_request")
+            if isinstance(request, dict):
+                app_items += 1
+                attempts = item.get("pr_review_attempts")
+                if type(attempts) is int:
+                    app_attempts += attempts
+            continue
+        if item.get("pr") is not None:
+            pr_items += 1
+        repeated = is_repeat(item)
+        if repeated:
+            repeat_items += 1
+            if item.get("state") == "done" and item.get("scope_adequate") is True:
+                completed_repeats += 1
+        if isinstance(item.get("run"), dict):
+            starts += 1
+        attempts = item.get("attempts")
+        if not isinstance(attempts, list):
+            attempts = ()
+        created_at = timestamp(item.get("created_at"))
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                unknown_attempts += 1
+                continue
+            starts += 1
+            outcome = attempt.get("outcome")
+            if outcome is None or outcome not in ("completed", "interrupted", "error", "timeout"):
+                unknown_attempts += 1
+            elif outcome != "completed" or attempt.get("counted") is False:
+                failed += 1
+            band = attempt.get("band") if attempt.get("band") in ("interactive", "background") else None
+            started_at = timestamp(attempt.get("started_at"))
+            if band is not None and started_at is not None and created_at is not None:
+                lag = max(0, started_at - created_at)
+                add_to = wait_class["repeat"] if repeated else wait_class["first"]
+                add_to["count"] += 1
+                add_to["buckets"][_bucket(lag)] += 1
+                wait[band]["count"] += 1
+                wait[band]["buckets"][_bucket(lag)] += 1
+        if (created_at is not None and item.get("state") == "done" and
+                item.get("scope_adequate") is True):
+            completed_at = timestamp(item.get("completed_at"))
+            if completed_at is not None:
+                lag = max(0, completed_at - created_at)
+                bands = {a.get("band") for a in attempts if isinstance(a, dict)}
+                band = "interactive" if "interactive" in bands else "background"
+                add_to = completion_class["repeat"] if repeated else completion_class["first"]
+                add_to["count"] += 1
+                add_to["buckets"][_bucket(lag)] += 1
+                completion[band]["count"] += 1
+                completion[band]["buckets"][_bucket(lag)] += 1
+    started_events = spawn_failed_events = 0
+    for event in events:
+        at = timestamp(event.get("at")) if isinstance(event, dict) else None
+        if at is None or not now - 86400 <= at <= now:
+            continue
+        kind = event.get("event")
+        if kind == "review_started":
+            started_events += 1
+        elif kind == "spawn_failed":
+            spawn_failed_events += 1
+    usage = queue.get("usage")
+    if isinstance(usage, dict) and type(usage.get("limit")) is int and usage["limit"] > 0:
+        quota = {"state": "known", "limit": usage["limit"]}
+        if type(usage.get("remaining")) is int:
+            quota["remaining"] = usage["remaining"]
+    else:
+        quota = _unknown("no current vendor usage observation in queue state")
+    cooldown_until = queue.get("cooldown_until")
+    cooldown_at = timestamp(cooldown_until)
+    if cooldown_until is None:
+        cooldown = {"state": "none"}
+    elif cooldown_at is None:
+        cooldown = _unknown("unparsable cooldown timestamp")
+    else:
+        cooldown = {"state": "active" if cooldown_at > now else "expired",
+                    "until": cooldown_until,
+                    "seconds_remaining": max(0, cooldown_at - now)}
+    outbox = queue.get("review_notify_outbox") or {}
+    notify_states = {"sent": 0, "error": 0, "pending": 0, "withdrawn": 0}
+    retries = 0
+    for row in outbox.values():
+        if not isinstance(row, dict):
+            continue
+        state = row.get("state")
+        if state in notify_states:
+            notify_states[state] += 1
+        attempts = row.get("attempts")
+        if type(attempts) is int and attempts > 1:
+            retries += attempts - 1
+    return {
+        "requests": {"total": len(requests), "created": created, "joined": joined,
+                     "reused": reused, "unknown_action": action_unknown},
+        "dedup": {"requests_without_new_item": joined + reused,
+                  "on_completed_items": dedup_completed,
+                  "monetary_saving": _unknown(
+                      "a skipped invocation is not a measured monetary saving")},
+        "vendor_starts": starts,
+        "operation_events_24h": {"review_started": started_events,
+                                 "spawn_failed": spawn_failed_events},
+        "queue_wait": {"interactive": wait["interactive"],
+                       "background": wait["background"],
+                       "first": wait_class["first"], "repeat": wait_class["repeat"]},
+        "completion": {"interactive": completion["interactive"],
+                       "background": completion["background"],
+                       "first": completion_class["first"],
+                       "repeat": completion_class["repeat"]},
+        "repeats": {"repeat_items": repeat_items, "completed_repeats": completed_repeats},
+        "predecessor": {"linked_requests": predecessor_links,
+                        "superseding_requests": supersede_links,
+                        "change_statistics": _unknown(
+                            "predecessor deltas are advisory-only and not retained in queue state")},
+        "cooldown": cooldown,
+        "attempts": {"failed": failed, "unknown": unknown_attempts},
+        "quota": quota,
+        "notifications": {**notify_states, "retries": retries,
+                          "delivery_lag": _unknown(
+                              "outbox rows do not record send completion time"),
+                          "consumption_lag": _unknown(
+                              "result consumption is not observed")},
+        "pr_associated": {"items": pr_items,
+                          "reuse_requests": pr_reuse,
+                          "additional_starts": starts - sum(
+                              1 for i in items.values()
+                              if i.get("kind") == "local-review" and i.get("pr") is None)},
+        "app_reviews": {"items": app_items, "attempts": app_attempts},
+        "records": {"ingestion_lag": _unknown(
+                        "record import timestamps are retained in the ledger, not queue state"),
+                    "unknown_scope_rate": _unknown(
+                        "record scope confidence is retained in the ledger, not queue state"),
+                    "projection_failures": _unknown(
+                        "submit projection failures are not retained as operation events")},
     }
 
 
