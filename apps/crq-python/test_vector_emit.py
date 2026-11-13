@@ -302,6 +302,19 @@ class VectorFileTest(unittest.TestCase):
         self.assertEqual(vector_emit.encode(vector_emit.build()),
                          vector_emit.encode(vector_emit.build()))
 
+    def test_emission_binds_the_recorded_aging_limit(self):
+        # `crq.rank` reads CONFIG at call time. Emission must bind the value the
+        # vector records, not the host's config.json, or an ambient override
+        # changes emitted ranks while replay keeps using the recorded value.
+        saved = crq.CONFIG["local_review_aging_minutes"]
+        try:
+            crq.CONFIG["local_review_aging_minutes"] = 30
+            emitted = vector_emit.build()["tick-schedule"]
+        finally:
+            crq.CONFIG["local_review_aging_minutes"] = saved
+        checked_in = json.loads((FIXTURE_ROOT / "tick-schedule.json").read_text())
+        self.assertEqual(emitted, checked_in)
+
     def test_subprocess_emission_is_independent_of_hash_seed(self):
         command = [sys.executable, str(HERE / "vector_emit.py"), "--stdout"]
         first = subprocess.run(

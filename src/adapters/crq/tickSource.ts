@@ -28,7 +28,7 @@
  *   never proves a runner alive.
  */
 import { execFile } from 'node:child_process';
-import { readFile, stat } from 'node:fs/promises';
+import { open, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { JsonObject, parseJsonValue } from '../../policy/crq/jsonValue.js';
 import { isRecord } from '../../policy/crq/receiptIdentity.js';
@@ -139,8 +139,26 @@ const VENDOR_PROGRESS_BYTES = 65_536;
 async function vendorProgress(path: string): Promise<boolean> {
   let text: string;
   try {
-    const bytes = await readFile(path);
-    text = bytes.subarray(0, VENDOR_PROGRESS_BYTES).toString('utf8');
+    const handle = await open(path, 'r');
+    try {
+      const bytes = Buffer.alloc(VENDOR_PROGRESS_BYTES);
+      let filled = 0;
+      // Python's `stream.read(65536)` fills the buffer unless EOF; a short
+      // `read` here must not shrink the evidence window.
+      while (filled < VENDOR_PROGRESS_BYTES) {
+        const { bytesRead } = await handle.read(
+          bytes,
+          filled,
+          VENDOR_PROGRESS_BYTES - filled,
+          filled,
+        );
+        if (bytesRead === 0) break;
+        filled += bytesRead;
+      }
+      text = bytes.subarray(0, filled).toString('utf8');
+    } finally {
+      await handle.close();
+    }
   } catch {
     return false;
   }

@@ -12,6 +12,7 @@ import {
   TICK_MISSING_EFFECTS,
   type TickPlanValue,
 } from '../../src/queue-runner/tick.js';
+import { run } from '../../src/queue-runner/runner.js';
 import type { TickEffects } from '../../src/adapters/crq/tickSource.js';
 
 const NOW = 1_700_000_000_000_000n; // 2023-11-14T22:13:20Z, deterministic.
@@ -141,6 +142,25 @@ describe('crq tick: refusals', () => {
   it('rejects commands and arguments it cannot serve', async () => {
     await expect(planTick('/unused', 'harvest', [])).rejects.toThrow(/not implemented/);
     await expect(planTick('/unused', 'tick', ['--now'])).rejects.toThrow(/does not accept/);
+  });
+
+  it('reports unsupported tick arguments as the usage artifact', async () => {
+    const result = await run(['tick', '--dry-run', '--now'], {
+      shadowRoot: '/unused',
+      tick: 'tick-1',
+      planner: (command, args) => planTick('/unused', command, args),
+    });
+    expect(result).toEqual({
+      artifact: {
+        error: {
+          kind: 'usage',
+          subcommand: 'tick',
+          message: 'tick does not accept these arguments',
+          exitCode: 2,
+        },
+      },
+      exitCode: 2,
+    });
   });
 
   it('short-circuits a disarmed runner before reading config or queue', async () => {
@@ -357,6 +377,31 @@ describe('crq tick: real host probes', () => {
       target: 'queue.json#/last_tick',
       value: isoSeconds(NOW),
     });
+  });
+
+  it('collects vendor progress before the usage snapshot', async () => {
+    const order: string[] = [];
+    const queue = {
+      items: [{ id: 'rev', kind: 'open', state: 'reviewing', run: { run_id: 'run-0001' } }],
+    };
+    await planTick(
+      '/unused',
+      'tick',
+      [],
+      fakeEffects({
+        readQueue: async () => JSON.stringify(queue),
+        readConfig: async () => JSON.stringify(CONFIG),
+        vendorProgress: async () => {
+          order.push('progress');
+          return true;
+        },
+        readUsage: async () => {
+          order.push('usage');
+          return null;
+        },
+      }),
+    );
+    expect(order).toEqual(['progress', 'usage']);
   });
 });
 

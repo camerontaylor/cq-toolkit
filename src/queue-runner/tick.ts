@@ -54,7 +54,7 @@ import {
 } from '../policy/crq/tickSchedule.js';
 import { TickAdmissionError } from '../policy/crq/tickAdmission.js';
 import type { VendorUsage } from '../policy/crq/usageSlots.js';
-import type { Mutation, Plan } from './runner.js';
+import { PlannerUsageError, type Mutation, type Plan } from './runner.js';
 
 /**
  * Everything a live tick does that this planner does not. The value's reason
@@ -385,7 +385,7 @@ export async function planTick(
   }),
 ): Promise<Plan> {
   if (command !== 'tick') throw new Error(`${command} is not implemented`);
-  if (args.length !== 0) throw new Error('tick does not accept these arguments');
+  if (args.length !== 0) throw new PlannerUsageError('tick does not accept these arguments');
   if (await effects.runnerDisabled()) {
     return {
       value: { complete: false, disabled: true, reason: 'runner disabled for host handover' },
@@ -405,7 +405,6 @@ export async function planTick(
   const queue = accepted.value;
 
   const nowMicros = effects.nowMicros();
-  const usage = await effects.readUsage(clone);
   const observedRunIds = new Set<string>();
   const runs: RunObservation[] = [];
   const rawItems = queue.items;
@@ -422,6 +421,11 @@ export async function planTick(
   for (const candidate of scanReservations(queue, () => true).observed) {
     if (await effects.vendorProgress(candidate.runId)) observedRunIds.add(candidate.runId);
   }
+  // Read usage only after the progress scan. A run that starts reporting
+  // progress mid-pass then stays in the snapshot's blind spot: the snapshot
+  // may not count its consumption, so releasing its hold would overstate
+  // admission. The Python oracle uses this order (`read_slot_usage`).
+  const usage = await effects.readUsage(clone);
 
   return buildTickPlan({ queue, config, nowMicros, usage, observedRunIds, runs });
 }

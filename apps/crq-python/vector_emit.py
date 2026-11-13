@@ -1510,7 +1510,8 @@ PRIMARY = "example/primary"
 OTHER = "example/other"
 
 
-def _oracle_patches(primary: str, repos: List[Dict[str, Any]], now: str):
+def _oracle_patches(primary: str, repos: List[Dict[str, Any]], now: str,
+                    aging_minutes: int):
     """Bind the module globals the scheduling oracle reads, then restore them.
 
     ``crq.rank`` reads ``REPO``/``REPOS`` for non-primary ranking and
@@ -1520,10 +1521,12 @@ def _oracle_patches(primary: str, repos: List[Dict[str, Any]], now: str):
     """
     from unittest.mock import patch
 
+    config = {**crq.CONFIG, "local_review_aging_minutes": aging_minutes}
     return patch.multiple(
         crq,
         REPO=primary,
         REPOS=repos,
+        CONFIG=config,
         now=lambda: queue_time.parse_utc(now),
     )
 
@@ -1543,7 +1546,8 @@ def _schedule_input(queue: Any = None, item: Any = None, *, now: str = AT,
 def _schedule_case(name: str, function: str, inputs: Dict[str, Any],
                    call: Callable[[], Any]) -> Dict[str, Any]:
     def run() -> Any:
-        with _oracle_patches(inputs["primary_repo"], inputs["repos"], inputs["now"]):
+        with _oracle_patches(inputs["primary_repo"], inputs["repos"], inputs["now"],
+                             inputs["local_review_aging_minutes"]):
             return call()
 
     return _capture(name, f"crq.{function}", inputs, run)
