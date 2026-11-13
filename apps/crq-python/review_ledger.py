@@ -115,7 +115,7 @@ def _schema(value, rule):
     """Evaluate exactly the checked-in schema vocabulary, failing closed."""
     supported = {"$schema", "oneOf", "type", "const", "enum", "required", "properties",
                  "additionalProperties", "items", "minItems", "maxItems", "minimum",
-                 "minLength", "pattern"}
+                 "maxLength", "minLength", "pattern"}
     if set(rule) - supported:
         raise IntegrityError("unsupported schema keyword")
     if "oneOf" in rule:
@@ -150,7 +150,7 @@ def _schema(value, rule):
         for item in value:
             _schema(item, rule.get("items", {}))
     if isinstance(value, str):
-        if len(value) < rule.get("minLength", 0) or "pattern" in rule and not re.fullmatch(rule["pattern"], value):
+        if len(value) < rule.get("minLength", 0) or "pattern" in rule and not re.fullmatch(rule["pattern"], value) or len(value) > rule.get("maxLength", len(value)):
             raise IntegrityError("schema string bound")
     if type(value) is int and value < rule.get("minimum", value):
         raise IntegrityError("schema integer bound")
@@ -200,6 +200,7 @@ def validate(value):
         expected = f"{p['repo']}:{p['source']['producer']}:{p['source']['id']}"
         if value["source_key"] != expected or p["source"]["repo"] != p["repo"]:
             raise IntegrityError("review source identity mismatch")
+        validate_provenance(value)
         requested, input_scope, reviewed = map(scope, (p["requested_scope"], p["input_scope"], p["reviewed_scope"]))
         if digest(p["requested_scope"]) != p["scope_digest"]:
             raise IntegrityError("scope digest mismatch")
@@ -254,6 +255,50 @@ def creditable(value):
     return (p["outcome"] == "completed" and producer and s["authenticated"]
             and c["terminal"] and not c["skipped"] and c["scope_verified"]
             and c["exit_code"] == 0 and not c["errors"])
+
+
+# Manual/agent producers describe evidence for existing policy consumers; no
+# completion they carry can ever satisfy the vendor-verified credit gate.
+REPORT_PRODUCERS = ("manual", "agent")
+
+# Where a record's report was observed. Off-forge imports carry the artifact
+# itself; GitHub observations name the existing fetchReviewState read.
+FORGE_EVIDENCE = ("off-forge-import", "github-review-comment")
+
+
+def report_producer(value):
+    """True for manual/agent review records, the S3b collected reports."""
+    return (value.get("event_type") == "review"
+            and value["payload"]["source"]["type"] in REPORT_PRODUCERS)
+
+
+def validate_provenance(value):
+    """Manual/agent records must separate provenance dimensions honestly.
+
+    Provenance is descriptive evidence for existing policy consumers, never an
+    independent-acceptance verdict: independence stays a string observation and
+    completion evidence may be absent (null). A record that claims CodeRabbit
+    completion is malformed, not credited.
+    """
+    p = value["payload"]
+    if not report_producer(value):
+        if "provenance" in p:
+            raise IntegrityError("provenance is a manual/agent record field")
+        if "supersedes" in p:
+            raise IntegrityError("superseding is a manual/agent record field")
+        return
+    pv = p["provenance"]
+    if not pv["authenticated_submitter"]:
+        raise IntegrityError("record requires the authenticated submitter")
+    if pv["forge_evidence"] not in FORGE_EVIDENCE:
+        raise IntegrityError("record forge evidence must name the observed source")
+    if p["outcome"] == "completed" and pv["completion_evidence"] is None:
+        raise IntegrityError("completed record requires completion evidence or unknown outcome")
+    if p["outcome"] == "completed" and not p["completion"]["scope_verified"]:
+        raise IntegrityError("completed record requires verified scope or an unknown outcome")
+    supersedes = p.get("supersedes")
+    if supersedes is not None and supersedes == value["id"]:
+        raise IntegrityError("record cannot supersede itself")
 
 
 def record_path(value):
