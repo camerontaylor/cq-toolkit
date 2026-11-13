@@ -486,8 +486,16 @@ def review_metrics(queue, events, now):
         elif kind == "spawn_failed":
             spawn_failed_events += 1
     usage = queue.get("usage")
-    if isinstance(usage, dict) and type(usage.get("limit")) is int and usage["limit"] > 0:
-        quota = {"state": "known", "limit": usage["limit"]}
+    # A limit-free observation is still an observation: usage_slots accepts
+    # it and admit_available schedules from `remaining`. Only the absent
+    # limit itself is unknown, never the known balance.
+    if isinstance(usage, dict) and (type(usage.get("limit")) is int or
+                                    type(usage.get("remaining")) is int):
+        quota = {"state": "known"}
+        if type(usage.get("limit")) is int and usage["limit"] > 0:
+            quota["limit"] = usage["limit"]
+        else:
+            quota["limit"] = _unknown("vendor observation carries no review limit")
         if type(usage.get("remaining")) is int:
             quota["remaining"] = usage["remaining"]
     else:

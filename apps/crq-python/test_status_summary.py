@@ -540,8 +540,12 @@ class ReposSummaryTests(unittest.TestCase):
         data = adapter.summarize({"generated_at": "2026-11-07T00:00:00Z"}, queue, {},
                                  {"repo": "owner/repo", "max_starts_per_hour": 8}, [], 0)
         m = data["review_metrics"]
-        self.assertEqual(m["quota"], {"state": "unknown",
-                                      "reason": "no current vendor usage observation in queue state"})
+        # A limit-free balance is still a known observation; only the absent
+        # limit itself is unknown.
+        self.assertEqual(m["quota"], {"state": "known",
+                                      "limit": {"state": "unknown", "reason":
+                                                "vendor observation carries no review limit"},
+                                      "remaining": 2})
         self.assertEqual(m["cooldown"], {"state": "none"})
         self.assertEqual(m["requests"], {"total": 0, "created": 0, "joined": 0,
                                          "reused": 0, "observed": 0, "unknown_action": 0})
