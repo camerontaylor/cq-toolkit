@@ -340,6 +340,7 @@ def review_metrics(queue, events, now):
     completion = {"interactive": _latency_acc(), "background": _latency_acc()}
     completion_class = {"first": _latency_acc(), "repeat": _latency_acc()}
     repeat_items = completed_repeats = pr_items = 0
+    pr_starts = 0
     app_items = app_attempts = 0
     for item in items.values():
         if item.get("kind") != "local-review":
@@ -359,11 +360,13 @@ def review_metrics(queue, events, now):
                 completed_repeats += 1
         if isinstance(item.get("run"), dict):
             starts += 1
-        attempts = item.get("attempts")
-        if not isinstance(attempts, list):
-            attempts = ()
+        item_attempts = item.get("attempts")
+        if not isinstance(item_attempts, list):
+            item_attempts = ()
         created_at = timestamp(item.get("created_at"))
-        for attempt in attempts:
+        if item.get("pr") is not None:
+            pr_starts += len(item_attempts) + (1 if isinstance(item.get("run"), dict) else 0)
+        for attempt in item_attempts:
             if not isinstance(attempt, dict):
                 unknown_attempts += 1
                 continue
@@ -387,7 +390,7 @@ def review_metrics(queue, events, now):
             completed_at = timestamp(item.get("completed_at"))
             if completed_at is not None:
                 lag = max(0, completed_at - created_at)
-                bands = {a.get("band") for a in attempts if isinstance(a, dict)}
+                bands = {a.get("band") for a in item_attempts if isinstance(a, dict)}
                 band = "interactive" if "interactive" in bands else "background"
                 add_to = completion_class["repeat"] if repeated else completion_class["first"]
                 add_to["count"] += 1
@@ -465,9 +468,7 @@ def review_metrics(queue, events, now):
                               "result consumption is not observed")},
         "pr_associated": {"items": pr_items,
                           "reuse_requests": pr_reuse,
-                          "additional_starts": starts - sum(
-                              1 for i in items.values()
-                              if i.get("kind") == "local-review" and i.get("pr") is None)},
+                          "additional_starts": pr_starts},
         "app_reviews": {"items": app_items, "attempts": app_attempts},
         "records": {"ingestion_lag": _unknown(
                         "record import timestamps are retained in the ledger, not queue state"),
@@ -567,7 +568,7 @@ def publish(root, queue, config, schedule, home=None, now=None):
     now = time.time() if now is None else now
     generated = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     data = summarize({"generated_at": generated}, queue, {"last_tick": queue.get("last_tick")},
-                     config, read_events(root / "state/events.jsonl"), now)
+                     config, list(read_events(root / "state/events.jsonl")), now)
     if not data["last_tick"]:
         raise ValueError("no completed tick to publish")
     # Only the bounded public preview is resolved; queue internals stay private.

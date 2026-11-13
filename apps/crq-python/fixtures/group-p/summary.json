@@ -265,6 +265,167 @@
               "other": 0,
               "reviewed_tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             }
+          },
+          "review_metrics": {
+            "requests": {
+              "total": 0,
+              "created": 0,
+              "joined": 0,
+              "reused": 0,
+              "unknown_action": 0
+            },
+            "dedup": {
+              "requests_without_new_item": 0,
+              "on_completed_items": 0,
+              "monetary_saving": {
+                "state": "unknown",
+                "reason": "a skipped invocation is not a measured monetary saving"
+              }
+            },
+            "vendor_starts": 0,
+            "operation_events_24h": {
+              "review_started": 0,
+              "spawn_failed": 0
+            },
+            "queue_wait": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "completion": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "repeats": {
+              "repeat_items": 1,
+              "completed_repeats": 0
+            },
+            "predecessor": {
+              "linked_requests": 0,
+              "superseding_requests": 0,
+              "change_statistics": {
+                "state": "unknown",
+                "reason": "predecessor deltas are advisory-only and not retained in queue state"
+              }
+            },
+            "cooldown": {
+              "state": "active",
+              "until": "2026-11-09T12:15:00Z",
+              "seconds_remaining": 900.0
+            },
+            "attempts": {
+              "failed": 0,
+              "unknown": 0
+            },
+            "quota": {
+              "state": "known",
+              "limit": 6
+            },
+            "notifications": {
+              "sent": 0,
+              "error": 0,
+              "pending": 0,
+              "withdrawn": 0,
+              "retries": 0,
+              "delivery_lag": {
+                "state": "unknown",
+                "reason": "outbox rows do not record send completion time"
+              },
+              "consumption_lag": {
+                "state": "unknown",
+                "reason": "result consumption is not observed"
+              }
+            },
+            "pr_associated": {
+              "items": 1,
+              "reuse_requests": 0,
+              "additional_starts": 0
+            },
+            "app_reviews": {
+              "items": 0,
+              "attempts": 0
+            },
+            "records": {
+              "ingestion_lag": {
+                "state": "unknown",
+                "reason": "record import timestamps are retained in the ledger, not queue state"
+              },
+              "unknown_scope_rate": {
+                "state": "unknown",
+                "reason": "record scope confidence is retained in the ledger, not queue state"
+              },
+              "projection_failures": {
+                "state": "unknown",
+                "reason": "submit projection failures are not retained as operation events"
+              }
+            }
           }
         }
       }
@@ -526,7 +687,166 @@
             "merged-current": 0,
             "backfill": 0
           },
-          "repos": {}
+          "repos": {},
+          "review_metrics": {
+            "requests": {
+              "total": 0,
+              "created": 0,
+              "joined": 0,
+              "reused": 0,
+              "unknown_action": 0
+            },
+            "dedup": {
+              "requests_without_new_item": 0,
+              "on_completed_items": 0,
+              "monetary_saving": {
+                "state": "unknown",
+                "reason": "a skipped invocation is not a measured monetary saving"
+              }
+            },
+            "vendor_starts": 0,
+            "operation_events_24h": {
+              "review_started": 0,
+              "spawn_failed": 0
+            },
+            "queue_wait": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "completion": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "repeats": {
+              "repeat_items": 0,
+              "completed_repeats": 0
+            },
+            "predecessor": {
+              "linked_requests": 0,
+              "superseding_requests": 0,
+              "change_statistics": {
+                "state": "unknown",
+                "reason": "predecessor deltas are advisory-only and not retained in queue state"
+              }
+            },
+            "cooldown": {
+              "state": "none"
+            },
+            "attempts": {
+              "failed": 0,
+              "unknown": 0
+            },
+            "quota": {
+              "state": "unknown",
+              "reason": "no current vendor usage observation in queue state"
+            },
+            "notifications": {
+              "sent": 0,
+              "error": 0,
+              "pending": 0,
+              "withdrawn": 0,
+              "retries": 0,
+              "delivery_lag": {
+                "state": "unknown",
+                "reason": "outbox rows do not record send completion time"
+              },
+              "consumption_lag": {
+                "state": "unknown",
+                "reason": "result consumption is not observed"
+              }
+            },
+            "pr_associated": {
+              "items": 0,
+              "reuse_requests": 0,
+              "additional_starts": 0
+            },
+            "app_reviews": {
+              "items": 0,
+              "attempts": 0
+            },
+            "records": {
+              "ingestion_lag": {
+                "state": "unknown",
+                "reason": "record import timestamps are retained in the ledger, not queue state"
+              },
+              "unknown_scope_rate": {
+                "state": "unknown",
+                "reason": "record scope confidence is retained in the ledger, not queue state"
+              },
+              "projection_failures": {
+                "state": "unknown",
+                "reason": "submit projection failures are not retained as operation events"
+              }
+            }
+          }
         }
       },
       "note": "Ceres retains 70 historical promotion items; none may appear as pending scheduling work or backlog"

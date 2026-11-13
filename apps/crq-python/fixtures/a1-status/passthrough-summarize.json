@@ -95,10 +95,169 @@
             "merged-current": 0,
             "backfill": 0
           },
-          "repos": {}
+          "repos": {},
+          "review_metrics": {
+            "requests": {
+              "total": 0,
+              "created": 0,
+              "joined": 0,
+              "reused": 0,
+              "unknown_action": 0
+            },
+            "dedup": {
+              "requests_without_new_item": 0,
+              "on_completed_items": 0,
+              "monetary_saving": {
+                "state": "unknown",
+                "reason": "a skipped invocation is not a measured monetary saving"
+              }
+            },
+            "vendor_starts": 0,
+            "operation_events_24h": {
+              "review_started": 0,
+              "spawn_failed": 0
+            },
+            "queue_wait": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "completion": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "repeats": {
+              "repeat_items": 0,
+              "completed_repeats": 0
+            },
+            "predecessor": {
+              "linked_requests": 0,
+              "superseding_requests": 0,
+              "change_statistics": {
+                "state": "unknown",
+                "reason": "predecessor deltas are advisory-only and not retained in queue state"
+              }
+            },
+            "cooldown": {
+              "state": "none"
+            },
+            "attempts": {
+              "failed": 0,
+              "unknown": 0
+            },
+            "quota": {
+              "state": "unknown",
+              "reason": "no current vendor usage observation in queue state"
+            },
+            "notifications": {
+              "sent": 0,
+              "error": 0,
+              "pending": 0,
+              "withdrawn": 0,
+              "retries": 0,
+              "delivery_lag": {
+                "state": "unknown",
+                "reason": "outbox rows do not record send completion time"
+              },
+              "consumption_lag": {
+                "state": "unknown",
+                "reason": "result consumption is not observed"
+              }
+            },
+            "pr_associated": {
+              "items": 0,
+              "reuse_requests": 0,
+              "additional_starts": 0
+            },
+            "app_reviews": {
+              "items": 0,
+              "attempts": 0
+            },
+            "records": {
+              "ingestion_lag": {
+                "state": "unknown",
+                "reason": "record import timestamps are retained in the ledger, not queue state"
+              },
+              "unknown_scope_rate": {
+                "state": "unknown",
+                "reason": "record scope confidence is retained in the ledger, not queue state"
+              },
+              "projection_failures": {
+                "state": "unknown",
+                "reason": "submit projection failures are not retained as operation events"
+              }
+            }
+          }
         },
-        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":9007199254740993,\"title\":\"BIG\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":9007199254740993,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
-        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":9007199254740993,\"title\":\"BIG\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":9007199254740993,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":9007199254740993,\"title\":\"BIG\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":9007199254740993,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":9007199254740993,\"title\":\"BIG\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":9007199254740993,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
       }
     },
     {
@@ -196,10 +355,169 @@
             "merged-current": 0,
             "backfill": 0
           },
-          "repos": {}
+          "repos": {},
+          "review_metrics": {
+            "requests": {
+              "total": 0,
+              "created": 0,
+              "joined": 0,
+              "reused": 0,
+              "unknown_action": 0
+            },
+            "dedup": {
+              "requests_without_new_item": 0,
+              "on_completed_items": 0,
+              "monetary_saving": {
+                "state": "unknown",
+                "reason": "a skipped invocation is not a measured monetary saving"
+              }
+            },
+            "vendor_starts": 0,
+            "operation_events_24h": {
+              "review_started": 0,
+              "spawn_failed": 0
+            },
+            "queue_wait": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "completion": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "repeats": {
+              "repeat_items": 0,
+              "completed_repeats": 0
+            },
+            "predecessor": {
+              "linked_requests": 0,
+              "superseding_requests": 0,
+              "change_statistics": {
+                "state": "unknown",
+                "reason": "predecessor deltas are advisory-only and not retained in queue state"
+              }
+            },
+            "cooldown": {
+              "state": "none"
+            },
+            "attempts": {
+              "failed": 0,
+              "unknown": 0
+            },
+            "quota": {
+              "state": "unknown",
+              "reason": "no current vendor usage observation in queue state"
+            },
+            "notifications": {
+              "sent": 0,
+              "error": 0,
+              "pending": 0,
+              "withdrawn": 0,
+              "retries": 0,
+              "delivery_lag": {
+                "state": "unknown",
+                "reason": "outbox rows do not record send completion time"
+              },
+              "consumption_lag": {
+                "state": "unknown",
+                "reason": "result consumption is not observed"
+              }
+            },
+            "pr_associated": {
+              "items": 0,
+              "reuse_requests": 0,
+              "additional_starts": 0
+            },
+            "app_reviews": {
+              "items": 0,
+              "attempts": 0
+            },
+            "records": {
+              "ingestion_lag": {
+                "state": "unknown",
+                "reason": "record import timestamps are retained in the ledger, not queue state"
+              },
+              "unknown_scope_rate": {
+                "state": "unknown",
+                "reason": "record scope confidence is retained in the ledger, not queue state"
+              },
+              "projection_failures": {
+                "state": "unknown",
+                "reason": "submit projection failures are not retained as operation events"
+              }
+            }
+          }
         },
-        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":9007199254740993,\"title\":\"SUBJECT\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
-        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":9007199254740993,\"title\":\"SUBJECT\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":9007199254740993,\"title\":\"SUBJECT\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":9007199254740993,\"title\":\"SUBJECT\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
       }
     },
     {
@@ -296,10 +614,169 @@
             "merged-current": 0,
             "backfill": 0
           },
-          "repos": {}
+          "repos": {},
+          "review_metrics": {
+            "requests": {
+              "total": 0,
+              "created": 0,
+              "joined": 0,
+              "reused": 0,
+              "unknown_action": 0
+            },
+            "dedup": {
+              "requests_without_new_item": 0,
+              "on_completed_items": 0,
+              "monetary_saving": {
+                "state": "unknown",
+                "reason": "a skipped invocation is not a measured monetary saving"
+              }
+            },
+            "vendor_starts": 0,
+            "operation_events_24h": {
+              "review_started": 0,
+              "spawn_failed": 0
+            },
+            "queue_wait": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "completion": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "repeats": {
+              "repeat_items": 0,
+              "completed_repeats": 0
+            },
+            "predecessor": {
+              "linked_requests": 0,
+              "superseding_requests": 0,
+              "change_statistics": {
+                "state": "unknown",
+                "reason": "predecessor deltas are advisory-only and not retained in queue state"
+              }
+            },
+            "cooldown": {
+              "state": "none"
+            },
+            "attempts": {
+              "failed": 0,
+              "unknown": 0
+            },
+            "quota": {
+              "state": "unknown",
+              "reason": "no current vendor usage observation in queue state"
+            },
+            "notifications": {
+              "sent": 0,
+              "error": 0,
+              "pending": 0,
+              "withdrawn": 0,
+              "retries": 0,
+              "delivery_lag": {
+                "state": "unknown",
+                "reason": "outbox rows do not record send completion time"
+              },
+              "consumption_lag": {
+                "state": "unknown",
+                "reason": "result consumption is not observed"
+              }
+            },
+            "pr_associated": {
+              "items": 0,
+              "reuse_requests": 0,
+              "additional_starts": 0
+            },
+            "app_reviews": {
+              "items": 0,
+              "attempts": 0
+            },
+            "records": {
+              "ingestion_lag": {
+                "state": "unknown",
+                "reason": "record import timestamps are retained in the ledger, not queue state"
+              },
+              "unknown_scope_rate": {
+                "state": "unknown",
+                "reason": "record scope confidence is retained in the ledger, not queue state"
+              },
+              "projection_failures": {
+                "state": "unknown",
+                "reason": "submit projection failures are not retained as operation events"
+              }
+            }
+          }
         },
-        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":5.0,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
-        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":5.0,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":5.0,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":5.0,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
       }
     },
     {
@@ -392,10 +869,169 @@
             "merged-current": 0,
             "backfill": 0
           },
-          "repos": {}
+          "repos": {},
+          "review_metrics": {
+            "requests": {
+              "total": 0,
+              "created": 0,
+              "joined": 0,
+              "reused": 0,
+              "unknown_action": 0
+            },
+            "dedup": {
+              "requests_without_new_item": 0,
+              "on_completed_items": 0,
+              "monetary_saving": {
+                "state": "unknown",
+                "reason": "a skipped invocation is not a measured monetary saving"
+              }
+            },
+            "vendor_starts": 0,
+            "operation_events_24h": {
+              "review_started": 0,
+              "spawn_failed": 0
+            },
+            "queue_wait": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "completion": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "repeats": {
+              "repeat_items": 0,
+              "completed_repeats": 0
+            },
+            "predecessor": {
+              "linked_requests": 0,
+              "superseding_requests": 0,
+              "change_statistics": {
+                "state": "unknown",
+                "reason": "predecessor deltas are advisory-only and not retained in queue state"
+              }
+            },
+            "cooldown": {
+              "state": "none"
+            },
+            "attempts": {
+              "failed": 0,
+              "unknown": 0
+            },
+            "quota": {
+              "state": "unknown",
+              "reason": "no current vendor usage observation in queue state"
+            },
+            "notifications": {
+              "sent": 0,
+              "error": 0,
+              "pending": 0,
+              "withdrawn": 0,
+              "retries": 0,
+              "delivery_lag": {
+                "state": "unknown",
+                "reason": "outbox rows do not record send completion time"
+              },
+              "consumption_lag": {
+                "state": "unknown",
+                "reason": "result consumption is not observed"
+              }
+            },
+            "pr_associated": {
+              "items": 0,
+              "reuse_requests": 0,
+              "additional_starts": 0
+            },
+            "app_reviews": {
+              "items": 0,
+              "attempts": 0
+            },
+            "records": {
+              "ingestion_lag": {
+                "state": "unknown",
+                "reason": "record import timestamps are retained in the ledger, not queue state"
+              },
+              "unknown_scope_rate": {
+                "state": "unknown",
+                "reason": "record scope confidence is retained in the ledger, not queue state"
+              },
+              "projection_failures": {
+                "state": "unknown",
+                "reason": "submit projection failures are not retained as operation events"
+              }
+            }
+          }
         },
-        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
-        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
       }
     },
     {
@@ -491,10 +1127,169 @@
             "merged-current": 0,
             "backfill": 0
           },
-          "repos": {}
+          "repos": {},
+          "review_metrics": {
+            "requests": {
+              "total": 0,
+              "created": 0,
+              "joined": 0,
+              "reused": 0,
+              "unknown_action": 0
+            },
+            "dedup": {
+              "requests_without_new_item": 0,
+              "on_completed_items": 0,
+              "monetary_saving": {
+                "state": "unknown",
+                "reason": "a skipped invocation is not a measured monetary saving"
+              }
+            },
+            "vendor_starts": 0,
+            "operation_events_24h": {
+              "review_started": 0,
+              "spawn_failed": 0
+            },
+            "queue_wait": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "completion": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "repeats": {
+              "repeat_items": 0,
+              "completed_repeats": 0
+            },
+            "predecessor": {
+              "linked_requests": 0,
+              "superseding_requests": 0,
+              "change_statistics": {
+                "state": "unknown",
+                "reason": "predecessor deltas are advisory-only and not retained in queue state"
+              }
+            },
+            "cooldown": {
+              "state": "none"
+            },
+            "attempts": {
+              "failed": 0,
+              "unknown": 0
+            },
+            "quota": {
+              "state": "unknown",
+              "reason": "no current vendor usage observation in queue state"
+            },
+            "notifications": {
+              "sent": 0,
+              "error": 0,
+              "pending": 0,
+              "withdrawn": 0,
+              "retries": 0,
+              "delivery_lag": {
+                "state": "unknown",
+                "reason": "outbox rows do not record send completion time"
+              },
+              "consumption_lag": {
+                "state": "unknown",
+                "reason": "result consumption is not observed"
+              }
+            },
+            "pr_associated": {
+              "items": 0,
+              "reuse_requests": 0,
+              "additional_starts": 0
+            },
+            "app_reviews": {
+              "items": 0,
+              "attempts": 0
+            },
+            "records": {
+              "ingestion_lag": {
+                "state": "unknown",
+                "reason": "record import timestamps are retained in the ledger, not queue state"
+              },
+              "unknown_scope_rate": {
+                "state": "unknown",
+                "reason": "record scope confidence is retained in the ledger, not queue state"
+              },
+              "projection_failures": {
+                "state": "unknown",
+                "reason": "submit projection failures are not retained as operation events"
+              }
+            }
+          }
         },
-        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":0,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
-        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":0,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":0,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":0,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
       }
     },
     {
@@ -605,10 +1400,169 @@
             "merged-current": 0,
             "backfill": 0
           },
-          "repos": {}
+          "repos": {},
+          "review_metrics": {
+            "requests": {
+              "total": 0,
+              "created": 0,
+              "joined": 0,
+              "reused": 0,
+              "unknown_action": 0
+            },
+            "dedup": {
+              "requests_without_new_item": 0,
+              "on_completed_items": 0,
+              "monetary_saving": {
+                "state": "unknown",
+                "reason": "a skipped invocation is not a measured monetary saving"
+              }
+            },
+            "vendor_starts": 0,
+            "operation_events_24h": {
+              "review_started": 0,
+              "spawn_failed": 0
+            },
+            "queue_wait": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "completion": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "repeats": {
+              "repeat_items": 0,
+              "completed_repeats": 0
+            },
+            "predecessor": {
+              "linked_requests": 0,
+              "superseding_requests": 0,
+              "change_statistics": {
+                "state": "unknown",
+                "reason": "predecessor deltas are advisory-only and not retained in queue state"
+              }
+            },
+            "cooldown": {
+              "state": "none"
+            },
+            "attempts": {
+              "failed": 0,
+              "unknown": 0
+            },
+            "quota": {
+              "state": "unknown",
+              "reason": "no current vendor usage observation in queue state"
+            },
+            "notifications": {
+              "sent": 0,
+              "error": 0,
+              "pending": 0,
+              "withdrawn": 0,
+              "retries": 0,
+              "delivery_lag": {
+                "state": "unknown",
+                "reason": "outbox rows do not record send completion time"
+              },
+              "consumption_lag": {
+                "state": "unknown",
+                "reason": "result consumption is not observed"
+              }
+            },
+            "pr_associated": {
+              "items": 0,
+              "reuse_requests": 0,
+              "additional_starts": 0
+            },
+            "app_reviews": {
+              "items": 0,
+              "attempts": 0
+            },
+            "records": {
+              "ingestion_lag": {
+                "state": "unknown",
+                "reason": "record import timestamps are retained in the ledger, not queue state"
+              },
+              "unknown_scope_rate": {
+                "state": "unknown",
+                "reason": "record scope confidence is retained in the ledger, not queue state"
+              },
+              "projection_failures": {
+                "state": "unknown",
+                "reason": "submit projection failures are not retained as operation events"
+              }
+            }
+          }
         },
-        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":\"LOW\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1},{\"repo\":\"owner/repo\",\"pr\":null,\"title\":\"HIGH\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":2}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":2,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
-        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":\"LOW\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1},{\"repo\":\"owner/repo\",\"pr\":null,\"title\":\"HIGH\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":2}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":2,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":\"LOW\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1},{\"repo\":\"owner/repo\",\"pr\":null,\"title\":\"HIGH\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":2}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":2,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":\"LOW\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1},{\"repo\":\"owner/repo\",\"pr\":null,\"title\":\"HIGH\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":2}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":2,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
       }
     },
     {
@@ -702,10 +1656,169 @@
             "merged-current": 0,
             "backfill": 0
           },
-          "repos": {}
+          "repos": {},
+          "review_metrics": {
+            "requests": {
+              "total": 0,
+              "created": 0,
+              "joined": 0,
+              "reused": 0,
+              "unknown_action": 0
+            },
+            "dedup": {
+              "requests_without_new_item": 0,
+              "on_completed_items": 0,
+              "monetary_saving": {
+                "state": "unknown",
+                "reason": "a skipped invocation is not a measured monetary saving"
+              }
+            },
+            "vendor_starts": 0,
+            "operation_events_24h": {
+              "review_started": 0,
+              "spawn_failed": 0
+            },
+            "queue_wait": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "completion": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "repeats": {
+              "repeat_items": 1,
+              "completed_repeats": 0
+            },
+            "predecessor": {
+              "linked_requests": 0,
+              "superseding_requests": 0,
+              "change_statistics": {
+                "state": "unknown",
+                "reason": "predecessor deltas are advisory-only and not retained in queue state"
+              }
+            },
+            "cooldown": {
+              "state": "none"
+            },
+            "attempts": {
+              "failed": 0,
+              "unknown": 0
+            },
+            "quota": {
+              "state": "unknown",
+              "reason": "no current vendor usage observation in queue state"
+            },
+            "notifications": {
+              "sent": 0,
+              "error": 0,
+              "pending": 0,
+              "withdrawn": 0,
+              "retries": 0,
+              "delivery_lag": {
+                "state": "unknown",
+                "reason": "outbox rows do not record send completion time"
+              },
+              "consumption_lag": {
+                "state": "unknown",
+                "reason": "result consumption is not observed"
+              }
+            },
+            "pr_associated": {
+              "items": 0,
+              "reuse_requests": 0,
+              "additional_starts": 0
+            },
+            "app_reviews": {
+              "items": 0,
+              "attempts": 0
+            },
+            "records": {
+              "ingestion_lag": {
+                "state": "unknown",
+                "reason": "record import timestamps are retained in the ledger, not queue state"
+              },
+              "unknown_scope_rate": {
+                "state": "unknown",
+                "reason": "record scope confidence is retained in the ledger, not queue state"
+              },
+              "projection_failures": {
+                "state": "unknown",
+                "reason": "submit projection failures are not retained as operation events"
+              }
+            }
+          }
         },
-        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":null,\"kind\":\"local-review\",\"band\":\"interactive\",\"generation\":2.0,\"aging_deadline\":3600.0,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"1970-01-01T01:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
-        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":null,\"kind\":\"local-review\",\"band\":\"interactive\",\"generation\":2.0,\"aging_deadline\":3600.0,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"1970-01-01T01:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"1970-01-01T01:00:00Z\"}"
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":null,\"kind\":\"local-review\",\"band\":\"interactive\",\"generation\":2.0,\"aging_deadline\":3600.0,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"1970-01-01T01:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":1,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":null,\"kind\":\"local-review\",\"band\":\"interactive\",\"generation\":2.0,\"aging_deadline\":3600.0,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"1970-01-01T01:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":1,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}},\"schema_version\":2,\"generated_at\":\"1970-01-01T01:00:00Z\"}"
       }
     },
     {
@@ -835,10 +1948,169 @@
             "merged-current": 0,
             "backfill": 0
           },
-          "repos": {}
+          "repos": {},
+          "review_metrics": {
+            "requests": {
+              "total": 0,
+              "created": 0,
+              "joined": 0,
+              "reused": 0,
+              "unknown_action": 0
+            },
+            "dedup": {
+              "requests_without_new_item": 0,
+              "on_completed_items": 0,
+              "monetary_saving": {
+                "state": "unknown",
+                "reason": "a skipped invocation is not a measured monetary saving"
+              }
+            },
+            "vendor_starts": 0,
+            "operation_events_24h": {
+              "review_started": 0,
+              "spawn_failed": 0
+            },
+            "queue_wait": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "completion": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "repeats": {
+              "repeat_items": 0,
+              "completed_repeats": 0
+            },
+            "predecessor": {
+              "linked_requests": 0,
+              "superseding_requests": 0,
+              "change_statistics": {
+                "state": "unknown",
+                "reason": "predecessor deltas are advisory-only and not retained in queue state"
+              }
+            },
+            "cooldown": {
+              "state": "none"
+            },
+            "attempts": {
+              "failed": 0,
+              "unknown": 0
+            },
+            "quota": {
+              "state": "unknown",
+              "reason": "no current vendor usage observation in queue state"
+            },
+            "notifications": {
+              "sent": 0,
+              "error": 0,
+              "pending": 0,
+              "withdrawn": 0,
+              "retries": 0,
+              "delivery_lag": {
+                "state": "unknown",
+                "reason": "outbox rows do not record send completion time"
+              },
+              "consumption_lag": {
+                "state": "unknown",
+                "reason": "result consumption is not observed"
+              }
+            },
+            "pr_associated": {
+              "items": 0,
+              "reuse_requests": 0,
+              "additional_starts": 0
+            },
+            "app_reviews": {
+              "items": 0,
+              "attempts": 0
+            },
+            "records": {
+              "ingestion_lag": {
+                "state": "unknown",
+                "reason": "record import timestamps are retained in the ledger, not queue state"
+              },
+              "unknown_scope_rate": {
+                "state": "unknown",
+                "reason": "record scope confidence is retained in the ledger, not queue state"
+              },
+              "projection_failures": {
+                "state": "unknown",
+                "reason": "submit projection failures are not retained as operation events"
+              }
+            }
+          }
         },
-        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":9007199254740993,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
-        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":9007199254740993,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":9007199254740993,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":9007199254740993,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
       }
     },
     {
@@ -945,10 +2217,169 @@
               "other": 0,
               "reviewed_tip": 9007199254740993
             }
+          },
+          "review_metrics": {
+            "requests": {
+              "total": 0,
+              "created": 0,
+              "joined": 0,
+              "reused": 0,
+              "unknown_action": 0
+            },
+            "dedup": {
+              "requests_without_new_item": 0,
+              "on_completed_items": 0,
+              "monetary_saving": {
+                "state": "unknown",
+                "reason": "a skipped invocation is not a measured monetary saving"
+              }
+            },
+            "vendor_starts": 0,
+            "operation_events_24h": {
+              "review_started": 0,
+              "spawn_failed": 0
+            },
+            "queue_wait": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "completion": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "repeats": {
+              "repeat_items": 0,
+              "completed_repeats": 0
+            },
+            "predecessor": {
+              "linked_requests": 0,
+              "superseding_requests": 0,
+              "change_statistics": {
+                "state": "unknown",
+                "reason": "predecessor deltas are advisory-only and not retained in queue state"
+              }
+            },
+            "cooldown": {
+              "state": "none"
+            },
+            "attempts": {
+              "failed": 0,
+              "unknown": 0
+            },
+            "quota": {
+              "state": "unknown",
+              "reason": "no current vendor usage observation in queue state"
+            },
+            "notifications": {
+              "sent": 0,
+              "error": 0,
+              "pending": 0,
+              "withdrawn": 0,
+              "retries": 0,
+              "delivery_lag": {
+                "state": "unknown",
+                "reason": "outbox rows do not record send completion time"
+              },
+              "consumption_lag": {
+                "state": "unknown",
+                "reason": "result consumption is not observed"
+              }
+            },
+            "pr_associated": {
+              "items": 0,
+              "reuse_requests": 0,
+              "additional_starts": 0
+            },
+            "app_reviews": {
+              "items": 0,
+              "attempts": 0
+            },
+            "records": {
+              "ingestion_lag": {
+                "state": "unknown",
+                "reason": "record import timestamps are retained in the ledger, not queue state"
+              },
+              "unknown_scope_rate": {
+                "state": "unknown",
+                "reason": "record scope confidence is retained in the ledger, not queue state"
+              },
+              "projection_failures": {
+                "state": "unknown",
+                "reason": "submit projection failures are not retained as operation events"
+              }
+            }
           }
         },
-        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{\"after\":\"2026-11-08T00:00:00Z\",\"complete\":true},\"discovery\":{\"represented\":9007199254740993,\"pages_read\":1,\"transient_failures\":2.0},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{\"owner/foreign\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"other\":0,\"reviewed_tip\":9007199254740993}}}",
-        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{\"after\":\"2026-11-08T00:00:00Z\",\"complete\":true},\"discovery\":{\"represented\":9007199254740993,\"pages_read\":1,\"transient_failures\":2.0},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{\"owner/foreign\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"other\":0,\"reviewed_tip\":9007199254740993}},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{\"after\":\"2026-11-08T00:00:00Z\",\"complete\":true},\"discovery\":{\"represented\":9007199254740993,\"pages_read\":1,\"transient_failures\":2.0},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{\"owner/foreign\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"other\":0,\"reviewed_tip\":9007199254740993}},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{\"after\":\"2026-11-08T00:00:00Z\",\"complete\":true},\"discovery\":{\"represented\":9007199254740993,\"pages_read\":1,\"transient_failures\":2.0},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{\"owner/foreign\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"other\":0,\"reviewed_tip\":9007199254740993}},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
       }
     },
     {
@@ -1024,10 +2455,169 @@
             "merged-current": 0,
             "backfill": 0
           },
-          "repos": {}
+          "repos": {},
+          "review_metrics": {
+            "requests": {
+              "total": 0,
+              "created": 0,
+              "joined": 0,
+              "reused": 0,
+              "unknown_action": 0
+            },
+            "dedup": {
+              "requests_without_new_item": 0,
+              "on_completed_items": 0,
+              "monetary_saving": {
+                "state": "unknown",
+                "reason": "a skipped invocation is not a measured monetary saving"
+              }
+            },
+            "vendor_starts": 0,
+            "operation_events_24h": {
+              "review_started": 0,
+              "spawn_failed": 0
+            },
+            "queue_wait": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "completion": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "repeats": {
+              "repeat_items": 0,
+              "completed_repeats": 0
+            },
+            "predecessor": {
+              "linked_requests": 0,
+              "superseding_requests": 0,
+              "change_statistics": {
+                "state": "unknown",
+                "reason": "predecessor deltas are advisory-only and not retained in queue state"
+              }
+            },
+            "cooldown": {
+              "state": "none"
+            },
+            "attempts": {
+              "failed": 0,
+              "unknown": 0
+            },
+            "quota": {
+              "state": "known",
+              "limit": 9007199254740993
+            },
+            "notifications": {
+              "sent": 0,
+              "error": 0,
+              "pending": 0,
+              "withdrawn": 0,
+              "retries": 0,
+              "delivery_lag": {
+                "state": "unknown",
+                "reason": "outbox rows do not record send completion time"
+              },
+              "consumption_lag": {
+                "state": "unknown",
+                "reason": "result consumption is not observed"
+              }
+            },
+            "pr_associated": {
+              "items": 0,
+              "reuse_requests": 0,
+              "additional_starts": 0
+            },
+            "app_reviews": {
+              "items": 0,
+              "attempts": 0
+            },
+            "records": {
+              "ingestion_lag": {
+                "state": "unknown",
+                "reason": "record import timestamps are retained in the ledger, not queue state"
+              },
+              "unknown_scope_rate": {
+                "state": "unknown",
+                "reason": "record scope confidence is retained in the ledger, not queue state"
+              },
+              "projection_failures": {
+                "state": "unknown",
+                "reason": "submit projection failures are not retained as operation events"
+              }
+            }
+          }
         },
-        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-10-31T00:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":9007199254740993,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
-        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-10-31T00:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":9007199254740993,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-10-31T00:00:00Z\"}"
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-10-31T00:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":9007199254740993,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"known\",\"limit\":9007199254740993},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-10-31T00:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":9007199254740993,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"known\",\"limit\":9007199254740993},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}},\"schema_version\":2,\"generated_at\":\"2026-10-31T00:00:00Z\"}"
       }
     },
     {
@@ -1103,10 +2693,169 @@
             "merged-current": 0,
             "backfill": 0
           },
-          "repos": {}
+          "repos": {},
+          "review_metrics": {
+            "requests": {
+              "total": 0,
+              "created": 0,
+              "joined": 0,
+              "reused": 0,
+              "unknown_action": 0
+            },
+            "dedup": {
+              "requests_without_new_item": 0,
+              "on_completed_items": 0,
+              "monetary_saving": {
+                "state": "unknown",
+                "reason": "a skipped invocation is not a measured monetary saving"
+              }
+            },
+            "vendor_starts": 0,
+            "operation_events_24h": {
+              "review_started": 0,
+              "spawn_failed": 0
+            },
+            "queue_wait": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "completion": {
+              "interactive": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "background": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "first": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              }
+            },
+            "repeats": {
+              "repeat_items": 0,
+              "completed_repeats": 0
+            },
+            "predecessor": {
+              "linked_requests": 0,
+              "superseding_requests": 0,
+              "change_statistics": {
+                "state": "unknown",
+                "reason": "predecessor deltas are advisory-only and not retained in queue state"
+              }
+            },
+            "cooldown": {
+              "state": "none"
+            },
+            "attempts": {
+              "failed": 0,
+              "unknown": 0
+            },
+            "quota": {
+              "state": "unknown",
+              "reason": "no current vendor usage observation in queue state"
+            },
+            "notifications": {
+              "sent": 0,
+              "error": 0,
+              "pending": 0,
+              "withdrawn": 0,
+              "retries": 0,
+              "delivery_lag": {
+                "state": "unknown",
+                "reason": "outbox rows do not record send completion time"
+              },
+              "consumption_lag": {
+                "state": "unknown",
+                "reason": "result consumption is not observed"
+              }
+            },
+            "pr_associated": {
+              "items": 0,
+              "reuse_requests": 0,
+              "additional_starts": 0
+            },
+            "app_reviews": {
+              "items": 0,
+              "attempts": 0
+            },
+            "records": {
+              "ingestion_lag": {
+                "state": "unknown",
+                "reason": "record import timestamps are retained in the ledger, not queue state"
+              },
+              "unknown_scope_rate": {
+                "state": "unknown",
+                "reason": "record scope confidence is retained in the ledger, not queue state"
+              },
+              "projection_failures": {
+                "state": "unknown",
+                "reason": "submit projection failures are not retained as operation events"
+              }
+            }
+          }
         },
-        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-10-31T00:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":5.0,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
-        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-10-31T00:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":5.0,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-10-31T00:00:00Z\"}",
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-10-31T00:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":5.0,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-10-31T00:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":5.0,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"review_metrics\":{\"requests\":{\"total\":0,\"created\":0,\"joined\":0,\"reused\":0,\"unknown_action\":0},\"dedup\":{\"requests_without_new_item\":0,\"on_completed_items\":0,\"monetary_saving\":{\"state\":\"unknown\",\"reason\":\"a skipped invocation is not a measured monetary saving\"}},\"vendor_starts\":0,\"operation_events_24h\":{\"review_started\":0,\"spawn_failed\":0},\"queue_wait\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"completion\":{\"interactive\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"background\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"first\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}},\"repeat\":{\"count\":0,\"buckets\":{\"lt_60s\":0,\"lt_600s\":0,\"lt_3600s\":0,\"gte_3600s\":0}}},\"repeats\":{\"repeat_items\":0,\"completed_repeats\":0},\"predecessor\":{\"linked_requests\":0,\"superseding_requests\":0,\"change_statistics\":{\"state\":\"unknown\",\"reason\":\"predecessor deltas are advisory-only and not retained in queue state\"}},\"cooldown\":{\"state\":\"none\"},\"attempts\":{\"failed\":0,\"unknown\":0},\"quota\":{\"state\":\"unknown\",\"reason\":\"no current vendor usage observation in queue state\"},\"notifications\":{\"sent\":0,\"error\":0,\"pending\":0,\"withdrawn\":0,\"retries\":0,\"delivery_lag\":{\"state\":\"unknown\",\"reason\":\"outbox rows do not record send completion time\"},\"consumption_lag\":{\"state\":\"unknown\",\"reason\":\"result consumption is not observed\"}},\"pr_associated\":{\"items\":0,\"reuse_requests\":0,\"additional_starts\":0},\"app_reviews\":{\"items\":0,\"attempts\":0},\"records\":{\"ingestion_lag\":{\"state\":\"unknown\",\"reason\":\"record import timestamps are retained in the ledger, not queue state\"},\"unknown_scope_rate\":{\"state\":\"unknown\",\"reason\":\"record scope confidence is retained in the ledger, not queue state\"},\"projection_failures\":{\"state\":\"unknown\",\"reason\":\"submit projection failures are not retained as operation events\"}}},\"schema_version\":2,\"generated_at\":\"2026-10-31T00:00:00Z\"}",
         "core_only": true
       }
     }
