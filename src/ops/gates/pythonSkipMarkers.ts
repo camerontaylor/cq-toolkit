@@ -179,6 +179,13 @@ export class PythonSectionScanner {
     if (asCode !== undefined && asCode.trim() !== '') {
       this.trackDefs(asCode);
       this.trackImports(asCode);
+    } else {
+      // The line starts inside a multi-line string, so it is never code for
+      // def tracking — but the text after the closing delimiter can still
+      // close an open signature (`"""):`). Count only that suffix's brackets,
+      // or the signature depth stays open and suppresses later defs.
+      const closed = lexed.find((l) => l.start !== null && l.end === null)?.code;
+      if (closed !== undefined) this.trackSignatureSuffix(closed);
     }
     if (!added) return;
     const codes = [...new Set(lexed.map((l) => l.code))].filter((code) => code.trim() !== '');
@@ -286,6 +293,12 @@ export class PythonSectionScanner {
       return;
     }
     this.signatureParens = Math.max(0, bracketBalance(code));
+  }
+
+  /** Close an open signature from a line whose prefix is a multi-line string. */
+  private trackSignatureSuffix(code: string): void {
+    if (this.signatureParens === 0) return;
+    this.signatureParens = Math.max(0, this.signatureParens + bracketBalance(code));
   }
 
   private trackImports(code: string): void {
