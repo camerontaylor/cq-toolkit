@@ -253,21 +253,25 @@ export const makeSubmit = (transport?: QueueTransport, beforeDispatch?: () => Pr
         const response = await client.request(wire);
         if (!('state' in response)) throw new Error('expected admission response');
         // The immutable request remains the recovery authority even if this cache update fails.
-        const record = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
-        const updated = join(dir, requestId + '.' + randomUUID() + '.tmp');
-        await writeFile(
-          updated,
-          JSON.stringify({
-            ...record,
-            response,
-            ...('identity' in response ? { identity: response.identity } : {}),
-            ...('history' in response && response.history
-              ? { history_digest: response.history.digest }
-              : {}),
-          }),
-          { mode: 0o600 },
-        );
-        await rename(updated, path);
+        try {
+          const record = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+          const updated = join(dir, requestId + '.' + randomUUID() + '.tmp');
+          await writeFile(
+            updated,
+            JSON.stringify({
+              ...record,
+              response,
+              ...('identity' in response ? { identity: response.identity } : {}),
+              ...('history' in response && response.history
+                ? { history_digest: response.history.digest }
+                : {}),
+            }),
+            { mode: 0o600 },
+          );
+          await rename(updated, path);
+        } catch {
+          // Cache-only update; the saved wire still lets a retry reconcile this request.
+        }
         const result =
           i.waitMs === undefined || !['queued', 'running'].includes(response.state)
             ? response
