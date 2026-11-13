@@ -54,6 +54,11 @@ def authenticated_gh(repo):
     def gh(argv, *, input_text=None):
         if time.time() + 10 >= expiry.timestamp():
             raise RuntimeError('App credentials expired; retry with the same identity')
-        return subprocess.run(argv, capture_output=True, text=True, input=input_text,
-                              timeout=60, env=env)
+        result = subprocess.run(argv, capture_output=True, text=True, input=input_text,
+                                timeout=60, env=env)
+        # Even a diagnostic/debug response must not carry the child credential
+        # back into the queue's ordinary API-error reporting path.
+        result.stdout = (result.stdout or '').replace(token, '[redacted]')
+        result.stderr = (result.stderr or '').replace(token, '[redacted]')
+        return result
     return gh

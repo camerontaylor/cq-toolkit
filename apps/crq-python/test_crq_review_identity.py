@@ -28,6 +28,18 @@ class IdentityTest(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs['env']['GH_TOKEN'], 'fixture-private-token')
         self.assertNotIn('fixture-private-token', str(run.call_args.args))
 
+    def test_api_diagnostics_cannot_propagate_token_to_receipt_errors(self):
+        answers = [self.response('{"installation_token":"repo-scoped-v1"}'),
+                   self.response('private-fixture', '{"expires_at":"2099-01-01T00:00:00Z"}'),
+                   self.response('private-fixture', 'debug private-fixture', 1)]
+        with mock.patch.object(identity.subprocess, 'run', side_effect=answers):
+            gh = identity.authenticated_gh(REPO)
+            result = gh(['gh', 'api', 'repos/' + REPO + '/pulls/7'])
+        self.assertNotIn('private-fixture', result.stdout + result.stderr)
+        with self.assertRaises(RuntimeError) as error:
+            prf._ok(['gh', 'api'], result)
+        self.assertNotIn('private-fixture', str(error.exception))
+
     def test_missing_old_helper_failed_token_and_invalid_expiry_have_safe_distinct_errors(self):
         fixtures = [(FileNotFoundError('secret-like'), 'helper-missing'),
                     ([self.response('secret-like', code=2)], 'helper-capability-missing'),
