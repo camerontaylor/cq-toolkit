@@ -122,16 +122,24 @@ export const gitSubprocess = (
   // (`-o BatchMode=no`) and quoted (`"-oBatchMode=no"`) forms: OpenSSH honors
   // the first occurrence of an option, so a configured `BatchMode=no` would
   // win over an appended `-oBatchMode=yes`, and every occurrence must go so
-  // the appended one is the only one in force. Lookbehind and lookahead
-  // delimit each option, so removal takes the option and its trailing
-  // whitespace but never a bounding quote: shell quoting stays balanced and
-  // the rewritten command remains valid for shell execution.
+  // the appended one is the only one in force. Removal takes the entire
+  // shell word, bounding quotes included: the captured opening quote must be
+  // closed by the same quote right after the option value, so no dangling
+  // quotes and no quoted-space argument survive the rewrite, because ssh
+  // would otherwise accept such a leftover empty word as its destination
+  // instead of the configured host. Each removal takes the option span and
+  // its trailing delimiter, leaving the leading one; nothing else is
+  // rewritten and no global whitespace normalization runs, so all other
+  // command text, including whitespace inside quoted shell arguments, is
+  // preserved exactly.
   const enforceBatchMode = (command: string): string => {
-    const stripped = command
-      .replace(/(?<=^|[\s"'])-o\s*batchmode=\S*?(?=$|[\s"'])\s*/gi, ' ')
-      .trim()
-      .replace(/\s+/g, ' ');
-    return `${stripped} -oBatchMode=yes`;
+    const stripped = command.replace(/(?<=^|\s)(["']?)-o\s*batchmode=\S*?\1(?=$|\s)\s*/gi, '');
+    // The removal leaves the leading delimiter in place, so a trailing match
+    // leaves trailing whitespace that would otherwise double when the
+    // enforcement option is appended. Trimming the end only cannot reach
+    // interior or quoted whitespace: a command ending in a quoted argument
+    // ends in the quote, not in a space.
+    return `${stripped.trimEnd()} -oBatchMode=yes`;
   };
   if (env['GIT_SSH'] === undefined && env['GIT_SSH_COMMAND'] === undefined) {
     const base = configuredSshCommand?.trim() || 'ssh';

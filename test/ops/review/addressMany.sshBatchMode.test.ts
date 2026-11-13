@@ -4,15 +4,42 @@
 // configured `-oBatchMode=no` left interactive prompts enabled. Both the
 // attached (`-oBatchMode=no`) and separated (`-o BatchMode=no`) forms must be
 // normalized before the enforcement option is appended. Quoted occurrences
-// (`"-oBatchMode=no"`) must be removed too, without consuming their bounding
-// quotes so shell quoting stays balanced, and repeated occurrences must not
-// survive the rewrite so exactly one `-oBatchMode=yes` remains.
+// (`"-oBatchMode=no"`) must be removed whole, bounding quotes included, so
+// the rewritten command shell-parses to exactly the surviving arguments with
+// no quoted space ssh could mistake for its destination, and repeated
+// occurrences must not survive the rewrite so exactly one `-oBatchMode=yes`
+// remains.
 import { expect, test } from 'vitest';
 import { gitSubprocess } from '../../../src/ops/review/addressMany.js';
 
 const sshCommand = (configured?: string): string | undefined => {
   const env = gitSubprocess(configured).env;
   return env['GIT_SSH'] === undefined ? env['GIT_SSH_COMMAND'] : undefined;
+};
+
+// Minimal POSIX-shell word splitter used to verify the rewritten command's
+// actual arguments: whitespace separates words unless it sits inside single
+// or double quotes, and the quote characters themselves never reach ssh.
+const shellWords = (command: string | undefined): string[] => {
+  if (command === undefined) return [];
+  const words: string[] = [];
+  let word = '';
+  let quote: '"' | "'" | undefined;
+  for (const char of command) {
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined;
+      else word += char;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    } else if (/\s/.test(char)) {
+      if (word !== '') words.push(word);
+      word = '';
+    } else {
+      word += char;
+    }
+  }
+  if (word !== '') words.push(word);
+  return words;
 };
 
 test('plain ssh gains BatchMode=yes', () => {
@@ -56,15 +83,24 @@ test('separated -o BatchMode=no is replaced when both SSH env vars are unset', (
   }
 });
 
-test('quoted "-oBatchMode=no" is removed without breaking shell quoting', () => {
-  // Removal keeps both bounding quotes of the quoted argument, so quoting
-  // stays balanced and the rewritten GIT_SSH_COMMAND remains valid for shell
-  // execution: the leftover quoted token is inert and every other option and
-  // argument survives, with the appended enforcement option the only
-  // BatchMode occurrence in the command.
-  const command = sshCommand('ssh "-oBatchMode=no" -p 2222');
-  expect(command).toBe('ssh " " -p 2222 -oBatchMode=yes');
-  expect((command?.match(/"/g) ?? []).length % 2).toBe(0);
+test('quoted "-oBatchMode=no" is removed as a whole shell word', () => {
+  // Removal takes the entire quoted word, bounding quotes included, so the
+  // rewritten command leaves no dangling quotes and no quoted space that ssh
+  // would accept as the destination: the surviving arguments are exactly the
+  // configured ones with the enforcement option appended, and the configured
+  // host stays the only destination argument.
+  const command = sshCommand('ssh "-oBatchMode=no" -p 2222 deploy@example.com');
+  expect(command).toBe('ssh -p 2222 deploy@example.com -oBatchMode=yes');
+  expect(shellWords(command)).toEqual([
+    'ssh',
+    '-p',
+    '2222',
+    'deploy@example.com',
+    '-oBatchMode=yes',
+  ]);
+  // No empty or whitespace-only argument survives: ssh would otherwise take
+  // such a word as its destination instead of the configured host.
+  expect(shellWords(command).every((arg) => /\S/.test(arg))).toBe(true);
   expect((command?.match(/-oBatchMode=/gi) ?? []).length).toBe(1);
 });
 
