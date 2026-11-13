@@ -1,0 +1,225 @@
+"""CRQ-only whole-PR receipts; never consumes canonical repair evidence.
+
+The ordinary independent-review CLI remains on its existing publisher path.
+A run's absence of a finding is deliberately NOT a thread-resolution proof.
+"""
+import json
+import datetime as dt
+import re
+
+PREFIX = '<!-- crq-review-output '
+BLOCKING = {'major', 'critical', 'blocker', 'fatal'}
+
+
+def binding(meta, pr):
+    return {key: value for key, value in (
+        ('pr', pr), ('run_id', meta['run_id']), ('base', meta['base']), ('head', meta['head']))}
+
+
+def binding_marker(value):
+    return PREFIX + json.dumps(value, sort_keys=True, separators=(',', ':')) + ' -->'
+
+
+def reviews(prf, gh, repo, pr):
+    pages = prf._json(gh, ['gh', 'api', '--paginate', '--slurp',
+                         f'repos/{repo}/pulls/{pr}/reviews?per_page=100'])
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        raise RuntimeError('incomplete PR review pagination')
+    rows = []
+    for page in pages:
+        for row in page:
+            if not isinstance(row, dict) or type(row.get('id')) is not int:
+                raise RuntimeError('invalid PR review identity')
+            body, user = row.get('body') or '', row.get('user') or {}
+            if not isinstance(body, str) or not isinstance(user, dict):
+                raise RuntimeError('invalid PR review metadata')
+            rows.append({**row, 'body': body, 'user': user})
+    return rows
+
+
+def prior_receipt(prf, gh, repo, pr, meta, login):
+    wanted = binding(meta, pr)
+    for row in reviews(prf, gh, repo, pr):
+        if not isinstance(row, dict):
+            raise RuntimeError('invalid PR review row')
+        body = row.get('body') or ''
+        if body.startswith(prf.marker(meta['run_id']) + '\n') and PREFIX not in body:
+            # Upgrade must preserve the original run-marker crash barrier too.
+            if f"{meta['base']}..{meta['head']}" not in body:
+                raise ValueError('changed legacy CRQ review binding')
+            return {'id': row['id'], 'url': row.get('html_url'), 'login': row.get('user', {}).get('login'), 'body': body}
+        if row.get('user', {}).get('login') not in {login, 'cq-review[bot]'}:
+            continue
+        for match in re.finditer(re.escape(PREFIX) + r'(.*?) -->', body):
+            try:
+                found = json.loads(match[1])
+            except ValueError:
+                raise ValueError('malformed CRQ receipt binding') from None
+            if not isinstance(found, dict):
+                raise ValueError('malformed CRQ receipt binding')
+            if found.get('run_id') != wanted['run_id']:
+                continue
+            if found != wanted:
+                raise ValueError('changed CRQ receipt binding')
+            if not body.startswith(prf.marker(meta['run_id']) + '\n' + binding_marker(wanted)):
+                raise ValueError('misplaced CRQ receipt binding')
+            return {'id': row['id'], 'url': row.get('html_url'), 'login': row.get('user', {}).get('login'), 'body': body}
+    return None
+
+
+def open_major(prf, gh, repo, pr, login):
+    """Paginate own namespaced threads; never resolve from absence in this run."""
+    owner, name = repo.split('/')
+    cursor = None
+    seen = set()
+    while True:
+        query = '''query($owner:String!,$name:String!,$pr:Int!,$cursor:String){
+          repository(owner:$owner,name:$name){pullRequest(number:$pr){reviewThreads(first:100,after:$cursor){
+            pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{body author{login} pullRequestReview{body author{login}}}}}
+          }}}}'''
+        args = ['gh', 'api', 'graphql', '-f', 'query=' + query, '-f', 'owner=' + owner,
+                '-f', 'name=' + name, '-F', 'pr=' + str(pr)]
+        if cursor:
+            args += ['-f', 'cursor=' + cursor]
+        data = prf._json(gh, args)
+        try:
+            if data.get('errors'):
+                raise ValueError()
+            conn = data['data']['repository']['pullRequest']['reviewThreads']
+            nodes, page = conn['nodes'], conn['pageInfo']
+            if not isinstance(nodes, list) or type(page['hasNextPage']) is not bool:
+                raise ValueError()
+            for thread in nodes:
+                first = thread['comments']['nodes']
+                if not first:
+                    raise ValueError()
+                body = first[0]['body']
+                review = first[0].get('pullRequestReview') or {}
+                review_body = review.get('body') or ''
+                # Legacy queue output has a CodeRabbit CLI label; independent
+                # cq-review-post summaries have a different explicit label.
+                legacy = (review_body.startswith('<!-- crq-findings run=') and
+                          '### crq findings (CodeRabbit CLI, local run ' in review_body)
+                own = bool(re.search(r'\n<!-- crq-review-thread run=[A-Za-z0-9._-]+ head=[0-9a-f]{40} finding=[0-9a-f]{64} -->$', body)) or legacy
+                if type(thread['isResolved']) is not bool:
+                    raise ValueError()
+                if own and not thread['isResolved'] and re.search(r'^\*\*crq finding F\d+ \[(major|critical|blocker|fatal)\]\*\*', body, re.I):
+                    return True
+            if not page['hasNextPage']:
+                return False
+            next_cursor = page['endCursor']
+            if not next_cursor or next_cursor in seen:
+                raise ValueError()
+            seen.add(next_cursor)
+            cursor = next_cursor
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise RuntimeError('incomplete PR review threads') from None
+
+
+def prepare(prf, gh, repo, pr, meta, ndjson, findings, login):
+    """Validate saved scan artifacts, and recompute completeness at delivery."""
+    import crq
+    rdir = ndjson.parent
+    saved = json.loads((rdir / 'meta.json').read_text())
+    if not isinstance(saved, dict):
+        raise ValueError('invalid CRQ run artifact')
+    for key in ('run_id', 'base', 'head'):
+        if saved.get(key) != meta.get(key):
+            raise ValueError('changed CRQ run artifact binding')
+    saved_repo = saved.get('repo', repo)
+    if saved.get('pr', pr) != pr or not isinstance(saved_repo, str) or saved_repo.lower() != repo.lower():
+        raise ValueError('changed CRQ PR/repository binding')
+    exit_info = json.loads((rdir / 'exit.json').read_text())
+    if not isinstance(exit_info, dict):
+        raise ValueError('invalid CRQ exit artifact')
+    cls = crq.classify(ndjson, exit_info.get('exit'))
+    if cls['outcome'] != 'completed' or not cls['counted']:
+        return None
+    for line in ndjson.read_text().splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if event.get('partial') is True or event.get('truncated') is True:
+            return None
+    state = prf.pr_state(gh, repo, pr)
+    if state.get('head') != meta['head']:
+        return None
+    merge_base = prf._json(gh, ['gh', 'api', f"repos/{repo}/compare/{state['base']}...{meta['head']}",
+                              '--jq', '.merge_base_commit.sha'])
+    whole = (saved.get('range_policy') == 'full-range-once-v1' and merge_base == meta['base'])
+    blocked = any(f['severity'].lower() in BLOCKING for f in findings)
+    blocked = open_major(prf, gh, repo, pr, login) or blocked
+    verdict = 'PASS' if whole and not blocked else 'ITERATE'
+    return {**meta, 'receipt_header': f"**Independent review (CodeRabbit CLI via crq): {verdict} for `{meta['head']}`**",
+            'receipt_binding': binding_marker(binding(meta, pr)), 'whole_pr_scan': whole, 'receipt_verdict': verdict}
+
+
+REFRESH = '<!-- crq-verdict-refresh '
+VERDICT = re.compile(r'^\*\*Independent review \(CodeRabbit CLI via crq\): (PASS|ITERATE) for `([0-9a-f]{40})`\*\*$', re.M)
+
+
+def refresh(prf, repo, pr, meta, gh=None, login=None):
+    """Refresh a prior whole-PR scan after author resolution, never rescan/resolve.
+
+    A separate per-head PASS marker survives a crash after POST. This namespace
+    does not change the immutable original run receipt or schedule another scan.
+    """
+    injected = gh is not None
+    gh = prf._gh if gh is None else gh
+    meta = dict(meta)
+    gh, login, meta = prf.select_receipt_identity(repo, meta, gh, login, injected)
+    state = prf.pr_state(gh, repo, pr)
+    if state['state'] != 'open' or state.get('merged') or state.get('head') != meta['head']:
+        return {'state': 'skipped-head'}
+    rows = reviews(prf, gh, repo, pr)
+    own = []
+    for row in rows:
+        body = row.get('body') or ''
+        verdict = VERDICT.search(body)
+        if (verdict and verdict[2] == meta['head'] and (PREFIX in body or REFRESH in body)
+                and row.get('user', {}).get('login') in {login, 'cq-review[bot]'}):
+            own.append((row, verdict[1]))
+    if not own:
+        return {'state': 'no-receipt'}
+    def submitted(entry):
+        try:
+            value = dt.datetime.fromisoformat(entry[0]['submitted_at'].replace('Z', '+00:00'))
+            if value.tzinfo is None:
+                raise ValueError()
+            return value.timestamp()
+        except (KeyError, ValueError, TypeError, AttributeError):
+            raise RuntimeError('missing CRQ review chronology; cannot refresh') from None
+    own.sort(key=submitted)
+    if len(own) > 1 and submitted(own[-1]) == submitted(own[-2]) and own[-1][1] != own[-2][1]:
+        raise RuntimeError('ambiguous CRQ review chronology; cannot refresh')
+    latest, verdict = own[-1]
+    if verdict == 'PASS':
+        return {'state': 'existing', 'review_id': latest['id'], 'review_url': latest.get('html_url')}
+    body = latest['body']
+    proof = f"<!-- crq-review-scan run={meta['run_id']} whole-pr-success -->"
+    if ' body-major=1 -->' in body:
+        return {'state': 'body-major'}
+    if (binding_marker(binding(meta, pr)) not in body or proof not in body):
+        return {'state': 'no-whole-pr-proof'}
+    if open_major(prf, gh, repo, pr, login):
+        return {'state': 'pending-threads'}
+    wanted = f"{REFRESH}head={meta['head']} scan-run={meta['run_id']} -->"
+    for row, prior_verdict in own:
+        if wanted in row['body'] or prior_verdict == 'PASS':
+            return {'state': 'existing', 'review_id': row['id'], 'review_url': row.get('html_url')}
+    lines = [wanted,
+             f"**Independent review (CodeRabbit CLI via crq): PASS for `{meta['head']}`**"]
+    if meta.get('unattested'):
+        lines += ['Unattested: App identity unavailable; posted with the host account.']
+    lines += [f"Refresh of scanned run `{meta['run_id']}`; reviewed range `{meta['base']}..{meta['head']}`.",
+              f"Supersedes review {latest.get('html_url') or latest['id']} after the author's thread resolution.",
+              'The prior complete whole-PR scan is reused; no scan or new findings were produced.',
+              'Legacy body-only findings are not covered or claimed resolved by this receipt.']
+    argv, response = prf._post(gh, repo, pr, {'event': 'COMMENT', 'commit_id': meta['head'],
+                                           'body': '\n'.join(lines), 'comments': []})
+    posted = json.loads(prf._ok(argv, response).stdout)
+    if type(posted.get('id')) is not int:
+        raise RuntimeError('refresh POST returned no review identity; reconcile before retry')
+    return {'state': 'created', 'review_id': posted['id'], 'review_url': posted.get('html_url'),
+            'identity': login, 'attested': login == 'cq-review[bot]',
+            'identity_reason': meta.get('identity_reason'), 'scanned_run': meta['run_id']}

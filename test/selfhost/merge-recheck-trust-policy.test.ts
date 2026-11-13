@@ -84,3 +84,46 @@ describe('trustPolicyFromConfig', () => {
     expect(judgeAtHead(snap, SHA_B, policy)).toMatchObject({ reason: 'no_head_bound_acceptance' });
   });
 });
+
+describe('latest CRQ exact-head evidence', () => {
+  const crq = (verdict: string, at: string, head = SHA_B, refresh = false) =>
+    review({
+      login: 'cq-review',
+      typename: 'Bot',
+      association: 'NONE',
+      state: 'COMMENTED',
+      oid: head,
+      submittedAt: at,
+      body: `${refresh ? `<!-- crq-verdict-refresh head=${head} scan-run=scan -->` : '<!-- crq-findings run=scan -->'}\n**Independent review (CodeRabbit CLI via crq): ${verdict} for \`${head}\`**\n`,
+    });
+  test.each([false, true])('uses full-history submission time (reverse=%s)', async (reverse) => {
+    const old = crq('PASS', '2026-09-25T00:00:01Z');
+    const newer = crq('ITERATE', '2026-09-25T00:00:02Z');
+    const reviews = reverse ? [newer, old] : [old, newer];
+    expect(
+      judgeAtHead(await snapshotOf(prSpec({ reviews })), SHA_B, CONSERVATIVE_TRUST_POLICY).accepted,
+    ).toBe(false);
+    const refresh = crq('PASS', '2026-09-25T00:00:03Z', SHA_B, true);
+    expect(
+      judgeAtHead(
+        await snapshotOf(prSpec({ reviews: [refresh, ...reviews] })),
+        SHA_B,
+        CONSERVATIVE_TRUST_POLICY,
+      ).accepted,
+    ).toBe(true);
+  });
+  test('stale CRQ verdict cannot borrow the current head from finding prose', async () => {
+    const stale = crq('PASS', '2026-09-25T00:00:03Z', 'd'.repeat(40));
+    stale.body += `Related ${SHA_B}`;
+    expect(
+      judgeAtHead(await snapshotOf(prSpec({ reviews: [stale] })), SHA_B, CONSERVATIVE_TRUST_POLICY)
+        .accepted,
+    ).toBe(false);
+  });
+  test('another independent reviewer remains usable', async () => {
+    const reviews = [crq('ITERATE', '2026-09-25T00:00:03Z'), review()];
+    expect(
+      judgeAtHead(await snapshotOf(prSpec({ reviews })), SHA_B, CONSERVATIVE_TRUST_POLICY).accepted,
+    ).toBe(true);
+  });
+});

@@ -2308,7 +2308,7 @@ def _settle_pr_review(item: Dict[str, Any], error: str) -> str:
     return f"findings review for PR #{item.get('pr')} abandoned: {item['pr_review_error']}"
 
 
-def _deliver_pr_review(item: Dict[str, Any]) -> Optional[str]:
+def _deliver_pr_review(item: Dict[str, Any], q=None) -> Optional[str]:
     """Post the findings of one counted open/delta review on its PR as
     a pull-request review (pr_review_findings). Idempotent by the run marker,
     skipped for a closed or merged PR, retried by later ticks up to
@@ -2322,10 +2322,13 @@ def _deliver_pr_review(item: Dict[str, Any]) -> Optional[str]:
     try:
         pr, ndjson = request["pr"], Path(request["ndjson"])
         meta = {"run_id": request["run_id"], "item_id": item["id"],
-                "base": request["base"], "head": request["head"]}
+                "base": request["base"], "head": request["head"], "crq_receipt": True}
     except (KeyError, TypeError) as exc:
         return _settle_pr_review(item, f"malformed findings review request: {exc!r}")
     try:
+        if q is not None:
+            meta.update(posting_identity=request.get("posting_identity"), identity_reason=request.get("identity_reason"),
+                        identity_checkpoint=lambda login, reason: _checkpoint_review_identity(q, request, login, reason))
         result = pr_review_findings.deliver(item_repo(item), pr, meta, ndjson)
     except ValueError as exc:
         return _settle_pr_review(item, str(exc))
@@ -2372,9 +2375,91 @@ def deliver_pending_pr_reviews(q: Dict[str, Any]) -> List[str]:
     log = []
     for pending in candidates[:PR_REVIEWS_PER_TICK]:
         pending["pr_review_attempt_at"] = iso()
-        msg = _deliver_pr_review(pending)
+        msg = _deliver_pr_review(pending, q)
         if msg:
             log.append(msg)
+    return log
+
+
+def _checkpoint_review_identity(q, request, login, reason):
+    """Durable own-request identity before POST; never persist credentials."""
+    selected = request.get("posting_identity")
+    if selected and selected != login:
+        raise ValueError("changed CRQ posting identity")
+    if selected is None:
+        request["posting_identity"] = login
+        request["identity_reason"] = reason
+        save_queue(q)
+
+
+def deliver_pending_clean_reviews(q: Dict[str, Any]) -> List[str]:
+    """Separate clean delivery debt; never clears/replaces findings requests."""
+    log = []
+    candidates = sorted((item for item in live_items(q)
+        if item.get("kind") in ("open", "delta") and item.get("clean_review_pending")),
+        key=lambda item: item.get("clean_review_attempt_at") or "")
+    for item in candidates[:PR_REVIEWS_PER_TICK]:
+        item["clean_review_attempt_at"] = iso()
+        item["clean_review_attempts"] = item.get("clean_review_attempts", 0) + 1
+        try:
+            request = item["clean_review_request"]
+            meta = {key: request[key] for key in ("run_id", "base", "head")}
+            meta.update(item_id=item["id"], crq_receipt=True,
+                        posting_identity=request.get("posting_identity"), identity_reason=request.get("identity_reason"),
+                        identity_checkpoint=lambda login, reason: _checkpoint_review_identity(q, request, login, reason))
+            result = pr_review_findings.deliver(item_repo(item), request["pr"], meta, Path(request["ndjson"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            item["clean_review_error"] = str(exc)[:300]
+            item["clean_review_pending"] = False
+        except (RuntimeError, OSError) as exc:
+            item["clean_review_error"] = str(exc)[:300]
+            if item["clean_review_attempts"] >= PR_REVIEW_MAX_ATTEMPTS:
+                item["clean_review_pending"] = False
+        else:
+            item["clean_review"] = result
+            item["clean_review_pending"] = False
+            item.pop("clean_review_error", None)
+            log.append(f"clean review on PR #{request['pr']} ({result['state']})")
+    return log
+
+
+def deliver_pending_review_refreshes(q: Dict[str, Any]) -> List[str]:
+    """Bounded PASS refresh after author resolution; never schedules a scan."""
+    candidates = []
+    for item in live_items(q):
+        if item.get("kind") not in ("open", "delta"):
+            continue
+        for prefix in ("pr_review", "clean_review"):
+            result, request = item.get(prefix), item.get(prefix + "_request")
+            if not isinstance(result, dict) or not isinstance(request, dict):
+                continue
+            if result.get("verdict") != "ITERATE" or not result.get("whole_pr_scan") or result.get("body_major"):
+                continue
+            if (not all(isinstance(request.get(key), str) and request[key] for key in ("run_id", "base", "head"))
+                    or type(request.get("pr")) is not int):
+                item["review_refresh"] = {"state": "abandoned", "error": "malformed CRQ refresh request"}
+                continue
+            previous = item.get("review_refresh", {})
+            if previous.get("head") == request["head"] and previous.get("state") in ("created", "existing", "abandoned"):
+                continue
+            candidates.append((item, request))
+    candidates.sort(key=lambda pair: pair[0].get("review_refresh_attempt_at") or "")
+    log = []
+    for item, request in candidates[:PR_REVIEWS_PER_TICK]:
+        item["review_refresh_attempt_at"] = iso()
+        prior = item.get("review_refresh", {})
+        attempts = prior.get("attempts", 0) if prior.get("head") == request["head"] else 0
+        meta = {key: request[key] for key in ("run_id", "base", "head")}
+        meta.update(posting_identity=request.get("posting_identity"), identity_reason=request.get("identity_reason"),
+                    identity_checkpoint=lambda login, reason: _checkpoint_review_identity(q, request, login, reason))
+        try:
+            result = pr_review_findings.crq_review_receipt.refresh(pr_review_findings, item_repo(item), request["pr"], meta)
+        except (RuntimeError, OSError, ValueError) as exc:
+            attempts += 1
+            result = {"state": "abandoned" if attempts >= PR_REVIEW_MAX_ATTEMPTS else "retry", "error": str(exc)[:300]}
+        item["review_refresh"] = {**result, "head": request["head"], "attempts": attempts}
+        if result["state"] == "created":
+            log.append(f"PASS refresh on PR #{request['pr']} ({result['state']})")
     return log
 
 
@@ -2575,6 +2660,12 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         if item["kind"] in ("open", "delta") and item.get("pr") and cls["findings"]:
             # All repos use the same durable, bounded PR-review delivery.
             _request_pr_review(item, r["run_id"], meta, rdir, cls)
+        if item["kind"] in ("open", "delta") and item.get("pr") and not cls["findings"]:
+            # Clean receipts never replace undelivered findings debt (#1069).
+            item["clean_review_request"] = {"run_id": r["run_id"], "pr": item["pr"],
+                "base": meta["base"], "head": meta["head"], "ndjson": str(rdir / "review.ndjson")}
+            item["clean_review_pending"] = True
+            item["clean_review_attempts"] = 0
         if item["kind"] in ("open", "delta") and not repo_registry.same_repo(item_repo(item), REPO):
             # Foreign cycles are real evidence; coverage and repair stay primary-only.
             item["state"] = "done"
@@ -3322,6 +3413,8 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                 log.append(msg)
         # Open/delta findings in every repo: one PR review each, same bounded shape.
         log += deliver_pending_pr_reviews(q)
+        log += deliver_pending_clean_reviews(q)
+        log += deliver_pending_review_refreshes(q)
         repair_tick.backfill(sys.modules[__name__], q)
         repair_tick.archive_legacy(sys.modules[__name__], q)
         with forge_window(budget):

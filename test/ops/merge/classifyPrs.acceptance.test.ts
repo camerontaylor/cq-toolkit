@@ -386,3 +386,41 @@ describe('classifyPr — acceptance states (row 7)', () => {
     expect(result.reason).toBe('no_acceptable_review');
   });
 });
+
+describe('latest CRQ verdict at the exact head', () => {
+  const body = (verdict: string, head = HEAD, refresh = false) =>
+    `${refresh ? `<!-- crq-verdict-refresh head=${head} scan-run=scan -->` : '<!-- crq-findings run=scan -->'}\n**Independent review (CodeRabbit CLI via crq): ${verdict} for \`${head}\`**\n`;
+  const crq = (verdict: string, at: string, head = HEAD, refresh = false) =>
+    approved({
+      authorType: 'Bot',
+      authorLogin: 'cq-review[bot]',
+      state: 'COMMENTED',
+      submittedAt: at,
+      body: body(verdict, head, refresh),
+    });
+  test.each([false, true])('uses submission time, not input order (reverse=%s)', (reverse) => {
+    const earlier = crq('PASS', '2026-01-01T00:00:01Z');
+    const later = crq('ITERATE', '2026-01-01T00:00:02Z');
+    const reviews = reverse ? [later, earlier] : [earlier, later];
+    expect(classifyPr(candidate({ reviews }), PENDING_MS).reason).toBe('no_acceptable_review');
+    const refresh = crq('PASS', '2026-01-01T00:00:03Z', HEAD, true);
+    expect(classifyPr(candidate({ reviews: [refresh, ...reviews] }), PENDING_MS).reason).toBe(
+      'settle_window_pending',
+    );
+  });
+  test('stale CRQ PASS cannot count even when its body mentions the current SHA', () => {
+    const stale = crq('PASS', '2026-01-01T00:00:03Z', 'b'.repeat(40));
+    stale.body += `Finding mentions ${HEAD}`;
+    expect(classifyPr(candidate({ reviews: [stale] }), PENDING_MS).reason).toBe(
+      'no_acceptable_review',
+    );
+  });
+  test('CRQ ITERATE preserves independent non-CRQ acceptance', () => {
+    expect(
+      classifyPr(
+        candidate({ reviews: [crq('ITERATE', '2026-01-01T00:00:03Z'), approved()] }),
+        PENDING_MS,
+      ).reason,
+    ).toBe('settle_window_pending');
+  });
+});

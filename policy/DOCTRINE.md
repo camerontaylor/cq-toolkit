@@ -35,7 +35,7 @@ head state exists — evidence covering an earlier commit never qualifies, no ma
 when it was resubmitted.
 The merge bar is green `static` and `denylist` on the exact PR head, one independent review of that head, and no unaddressed review comments.
 
-The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review with the `crq-findings` marker, posted by crq under the queue host’s login, whose reviewed range ends at the head and whose findings are all addressed. A clean crq run posts nothing and does not count.
+The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review posted as `cq-review[bot]` with an exact-head PASS and its run or verdict-refresh marker, whose findings are all addressed. The latest CRQ verdict for the head wins. A successful clean whole-PR crq run posts PASS; failed or partial scans never PASS. Owner-account fallback reviews explicitly say they are unattested.
 
 Every thread and finding, including Codex, CodeRabbit, bot and minor findings, must be fixed or answered with a reason, and every thread resolved before merge. Truncated review data fails closed.
 
@@ -49,8 +49,8 @@ agent must review the final head separately from the author agent. The reviewer 
 share the author's GitHub account. Agent PASS reviews use `cq-review-post`; human PASS reviews name the exact head.
 The merging agent judges independence. `cq-review[bot]` agent PASS reviews count
 without a `crq-findings` marker; other bot authors are excluded from agent PASS
-evidence. The current parser requires PASS and a full head SHA and does not
-recognize the crq alternative; see [merge policy](../docs/promotion-policy.md#merge-to-main)
+evidence. The current parser requires PASS and a full head SHA, rejects ITERATE
+even when the body mentions PASS, and accepts crq through that same format; see [merge policy](../docs/promotion-policy.md#merge-to-main)
 for this implementation limit.
 
 ## I3 — merge commits directly to main

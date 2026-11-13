@@ -3,6 +3,7 @@ import {
   isIgnoredBotAuthor,
   isReviewAppAuthor,
   parseIndependentReview,
+  latestCrqReviewEvidence,
 } from '../../src/shared/independent-review.js';
 
 describe('cq-review App author', () => {
@@ -89,4 +90,36 @@ describe('parseIndependentReview', () => {
       expect(parseIndependentReview(body)).toEqual({ kind: 'absent' });
     },
   );
+});
+
+describe('CRQ exact-head verdict', () => {
+  const head = 'a'.repeat(40);
+  const review = (verdict: string) =>
+    `<!-- crq-findings run=pr7-r1 -->\n**Independent review (CodeRabbit CLI via crq): ${verdict} for \`${head}\`**\nReviewed range ${'b'.repeat(40)}..${head}.`;
+  test('accepts CRQ PASS after its unchanged run marker', () => {
+    expect(parseIndependentReview(review('PASS'), head)).toMatchObject({ kind: 'valid' });
+  });
+  test('rejects ITERATE even when the findings mention PASS', () => {
+    expect(parseIndependentReview(review('ITERATE') + '\nFix the test before PASS.', head)).toEqual(
+      { kind: 'absent' },
+    );
+  });
+});
+
+describe('CRQ history ambiguity', () => {
+  const head = 'a'.repeat(40);
+  const review = (verdict: string, at: string | null) => ({
+    body: `<!-- crq-findings run=r -->\n**Independent review (CodeRabbit CLI via crq): ${verdict} for \`${head}\`**\n`,
+    at,
+  });
+  test('missing chronology and tied contrary latest verdicts fail closed', () => {
+    const pass = review('PASS', '2026-01-01T00:00:00Z');
+    const iterate = review('ITERATE', pass.at);
+    expect(latestCrqReviewEvidence([pass, iterate], head, (r) => r.at)).toEqual([]);
+    expect(latestCrqReviewEvidence([pass, review('ITERATE', null)], head, (r) => r.at)).toEqual([]);
+    const nonCrq = { body: `${head} PASS`, at: null };
+    expect(
+      latestCrqReviewEvidence([pass, review('ITERATE', null), nonCrq], head, (r) => r.at),
+    ).toEqual([nonCrq]);
+  });
 });

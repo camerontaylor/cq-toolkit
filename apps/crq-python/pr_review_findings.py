@@ -1,14 +1,14 @@
 """Post crq findings on an open PR in any reviewed repository as one GitHub pull-request review.
 
-A counted open/delta review with findings becomes ONE review
+A counted open/delta review becomes ONE exact-head verdict review
 (`POST /repos/{repo}/pulls/{pr}/reviews`, event COMMENT, `commit_id` = the
 reviewed head). Each finding whose lines fall inside the PR diff for that
 commit becomes an inline comment, so it opens its own resolvable review thread
 (GraphQL `reviewThreads` / reply / `resolveReviewThread`). Findings that cannot
 be anchored are listed in the review body instead.
 
-The review is labelled plainly as crq output: no CodeRabbit branding, bot
-markers or comment format. Its body starts with a hidden marker
+The counted-run path uses the cq-review App transport and a PASS/ITERATE header.
+The independent-review CLI keeps its caller-provided summary. Both start with
 `<!-- crq-findings run=<run_id> -->`; before posting, the PR's existing reviews
 are searched for that marker, so a crash between the POST and the queue save
 is safe to retry and one run is never posted twice.
@@ -16,6 +16,8 @@ is safe to retry and one run is never posted twice.
 Pure module: plain data in, `gh` injected (the same shape as finding_issues).
 """
 import argparse
+import crq_review_identity
+import crq_review_receipt
 import json
 import sys
 import hashlib
@@ -52,13 +54,13 @@ def marker(run_id: str) -> str:
 # ----------------------------------------------------------- findings
 
 
-def load_findings(ndjson: Path) -> List[Dict[str, Any]]:
+def load_findings(ndjson: Path, *, highest_severity=False) -> List[Dict[str, Any]]:
     """Finding events from the run's review.ndjson, exact duplicates dropped.
 
     The CLI sometimes emits the same finding twice in one stream; posting both
     would open two identical threads."""
     out: List[Dict[str, Any]] = []
-    seen = set()
+    seen = {}
     for line in Path(ndjson).read_text(errors="replace").splitlines():
         try:
             event = json.loads(line)
@@ -79,8 +81,13 @@ def load_findings(ndjson: Path) -> List[Dict[str, Any]]:
             finding["start"], finding["end"] = finding["end"], finding["start"]
         key = (finding["path"], finding["start"], finding["end"], finding["title"], finding["text"])
         if key in seen:
+            if highest_severity:
+                rank = {"critical": 5, "major": 4, "minor": 3, "trivial": 2, "info": 1, "none": 0}
+                prior = out[seen[key]]
+                if rank.get(finding["severity"].lower(), 0) > rank.get(prior["severity"].lower(), 0):
+                    prior["severity"] = finding["severity"]
             continue
-        seen.add(key)
+        seen[key] = len(out)
         out.append(finding)
     return out
 
@@ -291,14 +298,23 @@ def build_review(meta: Dict[str, Any], findings: List[Dict[str, Any]],
     run_id, base, head = meta["run_id"], meta["base"], meta["head"]
     comments, unanchored = [], []
     for number, finding in enumerate(findings, 1):
-        position = anchor(finding, hunks) if hunks is not None and len(comments) < MAX_INLINE else None
+        position = anchor(finding, hunks) if hunks is not None and (meta.get("crq_receipt") or len(comments) < MAX_INLINE) else None
+        intended = ""
+        if meta.get("crq_receipt") and hunks and any(hunks.values()):
+            if position is None:
+                path = finding["path"] if hunks.get(finding["path"]) else next(path for path, ranges in hunks.items() if ranges)
+                position = {"path": path, "line": hunks[path][0][0], "side": "RIGHT"}
+                intended = f"\n\nThread anchor is a PR changed line, not the finding's intended location: {code_span(finding['path'] or '(unspecified file)')} {_lines(finding)}."
         heading = f"**crq finding F{number} [{one_line(finding['severity'])}]**"
         if finding["title"]:
             heading += f" {one_line(finding['title'])}"
         text = clean_text(finding["text"], finding["title"])
         if position:
             where = _lines(finding)
-            note = f"\n\n<sub>crq run `{run_id}`{', ' + where if where else ''}</sub>"
+            note = intended + f"\n\n<sub>crq run `{run_id}`{', ' + where if where else ''}</sub>"
+            if meta.get("receipt_binding"):
+                identity = hashlib.sha256(json.dumps(finding, sort_keys=True).encode()).hexdigest()
+                note += f"\n<!-- crq-review-thread run={run_id} head={head} finding={identity} -->"
             comments.append({**position, "body": _clip(f"{heading}\n\n{text}", MAX_COMMENT) + note})
         else:
             unanchored.append((number, finding, heading, text))
@@ -308,9 +324,21 @@ def build_review(meta: Dict[str, Any], findings: List[Dict[str, Any]],
         counts[severity] = counts.get(severity, 0) + 1
     summary = ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
     label = one_line(meta.get("label") or f"crq findings (CodeRabbit CLI, local run {run_id}, {base[:10]}..{head[:10]})")
-    lines = [marker(run_id), clean_text(meta.get("summary", "")),
+    lines = [marker(run_id)]
+    if meta.get("receipt_binding"):
+        lines += [meta["receipt_binding"]]
+        body_major = any(finding["severity"].lower() in crq_review_receipt.BLOCKING
+                         for _, finding, _, _ in unanchored)
+        suffix = " body-major=1" if body_major else ""
+        scope = "whole-pr-success" if meta.get("whole_pr_scan") else "narrow-success"
+        lines += [f"<!-- crq-review-scan run={run_id} {scope}{suffix} -->"]
+        lines += [meta["receipt_header"]]
+        if meta.get("unattested"):
+            lines += ["Unattested: App identity unavailable; posted with the host account."]
+        lines += ["Legacy body-only findings are not covered or claimed resolved by this receipt."]
+    lines += [clean_text(meta.get("summary", "")),
              f"### {label}", "",
-             f"{len(findings)} finding(s) ({summary}): {len(comments)} as inline threads, "
+             f"{('0 findings' if not findings and meta.get('crq_receipt') else str(len(findings)) + ' finding(s)')} ({summary}): {len(comments)} as inline threads, "
              f"{len(unanchored)} listed below.", "",
              f"Queue item `{meta.get('item_id', '')}`, reviewed range `{base}..{head}`. "
              + (f"{label}. Reply on a thread or resolve it after an explicit disposition." if meta.get("label") else
@@ -397,7 +425,23 @@ def existing_review(gh: Gh, repo: str, pr: int, run_id: str, login: str) -> Opti
     return None
 
 
-def diff_hunks(gh: Gh, repo: str, base: str, head: str) -> Dict[str, List[Tuple[int, int]]]:
+def added_ranges(patch):
+    """Actual added lines, excluding context/header/deleted coordinates."""
+    ranges, line_number = [], None
+    for line in patch.splitlines():
+        header = HUNK.match(line)
+        if header:
+            line_number = int(header[1])
+        elif line_number is not None:
+            if line.startswith('+'):
+                ranges.append((line_number, line_number))
+                line_number += 1
+            elif line.startswith(' '):
+                line_number += 1
+    return ranges
+
+
+def diff_hunks(gh: Gh, repo: str, base: str, head: str, *, changed_only=False) -> Dict[str, List[Tuple[int, int]]]:
     """Commentable right-side ranges per path for the PR diff at `head`
     (merge base of the PR base and `head`, as GitHub computes it). Files with no
     patch (binary, oversized, deleted) get no ranges, so their findings go to
@@ -407,7 +451,7 @@ def diff_hunks(gh: Gh, repo: str, base: str, head: str) -> Dict[str, List[Tuple[
     hunks: Dict[str, List[Tuple[int, int]]] = {}
     for row in data if isinstance(data, list) else []:
         if isinstance(row, dict) and isinstance(row.get("filename"), str) and row.get("status") != "removed":
-            ranges = right_ranges(row.get("patch") or "")
+            ranges = added_ranges(row.get("patch") or "") if changed_only else right_ranges(row.get("patch") or "")
             if ranges:
                 hunks[row["filename"]] = ranges
     return hunks
@@ -418,6 +462,33 @@ def _post(gh: Gh, repo: str, pr: int, review: Dict[str, Any]) -> Any:
     return argv, _call(gh, argv, input_text=json.dumps(review))
 
 
+def select_receipt_identity(repo, meta, gh, login, injected):
+    selected = meta.get("posting_identity")
+    if not injected:
+        if selected and selected != "cq-review[bot]":
+            actual = authenticated_login(gh)
+            if actual != selected:
+                raise ValueError("changed CRQ posting identity")
+            login = actual
+            meta["unattested"] = True
+        else:
+            try:
+                gh = crq_review_identity.authenticated_gh(repo)
+                login = "cq-review[bot]"
+            except crq_review_identity.IdentityUnavailable as exc:
+                if selected == "cq-review[bot]":
+                    raise RuntimeError("App identity selected; credential setup unavailable, retry as App") from None
+                meta["unattested"] = True
+                meta["identity_reason"] = str(exc)
+    login = login or authenticated_login(gh)
+    if selected and selected != login:
+        raise ValueError("changed CRQ posting identity")
+    checkpoint = meta.get("identity_checkpoint")
+    if checkpoint:
+        checkpoint(login, meta.get("identity_reason"))
+    return gh, login, meta
+
+
 def deliver(repo: str, pr: int, meta: Dict[str, Any], ndjson: Path,
             gh: Optional[Gh] = None, login: Optional[str] = None) -> Dict[str, Any]:
     """Post this run's findings review on the PR, at most once.
@@ -425,6 +496,7 @@ def deliver(repo: str, pr: int, meta: Dict[str, Any], ndjson: Path,
     Returns {"state": "created"|"existing"|"skipped-closed"|"skipped-empty",
     "review_id", "review_url", "inline", "body_only"}. Raises RuntimeError on a
     gh failure; the caller keeps the debt and retries on a later tick."""
+    injected = gh is not None
     gh = _gh if gh is None else gh
     run_id, head = meta.get("run_id"), meta.get("head")
     if (not REPO.fullmatch(repo or "") or type(pr) is not int or pr <= 0
@@ -433,19 +505,44 @@ def deliver(repo: str, pr: int, meta: Dict[str, Any], ndjson: Path,
             or not isinstance(meta.get("base"), str) or not meta["base"]):
         raise ValueError("invalid PR review delivery identity")
     result = {"review_id": None, "review_url": None, "inline": 0, "body_only": 0}
-    findings = load_findings(ndjson)
+    findings = load_findings(ndjson, highest_severity=True) if meta.get("crq_receipt") else load_findings(ndjson)
     if login is not None and not LOGIN.fullmatch(login):
         raise ValueError("invalid posting login")
-    if not findings and not meta.get("summary") and not meta.get("local_review"):
+    if not findings and not meta.get("summary") and not meta.get("local_review") and not meta.get("crq_receipt"):
         return {**result, "state": "skipped-empty"}
+    if meta.get("crq_receipt"):
+        meta = dict(meta)
+        gh, login, meta = select_receipt_identity(repo, meta, gh, login, injected)
+        prior = crq_review_receipt.prior_receipt(sys.modules[__name__], gh, repo, pr, meta, login)
+        if prior:
+            return {**result, "state": "existing", "review_id": prior["id"], "review_url": prior.get("url"),
+                    "identity": prior.get("login"), "attested": prior.get("login") == "cq-review[bot]",
+                    "verdict": (crq_review_receipt.VERDICT.search(prior.get("body", ""))[1]
+                                if crq_review_receipt.VERDICT.search(prior.get("body", "")) else None),
+                    "whole_pr_scan": f"<!-- crq-review-scan run={run_id} whole-pr-success" in prior.get("body", ""),
+                    "body_major": " body-major=1 -->" in prior.get("body", "")}
     state = pr_state(gh, repo, pr)
     if state["state"] != "open" or state.get("merged"):
         return {**result, "state": "skipped-closed"}
     if meta.get("local_review") and state.get("head") != head:
         return {**result, "state": "skipped-head"}
-    if not findings and not meta.get("summary"):
+    if not findings and not meta.get("summary") and not meta.get("crq_receipt"):
         return {**result, "state": "skipped-empty"}
     login = login or authenticated_login(gh)
+    if meta.get("crq_receipt"):
+        prepared = crq_review_receipt.prepare(sys.modules[__name__], gh, repo, pr, meta, ndjson, findings, login)
+        if prepared is None:
+            return {**result, "state": "skipped-no-verdict"}
+        meta = prepared
+        if meta["receipt_verdict"] == "PASS":
+            for old in crq_review_receipt.reviews(sys.modules[__name__], gh, repo, pr):
+                body = old.get("body") or ""
+                verdict = crq_review_receipt.VERDICT.search(body)
+                if (verdict and verdict[1] == "PASS" and verdict[2] == head and
+                        (crq_review_receipt.PREFIX in body or crq_review_receipt.REFRESH in body) and
+                        old.get("user", {}).get("login") in {login, "cq-review[bot]"}):
+                    return {**result, "state": "existing", "review_id": old["id"], "review_url": old.get("html_url"),
+                            "identity": old["user"]["login"], "attested": old["user"]["login"] == "cq-review[bot]"}
     fingerprint = None
     # Independent verdicts keep their reviewer-specific run marker even when
     # their findings match another reviewer's findings.
@@ -460,12 +557,12 @@ def deliver(repo: str, pr: int, meta: Dict[str, Any], ndjson: Path,
         out = _ok(argv, _call(gh, argv))
         for line in (out.stdout or "").splitlines():
             row = json.loads(line)
-            if type(row.get("id")) is int:
+            if type(row.get("id")) is int and not meta.get("crq_receipt"):
                 return {**result, "state": "existing", "review_id": row["id"], "review_url": row.get("url")}
-    found = existing_review(gh, repo, pr, run_id, login)
+    found = None if meta.get("crq_receipt") else existing_review(gh, repo, pr, run_id, login)
     if found:
         return {**result, "state": "existing", "review_id": found["id"], "review_url": found["url"]}
-    hunks = diff_hunks(gh, repo, meta["base"], head)
+    hunks = diff_hunks(gh, repo, meta["base"], head, changed_only=True) if meta.get("crq_receipt") else diff_hunks(gh, repo, meta["base"], head)
     review = build_review(meta, findings, hunks)
     if fingerprint:
         review["body"] += "\n" + wanted
@@ -476,6 +573,8 @@ def deliver(repo: str, pr: int, meta: Dict[str, Any], ndjson: Path,
             and (review["comments"] or "commit_id" in review):
         # Validation rejected an anchor or the commit (e.g. force-pushed away):
         # nothing was created, so fall back once to a body-only review.
+        if meta.get("crq_receipt") and pr_state(gh, repo, pr).get("head") != head:
+            return {**result, "state": "skipped-head"}
         review = build_review(meta, findings, None)
         if fingerprint:
             if meta.get("local_review") and pr_state(gh, repo, pr).get("head") != head:
@@ -487,8 +586,15 @@ def deliver(repo: str, pr: int, meta: Dict[str, Any], ndjson: Path,
         posted = json.loads(out.stdout or "{}")
     except ValueError:
         posted = {}
-    return {"state": "created", "review_id": posted.get("id"), "review_url": posted.get("html_url"),
-            "inline": len(review["comments"]), "body_only": len(findings) - len(review["comments"])}
+    if meta.get("crq_receipt") and type(posted.get("id")) is not int:
+        raise RuntimeError("receipt POST returned no review identity; reconcile before retry")
+    result = {"state": "created", "review_id": posted.get("id"), "review_url": posted.get("html_url"),
+              "inline": len(review["comments"]), "body_only": len(findings) - len(review["comments"])}
+    if meta.get("crq_receipt"):
+        result.update(identity=login, attested=login == "cq-review[bot]", identity_reason=meta.get("identity_reason"),
+                      verdict=meta.get("receipt_verdict"), whole_pr_scan=meta.get("whole_pr_scan"),
+                      body_major=" body-major=1 -->" in review["body"])
+    return result
 
 
 def main(argv=None, gh=None):

@@ -49,6 +49,16 @@ class FakeGh:
         self.calls.append((argv, input_text))
         if argv[2:3] == ["user"]:
             return SimpleNamespace(returncode=0, stdout=self.login + "\n", stderr="")
+        if "--slurp" in argv:
+            old = {"id": self.existing["id"], "html_url": self.existing.get("url"),
+                   "user": {"login": self.login}, "body": prf.marker("infra-pr7-r") + f"\n{BASE}..{HEAD}"} if self.existing else None
+            return SimpleNamespace(returncode=0, stdout=json.dumps([[old]] if old else [[]]), stderr="")
+        if "graphql" in argv:
+            data = {"data": {"repository": {"pullRequest": {"reviewThreads": {
+                "nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}}
+            return SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
+        if ".merge_base_commit.sha" in argv:
+            return SimpleNamespace(returncode=0, stdout=json.dumps(BASE), stderr="")
         target = next(a for a in argv[2:] if a.startswith("repos/"))
         if "--method" in argv:
             code, out, err = self.post.pop(0)
@@ -61,7 +71,7 @@ class FakeGh:
                      {"filename": "bin.dat", "status": "modified", "patch": None}]
             return SimpleNamespace(returncode=0, stdout=json.dumps(files), stderr="")
         return SimpleNamespace(returncode=0, stdout=json.dumps(
-            {"state": self.state, "merged": self.merged, "base": BASE}), stderr="")
+            {"state": self.state, "merged": self.merged, "base": BASE, "head": HEAD}), stderr="")
 
     def posts(self):
         return [json.loads(stdin) for argv, stdin in self.calls if "--method" in argv]
@@ -508,13 +518,15 @@ class CrqIntegrationTest(unittest.TestCase):
                 repair.assert_not_called()
             self.assertEqual(item["state"], "done")
 
-    def test_clean_review_records_no_debt_in_any_repo(self):
+    def test_clean_review_records_separate_debt_in_any_repo(self):
         for repo in (REPO, "camerontaylor/infra"):
             item = {"id": "pr8", "repo": repo, "kind": "open", "pr": 8,
                     "state": "reviewing", "run": {"run_id": "pr8-r"}}
             item, _, _ = self.harvest(item, [{"type": "complete"}], 0)
             self.assertNotIn("pr_review_request", item)
             self.assertNotIn("issue_request", item)
+            self.assertTrue(item["clean_review_pending"])
+            self.assertEqual(item["clean_review_request"]["head"], HEAD)
 
     def pending(self, item_id, stamp=None, repo=None):
         item = {"id": item_id, "kind": "open", "pr": 7, "state": "done", "pr_review_pending": True,
@@ -551,9 +563,11 @@ class CrqIntegrationTest(unittest.TestCase):
              mock.patch.object(crq, "event"):
             crq.deliver_pending_pr_reviews(q)
             crq.deliver_pending_pr_reviews(q)
-        deliver.assert_called_once_with("camerontaylor/infra", 7,
-            {"run_id": "old-run", "item_id": "infra-pr7", "base": BASE, "head": HEAD},
-            Path("/runs/old-run/review.ndjson"))
+        deliver.assert_called_once()
+        self.assertEqual(deliver.call_args.args[:2], ("camerontaylor/infra", 7))
+        self.assertEqual(deliver.call_args.args[2]["run_id"], "old-run")
+        self.assertEqual(deliver.call_args.args[2]["head"], HEAD)
+        self.assertEqual(deliver.call_args.args[3], Path("/runs/old-run/review.ndjson"))
         self.assertFalse(item["issue_pending"])
         self.assertFalse(item["pr_review_pending"])
 
@@ -578,13 +592,17 @@ class CrqIntegrationTest(unittest.TestCase):
             with self.subTest(expected=expected), tempfile.TemporaryDirectory() as root:
                 item = self.pending("infra-pr7", repo="camerontaylor/infra")
                 item["head"] = "c" * 40  # refreshed queue head must never replace reviewed head
-                item["pr_review_request"]["ndjson"] = str(write_ndjson(root, [ANCHORED]))
+                item["pr_review_request"]["ndjson"] = str(write_ndjson(root,
+                    [ANCHORED, {"type": "complete", "status": "review_completed"}]))
+                (Path(root) / "meta.json").write_text(json.dumps({"run_id": "infra-pr7-r", "base": BASE,
+                    "head": HEAD, "range_policy": "full-range-once-v1"}))
+                (Path(root) / "exit.json").write_text(json.dumps({"exit": 0}))
                 gh = FakeGh(state=state, existing=existing)
                 with mock.patch.object(prf, "_gh", side_effect=RuntimeError("HTTP 502")), \
                      mock.patch.object(crq, "event"):
                     crq.deliver_pending_pr_reviews({"items": [item]})
                 self.assertTrue(item["pr_review_pending"])
-                with mock.patch.object(prf, "_gh", gh), mock.patch.object(crq, "event"):
+                with mock.patch.object(prf, "_gh", gh), mock.patch.object(crq, "event"), mock.patch.object(crq, "save_queue"):
                     crq.deliver_pending_pr_reviews({"items": [item]})
                 self.assertEqual(item["pr_review"]["state"], expected)
                 self.assertFalse(item["pr_review_pending"])

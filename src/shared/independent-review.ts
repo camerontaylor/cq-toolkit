@@ -43,10 +43,10 @@ export function isIgnoredBotAuthor(
   return authorType === 'Bot' || (authorLogin?.toLowerCase().endsWith('[bot]') ?? false);
 }
 
-/** A word-bounded PASS, with no HOLD/FAIL verdict word and no negation ("not PASS", "isn't PASS"). */
+/** A word-bounded PASS, with no HOLD/FAIL/ITERATE verdict word and no negation ("not PASS", "isn't PASS"). */
 function hasPassVerdict(body: string): boolean {
   if (!/\bPASS\b/.test(body)) return false;
-  if (/\b(?:HOLD|FAIL)\b/.test(body)) return false;
+  if (/\b(?:HOLD|FAIL|ITERATE)\b/.test(body)) return false;
   return !/(?:\bnot|n't)\s+PASS\b/i.test(body);
 }
 
@@ -71,4 +71,49 @@ export function parseIndependentReview(
       verdict: 'PASS',
     },
   };
+}
+
+const CRQ_HEADER =
+  /^(?:(?:<!-- crq-findings run=[A-Za-z0-9._-]+ -->|<!-- crq-verdict-refresh head=[0-9a-f]{40} scan-run=[A-Za-z0-9._-]+ -->)\s*)(?:<!--[\s\S]*?-->\s*)*\*\*Independent review \(CodeRabbit CLI via crq\): (PASS|ITERATE) for `([0-9a-f]{40})`\*\*(?:\r?\n|$)/;
+
+/** CRQ's own verdict namespace; finding text alone cannot create one. */
+export function isCrqReviewBody(body: string): boolean {
+  return CRQ_HEADER.test(body);
+}
+
+/** Keep only the latest CRQ verdict at this head, without changing other reviewers.
+ * GitHub's complete paginated history need not arrive in chronological order.
+ * Missing or conflicting equal timestamps fail closed for CRQ only.
+ */
+export function latestCrqReviewEvidence<T extends { body: string }>(
+  evidence: readonly T[],
+  head: string,
+  submittedAt: (review: T) => string | null | undefined,
+): T[] {
+  const other: T[] = [];
+  let latest: { review: T; at: number; verdict: string } | undefined;
+  let invalidTime = false;
+  let ambiguousLatest = false;
+  for (const review of evidence) {
+    const match = CRQ_HEADER.exec(review.body);
+    if (match === null) {
+      other.push(review);
+      continue;
+    }
+    if (match[2] !== head.toLowerCase()) continue;
+    const at = Date.parse(submittedAt(review) ?? '');
+    if (!Number.isFinite(at)) {
+      invalidTime = true;
+      continue;
+    }
+    if (latest === undefined || at > latest.at) {
+      latest = { review, at, verdict: match[1] ?? '' };
+      ambiguousLatest = false;
+    } else if (at === latest.at && latest.verdict !== match[1]) {
+      ambiguousLatest = true;
+    }
+  }
+  return latest !== undefined && !invalidTime && !ambiguousLatest
+    ? [...other, latest.review]
+    : other;
 }

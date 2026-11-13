@@ -90,6 +90,8 @@ import {
   isIgnoredBotAuthor,
   isReviewAppAuthor,
   parseIndependentReview,
+  latestCrqReviewEvidence,
+  isCrqReviewBody,
 } from '../shared/independent-review.js';
 import type { IndependentReviewAttestation } from '../shared/independent-review.js';
 import { defaultClassifyPrConfig } from '../ops/merge/classify.config.js';
@@ -916,22 +918,30 @@ const sameAccountAgentAccepted = (
   headSha: string,
   policy: TrustPolicy,
 ): AuthenticatedR4Evidence | null => {
-  for (const review of [...snapshot.reviews, ...(snapshot.allClear?.comments ?? [])]) {
-    if (isIgnoredBotAuthor(review.authorType, review.authorLogin)) continue;
-    const login = review.authorLogin;
-    if (login === null || login === '') continue;
-    const name = bareName(login);
-    // The cq-review App is the reviewer's own posting path and is independent
-    // acceptance, so the exclusion and author guards bind only the plain-comment
-    // alternative: a plain comment counts from the PR author (shared-account
-    // design) or a User holding a trusted association, never from an excluded login.
-    if (!isReviewAppAuthor(review.authorType, login)) {
-      if (snapshot.authorLogin === null || snapshot.authorLogin === '') continue;
-      if ([...policy.excludedLogins].some((entry) => bareName(entry) === name)) continue;
-      if (review.authorType !== 'User') continue;
-      const isAuthor = snapshot.authorLogin !== null && bareName(snapshot.authorLogin) === name;
-      if (!isAuthor && !policy.trustedAssociations.has(review.association)) continue;
-    }
+  // Screen identity before history folding: an unrelated actor cannot supersede
+  // trusted CRQ evidence. The App bypasses plain shared-account exclusions.
+  const evidence = [...snapshot.reviews, ...(snapshot.allClear?.comments ?? [])].filter(
+    (review) => {
+      if (isIgnoredBotAuthor(review.authorType, review.authorLogin)) return false;
+      const login = review.authorLogin;
+      if (login === null || login === '') return false;
+      if (isReviewAppAuthor(review.authorType, login)) return true;
+      const name = bareName(login);
+      if (snapshot.authorLogin === null || snapshot.authorLogin === '') return false;
+      if ([...policy.excludedLogins].some((entry) => bareName(entry) === name)) return false;
+      return (
+        review.authorType === 'User' &&
+        (bareName(snapshot.authorLogin) === name ||
+          policy.trustedAssociations.has(review.association))
+      );
+    },
+  );
+  for (const review of latestCrqReviewEvidence(evidence, headSha, (entry) => entry.submittedAt)) {
+    if (
+      isCrqReviewBody(review.body) &&
+      (review.state === 'DISMISSED' || review.state === 'PENDING')
+    )
+      continue;
     const parsed = parseIndependentReview(review.body, headSha);
     if (parsed.kind !== 'valid') continue;
     return Object.freeze({
@@ -964,8 +974,8 @@ export function judgeAtHead(
   headSha: string,
   policy: TrustPolicy,
 ): HeadJudgment {
-  const trusted = snapshot.reviews.filter((review) =>
-    isTrusted(review, snapshot.authorLogin, policy),
+  const trusted = snapshot.reviews.filter(
+    (review) => !isCrqReviewBody(review.body) && isTrusted(review, snapshot.authorLogin, policy),
   );
   const objectors = [...foldLatestOpinionated(trusted).values()]
     .filter((review) => review.state === 'CHANGES_REQUESTED')
