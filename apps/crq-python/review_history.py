@@ -179,21 +179,25 @@ def _entries_for(q, *, repo, target, task, branch, predecessor, head, head_tree,
     return linked
 
 
+def _reviewed(item):
+    """Completion evidence that this one item was actually reviewed."""
+    return bool(item.get("state") == "done" and item.get("scope_adequate") is True
+                and item.get("receipt_id"))
+
+
 def _summary(q, linked):
     item_ids = {row["item"] for row in linked}
     request_ids = {rid for rid, binding in (q.get("review_requests") or {}).items()
                    if binding.get("item") in item_ids}
     items = [i for i in q.get("items") or [] if i.get("id") in item_ids]
     invocations = sum(len(i.get("attempts") or []) + (1 if i.get("run") else 0) for i in items)
-    completed = sum(1 for i in items
-                    if i.get("state") == "done" and i.get("scope_adequate") is True
-                    and bool(i.get("receipt_id")))
+    completed = sum(1 for i in items if _reviewed(i))
     failed = sum(int(i.get("failures") or 0) for i in items)
     return dict(requests=len(request_ids), invocations=invocations,
                 completed=completed, failed=failed)
 
 
-def _cue(predecessor, delta, summary, repeat):
+def _cue(predecessor, delta, summary, repeat, reviewed):
     if predecessor is None:
         return None
     head = (predecessor.get("head_commit") or "")[:12]
@@ -214,7 +218,10 @@ def _cue(predecessor, delta, summary, repeat):
         since.append(f"+{delta['insertions']}/-{delta['deletions']} (tree comparison)")
     elif delta is not None:
         since.append("line counts unknown (binary or missing trees)")
-    text = f"Previously reviewed at {head}. Since then: {', '.join(since)}. "
+    # Claim a prior review only with completion evidence for the selected
+    # predecessor itself; otherwise it is just an earlier request on record.
+    lead = "Previously reviewed" if reviewed else "Earlier review request"
+    text = f"{lead} at {head}. Since then: {', '.join(since)}. "
     text += f"{summary['completed']} CodeRabbit review(s) completed for this work."
     if repeat:
         text += " This request will wait behind first reviews. It is queued; keep working or wait."
@@ -308,6 +315,13 @@ def project(q, *, repo, target, head_commit=None, head_tree=None, task=None,
                                   deletions=None, binary_files=None, partial=True)),
                  "commits_ahead": None, "ancestry": headline["ancestry"]}
     scope = SCOPE_TASK if task is not None else SCOPE_BRANCH if branch is not None else SCOPE_NONE
+    # Completion evidence for the selected predecessor only; summary['completed']
+    # is an aggregate that can include other linked items.
+    reviewed = False
+    if headline is not None:
+        selected = next((i for i in q.get("items") or []
+                         if i.get("id") == headline["item"]), None)
+        reviewed = _reviewed(selected) if selected is not None else False
     material = dict(relation=relation, repeat=repeat, summary=summary, delta=delta,
                     predecessor=None if headline is None else
                     {k: headline[k] for k in ("item", "head_commit", "ancestry",
@@ -321,7 +335,7 @@ def project(q, *, repo, target, head_commit=None, head_tree=None, task=None,
                                                "created_at", "head_commit", "head_tree",
                                                "same_task", "same_branch", "relationship",
                                                "ancestry", "commits_ahead")}),
-        delta=delta, summary=summary, cue=_cue(headline, delta, summary, repeat),
+        delta=delta, summary=summary, cue=_cue(headline, delta, summary, repeat, reviewed),
         entries=page, cursor=cursor, next_cursor=next_cursor,
         digest=_digest(material),
     )
