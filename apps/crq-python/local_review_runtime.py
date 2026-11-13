@@ -178,6 +178,7 @@ def complete(c, q, item, rdir, run_id, cls, ended_at, exit_code):
                 receipt_id=receipt_id, run=None, publication_pending=True,
                 local_run_id=run_id, completed_at=ended_at, last_error=cls.get("message"), wait_reason=None)
     item.pop("not_before", None)
+    item.pop("receipt_unavailable", None)  # a published receipt re-verifies
     item.pop("reconcile_failures", None)
     if not any(a.get("run_id") == run_id for a in item.get("attempts", [])):
         item.setdefault("attempts", []).append(dict(run_id=run_id, outcome=cls["outcome"],
