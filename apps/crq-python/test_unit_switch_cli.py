@@ -8,6 +8,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import tempfile
 import unittest
@@ -100,6 +101,10 @@ class CliTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="crq-unit-switch-cli-")
         self.addCleanup(self.temp.cleanup)
         base = pathlib.Path(self.temp.name)
+        xdg_state = mock.patch.dict(os.environ,
+                                    {"XDG_STATE_HOME": str(base / "xdg-state")})
+        xdg_state.start()
+        self.addCleanup(xdg_state.stop)
         self.root = base / "checkout"
         state = self.root / "apps/crq-python/state"
         state.mkdir(parents=True)
