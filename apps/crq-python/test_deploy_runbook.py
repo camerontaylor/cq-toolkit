@@ -1659,11 +1659,14 @@ class CLITests(RunbookFixture):
                 rb.execute(args, effects_factory=refusing_factory)
             load.assert_not_called()
 
-    def test_inactive_real_listing_lets_an_authorized_run_proceed(self):
-        # The counterfactual to the parser defect: real-format lines whose
-        # state column is not active must NOT refuse. If the parser went back
-        # to checking the line prefix, this listing would still refuse and
-        # the guard would be wrong in the other direction.
+    def test_an_unauthorized_run_proceeds_when_no_live_unit_is_active(self):
+        # What this pins: the guard keys on the ACTIVE column, so a listing of
+        # real-format inactive units does not refuse even for an UNAUTHORIZED
+        # run (rehearsal=False, operator_go=False): authorization only bites
+        # when something is active. It is not a counterfactual for the
+        # name-prefix parser - these lines do not start with "active" either
+        # way, so restoring that parser leaves this test passing. The shape is
+        # discriminated by test_a_description_mentioning_active_is_not_active.
         args = self.args(rehearsal=False, operator_go=False)
         listing = ("crq-repair.timer loaded inactive dead Repair timer\n"
                    "crq-backfill.path loaded inactive dead Backfill path\n")
@@ -1679,6 +1682,27 @@ class CLITests(RunbookFixture):
             with self.assertRaisesRegex(rb.Refused, "past the guard"):
                 rb.execute(args, effects_factory=factory)
         self.assertEqual(len(built), 1, "the guard refuses only active units")
+
+    def test_a_description_mentioning_active_is_not_active(self):
+        # Shape, not substring: the state column says inactive while the
+        # DESCRIPTION says "active". A contains-check - or any parser that
+        # looked at the whole line - refuses here; reading the third column
+        # does not, so this is the case that tells the two apart.
+        args = self.args(rehearsal=False, operator_go=False)
+        listing = ("crq-repair.timer loaded inactive dead Repair timer, not "
+                   "active yet\n")
+        built = []
+
+        def factory(marker_path, effects_builder):
+            built.append(marker_path)
+            raise rb.Refused("past the guard")
+
+        with mock.patch.object(rb.subprocess, "run",
+                               return_value=mock.Mock(returncode=0,
+                                                      stdout=listing)):
+            with self.assertRaisesRegex(rb.Refused, "past the guard"):
+                rb.execute(args, effects_factory=factory)
+        self.assertEqual(len(built), 1)
 
     def test_unparsable_listing_refuses_instead_of_assuming_inactive(self):
         # Fail closed: a listing line that cannot be UNIT LOAD ACTIVE SUB is
@@ -2116,12 +2140,45 @@ class CLIStatusGateTests(RunbookFixture):
                 code = rb.main(argv, status_units=units)
             self.assertEqual(code, 0, str(root))
 
+    def test_a_failed_host_command_reports_the_envelope(self):
+        # A host with no user bus raises CalledProcessError after the
+        # candidate imports. It used to exit with a bare string; the machine
+        # contract needs one document, a kind, and no traceback.
+        def failing():
+            raise rb.subprocess.CalledProcessError(
+                1, ["systemctl", "--user", "list-units"])
+
+        stdout = io_string()
+        stderr = io_string()
+        with self.assertRaises(SystemExit) as raised, \
+                contextlib.redirect_stdout(stdout), \
+                contextlib.redirect_stderr(stderr):
+            rb.run_cli(failing)
+        self.assertEqual(raised.exception.code, 4)
+        self.assertEqual(stdout.getvalue(), "")
+        document = json.loads(stderr.getvalue())
+        self.assertEqual(document["error"]["kind"], "host_command_failed")
+        self.assertIn("systemctl", document["error"]["message"])
+        self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_status_requires_the_bound_root(self):
         # An optional binding is one the next invocation can omit, and then
-        # the record answers for whatever checkout wrote it.
-        with self.assertRaises(SystemExit) as raised:
+        # the record answers for whatever checkout wrote it. This is also the
+        # machine-mode contract: the subparser must emit the same single JSON
+        # document every other argument error emits, not an empty stdout.
+        stdout = io_string()
+        stderr = io_string()
+        with self.assertRaises(SystemExit) as raised, \
+                contextlib.redirect_stdout(stdout), \
+                contextlib.redirect_stderr(stderr):
             rb.main(["status", "--output-dir", str(self.output_dir)])
         self.assertEqual(raised.exception.code, 2)
+        document = json.loads(stdout.getvalue())
+        self.assertEqual(document["error"]["kind"], "argument_error")
+        self.assertIn("--root", document["error"]["message"])
+        self.assertEqual(stdout.getvalue().count('"error"'), 1,
+                         "exactly one document on stdout")
+        self.assertIn("usage:", stderr.getvalue())
 
     def test_status_refuses_a_record_from_another_checkout(self):
         # Finding F5: the record holds an absolute marker path, so with an

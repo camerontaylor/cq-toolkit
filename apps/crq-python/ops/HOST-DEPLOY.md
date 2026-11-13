@@ -499,7 +499,10 @@ differs from the digest of the executing file (a stale copy must not report
 on a run it did not perform), when the run recorded no marker path, or when
 `state/runner-disabled` is present again. It prints `final_triggers` and
 `released_at`, not just pass/fail, so the operator's start decision carries
-the nine-state map into the record. Exit 0 is the only permitted basis for
+the nine-state map into the record. `--root` is required, not optional: every
+marker path is derived from it, and the recorded `marker.path` must be that
+checkout's own marker, so an omitted root would silently bind the answer to
+whatever checkout wrote the record. Exit 0 is the only permitted basis for
 starting units; exit 1 means do not start.
 
 Tests: `pnpm test:narrow apps/crq-python/test_deploy_runbook.py` (host-free;
