@@ -189,6 +189,7 @@ export const RecordResponseSchema = z
     record_digest: DigestSchema.nullable(),
     duplicate_of: DigestSchema.nullable(),
     supersedes: DigestSchema.nullable(),
+    publication: z.enum(['spooled', 'disabled']).optional(),
     reason: z.string().min(1).max(500).optional(),
   })
   .strict();
