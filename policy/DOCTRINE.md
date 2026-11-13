@@ -33,7 +33,11 @@ test/cli/verdict-exit.test.ts cover error artifacts and verdict exits.
 **Rule.** A change is acceptable when an independent review of the last commit's exact
 head state exists — evidence covering an earlier commit never qualifies, no matter
 when it was resubmitted.
-Unresolved bot threads are reported rather than blocking; truncated review data fails closed.
+The merge bar is green `static` and `denylist` on the exact PR head, one independent review of that head, and no unaddressed review comments.
+
+The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review with the `crq-findings` marker, posted by crq under the queue host’s login, whose reviewed range ends at the head and whose findings are all addressed. A clean crq run posts nothing and does not count.
+
+Every thread and finding, including Codex, CodeRabbit, bot and minor findings, must be fixed or answered with a reason, and every thread resolved before merge. Truncated review data fails closed.
 
 **Why.** Requiring a privileged reviewer deadlocks a queue when that reviewer is
 unavailable; evidence predating the last commit accepts code nobody looked at.
@@ -42,16 +46,19 @@ Truncated pagination reads as "no blocking threads" — absence never passes.
 **Enforcement.** The decision table is built and tested in phase 3 as specified, on
 top of `src/ops/review` (phases 1–2). Independence is procedural: a fresh reviewer
 agent must review the final head separately from the author agent. The reviewer may
-share the author's GitHub account. Automation matches any PR comment containing
-both the exact current head SHA and `PASS`, ignoring bot authors (Bot type or
-`[bot]` login suffix); no HTML marker syntax, separate
-GitHub identity or opt-in is required. The merging agent judges independence.
+share the author's GitHub account. Agent PASS reviews use `cq-review-post`; human PASS reviews name the exact head.
+The merging agent judges independence. `cq-review[bot]` agent PASS reviews count
+without a `crq-findings` marker; other bot authors are excluded from agent PASS
+evidence. The current parser requires PASS and a full head SHA and does not
+recognize the crq alternative; see [merge policy](../docs/promotion-policy.md#merge-to-main)
+for this implementation limit.
 
 ## I3 — merge commits directly to main
 
 **Rule.** PRs target `main` and merge with merge commits after required `static`
-and `denylist` checks pass on the exact head and an independent reviewer posts
-an exact-head PASS comment. Never squash, rewrite shared history or force-push
+and `denylist` checks pass on the exact head, an independent reviewer supplies
+the evidence specified in I2, and all review comments receive a disposition
+and resolution. Never squash, rewrite shared history or force-push
 `main`. CRQ reviews merged PRs after merge as visible debt.
 
 **Why.** One integration branch removes duplicate checks and promotion waits while
