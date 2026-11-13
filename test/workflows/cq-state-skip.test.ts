@@ -190,7 +190,16 @@ describe('unit shard aggregation', () => {
     );
     expect(condition, 'static has a job-level if reading needs.unit.result').toBeDefined();
     expect(condition).toContain('!cancelled()');
-    expect(condition).toContain("github.event_name == 'pull_request'");
+    // The unit gate's OWN arm, not the independent event guard later on the
+    // same line: `github.event_name == 'pull_request'` also appears there, so
+    // only the whole arm pins the property. The fail-open form (skip static on
+    // a pull request whose shards were cancelled) must be absent, because a
+    // skipped required job counts as SUCCESS.
+    expect(condition).toContain(
+      "(needs.unit.result != 'cancelled' || github.event_name == 'pull_request')",
+    );
+    expect(condition).not.toContain("|| github.event_name == 'push')");
+    expect(condition).not.toContain("needs.unit.result == 'cancelled'");
   });
 
   it('the shards are four and the composite does not repeat the suite', () => {
