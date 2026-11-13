@@ -4,6 +4,7 @@ import {
   isReviewAppAuthor,
   parseIndependentReview,
   latestCrqReviewEvidence,
+  isCrqReviewBody,
 } from '../../src/shared/independent-review.js';
 
 describe('cq-review App author', () => {
@@ -122,4 +123,15 @@ describe('CRQ history ambiguity', () => {
       latestCrqReviewEvidence([pass, review('ITERATE', null), nonCrq], head, (r) => r.at),
     ).toEqual([nonCrq]);
   });
+});
+
+test('CRQ marker parsing handles long comment prefixes without accepting embedded headers', () => {
+  const head = 'a'.repeat(40);
+  const prefix = '<!-- crq-findings run=r -->\n' + '<!-- auxiliary -->\n'.repeat(1000);
+  expect(
+    isCrqReviewBody(
+      prefix + `**Independent review (CodeRabbit CLI via crq): PASS for \`${head}\`**\n`,
+    ),
+  ).toBe(true);
+  expect(isCrqReviewBody(prefix + 'ordinary finding text mentioning PASS')).toBe(false);
 });

@@ -73,12 +73,27 @@ export function parseIndependentReview(
   };
 }
 
-const CRQ_HEADER =
-  /^(?:(?:<!-- crq-findings run=[A-Za-z0-9._-]+ -->|<!-- crq-verdict-refresh head=[0-9a-f]{40} scan-run=[A-Za-z0-9._-]+ -->)\s*)(?:<!--[\s\S]*?-->\s*)*\*\*Independent review \(CodeRabbit CLI via crq\): (PASS|ITERATE) for `([0-9a-f]{40})`\*\*(?:\r?\n|$)/;
+/** Consume leading markers linearly; finding text cannot introduce a header. */
+function crqHeader(body: string): RegExpExecArray | null {
+  const marker =
+    /^(?:<!-- crq-findings run=[A-Za-z0-9._-]+ -->|<!-- crq-verdict-refresh head=[0-9a-f]{40} scan-run=[A-Za-z0-9._-]+ -->)/.exec(
+      body,
+    );
+  if (marker === null) return null;
+  let rest = body.slice(marker[0].length).trimStart();
+  while (rest.startsWith('<!--')) {
+    const end = rest.indexOf('-->');
+    if (end < 0) return null;
+    rest = rest.slice(end + 3).trimStart();
+  }
+  return /^\*\*Independent review \(CodeRabbit CLI via crq\): (PASS|ITERATE) for `([0-9a-f]{40})`\*\*(?:\r?\n|$)/.exec(
+    rest,
+  );
+}
 
 /** CRQ's own verdict namespace; finding text alone cannot create one. */
 export function isCrqReviewBody(body: string): boolean {
-  return CRQ_HEADER.test(body);
+  return crqHeader(body) !== null;
 }
 
 /** Keep only the latest CRQ verdict at this head, without changing other reviewers.
@@ -95,7 +110,7 @@ export function latestCrqReviewEvidence<T extends { body: string }>(
   let invalidTime = false;
   let ambiguousLatest = false;
   for (const review of evidence) {
-    const match = CRQ_HEADER.exec(review.body);
+    const match = crqHeader(review.body);
     if (match === null) {
       other.push(review);
       continue;
