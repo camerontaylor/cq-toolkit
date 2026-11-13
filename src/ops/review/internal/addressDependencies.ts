@@ -174,8 +174,43 @@ export async function assertAddressDependencyMetadata(
       if (key === undefined || selected.has(key)) continue;
       selected.add(key);
       const command = scripts[key] ?? '';
+      const tokens = (command.match(/"[^"]*"|'[^']*'|[^\s;&|()]+/g) ?? []).map((token) =>
+        token.replace(/^(['"])(.*)\1$/, '$2'),
+      );
+      const literal = new Set<string>();
+      // Dynamic shell expressions and unsupported runner syntax stay conservative:
+      // narrowing those to literal names could omit an actual install input.
+      let ambiguous =
+        /[$`\\<>]/.test(command) ||
+        tokens.includes('eval') ||
+        tokens.some((token) => /[\s'"]/.test(token));
+      for (let index = 0; index < tokens.length; index++) {
+        const token = tokens[index] ?? '';
+        if (token.startsWith('npm:')) {
+          const name = token.slice(4);
+          if (!name || /[*?\[]/.test(name)) ambiguous = true;
+          else literal.add(name);
+        }
+        if (['npm-run-all', 'run-s', 'run-p'].includes(token)) ambiguous = true;
+        const runner = token.split('/').at(-1) ?? '';
+        if (!['npm', 'pnpm', 'yarn', 'bun'].includes(runner)) continue;
+        let name = tokens[index + 1];
+        if (name === 'run' || name === 'run-script') name = tokens[index + 2];
+        else if (runner === 'npm') {
+          ambiguous = true;
+          continue;
+        }
+        if (!name || !(name in scripts) || name.startsWith('-') || /[*?\[]/.test(name))
+          ambiguous = true;
+        else literal.add(name);
+      }
       for (const target of Object.keys(scripts)) {
-        if (target === key || selected.has(target) || !command.includes(target)) continue;
+        if (
+          target === key ||
+          selected.has(target) ||
+          !(literal.has(target) || (ambiguous && command.includes(target)))
+        )
+          continue;
         worklist.push(target);
       }
       for (const hook of [`pre${key}`, `post${key}`]) {

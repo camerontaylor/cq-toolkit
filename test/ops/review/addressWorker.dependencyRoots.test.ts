@@ -159,6 +159,18 @@ describe('review.address candidate isolation', () => {
   );
   test.each([
     ['transitive', 'npm run compile', 'compile'],
+    ['npm run-script', 'npm run-script compile', 'compile'],
+    ['quoted npm script', 'npm run "compile"', 'compile'],
+    ['pnpm run', 'pnpm run compile', 'compile'],
+    ['pnpm shorthand', 'pnpm compile', 'compile'],
+    ['yarn run', 'yarn run compile', 'compile'],
+    ['yarn shorthand', 'yarn compile', 'compile'],
+    ['bun run', 'bun run compile', 'compile'],
+    ['bun shorthand', 'bun compile', 'compile'],
+    ['npm argument', 'concurrently "npm:compile"', 'compile'],
+    ['runner options', 'pnpm --silent run compile', 'compile'],
+    ['workspace runner', 'yarn workspace pkg compile', 'compile'],
+    ['quoted shell command', "sh -c 'npm run compile'", 'compile'],
     ['hook', 'node build.mjs', 'prebuild'],
     ['hook dependency', 'node build.mjs', 'compile'],
     ['cycle', 'npm run compile', 'compile'],
@@ -189,6 +201,26 @@ describe('review.address candidate isolation', () => {
       }
     },
   );
+  test('a --check argument is not an invocation of the check script', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const scripts = {
+        postinstall: 'pnpm run build',
+        build: 'node scripts/build.mjs --check',
+        check: 'node check.mjs',
+      };
+      await f.repo.write('package.json', JSON.stringify({ scripts }));
+      f.repo.commitAll('install command with unrelated check argument');
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ scripts: { ...scripts, check: 'node different-check.mjs' } }),
+      );
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit, result.reason).toBeTruthy();
+    } finally {
+      await f.cleanup();
+    }
+  });
   test('unchanged cyclic install script graph terminates and reuses dependencies', async () => {
     const f = await fixture(undefined, '', { installedDependencies: 'matching' });
     try {
