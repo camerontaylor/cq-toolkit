@@ -69,7 +69,9 @@ process.exitCode = result.exitCode;
 /** `crq status [--state-root <dir>]` argv; the runner root is the cwd. */
 function parseStatusArgv(
   args: readonly string[],
-): { readonly ok: true; readonly stateRoot: string } | { readonly ok: false; readonly message: string } {
+):
+  | { readonly ok: true; readonly stateRoot: string }
+  | { readonly ok: false; readonly message: string } {
   let stateRoot = join(root, 'state');
   let index = 0;
   while (index < args.length) {

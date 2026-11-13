@@ -120,11 +120,16 @@ export function fileStatusWriterEffects(
     publishSummary: async (documents: CrqDocuments) => {
       // The exact `status_summary.publish(ROOT, q, CONFIG, schedule)`: build
       // the shared effect snapshot for this queue, compose the core through
-      // readSummaryCore's summarize+merged_current pipeline over the SAME
-      // validated documents the route already loaded, then write atomically.
+      // readSummaryCore's summarize+merged_current pipeline, then write
+      // atomically. Python passes its in-memory q; here the composer re-reads
+      // the same strict bytes the route just validated (the queue is never
+      // written between the two reads), so the lossless parse the composer
+      // sees is the route's own documents, BigInt lexemes included. The
+      // validated documents still drive the effect snapshot below.
+      void documents;
       const coreEffects: ReadOnlyStatusEffects = {
-        readQueue: async () => JSON.stringify(documents.queue),
-        readConfig: async () => JSON.stringify(documents.config),
+        readQueue: readOnly.readQueue,
+        readConfig: readOnly.readConfig,
         readEvents: readOnly.readEvents,
         readReceipt: readOnly.readReceipt,
         now,
@@ -133,7 +138,7 @@ export function fileStatusWriterEffects(
       const effects = await summaryStateEffects(
         { stateRoot: roots.stateRoot, xdgStateHome: roots.xdgStateHome, home: roots.home },
         runCommand,
-        pendingPullsOf(documents.queue),
+        pendingPullsOf(core.value),
         now,
         documents.queue,
       );
@@ -168,25 +173,25 @@ export async function resolveComposerSeams(stateRoot: string): Promise<{
 }
 
 /**
- * The pending (repo, pr) rows the gh title preloader needs, extracted from
- * the validated queue exactly as the composer will read them (pending items
- * from summarize are a subset of live items; preloading a superset of the
- * queries the composer issues is harmless: each query runs once).
+ * The (repo, pr) rows the gh title preloader needs, taken directly from the
+ * core the composer will enrich: `pending_items` rows already carry the
+ * producer's repo normalization (`item.repo or subject.repo or CONFIG.repo`)
+ * and the lossless pr scalars the composer's `ghIntegerPr` gate expects, so
+ * the preloader can never diverge from the queries the composer issues.
+ * Preloading a superset is harmless: each query runs once.
  */
-function pendingPullsOf(queue: CrqDocuments['queue']): {
+function pendingPullsOf(core: Record<string, unknown>): {
   readonly repo: unknown;
   readonly pr: unknown;
 }[] {
-  const items = queue['items'];
-  if (!Array.isArray(items)) return [];
-  return items
+  const rows = core['pending_items'];
+  if (!Array.isArray(rows)) return [];
+  return rows
     .filter(
-      (item): item is Record<string, unknown> =>
-        typeof item === 'object' && item !== null && !Array.isArray(item),
+      (row): row is Record<string, unknown> =>
+        typeof row === 'object' && row !== null && !Array.isArray(row),
     )
-    .filter((item) => item['kind'] !== 'promotion')
-    .filter((item) => item['state'] === 'pending')
-    .map((item) => ({ repo: item['repo'], pr: item['pr'] }));
+    .map((row) => ({ repo: row['repo'], pr: row['pr'] }));
 }
 
 /**
