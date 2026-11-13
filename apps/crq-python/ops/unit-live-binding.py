@@ -117,6 +117,27 @@ def _directory_probe(path: Path) -> tuple[bool, str | None]:
     return stat.S_ISDIR(info.st_mode), None
 
 
+def _shared_dropin_bases(units):
+    """Return the shared drop-in directory bases systemd reads for ``units``.
+
+    Alongside each unit's own ``<unit>.d`` directory, systemd also applies the
+    type-wide directory (``service.d``) and the dash-prefix directories
+    (``crq-.service.d`` applies to ``crq-tick.service``). Drop-ins in them
+    change the selected units' effective configuration, so discovery must
+    reject those directories too.
+    """
+    bases = set()
+    for name in units:
+        stem, dot, suffix = name.rpartition(".")
+        if not dot or not stem:
+            continue
+        bases.add(suffix)
+        while "-" in stem:
+            stem = stem.rsplit("-", 1)[0]
+            bases.add(stem + "-." + suffix)
+    return bases
+
+
 def _controller_module(effects):
     """Return the loaded controller module that owns ``effects`` when possible.
 
@@ -551,6 +572,7 @@ class SubprocessSystemd:
                     "foreign": foreign, "jobs": []}
         declared_set = {str(path) for path in declared}
         prefix = unit.split(".")[0]
+        shared_dropins = _shared_dropin_bases(units)
         for entry in sorted(entries):
             name = entry.name
             if name.startswith(prefix) and str(entry) not in declared_set:
@@ -560,7 +582,14 @@ class SubprocessSystemd:
                     and name.endswith((".d", ".wants", ".requires")):
                 error = error or probe_failure
                 continue
-            if is_dir and name.endswith(".d") and name[:-2] in units:
+            if is_dir and name.endswith(".d") \
+                    and (name[:-2] in units or name[:-2] in shared_dropins):
+                foreign.append("undeclared drop-in directory: " + str(entry))
+            elif entry.is_symlink() and name.endswith(".d") \
+                    and name[:-2] in shared_dropins:
+                # A symlinked shared drop-in directory evades the prefix
+                # check above and is not a probed directory, yet systemd
+                # follows the link and applies the drop-ins behind it.
                 foreign.append("undeclared drop-in directory: " + str(entry))
             if is_dir and name.endswith((".wants", ".requires")):
                 try:

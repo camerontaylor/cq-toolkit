@@ -354,6 +354,37 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("drop-in", " ".join(evidence["foreign"]))
 
+    def test_dash_prefix_dropin_directory_is_unsupported(self):
+        declared = self.declare()
+        dropin = self.unit_dir / "crq-.service.d"
+        dropin.mkdir()
+        (dropin / "override.conf").write_text("[Service]\nNice=5\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("drop-in", " ".join(evidence["foreign"]))
+
+    def test_type_wide_dropin_directory_is_unsupported(self):
+        declared = self.declare()
+        dropin = self.unit_dir / "service.d"
+        dropin.mkdir()
+        (dropin / "override.conf").write_text("[Service]\nNice=5\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("drop-in", " ".join(evidence["foreign"]))
+
+    def test_symlinked_shared_dropin_directory_is_unsupported(self):
+        declared = self.declare()
+        held = self.unit_dir / "held-shared-dropin"
+        held.mkdir()
+        (held / "override.conf").write_text("[Service]\nNice=5\n")
+        (self.unit_dir / "crq-.service.d").symlink_to(held)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("drop-in", " ".join(evidence["foreign"]))
+
     def test_symlinked_dropin_directory_is_not_scanned_as_a_dropin(self):
         declared = self.declare()
         held = self.unit_dir / "held-dropin"
