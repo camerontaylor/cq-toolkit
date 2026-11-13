@@ -111,17 +111,31 @@ REVIEWED_SIBLING_SHA256 = {
     "digests.py":
         "93362d4678867a771a50d4512bbee4a05aebbec045c60ca832401feb9775edc1",
     "deploy-invariants.schema.json":
-        "ff1d3f722347ce85bd487443dd8098ee9685637b064847fe809f4fb0d84a24fd",
+        "6c8c0e06d42301467fccac7a27ad48ec236ba5a04c0b1f11691459daa4979116",
 }
 RUNBOOK_SELF_DIGEST = hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()
 for _sibling_name, _sibling_want in REVIEWED_SIBLING_SHA256.items():
     _sibling_got = hashlib.sha256(
         (OPS_DIR / _sibling_name).read_bytes()).hexdigest()
     if _sibling_got != _sibling_want:
-        raise RuntimeError(
-            "ops sibling " + _sibling_name + " does not match the reviewed "
-            "digest: got " + _sibling_got + " want " + _sibling_want
-            + "; refusing to import or use unverified ops bytes")
+        _message = ("ops sibling " + _sibling_name + " does not match the "
+                    "reviewed digest: got " + _sibling_got + " want "
+                    + _sibling_want + "; refusing to import or use unverified "
+                    "ops bytes")
+        # Fail closed before the protocol exists. This runs before anything
+        # from the ops directory is imported and before the refusal helpers are
+        # defined, so it cannot emit the documented JSON refusal document and
+        # does not pretend to: the contract for this failure is a nonzero exit
+        # with the reason on stderr, and no JSON on stdout. Only stdlib has
+        # been used at this point.
+        #
+        # Scope, stated without overclaiming: these pins catch a sibling that
+        # was substituted, truncated or edited without the runbook being
+        # updated, and a runbook edited without --runbook-sha256 being updated.
+        # They are not a claim of self-authenticity - bytes that pin themselves
+        # cannot prove their own provenance - they close the accidental and
+        # partial-substitution class, which is the class the GO can check.
+        raise RuntimeError(_message)
 del _sibling_name, _sibling_want, _sibling_got
 
 if str(OPS_DIR) not in sys.path:
@@ -583,9 +597,12 @@ class Run:
                 "target": self.args.target_sha,
                 "target_tag": self.args.target_tag,
                 "prior_sha": self.args.prior_sha,
-                "marker_path": str(self.marker),
                 "journal": (self.journal or {}).get("transaction_id"),
                 "root": str(Path(self.args.root).resolve()),
+                # Recorded in the same frame as the root: the root is compared
+                # resolved, so a literal marker beside it would let the two
+                # fields describe different paths.
+                "marker_path": str(Path(self.marker).resolve()),
                 "cq_bin_entry": getattr(self, "cq_bin_entry", None),
                 "final_triggers": self.final_triggers}
 
@@ -1523,13 +1540,17 @@ def execute(args, effects_factory=None) -> dict:
     were constructed. Production (factory None) builds ``RealUnits`` and the
     controller's ``Effects``. Returns the run's result document (the caller
     prints it; ``main`` maps it to an exit status)."""
-    # The authorization guard runs first: a production invocation without
-    # --operator-go must not import candidate code, construct effects or
-    # touch record directories when active triggers sit on the host.
-    check_active_trigger_authorization(args)
+    # Order is the point of the finding this closes. The runbook pin, the
+    # manifest and the root comparison read only this checkout's own files, so
+    # they run BEFORE the systemctl authorization probe and before any
+    # candidate module is imported: an unauthorized invocation, or one pointed
+    # at the wrong checkout, refuses without a host read and without executing
+    # imported code. The guard still precedes every effect, every marker
+    # operation and every import.
     check_pinned_revision(args)
     manifest = validate_manifest_document(load_json(args.manifest),
                                           args.manifest, args.manifest_sha256)
+    check_active_trigger_authorization(args)
     candidate_ops = Path(args.candidate_root) / "apps/crq-python/ops"
     # Digest-pin the candidate modules BEFORE importing them: an import is
     # arbitrary code execution, so a stale or substituted helper or
@@ -1566,8 +1587,9 @@ def execute(args, effects_factory=None) -> dict:
     # tick - which reads its own root's state/runner-disabled - never saw the
     # hold. The manifest now carries the absolute deployment root the deploy
     # was approved against and this refuses before any host read or marker
-    # operation. Not an approval: the approved value is compared, and the
-    # comparison is the whole mechanism.
+    # operation (and, because this runs ahead of the provision now, before the
+    # systemctl probe and the candidate imports). Not an approval: the approved
+    # value is compared, and the comparison is the whole mechanism.
     approved_root = (manifest.get("marker") or {}).get("root")
     require(isinstance(approved_root, str) and approved_root
             and Path(approved_root).is_absolute(),
@@ -1687,10 +1709,9 @@ def cmd_status(args, units=None) -> int:
     # explicit --root the recorded path must be that checkout's own marker;
     # without it the same-host/same-output-dir precondition is documented on
     # the subcommand rather than assumed silently.
-    if marker_refusal is None and recorded_marker is not None \
-            and getattr(args, "root", None) is not None:
+    if marker_refusal is None and recorded_marker is not None:
         expected = marker_path(args.root)
-        if Path(recorded_marker) != expected:
+        if Path(recorded_marker).resolve() != expected.resolve():
             marker_refusal = (
                 "recorded marker.path " + str(recorded_marker) + " is not the "
                 "marker of --root " + str(Path(args.root)) + " (expected "
@@ -1780,10 +1801,14 @@ def main(argv=None, effects_factory=None, status_units=None) -> int:
     sub = parser.add_subparsers(dest="operation")
     status = sub.add_parser("status", help="released-flag gate")
     status.add_argument("--output-dir", required=True, type=Path)
-    status.add_argument("--root", type=Path, default=None,
+    # Required, not optional: an optional binding is a binding the next
+    # invocation can omit, and the record then reports on whatever host and
+    # checkout wrote it. Status therefore always names the checkout whose
+    # marker it is binding the answer to.
+    status.add_argument("--root", required=True, type=Path,
                         help="deployment checkout the tick reads its marker "
-                             "from; when given, the recorded marker.path must "
-                             "be that checkout's own marker")
+                             "from; the recorded marker.path must be that "
+                             "checkout's own marker")
     # Accepted for compatibility, and redundant by construction: status is
     # always a require-released gate - it refuses any record that does not
     # say released, so the flag cannot loosen it and is never read. Kept so

@@ -1143,8 +1143,10 @@ class ReleasedFlagGateTests(RunbookFixture):
         super().setUp()
         self.build_repo()
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        # --root is part of the status interface now, so the namespace built
+        # for direct cmd_status calls carries it like the parser would.
         self.status_args = argparse_namespace(
-            output_dir=self.output_dir, require_released=True)
+            output_dir=self.output_dir, root=self.root, require_released=True)
         self.digest = sha256_file(OPS / "deploy-runbook.py")
 
     def write_pair(self, release=None, phase=None, marker_record=True,
@@ -1262,7 +1264,7 @@ class ReleasedFlagGateTests(RunbookFixture):
         # Parser-level default (finding 1): status keeps an explicit flag.
         self.write_pair()
         argv = ["status", "--output-dir", str(self.output_dir),
-                "--require-released"]
+                "--root", str(self.root), "--require-released"]
         stdout = io_string()
         units = FakeUnits(self.marker_path,
                           {unit: "active" for unit in TRIGGERS})
@@ -1972,8 +1974,11 @@ class CLIStatusGateTests(RunbookFixture):
         rb.durable_write(self.output_dir / "marker.path",
                          {"path": str(self.marker_path)})
 
-    def status_argv(self):
+    def status_argv(self, root=None):
+        # --root is required by the interface: the recorded marker path is an
+        # absolute host path, so the answer must name the checkout it binds to.
         return ["status", "--output-dir", str(self.output_dir),
+                "--root", str(self.root if root is None else root),
                 "--require-released"]
 
     def run_status(self, units=None):
@@ -2037,13 +2042,37 @@ class CLIStatusGateTests(RunbookFixture):
                                        "does not match the reviewed digest"):
                 _load("probe_coerced_runbook", ops / "deploy-runbook.py")
 
+    def test_status_accepts_an_alias_of_the_bound_root(self):
+        # F5: the binding is by resolved path, so a relative or symlinked
+        # spelling of the same checkout still binds - and an omission cannot
+        # bypass the check because --root is required.
+        self.write_released()
+        alias = self.base / "root-alias"
+        if not alias.exists():
+            alias.symlink_to(self.root, target_is_directory=True)
+        for root in (alias, pathlib.Path(os.path.relpath(self.root))):
+            stdout = io_string()
+            units = FakeUnits(self.marker_path)
+            argv = ["status", "--output-dir", str(self.output_dir),
+                    "--root", str(root), "--require-released"]
+            with mock.patch.object(sys, "stdout", stdout):
+                code = rb.main(argv, status_units=units)
+            self.assertEqual(code, 0, str(root))
+
+    def test_status_requires_the_bound_root(self):
+        # An optional binding is one the next invocation can omit, and then
+        # the record answers for whatever checkout wrote it.
+        with self.assertRaises(SystemExit) as raised:
+            rb.main(["status", "--output-dir", str(self.output_dir)])
+        self.assertEqual(raised.exception.code, 2)
+
     def test_status_refuses_a_record_from_another_checkout(self):
         # Finding F5: the record holds an absolute marker path, so with an
         # explicit --root the record must name THIS checkout's marker; a
         # copied output dir must not report on another tree's hold.
         self.write_released()
         units = FakeUnits(self.marker_path)
-        argv = self.status_argv() + ["--root", str(self.base / "other-root")]
+        argv = self.status_argv(root=self.base / "other-root")
         stdout = io_string()
         with mock.patch.object(sys, "stdout", stdout):
             code = rb.main(argv, status_units=units)
@@ -2056,7 +2085,7 @@ class CLIStatusGateTests(RunbookFixture):
         # check binds the answer to a tree, it does not refuse status.
         self.write_released()
         units = FakeUnits(self.marker_path)
-        argv = self.status_argv() + ["--root", str(self.root)]
+        argv = self.status_argv()
         stdout = io_string()
         with mock.patch.object(sys, "stdout", stdout):
             code = rb.main(argv, status_units=units)
@@ -2354,6 +2383,35 @@ class MarkerPathTests(RunbookFixture):
             rb.execute(args, effects_factory=factory)
         self.assertEqual(built, [])
         self.assertFalse(self.marker_path.exists())
+
+    def test_an_alias_of_the_approved_root_is_accepted(self):
+        # The root guard compares resolved paths, so a symlinked spelling of
+        # the approved checkout binds instead of refusing: the hold the run
+        # writes is the one the live tick of that same tree reads, and the
+        # recorded root is the resolved one either way.
+        self.build_repo()
+        alias = self.base / "root-alias"
+        if not alias.exists():
+            alias.symlink_to(self.root, target_is_directory=True)
+        args = self.args(manifest_path=self.write_manifest(self.manifest()),
+                         root=alias)
+        reached = []
+
+        class _Reached(Exception):
+            pass
+
+        def factory(marker, builder):
+            reached.append(marker)
+            raise _Reached
+
+        try:
+            rb.execute(args, effects_factory=factory)
+        except _Reached:
+            pass
+        except rb.Refused as refusal:
+            self.assertNotIn("deployment root mismatch", str(refusal))
+        self.assertEqual(len(reached), 1,
+                         "the alias must reach the effects factory")
 
     def test_manifest_root_must_be_absolute(self):
         # A relative approved root could mean anything from a different

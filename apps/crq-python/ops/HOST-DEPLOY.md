@@ -490,7 +490,7 @@ python3 -B apps/crq-python/ops/deploy-runbook.py \
 # Then, before any start:
 python3 -B apps/crq-python/ops/deploy-runbook.py ... \
   status --output-dir /private/crq-deploy-records/run-YYYYMMDD \
-  --require-released
+  --root /private/crq-deploy --require-released
 ```
 
 `status --require-released` re-reads `release.json` and `phase.json` from
