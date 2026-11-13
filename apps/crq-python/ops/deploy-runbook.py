@@ -1426,8 +1426,24 @@ def check_active_trigger_authorization(args):
     if listing.returncode != 0:
         return  # no user manager/bus: production run is operator-side; the
         # preflight inventory assertion will refuse with full context.
-    active = [line.split()[0] for line in listing.stdout.splitlines()
-              if line.strip().startswith("active")]
+    # Real --no-legend output is `UNIT LOAD ACTIVE SUB DESCRIPTION`
+    # (`crq-tick.timer loaded active waiting ...`): the activation state is
+    # the THIRD column. Checking whether the line starts with "active" saw
+    # nothing, so this guard never fired on a real host while its fixture fed
+    # a fabricated `active active running ...` line. Parsed by column now,
+    # and a line too short to be a listing refuses rather than being skipped:
+    # silence is exactly the failure this guard had.
+    active = []
+    for line in listing.stdout.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split()
+        require(len(fields) >= 3,
+                "systemctl unit listing line is not UNIT LOAD ACTIVE SUB "
+                "DESCRIPTION: " + repr(line) + " (refusing rather than "
+                "assuming no unit is active)")
+        if fields[2] == "active":
+            active.append(fields[0])
     require(not active,
             "live crq trigger units are active; production runs are operator-"
             "executed only. Pass --rehearsal for a throwaway clone or "

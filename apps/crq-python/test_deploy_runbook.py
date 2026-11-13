@@ -1642,7 +1642,11 @@ class CLITests(RunbookFixture):
             raise AssertionError("effects constructed before the active-unit "
                                  "guard")
 
-        listing = "active active running crq-tick.timer\n"
+        # Real --no-legend shape: UNIT LOAD ACTIVE SUB DESCRIPTION. The
+        # fabricated `active active running ...` line this test used to supply
+        # is not what systemctl prints, which is how the guard stayed dead.
+        listing = ("crq-repair.timer loaded active waiting Repair timer\n"
+                   "crq-backfill.path loaded active waiting Backfill path\n")
         with mock.patch.object(rb, "load_module") as load, \
                 mock.patch.object(rb.subprocess, "run",
                                   return_value=mock.Mock(returncode=0,
@@ -1651,6 +1655,39 @@ class CLITests(RunbookFixture):
                                         "live crq trigger units are active"):
                 rb.execute(args, effects_factory=refusing_factory)
             load.assert_not_called()
+
+    def test_inactive_real_listing_lets_an_authorized_run_proceed(self):
+        # The counterfactual to the parser defect: real-format lines whose
+        # state column is not active must NOT refuse. If the parser went back
+        # to checking the line prefix, this listing would still refuse and
+        # the guard would be wrong in the other direction.
+        args = self.args(rehearsal=False, operator_go=False)
+        listing = ("crq-repair.timer loaded inactive dead Repair timer\n"
+                   "crq-backfill.path loaded inactive dead Backfill path\n")
+        built = []
+
+        def factory(marker_path, effects_builder):
+            built.append(marker_path)
+            raise rb.Refused("past the guard")
+
+        with mock.patch.object(rb.subprocess, "run",
+                               return_value=mock.Mock(returncode=0,
+                                                      stdout=listing)):
+            with self.assertRaisesRegex(rb.Refused, "past the guard"):
+                rb.execute(args, effects_factory=factory)
+        self.assertEqual(len(built), 1, "the guard refuses only active units")
+
+    def test_unparsable_listing_refuses_instead_of_assuming_inactive(self):
+        # Fail closed: a listing line that cannot be UNIT LOAD ACTIVE SUB is
+        # refused, because "nothing looked active" is precisely how the
+        # column-parsing defect hid.
+        args = self.args(rehearsal=False, operator_go=False)
+        with mock.patch.object(rb.subprocess, "run",
+                               return_value=mock.Mock(returncode=0,
+                                                      stdout="crq-tick.timer active\n")):
+            with self.assertRaisesRegex(rb.Refused,
+                                        "not UNIT LOAD ACTIVE SUB DESCRIPTION"):
+                rb.execute(args, effects_factory=lambda m, b: None)
 
     def test_operator_go_probe_is_skipped(self):
         # Authorized invocations never run the authorization probe: no
