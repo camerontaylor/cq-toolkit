@@ -1,8 +1,8 @@
 # Policy — PR checks and quality ratchets
 
-PRs target `main`. Required check-run names are `static` and `denylist`, with
-one independent exact-head review comment read by the merging agent. CRQ reviews
-after merge. See [merge policy](../docs/promotion-policy.md).
+PRs target `main`. The merge bar is green `static` and `denylist` on the exact PR head, one independent review of that head, and no unaddressed review comments.
+
+The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review with the `crq-findings` marker, posted by crq under the queue host’s login, whose reviewed range ends at the head and whose findings are all addressed. A clean crq run posts nothing and does not count. CRQ also reviews merged PRs after merge. See [merge policy](../docs/promotion-policy.md).
 
 [Doctrine](DOCTRINE.md) describes the behavioral invariants. The
 [templates](templates/) provide advisory cq reports, ratchet measurement and
@@ -29,8 +29,10 @@ open PRs against `main`; they do not silently rewrite the current baseline.
 
 ## Review
 
-A plain human comment with the reviewer agent identity, exact head SHA and
-`PASS` records independent review. Shared GitHub accounts are supported. Bot
-authors (Bot type or `[bot]` suffix) do not count as that signal. No HTML
-marker, opt-in or native approval is needed. Fix accepted cheap findings and
-group deferred work into one issue per PR; bot threads do not block merge.
+The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review with the `crq-findings` marker, posted by crq under the queue host’s login, whose reviewed range ends at the head and whose findings are all addressed. A clean crq run posts nothing and does not count.
+
+Shared GitHub accounts are supported; the merging agent judges independence.
+Agent PASS reviews posted as `cq-review[bot]` count without a `crq-findings`
+marker; other bot authors do not count as agent PASS evidence.
+Every thread and finding, including Codex, CodeRabbit, bot and minor findings, must be fixed or answered with a reason, and every thread resolved before merge. Group deferred work into one issue per PR and link it in the reply.
+See the merge policy for the current parser’s limits.

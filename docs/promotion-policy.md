@@ -1,12 +1,12 @@
 # Merge to main
 
-Open PRs directly against `main`. Merge with a merge commit when `static` and
-`denylist` are green on the exact PR head and one independent reviewer has
-posted a PASS review body or comment for that head, with no unresolved P0/P1
-findings raised by that independent review. Bot and CodeRabbit findings stay advisory and are
-not part of this condition (see [review guidance](coderabbit-review.md)).
+Open PRs directly against `main` and merge with a merge commit. The merge bar is green `static` and `denylist` on the exact PR head, one independent review of that head, and no unaddressed review comments.
 
-The reviewer comment names the reviewer agent, the full head SHA and `PASS`.
+The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review with the `crq-findings` marker, posted by crq under the queue host’s login, whose reviewed range ends at the head and whose findings are all addressed. A clean crq run posts nothing and does not count.
+
+Every thread and finding, including Codex, CodeRabbit, bot and minor findings, must be fixed or answered with a reason, and every thread resolved before merge.
+
+An agent's PASS comment names the reviewer agent, the full head SHA and `PASS`.
 Reviewers post it with `cq-review-post` (agents repo), which posts as the
 **cq-review** GitHub App (`cq-review[bot]`, Pull requests: write only), so
 the PASS comes from an identity the PR author's lane did not use. When the App
@@ -45,8 +45,7 @@ Pass the base SHA actually reviewed. The default run ID is `N-head10-NAME`;
 keep it stable across retries. Findings become native review threads, while
 unanchored findings (including deleted code) are listed with their locations in
 the body. The body carries verdict and coverage, even when there are no findings.
-Findings mode prints JSON; fallback diagnostics go to stderr. Minor threads are
-not merge blockers. The merging agent still judges independence. Reply to or
+Findings mode prints JSON; fallback diagnostics go to stderr. Minor threads also require a disposition and resolution before merge. The merging agent still judges independence. Reply to or
 resolve threads through the existing reply/resolve path after an explicit
 disposition, never just because a later summary says PASS. Concurrent reviewers
 produce separate reviews; the run marker prevents duplicates for each posting
@@ -61,10 +60,22 @@ gh pr merge <number> --merge --match-head-commit <sha>
 `ci` is the workflow name; its required check-run name is `static`.
 `denylist` is both the workflow and check-run name. The cq policy, acceptance
 and ratchet reports are advisory. A ratchet drop opens or updates the single
-`ratchet` issue. Bot threads are reported, not a merge condition: fix accepted
-cheap findings and group deferred work into one issue per PR.
+`ratchet` issue. No review comment may be left unaddressed at merge, bot threads included:
+fix each finding or answer it with a reason, then resolve the thread. Group
+deferred work into one issue per PR and link it in the reply.
 
-CRQ discovers merged PRs and reviews them after merge as visible review debt.
+CRQ also discovers merged PRs it has not reviewed and reviews them after merge
+as visible review debt. The `crq-findings` marker alone does not identify a crq
+review: agent reviews posted with `cq-review-post --findings` also carry it.
+
+**Implementation limit.** `src/shared/independent-review.ts` currently requires
+an explicit `PASS` and full head SHA, rejects uppercase `HOLD` or `FAIL` words
+and negated PASS, and does not recognize the crq findings-review alternative
+above. Its bot-author filter accepts `cq-review[bot]` agent reviews without
+requiring a `crq-findings` marker, and excludes other bot authors. These parser
+limits do not redefine the owner's merge bar; the merging agent reads the
+review and judges independence and disposition.
+
 No promotion signer status, fast-forward promotion, label, settle-ledger
 receipt or admin flag is part of the normal merge path. Keep the ordinary
 history protections; never rewrite shared history or force-push `main`.

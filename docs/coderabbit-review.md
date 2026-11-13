@@ -4,11 +4,13 @@ CodeRabbit is advisory. Handle its findings like any other review comment:
 fix substantive valid findings and explain rejected findings with concrete evidence.
 No CLI cycle or vendor-outage deferral enrollment is required.
 
-The merge bar is green `static` and `denylist` on the exact PR head plus one
-independent exact-head `PASS`. The reviewer must be an independent agent or
-human; sharing the author's GitHub account does not remove independence.
-Post the reviewer identity, exact head SHA and `PASS` in the review comment.
-See [merge policy](promotion-policy.md).
+The merge bar is green `static` and `denylist` on the exact PR head, one independent review of that head, and no unaddressed review comments.
+
+The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review with the `crq-findings` marker, posted by crq under the queue host’s login, whose reviewed range ends at the head and whose findings are all addressed. A clean crq run posts nothing and does not count.
+
+Every thread and finding, including Codex, CodeRabbit, bot and minor findings, must be fixed or answered with a reason, and every thread resolved before merge.
+Reviewer independence is between agents or humans, not GitHub accounts.
+See [merge policy](promotion-policy.md), including its implementation limit.
 
 The GitHub CodeRabbit App can review opened PRs; `.coderabbit.yaml` configures
 its feedback. CLI review remains optional.

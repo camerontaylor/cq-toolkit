@@ -34,10 +34,10 @@ CI runs full TS checks on code/shared/unknown PR changes, and skips TS work
 only for recognized prose/Python-only changes; formatting stays unconditional.
 Python runs for Python/shared changes. Main pushes and nightly run full checks.
 Required workflows keep unfiltered triggers; job selection avoids feature-push
-duplicates. The merge bar remains
-**green `static` and `denylist` on the exact PR head**, plus one independent
-exact-head review comment, is the merge bar for PRs directly to `main`.
-CRQ reviews after merge. See [merge policy](docs/promotion-policy.md).
+duplicates. PRs directly to `main` use the fleet merge bar (global
+`AGENTS.md`, "Publishing"), with **green `static` and `denylist` on the exact
+PR head** as the required checks. The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review with the `crq-findings` marker, posted by crq under the queue host’s login, whose reviewed range ends at the head and whose findings are all addressed. A clean crq run posts nothing and does not count. CRQ still reviews merged PRs it has not seen. See
+[merge policy](docs/promotion-policy.md).
 
 Escalate a shared interface, dependency/tooling or config change — and any
 impact you cannot classify — to the coordinator with the reason, rather than
@@ -108,9 +108,12 @@ use a non-GLM provider or wait.
 ## Code review
 
 CodeRabbit is advisory; handle its findings like any other review comment.
-The merge bar is green `static` and `denylist` on the exact PR head plus
-one independent exact-head `PASS`. Reviewer independence is between agents
-or humans, not GitHub accounts. See [review guidance](docs/coderabbit-review.md).
+The merge bar is green `static` and `denylist` on the exact PR head, one independent review of that head, and no unaddressed review comments.
+
+The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review with the `crq-findings` marker, posted by crq under the queue host’s login, whose reviewed range ends at the head and whose findings are all addressed. A clean crq run posts nothing and does not count.
+
+Every thread and finding, including Codex, CodeRabbit, bot and minor findings, must be fixed or answered with a reason, and every thread resolved before merge. Reviewer independence is between agents or
+humans, not GitHub accounts. See [review guidance](docs/coderabbit-review.md).
 
 ## Doctrine
 

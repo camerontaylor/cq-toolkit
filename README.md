@@ -1,6 +1,6 @@
 @camerontaylor/cq-toolkit is a portable code-quality toolkit: a TypeScript SDK of atomic code-quality operations, a deterministic plan runner that composes those operations into reproducible execution plans, and adoptable PR and doctrine policy templates that other repositories can take in whole or in part. It is greenfield and self-hosting — the toolkit's own quality gates run on the toolkit itself — and it is a work in progress. See the [documentation index](docs/README.md) for the canonical reading set.
 
-The SDK is the primary interface; the CLI is a secondary interface over the same ops and plans, and no logic lives only in the CLI. Doctrine: see [policy/DOCTRINE.md](policy/DOCTRINE.md). CodeRabbit is advisory; the merge bar is green `static` and `denylist` plus one independent exact-head `PASS`: see [docs/coderabbit-review.md](docs/coderabbit-review.md). Generated per-op reference: see [docs/ops/](docs/ops/) (regenerate with `pnpm run gen:op-docs`).
+The SDK is the primary interface; the CLI is a secondary interface over the same ops and plans, and no logic lives only in the CLI. Doctrine: see [policy/DOCTRINE.md](policy/DOCTRINE.md). CodeRabbit is advisory; the merge bar is green `static` and `denylist` on the exact PR head, one independent review of that head, and no unaddressed review comments. The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review with the `crq-findings` marker, posted by crq under the queue host’s login, whose reviewed range ends at the head and whose findings are all addressed. A clean crq run posts nothing and does not count. Every thread and finding, including Codex, CodeRabbit, bot and minor findings, must be fixed or answered with a reason, and every thread resolved before merge. See [docs/coderabbit-review.md](docs/coderabbit-review.md). Generated per-op reference: see [docs/ops/](docs/ops/) (regenerate with `pnpm run gen:op-docs`).
 
 ## Install
 
@@ -224,26 +224,26 @@ The eleven behavioral invariants are canonical in
 [policy/DOCTRINE.md](policy/DOCTRINE.md), each with its Rule, Why, and
 Enforcement. In brief:
 
-| #   | Invariant                                                                                                                                                                                                    |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| I1  | stdout is JSON, stderr is narration; exit codes 0 clean, 1 thrown, 2 arg error, 3 needs-human/budget-exhausted                                                                                               |
-| I2  | No-privileged-reviewer acceptance: a non-author review of the exact head, plus a ≥10-minute settle or a postdating all-clear; unresolved threads are reported (not blocking) and truncated data fails closed |
-| I3  | Merge commits directly to `main` on exact-head CI and independent review — never squash, rewrite, or force-push                                                                                              |
-| I4  | Required checks never filter triggers; the only sanctioned skip is a job-level `if:`                                                                                                                         |
-| I5  | Baselines only tighten; a missing metrics summary is non-passing evidence, never a pass                                                                                                                      |
-| I6  | Every per-file/per-job worker is a fresh isolated invocation; context never leaks                                                                                                                            |
-| I7  | A reused clean worktree re-probes its baselines from scratch; baseline values are never cached                                                                                                               |
-| I8  | Rescue and escalation policy live in the plan runner, never in a driver                                                                                                                                      |
-| I9  | Fleet runs collect everything and never bail mid-fleet; budget stops are honest (`budget-exhausted`, never fabricated)                                                                                       |
-| I10 | The kernel stays vendor-neutral — no vendor SDK vocabulary in kernel types or persisted data                                                                                                                 |
-| I11 | GitHub-API facts are carried as named tests beside the ops that rely on them                                                                                                                                 |
+| #   | Invariant                                                                                                                                                                                 |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| I1  | stdout is JSON, stderr is narration; exit codes 0 clean, 1 thrown, 2 arg error, 3 needs-human/budget-exhausted                                                                            |
+| I2  | No-privileged-reviewer acceptance: an independent exact-head agent/human PASS or qualifying crq findings review; all comments addressed and threads resolved; truncated data fails closed |
+| I3  | Merge commits directly to `main` on exact-head CI and independent review — never squash, rewrite, or force-push                                                                           |
+| I4  | Required checks never filter triggers; the only sanctioned skip is a job-level `if:`                                                                                                      |
+| I5  | Baselines only tighten; a missing metrics summary is non-passing evidence, never a pass                                                                                                   |
+| I6  | Every per-file/per-job worker is a fresh isolated invocation; context never leaks                                                                                                         |
+| I7  | A reused clean worktree re-probes its baselines from scratch; baseline values are never cached                                                                                            |
+| I8  | Rescue and escalation policy live in the plan runner, never in a driver                                                                                                                   |
+| I9  | Fleet runs collect everything and never bail mid-fleet; budget stops are honest (`budget-exhausted`, never fabricated)                                                                    |
+| I10 | The kernel stays vendor-neutral — no vendor SDK vocabulary in kernel types or persisted data                                                                                              |
+| I11 | GitHub-API facts are carried as named tests beside the ops that rely on them                                                                                                              |
 
 ## Adopting the policy
 
 The PR and doctrine templates under [`policy/templates/`](policy/templates/)
 are adoptable by other repositories. Target `main`, require `static` and
-`denylist`, obtain an independent review comment, and merge with a merge commit.
-CRQ reviews after merge. See [merge policy](docs/promotion-policy.md) and the
+`denylist`, obtain an independent review of that head, leave no review comment
+unaddressed, and merge with a merge commit. The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review with the `crq-findings` marker, posted by crq under the queue host’s login, whose reviewed range ends at the head and whose findings are all addressed. A clean crq run posts nothing and does not count. CRQ also reviews merged PRs after merge. See [merge policy](docs/promotion-policy.md) and the
 [adoption guide](policy/README.md).
 
 ## Self-hosting

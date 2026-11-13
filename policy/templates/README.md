@@ -1,7 +1,8 @@
 # Workflow templates
 
-PRs target `main`: require `static` and `denylist` and one independent exact-head
-review comment. CRQ reviews after merge. See [merge policy](../../docs/promotion-policy.md).
+PRs target `main`. The merge bar is green `static` and `denylist` on the exact PR head, one independent review of that head, and no unaddressed review comments.
+
+The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review with the `crq-findings` marker, posted by crq under the queue host’s login, whose reviewed range ends at the head and whose findings are all addressed. A clean crq run posts nothing and does not count. CRQ also reviews merged PRs after merge. See [merge policy](../../docs/promotion-policy.md).
 
 ## Files
 
@@ -47,9 +48,12 @@ unchecked and covered by the owner-run `--require-event-policy` check).
 App minting requires the corresponding `vars.CQ_*_APP_CLIENT_ID` variable.
 Self-merge configuration includes `vars.CQ_MERGE_TRUSTED_BOTS`, `vars.CQ_MERGE_ACCEPT_REVIEW_STATES`,
 `vars.CQ_MERGE_TRUSTED_ASSOCIATIONS` and the posture
-`vars.CQ_MERGE_PROTECTED_PATHS` (blank = the conservative default). Human review comments containing the exact head SHA and `PASS` count for
-shared-account agents without an opt-in; Bot authors and `[bot]` logins are
-excluded.
+`vars.CQ_MERGE_PROTECTED_PATHS` (blank = the conservative default). Agent reviews posted with `cq-review-post` and human PASS reviews name the exact head SHA.
+Shared accounts are supported. `cq-review[bot]` agent PASS reviews count without
+a `crq-findings` marker; other Bot authors and `[bot]` logins are excluded from
+agent PASS evidence. The crq alternative above is posted under the queue host’s
+login. See the merge policy’s implementation limit: the current parser does
+not recognize that alternative. Every thread and finding, including Codex, CodeRabbit, bot and minor findings, must be fixed or answered with a reason, and every thread resolved before merge.
 
 **Advisory posture (development).** `vars.CQ_MERGE_PROTECTED_PATHS=advisory`
 is this repository's development posture (2026-10-20; see
