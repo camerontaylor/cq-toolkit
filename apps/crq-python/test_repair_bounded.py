@@ -118,7 +118,7 @@ class BoundedRepairTest(unittest.TestCase):
         atomic(self.root / 'state/repair' / job_id / 'result.json',
                {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
                 'attempts': [{'rung': 'A0'}], 'source_sha': SOURCE,
-                'finding_sha256': job['finding_sha256'], 'origin_job': OLD,
+                'finding_sha256': job['finding_sha256'], 'origin_job': OLD, 'reason': 'test',
                 'worktree': str(self.c.WT_ROOT / ('crq-repair-pr1-merged-' + job_id)),
                 'repair_base': SOURCE})
         with mock.patch.object(repair_tick, 'verify', side_effect=RuntimeError('verification reached')):
@@ -474,6 +474,22 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertIn('without valid commits', record['error'])
         self.assertEqual(item['state'], 'repair_failed')
 
+    def test_harvest_records_verdict_without_string_reason_as_failed(self):
+        job_id, job = self.prepare()
+        self.c.WT_ROOT = self.root / 'wt'
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
+                'attempts': [{'rung': 'A0'}], 'reason': None,
+                'worktree': str(self.root / 'wt/crq-repair-pr1-merged'),
+                'repair_base': job['repair_base'],
+                'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'], 'origin_job': OLD})
+        item = self.queue['items'][0]
+        repair_tick.harvest(self.c, self.queue, item)
+        record = item['repair_runs'][job['run']]
+        self.assertEqual(record['state'], 'failed')
+        self.assertIn('string reason', record['error'])
+        self.assertEqual(item['state'], 'repair_failed')
+
     def test_terminal_failure_replays_sibling_outcomes_after_a_failed_write(self):
         job_id, job = self.prepare()
         item = self.queue['items'][0]
@@ -724,7 +740,7 @@ class BoundedRepairTest(unittest.TestCase):
         item = self.queue['items'][0]
         record = item['repair_runs'][job['run']]
         record['jobs'].append(second['job'])
-        good = {'job': job_id, 'item': job['item'], 'verdict': 'NOT-FIXED',
+        good = {'job': job_id, 'item': job['item'], 'verdict': 'NOT-FIXED', 'reason': 'test',
                 'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'],
                 'origin_job': OLD}
         atomic(self.root / 'state/repair' / job_id / 'result.json', good)
@@ -744,7 +760,7 @@ class BoundedRepairTest(unittest.TestCase):
             with self.subTest(rung=rung):
                 atomic(self.root / 'state/repair' / job_id / 'result.json',
                        {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
-                        'attempts': [{'rung': rung}], 'source_sha': job['source_sha'],
+                        'attempts': [{'rung': rung}], 'reason': 'test', 'source_sha': job['source_sha'],
                         'finding_sha256': job['finding_sha256'], 'origin_job': OLD,
                         'worktree': str(self.c.WT_ROOT / 'crq-repair-pr1-merged'),
                         'repair_base': job['repair_base']})

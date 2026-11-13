@@ -476,6 +476,11 @@ def harvest(c, q, item, dry=False):
                         raise ValueError('repair predecessor mismatch')
                 elif result.get('verdict') not in ('NOT-FIXED', 'FAILED', 'STALE'):
                     raise ValueError('unknown repair verdict')
+                # finalize_publication renders every verdict's reason into the
+                # fix PR body after the branch push, so a malformed reason must
+                # fail here, before the journal and push make it unrecoverable.
+                if not isinstance(result.get('reason'), str):
+                    raise ValueError('repair result lacks a string reason')
             except (ValueError, IndexError, KeyError, TypeError) as exc:
                 # A deterministic artifact defect can never pass on a later tick,
                 # so record it as a terminal failure instead of blocking the item.
