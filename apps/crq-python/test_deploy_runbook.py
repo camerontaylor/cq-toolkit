@@ -366,6 +366,59 @@ class DeployTests(DeployFixture, unittest.TestCase):
                             for unit in TRIGGERS))
         self.assertEqual(self.record(run)["outcome"], "recovery_required")
 
+    def test_rollback_drain_losing_permission_fail_stops_before_switch(self):
+        # The queue was compatible before the rollback and its drain, but the
+        # rollback drain itself leaves a schema marker. The pre-drain
+        # permission is stale: the rollback must not switch, and the hold is
+        # retained for the owner.
+        calls = {"n": 0}
+
+        def dirtying_rollback_drain():
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                (self.runner / "state/queue.json").write_text(
+                    '{"schema_version": 3, "items": []}\n')
+            return {"drained": True, "blocked": []}
+
+        run = self.build(health=lambda: {"healthy": False,
+                                         "reason": "no advancing tick"},
+                         drain=dirtying_rollback_drain)
+        with self.assertRaisesRegex(rb.RecoveryRequired,
+                                    "after the rollback drain"):
+            run.run()
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.head(), self.target)
+        self.assertTrue(all(self.units.state(unit) in ("inactive", "failed")
+                            for unit in TRIGGERS))
+        self.assertEqual(self.record(run)["outcome"], "recovery_required")
+
+    def test_fail_stop_surfaces_a_storage_failure_as_recovery_required(self):
+        # The recovery record cannot be written (disk full). The outcome must
+        # still be recovery_required, carrying the in-memory receipt and the
+        # persistence error, with the hold retained -- never an ordinary
+        # refusal that claims the host was left unchanged.
+        real_write = rb.durable_write
+
+        def failing_write(path, payload):
+            if Path(path).name == "deploy.json":
+                raise OSError("disk full")
+            return real_write(path, payload)
+
+        run = self.build(drain=lambda: {"drained": False,
+                                        "blocked": [{"item": "q1",
+                                                     "state": "alive"}]})
+        with mock.patch.object(rb, "durable_write", side_effect=failing_write):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                run.run()
+        self.assertIn("persistence_error", caught.exception.record)
+        self.assertIn("disk full",
+                      caught.exception.record["persistence_error"])
+        self.assertEqual(caught.exception.record["outcome"],
+                         "recovery_required")
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.head(), self.prior)
+        self.assertFalse((Path(run.run_dir) / "deploy.json").exists())
+
     def test_queue_that_loses_rollback_permission_during_drain_refuses(self):
         # Preflight measured a compatible queue; a tick wrote a schema marker
         # before the drain settled. Re-measuring after the drain must refuse
