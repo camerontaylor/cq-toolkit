@@ -1008,9 +1008,12 @@ class RepairDrainTest(unittest.TestCase):
 
         def refuse_mid_item(config, item, jobs):
             # The marker appears after this item was admitted, so the decision
-            # happens at the job gate and the exit is deliberately delayed.
+            # happens at the job gate; it is then removed again before the
+            # coordinator's own marker check, exactly the window F1 described.
+            # Only the published byte can stop the next admission here.
             (self.root / 'state/runner-disabled').write_text('handover\n')
             service.publish_refusal()
+            (self.root / 'state/runner-disabled').unlink()
             published.write_text('published\n')
             time.sleep(0.4)
             return service.RUNNER_DISABLED_OUTCOME
@@ -1031,7 +1034,10 @@ class RepairDrainTest(unittest.TestCase):
              contextlib.redirect_stderr(stderr):
             service.drain_items(self.config, {'a': ['crq-run1-F1'], 'b': ['crq-run2-F1']},
                                 ['a', 'b'])
-        self.assertEqual(len(forked), 1, 'a published refusal stops the next admission')
+        self.assertEqual(len(forked), 1,
+                         'a published refusal stops the next admission even '
+                         'after the marker is gone')
+        self.assertFalse((self.root / 'state/runner-disabled').exists())
         process_item.assert_not_called()
 
     def test_marker_mid_item_stops_the_remaining_jobs(self):
