@@ -314,12 +314,17 @@ or an earlier unresolved major/critical CRQ thread produce ITERATE.
   GitHub threads. Body-major taint remains scoped to the current head. Missing or partial
   visibility (including lag or deletion) keeps delivery pending for a later tick;
   absence never proves resolution. Waits retain missing run/head/finding bindings
-  and source receipt IDs/links in the existing queue error/state. A deleted thread
-  needs human investigation; it never clears automatically. Receipts and GraphQL
-  supply this evidence.
+  and source receipt IDs/links in the existing queue error/state. A deleted expected
+  major thread leaves later delivery pending across every subsequent head on that
+  PR by design: report it to the owner for human investigation. Resolving a visible
+  thread clears its expectation; a new push cannot clear a deleted expectation,
+  and there is no automatic exit. Receipts and GraphQL supply this evidence.
 - Pre-marker legacy body-only findings, including majors, do not hold the verdict
   and are not claimed covered or resolved. Cumulative body-major evidence applies
-  only to post-change receipts carrying the scan marker. Minor thread counts are not dispositions;
+  only to post-change receipts carrying the scan marker. Pre-change reviews without
+  new receipt proof are excluded from the expected-manifest inventory. A bound
+  post-change receipt with a missing or invalid manifest instead fails closed and
+  remains pending. Minor thread counts are not dispositions;
   minors do not hold PASS, while the merge bar still requires their disposition.
 - Python is the production PR publisher. The TS policy mirror
   `src/policy/crq/prReviewFindings.ts` deliberately retains its legacy contract;
