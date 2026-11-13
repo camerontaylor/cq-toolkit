@@ -106,7 +106,7 @@ const resolveCoreSshCommand = async (repoRoot: string): Promise<string | undefin
  * usable credential would otherwise stall the worker (and its reservation)
  * forever; the timeout bounds hangs that no prompt explains.
  */
-const gitSubprocess = (
+export const gitSubprocess = (
   configuredSshCommand?: string,
 ): { timeout: number; env: NodeJS.ProcessEnv } => {
   const env: NodeJS.ProcessEnv = { ...processEnv(), GIT_TERMINAL_PROMPT: '0' };
@@ -117,17 +117,16 @@ const gitSubprocess = (
   // variant that does not know BatchMode would only fail earlier, which the
   // timeout below bounds anyway. With no env vars set, the caller's resolved
   // core.sshCommand stays the base command so its options survive; plain ssh
-  // applies only when nothing is configured.
+  // applies only when nothing is configured. Any existing BatchMode value is
+  // dropped first: OpenSSH honors the first occurrence of an option, so a
+  // configured `-oBatchMode=no` would win over an appended `-oBatchMode=yes`.
+  const enforceBatchMode = (command: string): string =>
+    `${command.replace(/(^|[\s"'])-oBatchMode=\S+([\s"']|$)/gi, '$1').trim()} -oBatchMode=yes`;
   if (env['GIT_SSH'] === undefined && env['GIT_SSH_COMMAND'] === undefined) {
     const base = configuredSshCommand?.trim() || 'ssh';
-    env['GIT_SSH_COMMAND'] = /(^|[\s"'])-oBatchMode=yes([\s"']|$)/.test(base)
-      ? base
-      : `${base} -oBatchMode=yes`;
-  } else if (
-    env['GIT_SSH_COMMAND'] !== undefined &&
-    !/(^|[\s"'])-oBatchMode=yes([\s"']|$)/.test(env['GIT_SSH_COMMAND'])
-  ) {
-    env['GIT_SSH_COMMAND'] = `${env['GIT_SSH_COMMAND']} -oBatchMode=yes`;
+    env['GIT_SSH_COMMAND'] = enforceBatchMode(base);
+  } else if (env['GIT_SSH_COMMAND'] !== undefined) {
+    env['GIT_SSH_COMMAND'] = enforceBatchMode(env['GIT_SSH_COMMAND']);
   }
   return { timeout: 300_000, env };
 };
