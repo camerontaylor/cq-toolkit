@@ -165,6 +165,10 @@ class RunbookFixture(unittest.TestCase):
         shutil.copytree(self.runner, root / "apps/crq-python")
         (root / "dist").mkdir(parents=True)
         (root / "dist" / ("run-" + name + ".js")).write_text("dist of " + name + "\n")
+        # The entrypoint the overlay's repair.cq_bin names: a matching dist
+        # digest alone does not prove this file exists, which is exactly what
+        # the post-merge finding about wrong filenames was about.
+        (root / "dist" / "cli.js").write_text("console.log('" + name + "')\n")
         (root / "node_modules").mkdir(parents=True)
         (root / "node_modules" / ("pkg-" + name)).mkdir()
         (root / "node_modules" / ("pkg-" + name) / "index.js").write_text("dep\n")
@@ -1835,10 +1839,35 @@ class CLITests(RunbookFixture):
         self.assertEqual(document["final_triggers"],
                          {unit: "active" for unit in TRIGGERS})
         self.assertEqual(sorted(document),
-                         ["final_triggers", "journal", "marker_path",
-                          "operation", "outcome", "output_dir", "prior_sha",
-                          "rehearsal", "released", "runbook_sha256",
-                          "target", "target_tag"])
+                         ["cq_bin_entry", "final_triggers", "journal",
+                          "marker_path", "operation", "outcome", "output_dir",
+                          "prior_sha", "rehearsal", "released",
+                          "runbook_sha256", "target", "target_tag"])
+
+    def test_a_second_invocation_cannot_claim_the_same_output_dir(self):
+        # Post-merge finding: two invocations given the same fresh
+        # --output-dir both passed the phase.json check, and the loser's
+        # refusal cleanup could then replace the winner's phase.json while
+        # its triggers were still stopped. The directory is claimed
+        # atomically before any record write, so the second invocation
+        # refuses with nothing observed.
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        (self.output_dir / ".claim").write_text("held by the other run\n")
+        with self.assertRaisesRegex(
+                rb.Refused, "output-dir is claimed by another invocation"):
+            rb.main(self.cli_argv(),
+                    effects_factory=self.with_fake_switch())
+        self.assertEqual(sorted(p.name for p in self.output_dir.iterdir()),
+                         [".claim"])
+
+    def test_a_completed_run_leaves_no_claim_behind(self):
+        # The claim is per invocation, not a permanent lock: a bare directory
+        # stays reusable once the run that held it has finished.
+        code, _stdout = self.capture(
+            lambda: rb.main(self.cli_argv(),
+                            effects_factory=self.with_fake_switch()))
+        self.assertEqual(code, 0)
+        self.assertFalse((self.output_dir / ".claim").exists())
 
     def test_deploy_refusal_prints_stdout_document(self):
         # A terminal refusal lands one machine-readable result document on
@@ -2660,7 +2689,7 @@ class CqBinPointerTests(RunbookFixture):
         self.assertEqual(live["repair"]["cq_bin"],
                          str(self.moved_runtime() / "dist" / "cli.js"))
 
-    def _moved_config(self, root, runtime=None):
+    def _moved_config(self, root, runtime=None, entry="cli.js"):
         """The approved target render, with the pointer resolved elsewhere:
         what a stray writer would leave in the live bytes."""
         overlay, _raw = self.host_mod.load_overlay(self.overlay_path)
@@ -2668,7 +2697,7 @@ class CqBinPointerTests(RunbookFixture):
             Path(root), overlay,
             self.manifest()["identity"]["target_sha"]))
         config["repair"]["cq_bin"] = str((runtime or self.moved_runtime())
-                                         / "dist" / "cli.js")
+                                         / "dist" / entry)
         return config
 
     def runtime_root(self, name, dist_edit=None):
@@ -2716,6 +2745,44 @@ class CqBinPointerTests(RunbookFixture):
             with self.assertRaisesRegex(rb.Refused,
                                        "live dist digest mismatch"):
                 run.point()
+
+    def test_pointer_to_a_missing_entrypoint_name_refuses(self):
+        # The tree is byte-identical to the candidate and both artifact
+        # digests match, but the configured name is not a file in it: the
+        # release must refuse rather than restart triggers and report success
+        # with repair pointing at a script that does not exist.
+        typo = self.runtime_root("typo-runtime")
+        (self.runner / "config.json").write_bytes(
+            self.host_mod.encode(
+                self._moved_config(self.root, typo, entry="cli-typo.js")))
+        run = self.pointer_run(True)
+        with mock.patch.object(
+                run.host, "live_render",
+                side_effect=lambda root, ov, raw: (
+                    Path(root) / "apps/crq-python/config.json").write_bytes(
+                        self.host_mod.encode(
+                            self._moved_config(root, typo,
+                                               entry="cli-typo.js")))):
+            with self.assertRaisesRegex(
+                    rb.Refused,
+                    "does not name an existing entrypoint file"):
+                run.point()
+
+    def test_release_records_the_entrypoint_identity(self):
+        # Evidence for the GO checklist: the released run records the exact
+        # entrypoint, its bytes and mode, without executing anything.
+        run = self.pointer_run(False)
+        run.point()
+        entry = run.cq_bin_entry
+        self.assertTrue(entry["path"].endswith("dist/cli.js"))
+        self.assertEqual(entry["resolved"], str(Path(entry["path"]).resolve()))
+        self.assertEqual(entry["sha256"],
+                         hashlib.sha256(Path(entry["path"]).read_bytes())
+                         .hexdigest())
+        self.assertEqual(entry["mode"],
+                         oct(Path(entry["path"]).stat().st_mode & 0o777))
+        self.assertEqual(entry["invocation"], "node " + entry["path"])
+        self.assertEqual(run.result_document()["cq_bin_entry"], entry)
 
     def test_point_releases_only_the_approved_pointer(self):
         # After live_render, the released live pointer must equal the

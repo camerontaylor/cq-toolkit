@@ -549,6 +549,7 @@ class Run:
                 "prior_sha": self.args.prior_sha,
                 "marker_path": str(self.marker),
                 "journal": (self.journal or {}).get("transaction_id"),
+                "cq_bin_entry": getattr(self, "cq_bin_entry", None),
                 "final_triggers": self.final_triggers}
 
     # -- sequence --------------------------------------------------------
@@ -567,12 +568,31 @@ class Run:
                 "refusing to overwrite recovery evidence. Use a fresh "
                 "--output-dir; recovering the old run is an owner operation "
                 "on its existing records")
-        self.output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Finding (post-merge Codex P2): two invocations given the same fresh
+        # --output-dir both passed the check above, and the loser's
+        # _release_own_refusal() then overwrote the winner's phase.json after
+        # the winner had stopped triggers. The directory is claimed
+        # atomically before ANY record is written, so exactly one invocation
+        # owns it and the loser refuses with nothing observed.
+        claim = self.output_dir / ".claim"
+        try:
+            self.output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            claim_fd = os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                               0o600)
+        except FileExistsError as exc:
+            raise Refused(
+                "output-dir is claimed by another invocation (" + str(claim)
+                + " exists); refusing to share a run directory. Use a unique "
+                "fresh --output-dir per invocation; removing the claim is an "
+                "owner operation on the run that holds it") from exc
+        os.close(claim_fd)
         try:
             return self._run_body()
         except BaseException as exc:
             self._refusal_cleanup(exc)
             raise
+        finally:
+            claim.unlink(missing_ok=True)
 
     def _refusal_cleanup(self, exc):
         """Terminal cleanup for a failure, split by what the host can prove.
@@ -1038,6 +1058,31 @@ class Run:
                 "live dist digest mismatch: the executed runtime at "
                 + str(live_dist) + " is not the verified candidate "
                 "artifact (candidate_dist_sha256)")
+        # Finding (post-merge Codex P2): a matching dist digest says nothing
+        # about the NAME the overlay chose inside it. A pointer to
+        # dist/cli-typo.js in an otherwise pinned tree passed, and every
+        # later repair invocation then ran Node against a missing script
+        # while the release reported success. The entrypoint itself must be
+        # an existing regular file that resolves inside the approved tree.
+        entry = Path(pointer)
+        require(entry.is_file(),
+                "rendered cq_bin does not name an existing entrypoint file: "
+                + str(entry) + " (the dist tree may match the candidate, but "
+                "the pointer must name the script the release will execute)")
+        # A pointer cannot escape the tree: tree_digest refuses a symlink
+        # anywhere in dist, and a parent-traversing name digests a different
+        # root. The resolved path is recorded, not gated.
+        resolved = entry.resolve()
+        # Record the identity the GO checklist asks for: exact path, resolved
+        # path, bytes and mode, and the invocation contract the repair roles
+        # use. Recorded, not probed: nothing is executed here.
+        self.cq_bin_entry = {
+            "path": str(entry),
+            "resolved": str(resolved),
+            "sha256": digests.file_digest(entry),
+            "mode": oct(entry.stat().st_mode & 0o777),
+            "invocation": "node " + str(entry),
+        }
         # Review finding: the controller's checkout never installs
         # dependencies, and build.mjs emits unbundled output, so an
         # approved dist over stale node_modules can be inert where cq_bin
