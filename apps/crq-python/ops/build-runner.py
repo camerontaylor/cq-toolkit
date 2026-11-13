@@ -31,6 +31,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 
 EXPECTED_NODE_MAJOR = 24
 EXPECTED_PLATFORM = 'linux'
@@ -348,7 +349,8 @@ def main():
         if args.report is not None:
             args.report.parent.mkdir(parents=True, exist_ok=True)
             args.report.write_text(data)
-    except (BuildError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+    except (BuildError, OSError, ValueError, subprocess.TimeoutExpired,
+            tarfile.TarError) as exc:
         if machine:
             _machine_error('thrown', 'build-runner', str(exc), 1)
         parser.exit(1, 'build-runner: ' + str(exc) + '\n')
