@@ -2653,25 +2653,69 @@ class CqBinPointerTests(RunbookFixture):
         # (this fixture's config.json now IS the moved render), the
         # authorized run releases the moved pointer.
         run3 = self.pointer_run(True)
-        # The authorized move names a host path this fixture cannot create
-        # (/opt/cq), so the runtime binding is pinned elsewhere
-        # (PlaceholderTargetTests); here only the pointer policy is under test.
-        with moved_render(run3), mock.patch.object(
-                run3, "assert_live_dist_is_candidate"):
+        with moved_render(run3):
             run3.point()
         live = json.loads((Path(run3.args.root)
                            / "apps/crq-python/config.json").read_text())
-        self.assertEqual(live["repair"]["cq_bin"], "/opt/cq/bin.other")
+        self.assertEqual(live["repair"]["cq_bin"],
+                         str(self.moved_runtime() / "dist" / "cli.js"))
 
-    def _moved_config(self, root):
+    def _moved_config(self, root, runtime=None):
         """The approved target render, with the pointer resolved elsewhere:
         what a stray writer would leave in the live bytes."""
         overlay, _raw = self.host_mod.load_overlay(self.overlay_path)
         config = json.loads(self.host_mod.render(
             Path(root), overlay,
             self.manifest()["identity"]["target_sha"]))
-        config["repair"]["cq_bin"] = "/opt/cq/bin.other"
+        config["repair"]["cq_bin"] = str((runtime or self.moved_runtime())
+                                         / "dist" / "cli.js")
         return config
+
+    def runtime_root(self, name, dist_edit=None):
+        """A real runtime root, byte-identical to the candidate unless
+        dist_edit rewrites one file.
+
+        The binding is verified against a real tree here rather than a
+        patched assertion: the pointers these helpers build resolve to
+        directories that exist, carry the candidate's dist and dependency
+        graph, and differ only in host path (or in the one edited byte)."""
+        root = self.base / name
+        if not root.exists():
+            shutil.copytree(self.candidate / "dist", root / "dist",
+                            symlinks=True)
+            shutil.copytree(self.candidate / "node_modules",
+                            root / "node_modules", symlinks=True)
+        if dist_edit is not None:
+            (root / "dist" / "cli.js").write_text(dist_edit)
+        return root
+
+    def moved_runtime(self):
+        return self.runtime_root("moved-runtime")
+
+    def test_authorized_move_to_a_foreign_dist_refuses_at_the_binding(self):
+        # The pointer move is authorized and the release is allowed to write
+        # it, but the directory it resolves to is not the verified artifact:
+        # the runtime binding refuses by name after the render, which is the
+        # only place the pointer exists to be checked.
+        foreign = self.runtime_root("foreign-runtime",
+                                    dist_edit="// not the candidate bytes\n")
+        # manifest() pins target_state_config_sha256 from this fixture's live
+        # config, so the foreign render has to be the pinned state before the
+        # run is built; otherwise the whole-bytes gate fires first (see
+        # test_rendered_move_requires_authorization) and the binding is never
+        # reached.
+        (self.runner / "config.json").write_bytes(
+            self.host_mod.encode(self._moved_config(self.root, foreign)))
+        run = self.pointer_run(True)
+        with mock.patch.object(
+                run.host, "live_render",
+                side_effect=lambda root, ov, raw: (
+                    Path(root) / "apps/crq-python/config.json").write_bytes(
+                        self.host_mod.encode(
+                            self._moved_config(root, foreign)))):
+            with self.assertRaisesRegex(rb.Refused,
+                                       "live dist digest mismatch"):
+                run.point()
 
     def test_point_releases_only_the_approved_pointer(self):
         # After live_render, the released live pointer must equal the
