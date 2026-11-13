@@ -35,7 +35,7 @@ head state exists — evidence covering an earlier commit never qualifies, no ma
 when it was resubmitted.
 The merge bar is green `static` and `denylist` on the exact PR head, one independent review of that head, and no unaddressed review comments.
 
-The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review posted as `cq-review[bot]` with an exact-head PASS and its run or verdict-refresh marker, whose findings are all addressed. The latest CRQ verdict for the head wins. A successful clean whole-PR crq run posts PASS; failed or partial scans never PASS. Owner-account fallback reviews explicitly say they are unattested.
+The independent review is an agent PASS posted with `cq-review-post`, a human’s PASS, or a crq review posted as `cq-review[bot]` or, when the App path is unavailable, under the queue host’s login with an explicit unattested notice. Either CRQ identity counts under the same bar: an exact-head PASS with its run or verdict-refresh marker, whose findings are all addressed. The latest CRQ verdict for the head wins. A successful clean whole-PR crq run posts PASS; failed or partial scans never PASS. Owner-account fallback reviews explicitly say they are unattested.
 
 Every thread and finding, including Codex, CodeRabbit, bot and minor findings, must be fixed or answered with a reason, and every thread resolved before merge. Truncated review data fails closed.
 
