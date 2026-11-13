@@ -303,10 +303,11 @@ def review_metrics(queue, events, now):
                 item.get("ancestry_repeat") is True)
 
     requests = queue.get("review_requests") or {}
-    created = joined = reused = action_unknown = pr_reuse = 0
+    created = joined = reused = observed = action_unknown = pr_reuse = 0
     dedup_completed = 0
     predecessor_links = supersede_links = 0
-    request_items = set()
+    pr_link_items = {link.get("item") for link in
+                     (queue.get("review_pr_links") or {}).values() if isinstance(link, dict)}
     for binding in requests.values():
         if not isinstance(binding, dict):
             action_unknown += 1
@@ -320,25 +321,46 @@ def review_metrics(queue, events, now):
         if item is None or item.get("kind") != "local-review" or req_at is None:
             action_unknown += 1
             continue
-        request_items.add(item["id"])
         item_created = timestamp(item.get("created_at"))
-        if item_created is not None and req_at <= item_created:
-            created += 1
+        action = binding.get("admission_action")
+        if action in ("created", "joined", "reused", "observed"):
+            pass
+        elif item_created is None:
+            action = None
+        elif req_at < item_created:
+            action = "created"
+        elif req_at == item_created:
+            # Same-second ties cannot distinguish create from join without a
+            # retained action; legacy bindings stay unknown, never coerced.
+            action = None
         else:
-            completed_at = timestamp(item.get("completed_at"))
-            if completed_at is not None and req_at >= completed_at:
-                reused += 1
-                if item.get("pr") is not None:
-                    pr_reuse += 1
-                if item.get("state") == "done" and item.get("scope_adequate") is True:
-                    dedup_completed += 1
-            else:
-                joined += 1
+            completed_at_probe = timestamp(item.get("completed_at"))
+            adequate = item.get("state") == "done" and item.get("scope_adequate") is True
+            action = ("reused" if completed_at_probe is not None and
+                      req_at >= completed_at_probe and adequate else
+                      "observed" if completed_at_probe is not None and
+                      req_at >= completed_at_probe else "joined")
+        if action is None:
+            action_unknown += 1
+            continue
+        if action == "created":
+            created += 1
+        elif action == "joined":
+            joined += 1
+        elif action == "observed":
+            observed += 1
+        else:  # reused
+            reused += 1
+            if item["id"] in pr_link_items or item.get("pr_observers") or item.get("pr") is not None:
+                pr_reuse += 1
+            if item.get("state") == "done" and item.get("scope_adequate") is True:
+                dedup_completed += 1
     starts = failed = unknown_attempts = 0
     wait = {"interactive": _latency_acc(), "background": _latency_acc()}
     wait_class = {"first": _latency_acc(), "repeat": _latency_acc()}
     completion = {"interactive": _latency_acc(), "background": _latency_acc()}
     completion_class = {"first": _latency_acc(), "repeat": _latency_acc()}
+    completion_unknown = _latency_acc()
     repeat_items = completed_repeats = pr_items = 0
     pr_starts = 0
     app_items = app_attempts = 0
@@ -358,24 +380,39 @@ def review_metrics(queue, events, now):
             repeat_items += 1
             if item.get("state") == "done" and item.get("scope_adequate") is True:
                 completed_repeats += 1
+        pr_linked = (item["id"] in pr_link_items or item.get("pr_observers") or
+                     item.get("pr") is not None)
         if isinstance(item.get("run"), dict):
+            # Vendor starts come from launch evidence, not admission
+            # bookkeeping: an actual launch leaves `run` (including a consumed
+            # spawn failure), while receipt-only reuse stays uncounted.
             starts += 1
+            if pr_linked:
+                pr_starts += 1
         item_attempts = item.get("attempts")
         if not isinstance(item_attempts, list):
             item_attempts = ()
         created_at = timestamp(item.get("created_at"))
-        if item.get("pr") is not None:
-            pr_starts += len(item_attempts) + (1 if isinstance(item.get("run"), dict) else 0)
         for attempt in item_attempts:
             if not isinstance(attempt, dict):
                 unknown_attempts += 1
                 continue
-            starts += 1
-            outcome = attempt.get("outcome")
-            if outcome is None or outcome not in ("completed", "interrupted", "error", "timeout"):
+            if isinstance(attempt.get("run_id"), str) or timestamp(attempt.get("started_at")) is not None:
+                starts += 1
+                if pr_linked:
+                    pr_starts += 1
+            else:
                 unknown_attempts += 1
-            elif outcome != "completed" or attempt.get("counted") is False:
+            outcome = attempt.get("outcome")
+            if outcome is None:
+                unknown_attempts += 1
+            elif outcome == "completed" and attempt.get("counted") is not False:
+                pass
+            elif outcome in ("interrupted", "error", "timeout", "malformed", "rate_limited",
+                             "auth", "action_required", "skipped"):
                 failed += 1
+            else:
+                unknown_attempts += 1
             band = attempt.get("band") if attempt.get("band") in ("interactive", "background") else None
             started_at = timestamp(attempt.get("started_at"))
             if band is not None and started_at is not None and created_at is not None:
@@ -390,13 +427,20 @@ def review_metrics(queue, events, now):
             completed_at = timestamp(item.get("completed_at"))
             if completed_at is not None:
                 lag = max(0, completed_at - created_at)
-                bands = {a.get("band") for a in item_attempts if isinstance(a, dict)}
-                band = "interactive" if "interactive" in bands else "background"
-                add_to = completion_class["repeat"] if repeated else completion_class["first"]
-                add_to["count"] += 1
-                add_to["buckets"][_bucket(lag)] += 1
-                completion[band]["count"] += 1
-                completion[band]["buckets"][_bucket(lag)] += 1
+                # Band attribution follows the terminal (latest) attempt's own
+                # band; an unknown band counts nowhere instead of as background.
+                band = next((a.get("band") for a in reversed(item_attempts)
+                             if isinstance(a, dict) and a.get("band") in ("interactive", "background")),
+                            None)
+                if band is not None:
+                    add_to = completion_class["repeat"] if repeated else completion_class["first"]
+                    add_to["count"] += 1
+                    add_to["buckets"][_bucket(lag)] += 1
+                    completion[band]["count"] += 1
+                    completion[band]["buckets"][_bucket(lag)] += 1
+                else:
+                    completion_unknown["count"] += 1
+                    completion_unknown["buckets"][_bucket(lag)] += 1
     started_events = spawn_failed_events = 0
     for event in events:
         at = timestamp(event.get("at")) if isinstance(event, dict) else None
@@ -438,7 +482,8 @@ def review_metrics(queue, events, now):
             retries += attempts - 1
     return {
         "requests": {"total": len(requests), "created": created, "joined": joined,
-                     "reused": reused, "unknown_action": action_unknown},
+                     "reused": reused, "observed": observed,
+                     "unknown_action": action_unknown},
         "dedup": {"requests_without_new_item": joined + reused,
                   "on_completed_items": dedup_completed,
                   "monetary_saving": _unknown(
@@ -452,7 +497,8 @@ def review_metrics(queue, events, now):
         "completion": {"interactive": completion["interactive"],
                        "background": completion["background"],
                        "first": completion_class["first"],
-                       "repeat": completion_class["repeat"]},
+                       "repeat": completion_class["repeat"],
+                       "unknown_band": completion_unknown},
         "repeats": {"repeat_items": repeat_items, "completed_repeats": completed_repeats},
         "predecessor": {"linked_requests": predecessor_links,
                         "superseding_requests": supersede_links,

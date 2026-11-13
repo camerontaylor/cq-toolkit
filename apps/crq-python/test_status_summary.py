@@ -444,8 +444,11 @@ class ReposSummaryTests(unittest.TestCase):
                       generation=2, state="done", scope_adequate=True,
                       created_at="2026-11-06T01:00:00Z",
                       completed_at="2026-11-06T01:40:00Z",
-                      attempts=[dict(run_id="run2", band="background",
+                      attempts=[dict(run_id="run2a", band="interactive",
                                      started_at="2026-11-06T01:30:00Z",
+                                     outcome="rate_limited", counted=False),
+                                dict(run_id="run2b", band="background",
+                                     started_at="2026-11-06T01:31:00Z",
                                      outcome="error", counted=False)],
                       failures=1)
         in_flight = dict(id="lr-live", kind="local-review", generation=1,
@@ -460,11 +463,15 @@ class ReposSummaryTests(unittest.TestCase):
                  "cooldown_until": "2026-11-06T03:00:00Z",
                  "review_requests": {
                      "req-create": {"item": "lr-first", "created_at": "2026-11-06T00:00:00Z",
-                                    "predecessor": None},
+                                    "predecessor": None, "admission_action": "created"},
                      "req-reuse": {"item": "lr-first", "created_at": "2026-11-06T00:05:00Z",
-                                   "supersedes": "req-old"},
-                     "req-join": {"item": "lr-live", "created_at": "2026-11-06T02:01:00Z"},
-                     "req-pr": {"item": "lr-first", "created_at": "2026-11-06T01:00:00Z"}},
+                                   "supersedes": "req-old", "admission_action": "reused"},
+                     "req-join": {"item": "lr-live", "created_at": "2026-11-06T02:01:00Z",
+                                  "admission_action": "joined"},
+                     "req-pr": {"item": "lr-first", "created_at": "2026-11-06T01:00:00Z",
+                                "admission_action": "reused"}},
+                 "review_pr_links": {"owner/repo#11": {"item": "lr-first", "pr": 11,
+                                                      "repo": "owner/repo"}},
                  "review_notify_outbox": {
                      "n1": {"state": "sent", "attempts": 1},
                      "n2": {"state": "pending", "attempts": 3},
@@ -477,27 +484,31 @@ class ReposSummaryTests(unittest.TestCase):
                                  {"repo": "owner/repo", "max_starts_per_hour": 8},
                                  events, now)
         m = data["review_metrics"]
-        # requests: created at/before item birth; reuse after completion; join while active
+        # requests: retained admission actions classify every binding
         self.assertEqual(m["requests"], {"total": 4, "created": 1, "joined": 1,
-                                         "reused": 2, "unknown_action": 0})
+                                         "reused": 2, "observed": 0, "unknown_action": 0})
         self.assertEqual(m["dedup"]["requests_without_new_item"], 3)
         self.assertEqual(m["dedup"]["on_completed_items"], 2)
         self.assertEqual(m["dedup"]["monetary_saving"]["state"], "unknown")
-        # vendor starts: attempts + in-flight run; one interactive, one background, one live
-        self.assertEqual(m["vendor_starts"], 3)
+        # vendor starts: launch-evidence attempts (3) + in-flight live run (1);
+        # PR-associated: lr-first attempt (1) — repeat/live have no PR link
+        self.assertEqual(m["vendor_starts"], 4)
         self.assertEqual(m["operation_events_24h"], {"review_started": 1, "spawn_failed": 1})
-        # wait: 5s interactive (first), 30min background (repeat)
+        # wait: 5s interactive (first), 30min interactive + 31min background (repeat)
         self.assertEqual(m["queue_wait"]["interactive"],
-                         {"count": 1, "buckets": {"lt_60s": 1, "lt_600s": 0, "lt_3600s": 0, "gte_3600s": 0}})
-        self.assertEqual(m["queue_wait"]["background"]["count"], 1)
-        self.assertEqual(m["queue_wait"]["background"]["buckets"]["lt_3600s"], 1)
+                         {"count": 2, "buckets": {"lt_60s": 1, "lt_600s": 0, "lt_3600s": 1, "gte_3600s": 0}})
+        self.assertEqual(m["queue_wait"]["background"],
+                         {"count": 1, "buckets": {"lt_60s": 0, "lt_600s": 0, "lt_3600s": 1, "gte_3600s": 0}})
         self.assertEqual(m["queue_wait"]["first"]["count"], 1)
-        self.assertEqual(m["queue_wait"]["repeat"]["buckets"]["lt_3600s"], 1)
+        self.assertEqual(m["queue_wait"]["repeat"]["count"], 2)
         # completion latency: 45s interactive first; 40min background repeat
+        # (terminal attempt's own band, not a majority vote)
         self.assertEqual(m["completion"]["interactive"]["buckets"]["lt_60s"], 1)
         self.assertEqual(m["completion"]["background"]["buckets"]["lt_3600s"], 1)
         self.assertEqual(m["completion"]["first"]["count"], 1)
         self.assertEqual(m["completion"]["repeat"]["count"], 1)
+        self.assertEqual(m["completion"]["unknown_band"],
+                         {"count": 0, "buckets": {"lt_60s": 0, "lt_600s": 0, "lt_3600s": 0, "gte_3600s": 0}})
         self.assertEqual(m["repeats"], {"repeat_items": 1, "completed_repeats": 1})
         self.assertEqual(m["predecessor"], {"linked_requests": 0, "superseding_requests": 1,
                                             "change_statistics": m["predecessor"]["change_statistics"]})
@@ -505,7 +516,7 @@ class ReposSummaryTests(unittest.TestCase):
         self.assertEqual(m["cooldown"], {"state": "expired",
                                          "until": "2026-11-06T03:00:00Z",
                                          "seconds_remaining": 0})  # past cooldown relative to now
-        self.assertEqual(m["attempts"], {"failed": 1, "unknown": 0})
+        self.assertEqual(m["attempts"], {"failed": 2, "unknown": 0})
         self.assertEqual(m["quota"], {"state": "known", "limit": 10, "remaining": 4})
         self.assertEqual(m["notifications"], {"sent": 1, "error": 1, "pending": 1,
                                               "withdrawn": 0, "retries": 5,
@@ -531,7 +542,7 @@ class ReposSummaryTests(unittest.TestCase):
                                       "reason": "no current vendor usage observation in queue state"})
         self.assertEqual(m["cooldown"], {"state": "none"})
         self.assertEqual(m["requests"], {"total": 0, "created": 0, "joined": 0,
-                                         "reused": 0, "unknown_action": 0})
+                                         "reused": 0, "observed": 0, "unknown_action": 0})
         self.assertEqual(m["vendor_starts"], 0)
 
 

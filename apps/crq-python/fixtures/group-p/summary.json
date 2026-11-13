@@ -272,6 +272,7 @@
               "created": 0,
               "joined": 0,
               "reused": 0,
+              "observed": 0,
               "unknown_action": 0
             },
             "dedup": {
@@ -354,6 +355,15 @@
                 }
               },
               "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "unknown_band": {
                 "count": 0,
                 "buckets": {
                   "lt_60s": 0,
@@ -694,6 +704,7 @@
               "created": 0,
               "joined": 0,
               "reused": 0,
+              "observed": 0,
               "unknown_action": 0
             },
             "dedup": {
@@ -776,6 +787,15 @@
                 }
               },
               "repeat": {
+                "count": 0,
+                "buckets": {
+                  "lt_60s": 0,
+                  "lt_600s": 0,
+                  "lt_3600s": 0,
+                  "gte_3600s": 0
+                }
+              },
+              "unknown_band": {
                 "count": 0,
                 "buckets": {
                   "lt_60s": 0,
