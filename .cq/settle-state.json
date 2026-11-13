@@ -14,19 +14,6 @@
           "by": "self-merge-prs:observe"
         }
       ]
-    },
-    "1675": {
-      "tuple": {
-        "head": "d60b4f1780b19b4c6389b9dbfc53c622b3b47671",
-        "base": "e6d4544686e89a0062650aedc5f031dea4b060ab",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-13T03:33:51.889Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
     }
   }
 }
