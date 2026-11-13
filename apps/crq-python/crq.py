@@ -130,6 +130,11 @@ def git(*args: str, check: bool = True, env: Optional[dict] = None, cwd: Optiona
     return run(["git", *args], cwd=cwd or CLONE, check=check, env=env).stdout.strip()
 
 
+def git_raw(*args: str, check: bool = True, env: Optional[dict] = None,
+            cwd: Optional[Path] = None) -> str:
+    """git stdout without stripping; patches need their exact whitespace."""
+    return run(["git", *args], cwd=cwd or CLONE, check=check, env=env).stdout
+
 def is_ancestor(a: str, b: str, *, clone: Optional[Path] = None) -> bool:
     return run(["git", "merge-base", "--is-ancestor", a, b], cwd=clone or CLONE, check=False).returncode == 0
 

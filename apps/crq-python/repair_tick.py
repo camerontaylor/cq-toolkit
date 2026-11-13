@@ -881,23 +881,51 @@ def published_change_base(c, first):
     return lineage[1] if len(lineage) > 1 else None
 
 
+def git_raw(c, *args, env=None):
+    """Unstripped git stdout; falls back to the stripping wrapper (fail closed)."""
+    raw = getattr(c, 'git_raw', None)
+    if raw is not None:
+        return raw(*args, env=env)
+    return c.git(*args, env=env)
+
+
 def published_change_patch(c, first, parent, published, path):
-    """Full-context diff of the published span for exactly one path."""
+    """Full-context diff of the published span for exactly one path.
+
+    The output is captured unstripped: the production git wrapper strips
+    stdout, which would delete a blank final context line from the patch and
+    corrupt it against the hunk header's line counts.
+    """
     options = ['--no-color', '--no-ext-diff', '--no-textconv', '--binary', '--no-renames', '-U3']
     if parent:
-        return c.git('diff', *options, parent, published, '--', path)
-    return c.git('diff-tree', '-p', '--root', '--no-commit-id', *options, first, '--', path)
+        return git_raw(c, 'diff', *options, parent, published, '--', path)
+    return git_raw(c, 'diff-tree', '-p', '--root', '--no-commit-id', *options, first, '--', path)
 
 
 def published_change_contained(c, patch_file, env):
-    """Reverse the published change against the head index; clean means contained."""
+    """Reverse the published change against the head index; clean means contained.
+
+    Two checks, both required. The reverse check must apply cleanly (the
+    published post-image is still present at the head). The forward check must
+    fail (the change cannot be applied again). A descendant that restored the
+    deleted lines of a boundary hunk passes the reverse check -- the restored
+    copy sits beside the hunk's insert position -- but passes the forward check
+    too, because the published pre-image is back; forward applicability proves
+    the change was lost, so that case is refused.
+    """
     try:
         c.git('apply', '--cached', '--reverse', '--check', '--unidiff-zero',
               '--whitespace=nowarn', str(patch_file), env=env)
     except Exception:
         # Any apply failure is a refusal, never an acceptance (fail closed).
         return False
-    return True
+    try:
+        c.git('apply', '--cached', '--check', '--unidiff-zero',
+              '--whitespace=nowarn', str(patch_file), env=env)
+    except Exception:
+        return True
+    # The published change still applies: the head lost it (or never had it).
+    return False
 
 
 def extra_commits(c, published, actual_head):
@@ -960,6 +988,11 @@ def merge_head_evidence(c, record, actual_head):
                 result['status'] = 'identical'
                 continue
             if before is not None and after is None:
+                raise ValueError('merged repair source changed; needs revalidation: ' + path)
+            if after is not None and before is not None and after[0] != before[0]:
+                # The publication's mode change was undone at the head (for
+                # example the executable bit restored); git apply does not
+                # catch a reverted mode on its own.
                 raise ValueError('merged repair source changed; needs revalidation: ' + path)
             patch = published_change_patch(c, commits[0], published_parent, published, path)
             if not patch.strip():
