@@ -450,6 +450,16 @@ between deploys: ancestry direction (`must`/`must_not`/`either`), the three
 config relations, the `cq_bin` pointer policy, the trigger inventory, the
 quiescence bounds and the range note.
 
+Historical note on the ac13 ancestry refusal: the check itself
+(`git merge-base --is-ancestor prior target`, and the
+`target_on_origin_main` predicate requiring the target inside
+`origin/main` history) was always correct. Only one refusal message string
+was worded in the wrong direction ("not an ancestor" on a failure whose
+real cause was something else), which misdirected the operator during the
+ac13 incident. The runbook keeps the verified predicate and does not port
+that message; refusals state the failed relation plainly, and the drift
+message is never a substitute for reading the observations.
+
 ### Released-flag gate (operator rule)
 
 The marker is the hold; the gate is the flag. `phase.json` is written

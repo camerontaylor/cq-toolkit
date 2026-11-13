@@ -32,6 +32,7 @@ from pathlib import Path
 # like .modules.yaml sits inside its package directory).
 DEPS_EXCLUDED_DIRS = frozenset({".vite", ".vite-temp"})
 DEPS_EXCLUDED_FILES = frozenset({".modules.yaml", ".pnpm-workspace-state-v1.json"})
+NUL_SEP = b"\x00"
 
 
 def file_digest(path: Path) -> str:
@@ -44,22 +45,31 @@ def tree_digest(root: Path) -> str:
 
     Every regular file contributes ``<relative path>\\0<sha256>\\n`` under one
     running sha256, entries sorted by relative path so the digest is order-
-    independent. Symlinks and special files are unexpected in a dist and
-    refuse rather than digest; an absent root refuses.
+    independent. Finding 8: every entry is inspected for kind FIRST: a
+    symlink (to a file, a directory or a dangling target) or a special file
+    refuses, wherever it appears; only then does a regular file contribute.
+    Nothing in the tree is silently skipped, so a link to external
+    executable content cannot leave the digest unchanged. An absent root
+    refuses.
     """
     root = Path(root)
     if not root.is_dir() or root.is_symlink():
         raise ValueError("tree digest root must be an existing real directory: "
                          + str(root))
     digest = hashlib.sha256()
-    entries = sorted(path.relative_to(root) for path in root.rglob("*")
-                     if path.is_file())
-    for relative in entries:
-        path = root / relative
+    paths = sorted(root.rglob("*"),
+                   key=lambda p: str(p.relative_to(root)))
+    for path in paths:
+        relative = path.relative_to(root)
         if path.is_symlink():
             raise ValueError("unexpected symlink in dist tree: "
                              + str(relative))
-        digest.update(str(relative).encode() + b"\0"
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ValueError("unexpected special entry in dist tree: "
+                             + str(relative))
+        digest.update(str(relative).encode() + NUL_SEP
                       + file_digest(path).encode() + b"\n")
     return digest.hexdigest()
 
@@ -91,6 +101,7 @@ def deps_digest(root: Path) -> str:
         elif path.is_dir():
             payload = b"D"
         else:
-            raise ValueError("unexpected dependency entry: " + str(relative))
+            raise ValueError("unexpected dependency entry (special file): "
+                             + str(relative))
         digest.update(str(relative).encode() + b"\0" + payload + b"\n")
     return digest.hexdigest()

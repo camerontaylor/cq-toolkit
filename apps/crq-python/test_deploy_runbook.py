@@ -778,17 +778,25 @@ class ReleasedFlagGateTests(RunbookFixture):
             output_dir=self.output_dir, require_released=True)
         self.digest = sha256_file(OPS / "deploy-runbook.py")
 
-    def write_pair(self, release=None, phase=None):
+    def write_pair(self, release=None, phase=None, marker_record=True,
+                   phase_triggers=True):
         rb.durable_write(self.output_dir / "release.json", release or {
             "released_at": "2026-11-13T12:00:00Z",
             "final_triggers": {unit: "active" for unit in TRIGGERS},
+            "rehearsal": True,
             "runbook_sha256": self.digest})
-        rb.durable_write(self.output_dir / "phase.json", phase or {
+        document = {
             "phase": "completed", "released": True,
+            "rehearsal": True,
             "final_triggers": {unit: "active" for unit in TRIGGERS},
-            "runbook_sha256": self.digest})
-        rb.durable_write(self.output_dir / "marker.path",
-                         {"path": str(self.marker_path)})
+            "runbook_sha256": self.digest}
+        if phase_triggers:
+            document["triggers"] = {unit: "active" for unit in TRIGGERS}
+        rb.durable_write(self.output_dir / "phase.json",
+                         phase or document)
+        if marker_record:
+            rb.durable_write(self.output_dir / "marker.path",
+                             {"path": str(self.marker_path)})
 
     def status(self):
         with mock.patch.dict(os.environ, {"HOME": str(self.base)}):
@@ -796,8 +804,6 @@ class ReleasedFlagGateTests(RunbookFixture):
 
     def test_passes_after_release_and_prints_the_map(self):
         self.write_pair()
-        with mock.patch.object(rb, "Path", wraps=Path) as _unused:
-            pass  # marker path resolves under HOME, redirected below
         stdout = io_string()
         with mock.patch.object(sys, "stdout", stdout):
             code = self.status()
@@ -806,6 +812,10 @@ class ReleasedFlagGateTests(RunbookFixture):
         self.assertTrue(artifact["released"])
         self.assertEqual(artifact["released_at"], "2026-11-13T12:00:00Z")
         self.assertEqual(artifact["final_triggers"],
+                         {unit: "active" for unit in TRIGGERS})
+        # Requirement 2: the live observed state is printed beside the
+        # release record.
+        self.assertEqual(artifact["live_triggers"],
                          {unit: "active" for unit in TRIGGERS})
 
     def test_phase_release_disagreement_refuses(self):
@@ -839,11 +849,14 @@ class ReleasedFlagGateTests(RunbookFixture):
         self.write_pair(release={
             "released_at": "2026-11-13T12:00:00Z",
             "final_triggers": {unit: "active" for unit in TRIGGERS},
+            "rehearsal": True,
             "runbook_sha256": "2" * 64})
         rb.durable_write(self.output_dir / "phase.json", {
             "phase": "completed", "released": True,
+            "rehearsal": True,
             "final_triggers": {unit: "active" for unit in TRIGGERS},
-            "runbook_sha256": "2" * 64})
+            "runbook_sha256": "2" * 64,
+            "triggers": {unit: "active" for unit in TRIGGERS}})
         stdout = io_string()
         with mock.patch.object(sys, "stdout", stdout):
             code = self.status()
@@ -851,11 +864,16 @@ class ReleasedFlagGateTests(RunbookFixture):
         artifact = json.loads(stdout.getvalue())
         self.assertFalse(artifact["released"])
         self.assertIn("stale copy", artifact["refusal"])
+        # Requirement 1: the refusal names both digests.
+        self.assertIn("2" * 64, artifact["refusal"])
+        self.assertIn(self.digest, artifact["refusal"])
 
     def test_missing_release_artifact_refuses(self):
         rb.durable_write(self.output_dir / "phase.json", {
             "phase": "completed", "released": True,
-            "final_triggers": None, "runbook_sha256": self.digest})
+            "rehearsal": True,
+            "final_triggers": None, "runbook_sha256": self.digest,
+            "triggers": {unit: "active" for unit in TRIGGERS}})
         stdout = io_string()
         with mock.patch.object(sys, "stdout", stdout):
             code = self.status()
@@ -867,6 +885,18 @@ class ReleasedFlagGateTests(RunbookFixture):
         argv = ["--require-released"]
         with self.assertRaises(SystemExit):
             rb.main(argv)
+
+    def test_require_released_reaches_status_when_given(self):
+        # Parser-level default (finding 1): status keeps an explicit flag.
+        self.write_pair()
+        argv = ["status", "--output-dir", str(self.output_dir),
+                "--require-released"]
+        stdout = io_string()
+        with mock.patch.object(sys, "stdout", stdout):
+            code = rb.main(argv)
+        self.assertEqual(code, 0)
+        artifact = json.loads(stdout.getvalue())
+        self.assertTrue(artifact["released"])
 
 
 class RecordNamingTests(RunbookFixture):
@@ -1026,6 +1056,459 @@ class AncestryRehearsalTests(RunbookFixture):
                          runbook_sha256="4" * 64)
         with self.assertRaisesRegex(rb.Refused, "runbook digest mismatch"):
             rb.execute(args)
+
+
+class CLITests(RunbookFixture):
+    """The CLI entry point itself: argv in, effects via the injectable
+    factory, assertion on the factory's argument. Codex findings 1-5 are
+    regression-tested here, at the layer that let them through."""
+
+    def setUp(self):
+        super().setUp()
+        self.build_repo()
+        self.units = FakeUnits(self.marker_path)
+        state = self.runner / "state"
+        state.mkdir(exist_ok=True)
+        (state / "queue.json").write_text(
+            json.dumps({"items": [{"id": "done", "run": None}],
+                        "starts": []}) + "\n")
+
+    def cli_argv(self, **overrides):
+        args = self.args(**overrides)
+        argv = ["--target-sha", str(args.target_sha),
+                "--target-tag", args.target_tag,
+                "--candidate-root", str(args.candidate_root),
+                "--prior-root", str(args.prior_root),
+                "--prior-sha", args.prior_sha,
+                "--prior-tag", args.prior_tag,
+                "--root", str(args.root),
+                "--overlay", str(args.overlay),
+                "--baseline-journal", str(args.baseline_journal),
+                "--manifest", str(args.manifest),
+                "--manifest-sha256", args.manifest_sha256,
+                "--runbook-sha256", args.runbook_sha256,
+                "--output-dir", str(args.output_dir)]
+        if args.controller is not None:
+            argv += ["--controller", str(args.controller)]
+        if args.rehearsal:
+            argv += ["--rehearsal"]
+        return argv
+
+    def factory_recorder(self, units=None):
+        """An effects factory that records its construction argument: the
+        assertion target for 'no real effects were constructed'."""
+        calls = []
+        chosen = units or self.units
+
+        def factory(marker_path, effects_builder):
+            calls.append(marker_path)
+            return rb.RunEffects(chosen, effects_builder())
+
+        return factory, calls
+
+    def with_fake_switch(self, factory=None):
+        """Patch ``Run.run`` so the CLI-path Run writes the fake controller
+        journal instead of spawning the real controller subprocess; the
+        journal assertions still apply to what lands. Pass a factory through
+        to hand it to ``main`` with the patch in place."""
+        original = rb.Run.run
+
+        def patched_run(run_self):
+            self.install_fake_controller_journal(run_self)
+            return original(run_self)
+
+        rb.Run.run = patched_run
+        self.addCleanup(setattr, rb.Run, "run", original)
+        return factory
+
+    def test_deploy_invocation_reaches_execute_with_default_flag(self):
+        # Finding 1: a normal deploy invocation must not raise AttributeError
+        # on a status-only argparse attribute.
+        factory, calls = self.factory_recorder()
+        code = rb.main(self.cli_argv(),
+                       effects_factory=self.with_fake_switch(factory))
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1)
+
+    def test_rehearsal_constructs_no_real_effects(self):
+        # Finding 3: --rehearsal binds the in-memory provider; RealUnits is
+        # never constructed and the real controller subprocess never spawns
+        # (the rehearsal journal is the controller module's own switch CLI
+        # against the throwaway clone, not a systemd-touching path).
+        with mock.patch.object(rb, "RealUnits") as real_units:
+            code = rb.main(self.cli_argv())
+        self.assertEqual(code, 0)
+        real_units.assert_not_called()
+        phase = json.loads((self.output_dir / "phase.json").read_text())
+        self.assertTrue(phase["rehearsal"])
+        self.assertEqual(phase["phase"], "completed")
+        release = json.loads((self.output_dir / "release.json").read_text())
+        self.assertTrue(release["rehearsal"])
+
+    def test_rehearsal_without_injected_effects_is_refused(self):
+        # The CLI rehearsal path must refuse rather than reach systemd if the
+        # in-memory binding cannot be built; a direct execute() call with the
+        # flag and no factory is the same refusal.
+        args = self.args()
+        with self.assertRaisesRegex(rb.Refused, "rehearsal requires injected"):
+            rb.execute(args, effects_factory=None)
+
+    def test_run_controller_switch_resolves_the_default_controller(self):
+        # Finding 4: with --controller omitted, the subprocess argv names the
+        # resolved candidate controller, never None. A fresh Run is built
+        # here (its run_controller_switch is not yet overridden).
+        args = self.args(controller=None)
+        host_mod = _load("cli_ctrl_host_" + str(id(args)),
+                         self.candidate / "apps/crq-python/ops/prepare-host.py")
+        controller_mod = _load(
+            "cli_ctrl_controller_" + str(id(args)),
+            self.candidate / "apps/crq-python/ops/deploy-controller.py")
+        effects = controller_mod.Effects(
+            Path(args.root), Path(args.output_dir) / "controller-records")
+        run = rb.Run(args, FakeUnits(self.marker_path), host_mod,
+                     controller_mod, effects, json.loads(
+                         Path(args.manifest).read_text()))
+        captured = {}
+
+        def fake_run(cmd, *unused, **kwargs):
+            captured["argv"] = cmd
+            return argparse_namespace(returncode=0)
+
+        record_dir = self.output_dir / "controller-records"
+        record_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with mock.patch.object(rb.subprocess, "run", fake_run):
+            run.run_controller_switch(record_dir)
+        resolved = str(self.candidate
+                       / "apps/crq-python/ops/deploy-controller.py")
+        self.assertIn(resolved, captured["argv"])
+        self.assertNotIn("None", [str(part) for part in captured["argv"]])
+
+    def test_default_controller_path_completes_the_cli_run(self):
+        # Finding 4 end to end: --controller omitted previously executed
+        # None after the hold and left recovery-required; the run must
+        # complete through main().
+        argv = self.cli_argv(controller=None)
+        code = rb.main(argv, effects_factory=self.with_fake_switch())
+        self.assertEqual(code, 0)
+        records = sorted((self.output_dir / "controller-records")
+                         .glob("controller-*.json"))
+        self.assertEqual(len(records), 1)
+
+    def test_target_sha_mismatch_with_manifest_refuses(self):
+        # Finding 5: the CLI target is bound to the manifest identity before
+        # any host observation or mutation. The refusal must construct no
+        # real effects (RealUnits is the live constructor; the probe proves
+        # it is never called) and mutate no unit.
+        other = "f" * 40
+        document = self.manifest()
+        argv = self.cli_argv(target_sha=other,
+                             manifest_path=self.write_manifest(document))
+        constructed = []
+        with mock.patch.object(rb, "RealUnits",
+                               side_effect=lambda *a: constructed.append(a)):
+            with self.assertRaisesRegex(
+                    rb.Refused, "must equal the manifest identity target"):
+                rb.main(argv, effects_factory=self.factory_recorder()[0])
+        self.assertEqual(constructed, [], "no real effects constructed")
+        self.assertEqual(self.units.stopped, [], "no unit mutation")
+        # The factory was never called either: the refusal precedes effect
+        # construction entirely.
+        factory_calls = []
+
+        def refusing_factory(marker_path, effects_builder):
+            factory_calls.append(marker_path)
+            raise rb.Refused("factory must not be reached")
+
+        with self.assertRaisesRegex(rb.Refused,
+                                    "must equal the manifest identity target"):
+            rb.execute(self.args(
+                target_sha=other,
+                manifest_path=self.write_manifest(document)),
+                effects_factory=refusing_factory)
+        self.assertEqual(factory_calls, [])
+
+    def test_valid_manifest_with_schema_problem_none_does_not_crash(self):
+        # Finding 2 at the CLI: a valid manifest previously raised TypeError
+        # from an eagerly concatenated error message.
+        factory, calls = self.factory_recorder()
+        code = rb.main(self.cli_argv(),
+                       effects_factory=self.with_fake_switch(factory))
+        self.assertEqual(code, 0)
+
+
+class CLIStatusGateTests(RunbookFixture):
+    """The status gate through the CLI: digest self-verification (requirement
+    1) and the live comparison (requirement 2)."""
+
+    def setUp(self):
+        super().setUp()
+        self.build_repo()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.digest = sha256_file(OPS / "deploy-runbook.py")
+        self.units = FakeUnits(self.marker_path,
+                               {unit: "active" for unit in TRIGGERS})
+
+    def write_released(self, runbook_sha256=None, rehearsal=True):
+        rb.durable_write(self.output_dir / "release.json", {
+            "released_at": "2026-11-13T12:00:00Z",
+            "final_triggers": {unit: "active" for unit in TRIGGERS},
+            "rehearsal": rehearsal,
+            "runbook_sha256": runbook_sha256 or self.digest})
+        rb.durable_write(self.output_dir / "phase.json", {
+            "phase": "completed", "released": True,
+            "rehearsal": rehearsal,
+            "final_triggers": {unit: "active" for unit in TRIGGERS},
+            "runbook_sha256": runbook_sha256 or self.digest,
+            "triggers": {unit: "active" for unit in TRIGGERS}})
+        rb.durable_write(self.output_dir / "marker.path",
+                         {"path": str(self.marker_path)})
+
+    def status_argv(self):
+        return ["status", "--output-dir", str(self.output_dir),
+                "--require-released"]
+
+    def run_status(self, units=None):
+        stdout = io_string()
+        with mock.patch.object(sys, "stdout", stdout):
+            code = rb.main(self.status_argv(), status_units=units)
+        return code, json.loads(stdout.getvalue())
+
+    def test_digest_mismatch_between_file_and_record_refuses(self):
+        # Requirement 1: digest of the running file must equal the release
+        # record; refusal names both digests.
+        self.write_released(runbook_sha256="3" * 64)
+        code, artifact = self.run_status(units=self.units)
+        self.assertEqual(code, 1)
+        self.assertFalse(artifact["released"])
+        self.assertIn("runbook digest mismatch", artifact["refusal"])
+        self.assertIn("3" * 64, artifact["refusal"])
+        self.assertIn(self.digest, artifact["refusal"])
+
+    def test_live_trigger_drift_refuses(self):
+        # Requirement 2: one trigger not in final_triggers state refuses the
+        # gate, and the refusal names the unit, its live and released states.
+        self.write_released()
+        self.units.states["crq-slot.timer"] = "inactive"
+        code, artifact = self.run_status(units=self.units)
+        self.assertEqual(code, 1)
+        self.assertFalse(artifact["released"])
+        self.assertIn("crq-slot.timer", artifact["refusal"])
+        self.assertIn("inactive", artifact["refusal"])
+        self.assertIn("active", artifact["refusal"])
+        self.assertIn("crq-slot.timer", artifact["live_triggers"])
+
+    def test_live_drift_test_fails_without_the_comparison(self):
+        # The requirement: this test must fail if the live comparison is
+        # removed, so it is not satisfiable by printing alone. Patch the
+        # comparator away: the gate must then pass, which contradicts the
+        # assertion above.
+        self.write_released()
+        self.units.states["crq-slot.timer"] = "inactive"
+        with mock.patch.object(rb, "read_observed_triggers",
+                               return_value={unit: "active"
+                                             for unit in TRIGGERS}):
+            code, artifact = self.run_status(units=self.units)
+        self.assertEqual(code, 0)
+        self.assertTrue(artifact["released"])
+
+    def test_passing_gate_prints_live_and_released_maps(self):
+        self.write_released()
+        code, artifact = self.run_status(units=self.units)
+        self.assertEqual(code, 0)
+        self.assertTrue(artifact["released"])
+        self.assertEqual(artifact["released_at"], "2026-11-13T12:00:00Z")
+        self.assertEqual(artifact["final_triggers"],
+                         {unit: "active" for unit in TRIGGERS})
+        self.assertEqual(artifact["live_triggers"],
+                         {unit: "active" for unit in TRIGGERS})
+
+
+class RunbookMarkerUniquenessTests(RunbookFixture):
+    """crq F4 hardening: run-unique marker bytes and restore-order
+    guarantees survive the CLI-path fixes."""
+
+    def setUp(self):
+        super().setUp()
+        self.build_repo()
+
+    def test_marker_bytes_are_run_unique_and_exact_byte_verified(self):
+        run_a = self.run_runbook(self.args(), FakeUnits(self.marker_path))
+        run_b = self.run_runbook(self.args(), FakeUnits(self.marker_path))
+        self.assertNotEqual(run_a.marker_bytes(), run_b.marker_bytes())
+        self.marker_path.parent.mkdir(parents=True, exist_ok=True)
+        self.marker_path.write_bytes(run_a.marker_bytes())
+        self.assertTrue(run_a.owns_marker())
+        self.assertFalse(run_b.owns_marker())
+
+    def test_phase_records_original_and_stop_intent_before_the_stop(self):
+        units = FakeUnits(self.marker_path)
+        args = self.args()
+        run = self.run_runbook(args, units)
+        observed = run.observe_inventory()
+        run.assert_inventory(observed)
+        run.split_long_triggers()
+        record = json.loads((self.output_dir / "phase.json").read_text())
+        self.assertEqual(record["phase"], "split_intent")
+        self.assertEqual(record["original"], run.original)
+        self.assertEqual(sorted(record["stopped_pre"]),
+                         sorted(run.stopped_pre))
+        self.assertEqual(record["triggers"], run.split_map)
+
+
+class TargetRenderDigestTests(RunbookFixture):
+    """Finding 6: the rendered target config is checked against the pinned
+    target_state digest unconditionally."""
+
+    def setUp(self):
+        super().setUp()
+        self.build_repo()
+
+    def test_wrong_target_state_digest_refuses_before_preflight_pass(self):
+        document = self.manifest()
+        document["config"]["target_state_config_sha256"] = "4" * 64
+        args = self.args(manifest_path=self.write_manifest(document))
+        run = self.run_runbook(args, self.units)
+        with self.assertRaisesRegex(rb.Refused,
+                                    "target rendered config digest mismatch"):
+            run.run()
+
+    def _overlay(self):
+        overlay, _raw = host.load_overlay(self.overlay_path)
+        return overlay
+
+    def test_matching_target_state_digest_passes_with_delta(self):
+        # head_invariance False with a real config delta: the target render
+        # hashes to the recorded target-state digest and preflight passes.
+        # The candidate artifact must carry the target's committed config so
+        # the candidate/committed/candidate-config relations stay equal, and
+        # the runner's state/queue.json must exist for the drain probe.
+        state = self.runner / "state"
+        state.mkdir(exist_ok=True)
+        (state / "queue.json").write_text(
+            json.dumps({"items": [{"id": "done", "run": None}],
+                        "starts": []}) + "\n")
+        host_mod = _load("delta_render_host",
+                         self.candidate / "apps/crq-python/ops/prepare-host.py")
+        overlay, _raw = host_mod.load_overlay(self.overlay_path)
+        target_bytes = host_mod.render(self.root, overlay, self.target)
+        self.runner.joinpath("config.json").write_bytes(target_bytes)
+        self.command("commit", "-qam", "target config delta")
+        self.target = self.command("rev-parse", "HEAD").strip()
+        self.target_tag = "crq-runner/20261113-10"
+        self.command("tag", "-a", self.target_tag, "-m",
+                     "fixture delta target", self.target)
+        self.command("update-ref", "refs/remotes/origin/main", self.target)
+        shutil.copy(self.runner / "config.json",
+                    self.candidate / "apps/crq-python/config.json")
+        # The delta must survive the overlay: a committed leaf the overlay
+        # also supplies would be overwritten by apply() and vanish. The
+        # schema_version leaf is committed policy the overlay does not
+        # carry, so bumping it in the target commit is a real render delta
+        # (head_invariance False) while render(prior) with the CURRENT
+        # overlay still reproduces the live bytes after the checkout below.
+        committed = json.loads((self.runner / "config.json").read_text())
+        committed["schema_version"] = committed.get("schema_version", 1) + 1
+        delta_bytes = (json.dumps(committed, indent=2, sort_keys=True)
+                       + "\n").encode()
+        self.runner.joinpath("config.json").write_bytes(delta_bytes)
+        self.command("commit", "-qam", "target config delta: schema_version")
+        self.target = self.command("rev-parse", "HEAD").strip()
+        self.target_tag = "crq-runner/20261113-11"
+        self.command("tag", "-a", self.target_tag, "-m",
+                     "fixture delta target 2", self.target)
+        self.command("update-ref", "refs/remotes/origin/main", self.target)
+        shutil.copy(self.runner / "config.json",
+                    self.candidate / "apps/crq-python/config.json")
+        # The deployment checkout returns to the pre-run state: detached at
+        # the prior target with the CURRENT overlay's render of PRIOR as the
+        # dirty file (the drift-free baseline is always PRIOR + live overlay).
+        self.command("checkout", "-q", "--detach", self.prior_sha)
+        (self.runner / "config.json").write_bytes(
+            host_mod.render(self.root, self._overlay(), self.prior_sha))
+        document = self.manifest()
+        # The pins describing the new target's config state are computed
+        # exactly as the runbook verifies them: the committed digest from
+        # git show of the new target (the delta), the target-state digest
+        # from render(target) with the live overlay.
+        committed_bytes = subprocess.run(
+            ["git", "-C", str(self.root), "show",
+             self.target + ":apps/crq-python/config.json"],
+            check=True, capture_output=True).stdout
+        document["config"]["target_state_config_sha256"] = \
+            hashlib.sha256(host_mod.render(
+                self.root, self._overlay(), self.target)).hexdigest()
+        document["config"]["head_invariance"] = False
+        document["config"]["committed_config_sha256"] = \
+            hashlib.sha256(committed_bytes).hexdigest()
+        args = self.args(manifest_path=self.write_manifest(document),
+                         target_sha=self.target,
+                         target_tag=self.target_tag)
+        run = self.run_runbook(args, self.units)
+        run.run()
+        phase = json.loads((self.output_dir / "phase.json").read_text())
+        self.assertEqual(phase["phase"], "completed")
+
+    def test_real_delta_target_state_config_refuses_when_unpinned(self):
+        # Finding 6's scenario: the target state differs from the running
+        # config, so the OLD code (which checked only on equality) skipped
+        # the target render digest entirely. The manifest must still pin it:
+        # a wrong pinned digest refuses even when target != running.
+        host_mod = _load("delta_render_host2",
+                         self.candidate / "apps/crq-python/ops/prepare-host.py")
+        overlay, _raw = host_mod.load_overlay(self.overlay_path)
+        target_bytes = host_mod.render(self.root, overlay, self.target)
+        document = self.manifest()
+        document["config"]["target_state_config_sha256"] = "9" * 64
+        document["config"]["head_invariance"] = False
+        args = self.args(manifest_path=self.write_manifest(document))
+        run = self.run_runbook(args, self.units)
+        with self.assertRaisesRegex(rb.Refused,
+                                    "target rendered config digest mismatch"):
+            run.run()
+
+
+class TreeDigestRefusalTests(RunbookFixture):
+    """Finding 8: a dist-tree entry of any other kind refuses."""
+
+    def digest_of(self, tree):
+        return dg.tree_digest(tree)
+
+    def test_directory_symlink_refuses(self):
+        tree = self.base / "t1"
+        (tree / "sub").mkdir(parents=True)
+        (tree / "sub" / "f.js").write_text("x")
+        (tree / "outside").mkdir()
+        (tree / "outside" / "evil.sh").write_text("#!/bin/sh\n")
+        (tree / "sub2").symlink_to(tree / "outside")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            self.digest_of(tree)
+
+    def test_dangling_symlink_refuses(self):
+        tree = self.base / "t2"
+        tree.mkdir()
+        (tree / "gone").symlink_to(tree / "nowhere")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            self.digest_of(tree)
+
+    def test_special_file_refuses(self):
+        tree = self.base / "t3"
+        tree.mkdir()
+        os.mkfifo(tree / "pipe")
+        with self.assertRaisesRegex(ValueError, "special"):
+            self.digest_of(tree)
+
+    def test_dist_digest_covers_everything_present(self):
+        tree = self.base / "t4"
+        (tree / "sub").mkdir(parents=True)
+        (tree / "sub" / "a.js").write_text("a")
+        baseline = self.digest_of(tree)
+        # An added directory symlink is not silently skipped: it refuses, so
+        # the digest can never stay unchanged while content leaves the tree.
+        (tree / "link").symlink_to(tree / "sub")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            self.digest_of(tree)
+        (tree / "link").unlink()
+        self.assertEqual(self.digest_of(tree), baseline)
 
 
 def io_string():

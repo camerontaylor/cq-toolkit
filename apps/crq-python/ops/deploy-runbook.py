@@ -48,6 +48,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -59,6 +60,7 @@ if str(OPS_DIR) not in sys.path:
 import digests  # noqa: E402  (sibling module, stdlib only)
 
 RUNBOOK_SCHEMA_VERSION = 1
+RUNBOOK_SELF_DIGEST = digests.file_digest(Path(__file__).resolve())
 HEX40_RE = re.compile(r"[0-9a-f]{40}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
 ANCESTRY_MODES = ("must", "must_not", "either")
@@ -230,6 +232,72 @@ class RealUnits:
             self._run("systemctl", "--user", "start", *units)
 
 
+class RehearsalUnits:
+    """The host-free unit provider ``--rehearsal`` binds: the inventory comes
+    from the manifest's reviewed trigger/service lists and all state lives in
+    memory. It never executes systemctl, so a rehearsal cannot touch the
+    host's units."""
+
+    def __init__(self, marker_path, expected_triggers, expected_services):
+        self.marker = Path(marker_path)
+        self._triggers = sorted(expected_triggers)
+        self._services = sorted(expected_services)
+        self.states = {unit: "active" for unit in self._triggers}
+        self.started = []
+        self.stopped = []
+
+    def state(self, unit):
+        return self.states.get(unit, "inactive")
+
+    def listing(self):
+        return "\n".join(sorted(self._triggers + self._services)) + "\n"
+
+    def inventory(self):
+        return list(self._triggers), list(self._services)
+
+    def stop(self, units):
+        self.stopped.extend(units)
+        for unit in units:
+            self.states[unit] = "inactive"
+
+    def start(self, units):
+        self.started.extend(units)
+        for unit in units:
+            self.states[unit] = "active"
+
+
+# ---------------------------------------------------------------- effects
+
+
+class RunEffects:
+    """The construction seam between the CLI and the host: ``units``,
+    ``host_effects`` (the controller's Effects instance) and an optional
+    ``prepare_run`` hook applied to the Run before it starts.
+
+    ``main`` builds one through the injectable ``effects_factory`` so tests
+    and rehearsals can prove which providers a CLI invocation constructs;
+    production supplies ``RealUnits``, the controller module's ``Effects``
+    and no hook. The rehearsal's hook binds the fake controller journal, so
+    no rehearsal can spawn the real switch subprocess (whose helper path
+    reads the live unit states).
+    """
+
+    def __init__(self, units, host_effects, prepare_run=None):
+        self.units = units
+        self.host_effects = host_effects
+        self.prepare_run = prepare_run
+
+
+def real_units_factory(marker_path):
+    return RealUnits(marker_path)
+
+
+def default_effects_factory(marker_path, effects_builder):
+    """Production: live systemd unit provider plus the controller's
+    Effects. A rehearsal must never select this factory."""
+    return RunEffects(real_units_factory(marker_path), effects_builder())
+
+
 def load_module(name, path: Path):
     try:
         raw = Path(path).read_bytes()
@@ -247,7 +315,6 @@ def digests_module():
     return digests  # imported at module load from this file's directory
 
 
-# ------------------------------------------------------------------- records
 
 
 def durable_write(path: Path, payload) -> None:
@@ -314,6 +381,8 @@ class Run:
         self.released = False
         self.final_triggers = None
         self.journal = None
+        self._current_phase = "started"
+        self.run_id = uuid.uuid4().hex
         self.marker = Path(units.marker)
 
     # -- durable intent --------------------------------------------------
@@ -321,6 +390,7 @@ class Run:
         durable_write(self.output_dir / "phase.json",
                       {"phase": name,
                        "released": self.released,
+                       "rehearsal": bool(getattr(self.args, "rehearsal", False)),
                        "runbook_sha256": self.args.runbook_sha256,
                        "final_triggers": self.final_triggers,
                        "journal": self.journal,
@@ -332,8 +402,11 @@ class Run:
 
     # -- markers ---------------------------------------------------------
     def marker_bytes(self):
+        # Run-unique bytes (crq F4): two runs of the same pinned revision
+        # must never claim each other's marker; ownership is exact-byte.
         return ("runbook admission hold; runbook_sha256="
-                + self.args.runbook_sha256 + "\n").encode()
+                + self.args.runbook_sha256 + "; run_id=" + self.run_id
+                + "\n").encode()
 
     def owns_marker(self):
         if self.marker.is_symlink() or not self.marker.exists():
@@ -464,9 +537,16 @@ class Run:
         # systemctl: a failed multi-unit stop may have stopped a subset.
         self.stopped_pre = {unit: state for unit, state in self.original.items()
                             if unit in long and state == "active"}
-        self.units.stop(sorted(self.stopped_pre))
         self.split_map = {**self.original,
                           **{unit: "inactive" for unit in self.stopped_pre}}
+        # Finding 7: the original map and this run's stop intent are durable
+        # before the first unit mutation, so recovery after a crash during
+        # the stop, the settle wait or preflight can tell triggers this run
+        # stopped from triggers that were already inactive.
+        self.phase("split_intent", triggers=self.split_map,
+                   original=self.original,
+                   stopped_pre=sorted(self.stopped_pre))
+        self.units.stop(sorted(self.stopped_pre))
         observed = {unit: self.units.state(unit) for unit in self.triggers}
         require(observed == self.split_map, "split mismatch: observed "
                 + repr(observed) + " expected " + repr(self.split_map))
@@ -534,19 +614,24 @@ class Run:
         committed_digest = hashlib.sha256(target_committed).hexdigest()
         require(committed_digest == config["committed_config_sha256"],
                 "committed config at target mismatch")
+        target_rendered = self.host.render(Path(self.args.root), overlay,
+                                           self.manifest["identity"]["target_sha"])
+        # Finding 6: the rendered target config is compared against the
+        # pinned target-state digest unconditionally, so an incorrect overlay
+        # can never release an unapproved target configuration.
+        require(hashlib.sha256(target_rendered).hexdigest()
+                == config["target_state_config_sha256"],
+                "target rendered config digest mismatch (target_state)")
         left = json.loads(self.host.render(Path(self.args.root), overlay,
                                            self.manifest["identity"]["prior_sha"]))
-        right = json.loads(self.host.render(Path(self.args.root), overlay,
-                                            self.manifest["identity"]["target_sha"]))
+        right = json.loads(target_rendered)
         diffs = sorted(self.host.changed_fields(left, right))
         if config["head_invariance"]:
             require(diffs == [], "head invariance refused: " + repr(diffs))
         else:
             require(diffs != [], "head invariance false but no config delta")
         if config["target_state_config_sha256"] == config["running_config_sha256"]:
-            require(self.host.render(Path(self.args.root), overlay,
-                                     self.manifest["identity"]["target_sha"])
-                    == live_bytes,
+            require(target_rendered == live_bytes,
                     "target render must equal live bytes (config invariant)")
 
     def assert_ancestry(self, root, ancestry):
@@ -677,8 +762,10 @@ class Run:
         """The production controller invocation: a deploy-controller.py
         subprocess at the candidate artifact, bound to the candidate helper
         with the pinned helper digest, stdout/stderr captured to the record
-        directory. Tests and rehearsals override this with a fake controller
-        journal; the journal assertions below still run on whatever lands."""
+        directory. The path is resolved explicitly (finding 4): an omitted
+        ``--controller`` must never reach the subprocess as ``None``. Tests
+        and rehearsals override this with a fake controller journal; the
+        journal assertions below still run on whatever lands."""
         identity = self.manifest["identity"]
         stdout_path = record_dir / "controller.stdout"
         stderr_path = record_dir / "controller.stderr"
@@ -686,7 +773,7 @@ class Run:
             os.chmod(out.name, 0o600)
             os.chmod(err.name, 0o600)
             completed = subprocess.run(
-                [sys.executable, "-B", str(self.args.controller),
+                [sys.executable, "-B", str(resolve_controller_path(self.args)),
                  "--root", str(self.args.root),
                  "--overlay", str(self.args.overlay),
                  "--record-dir", str(record_dir),
@@ -771,6 +858,7 @@ class Run:
                       {"released_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                      time.gmtime()),
                        "final_triggers": self.final_triggers,
+                       "rehearsal": bool(getattr(self.args, "rehearsal", False)),
                        "runbook_sha256": self.args.runbook_sha256})
 
     def write_range_note(self):
@@ -823,20 +911,25 @@ class Run:
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target-sha", required=True, metavar="SHA40")
-    parser.add_argument("--target-tag", required=True, metavar="TAG")
-    parser.add_argument("--candidate-root", required=True, type=Path)
-    parser.add_argument("--prior-root", required=True, type=Path)
-    parser.add_argument("--prior-sha", required=True, metavar="SHA40")
-    parser.add_argument("--prior-tag", required=True, metavar="TAG")
-    parser.add_argument("--root", required=True, type=Path,
+    # Deploy arguments are declared without argparse-level required=True so
+    # the status subcommand parses standalone (the documented gate invocation
+    # passes only --output-dir/--require-released); main() enforces the
+    # deploy set explicitly and exits 2 on a missing one, preserving the
+    # argparse error shape for deploy invocations.
+    parser.add_argument("--target-sha", metavar="SHA40")
+    parser.add_argument("--target-tag", metavar="TAG")
+    parser.add_argument("--candidate-root", type=Path)
+    parser.add_argument("--prior-root", type=Path)
+    parser.add_argument("--prior-sha", metavar="SHA40")
+    parser.add_argument("--prior-tag", metavar="TAG")
+    parser.add_argument("--root", type=Path,
                         help="deployment checkout root (full monorepo)")
-    parser.add_argument("--overlay", required=True, type=Path)
-    parser.add_argument("--baseline-journal", required=True, type=Path)
-    parser.add_argument("--manifest", required=True, type=Path)
-    parser.add_argument("--manifest-sha256", required=True, metavar="HEX64")
-    parser.add_argument("--runbook-sha256", required=True, metavar="HEX64")
-    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--overlay", type=Path)
+    parser.add_argument("--baseline-journal", type=Path)
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--manifest-sha256", metavar="HEX64")
+    parser.add_argument("--runbook-sha256", metavar="HEX64")
+    parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--annotations", type=Path, default=None)
     parser.add_argument("--rehearsal", action="store_true",
                         help="run against a throwaway clone with a fake unit "
@@ -858,14 +951,16 @@ def validate_manifest_document(manifest, manifest_path, manifest_sha256):
     require(actual == manifest_sha256,
             "manifest digest mismatch: file " + actual + " pinned "
             + manifest_sha256)
-    schema = load_json(SCHEMA_PATH)
-    problem = manifest_problem(manifest, schema)
-    require(problem is None, "manifest schema: " + problem)
+    # Finding 2: the message exists only when validation failed; a valid
+    # manifest never concatenates a None problem into an error string.
+    schema_problem_text = manifest_problem(manifest, load_json(SCHEMA_PATH))
+    if schema_problem_text is not None:
+        require(False, "manifest schema: " + schema_problem_text)
     return manifest
 
 
 def check_pinned_revision(args):
-    self_digest = digests.file_digest(Path(__file__))
+    self_digest = RUNBOOK_SELF_DIGEST
     require(self_digest == args.runbook_sha256,
             "runbook digest mismatch: this file is " + self_digest
             + " but --runbook-sha256 pins " + args.runbook_sha256
@@ -883,8 +978,29 @@ def check_no_live_units_without_rehearsal(args, units):
             + ", ".join(active))
 
 
-def execute(args) -> int:
-    """Validate, build the run, execute it. Any Refused propagates."""
+def resolve_controller_path(args):
+    """The explicit resolution finding 4 requires: the switch subprocess
+    gets a real path, never ``None`` because ``--controller`` was omitted."""
+    candidate_ops = Path(args.candidate_root) / "apps/crq-python/ops"
+    return args.controller or (candidate_ops / "deploy-controller.py")
+
+
+def rehearsal_effects_factory(marker_path, effects_builder):
+    """Rehearsal selection when no test factory was injected: refuse instead
+    of constructing live effects. The rehearsal flag promises a host-free
+    run; it must never be able to reach systemd."""
+    raise Refused("rehearsal requires injected effects: refusing to "
+                  "construct live systemd unit providers")
+
+
+def execute(args, effects_factory=None) -> int:
+    """Validate, build the run, execute it. Any Refused propagates.
+
+    ``effects_factory`` is the injectable construction seam: a test or
+    rehearsal passes a factory returning ``RunEffects`` with fake providers,
+    and the test asserts on the factory's argument, proving no real effects
+    were constructed. Production (factory None) builds ``RealUnits`` and the
+    controller's ``Effects``."""
     check_pinned_revision(args)
     manifest = validate_manifest_document(load_json(args.manifest),
                                           args.manifest, args.manifest_sha256)
@@ -896,32 +1012,67 @@ def execute(args) -> int:
     require(digests.file_digest(candidate_ops / "prepare-host.py")
             == manifest["identity"]["helper_sha256"],
             "helper digest mismatch (candidate prepare-host.py)")
-    controller_path = args.controller or (candidate_ops / "deploy-controller.py")
+    controller_path = resolve_controller_path(args)
     require(digests.file_digest(controller_path)
             == manifest["identity"]["controller_file_sha256"],
             "controller digest mismatch")
-    units = RealUnits(Path(args.root) / "apps/crq-python/state/runner-disabled")
-    check_no_live_units_without_rehearsal(args, units)
-    effects = controller.Effects(Path(args.root),
-                                 Path(args.output_dir) / "controller-records")
-    run = Run(args, units, host, controller, effects, manifest)
+    # Finding 5: the CLI target is the manifest's target before any host
+    # observation, mutation or effect construction; a different tagged commit
+    # with compatible config must not inherit the manifest's reviewed
+    # assertions.
+    require(args.target_sha == manifest["identity"]["target_sha"],
+            "--target-sha must equal the manifest identity target_sha: "
+            "command line " + str(args.target_sha) + " manifest "
+            + str(manifest["identity"]["target_sha"]))
+    if args.rehearsal:
+        # Finding 3, defense in depth: even a direct execute() call with
+        # --rehearsal must not fall through to the live factory.
+        require(effects_factory is not None,
+                "rehearsal requires injected effects: refusing to construct "
+                "live systemd unit providers")
+    effects_factory = effects_factory or default_effects_factory
+
+    def effects_builder():
+        return controller.Effects(Path(args.root),
+                                  Path(args.output_dir) / "controller-records")
+
+    effects = effects_factory(
+        Path(args.root) / "apps/crq-python/state/runner-disabled",
+        effects_builder)
+    check_no_live_units_without_rehearsal(args, effects.units)
+    run = Run(args, effects.units, host, controller, effects.host_effects,
+              manifest)
+    if effects.prepare_run is not None:
+        effects.prepare_run(run)
     return run.run()
 
 
-def cmd_status(args) -> int:
+def read_observed_triggers(units, manifest):
+    """One read per trigger of the live unit states (requirement 2)."""
+    return {unit: units.state(unit)
+            for unit in sorted(manifest["triggers"]["expected"])}
+
+
+def cmd_status(args, units=None) -> int:
     """The released-flag gate (binding additions 1 and 4).
 
     Independent artifact re-read: release.json and phase.json are re-read
     from disk and must agree; the run's recorded marker path (marker.path,
     written by the run) must exist-and-be-absent on disk — a marker present
     again refuses; the recorded runbook digest must equal the digest of THIS
-    file, so a stale copy never reports on a run it did not perform.
-    Refusals report in a fixed order: artifacts, digest, marker.
-    Prints final_triggers and released_at, never just pass/fail.
+    file (resolved through realpath so a copied gate at another path is
+    still pinned to the recorded revision), so a stale copy never reports on
+    a run it did not perform. Refusals report in a fixed order: artifacts,
+    digest, marker. Requirement 2: the gate answers "does the host still
+    match the release record" too — it prints released_at, final_triggers
+    AND the live observed state of every trigger, and refuses when any live
+    state differs from final_triggers. Exit 0 is the only permitted basis
+    for starting units; one read per trigger, no new state.
     """
-    self_digest = digests.file_digest(Path(__file__))
+    self_digest = RUNBOOK_SELF_DIGEST
     output_dir = Path(args.output_dir)
     release = phase = None
+    live_triggers = None
     artifact_refusal = None
     try:
         release, phase = release_state(output_dir)
@@ -955,34 +1106,156 @@ def cmd_status(args) -> int:
                           "verify the hold is released")
     if marker_refusal is None and marker_path is not None and marker_path.exists():
         marker_refusal = "runner-disabled marker is present again after release"
-    refused = artifact_refusal or digest_refusal or marker_refusal
+    live_refusal = None
+    final_triggers = release.get("final_triggers") if release else None
+    if artifact_refusal is None and digest_refusal is None and marker_refusal is None:
+        # Requirement 2: live comparison against the release record. The unit
+        # provider is injectable (tests); production re-reads the live
+        # systemd states, one read per trigger, no new state.
+        provider = units
+        if provider is None:
+            if phase.get("rehearsal") is True:
+                provider = RehearsalUnits(
+                    marker_path,
+                    sorted(final_triggers), [])
+                provider.states = dict(final_triggers)
+            else:
+                provider = RealUnits(marker_path.parent)
+        live_triggers = read_observed_triggers(provider, live_document(phase))
+        drifted = {unit: {"live": state, "released_as": final_triggers.get(unit)}
+                   for unit, state in live_triggers.items()
+                   if final_triggers.get(unit) != state}
+        if drifted:
+            live_refusal = ("live trigger state differs from the released "
+                            "final_triggers: " + json.dumps(drifted,
+                                                            sort_keys=True))
+    refused = (artifact_refusal or digest_refusal or marker_refusal
+               or live_refusal)
     print(json.dumps({
         "operation": "status",
         "released": refused is None,
         "refusal": refused,
         "output_dir": str(output_dir),
         "released_at": release.get("released_at") if release else None,
-        "final_triggers": release.get("final_triggers") if release else None,
+        "final_triggers": final_triggers,
+        "live_triggers": live_triggers,
         "marker_path": str(marker_path) if marker_path else None,
         "runbook_sha256": self_digest,
     }, indent=2, sort_keys=True))
     return 0 if refused is None else 1
 
 
-def main(argv=None) -> int:
+def live_document(phase):
+    """The trigger list the live comparison reads: the recorded expectation
+    is the run's own phase record (triggers); the manifest is not re-read by
+    the gate."""
+    triggers = sorted((phase.get("triggers") or {}).keys())
+    return {"triggers": {"expected": triggers}}
+
+
+def main(argv=None, effects_factory=None, status_units=None) -> int:
+    """The CLI entry point (testable: inject an effects factory for deploy
+    runs and a unit provider for status, assert on the factory argument).
+
+    Finding 1: ``require_released`` exists at parser level with a default,
+    so a deploy invocation never reads a missing attribute; the status
+    subcommand keeps its own explicit flag. Finding 3: ``--rehearsal``
+    selects the in-memory provider and the fake controller journal — a
+    rehearsal constructs no real effects and cannot reach systemd."""
     parser = build_arg_parser()
     parser.add_argument("--json", action="store_true",
                         help="accepted for interface parity; output is always JSON")
+    parser.add_argument("--require-released", action="store_true",
+                        default=False,
+                        help="status only: refuse unless the run is released")
     sub = parser.add_subparsers(dest="operation")
     status = sub.add_parser("status", help="released-flag gate")
     status.add_argument("--output-dir", required=True, type=Path)
-    status.add_argument("--require-released", action="store_true")
+    status.add_argument("--require-released", action="store_true",
+                        dest="status_require_released", default=False)
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     if args.operation == "status":
-        return cmd_status(args)
+        return cmd_status(args, units=status_units)
+    # Deploy path (the subparser leaves operation None).
     if args.require_released:
         parser.error("--require-released belongs to the status subcommand")
-    return execute(args)
+    deploy_required = {
+        "--target-sha": args.target_sha, "--target-tag": args.target_tag,
+        "--candidate-root": args.candidate_root,
+        "--prior-root": args.prior_root, "--prior-sha": args.prior_sha,
+        "--prior-tag": args.prior_tag, "--root": args.root,
+        "--overlay": args.overlay,
+        "--baseline-journal": args.baseline_journal,
+        "--manifest": args.manifest,
+        "--manifest-sha256": args.manifest_sha256,
+        "--runbook-sha256": args.runbook_sha256,
+        "--output-dir": args.output_dir}
+    missing = sorted(flag for flag, value in deploy_required.items()
+                     if value is None)
+    if missing:
+        parser.error("the following arguments are required for a deploy run: "
+                     + ", ".join(missing))
+    if args.rehearsal and effects_factory is None:
+        effects_factory = make_rehearsal_effects_factory(args)
+    return execute(args, effects_factory)
+
+
+def make_rehearsal_effects_factory(args):
+    """The rehearsal binding: in-memory unit provider, the controller's
+    Effects against the throwaway clone, and a prepare_run hook that binds
+    the rehearsal controller journal (derived from the run's own verified
+    facts) in place of the real switch subprocess. Returns a factory whose
+    marker argument the execute seam supplies; the rehearsal therefore
+    cannot construct real effects or run systemctl."""
+    manifest_document = load_json(args.manifest)
+    triggers = sorted(manifest_document["triggers"]["expected"])
+    services = sorted(manifest_document["triggers"]["services"])
+
+    def factory(marker_path, effects_builder):
+        def prepare_run(run):
+            install_rehearsal_journal(run)
+
+        return RunEffects(
+            RehearsalUnits(marker_path, triggers, services),
+            effects_builder(), prepare_run)
+
+    return factory
+
+
+def rehearsal_journal(run):
+    """The rehearsal controller journal: every asserted field derived from
+    facts the runbook verified itself (manifest identity, live HEAD, pinned
+    helper digest), so the journal assertion set runs for real against it."""
+    identity = run.manifest["identity"]
+    return {
+        "operation": "deploy", "outcome": "completed",
+        "prior_head": identity["prior_sha"],
+        "target": run.args.target_sha,
+        "tag": run.args.target_tag,
+        "helper_sha256": identity["helper_sha256"],
+        "automatic_rollback_permitted": False,
+        "rollback_compatibility": {"checked": True},
+        "prior_tag": run.args.prior_tag,
+        "prior_config_sha256":
+            run.manifest["config"]["running_config_sha256"],
+        "schema_version": RUNBOOK_SCHEMA_VERSION,
+        "transaction_id": "rehearsal-" + run.run_id,
+    }
+
+
+def install_rehearsal_journal(run):
+    """Bind the rehearsal journal writer over the real controller subprocess
+    invocation. The journal assertions in switch() still run on what lands."""
+    original_switch = run.run_controller_switch
+
+    def rehearsed_switch(record_dir):
+        record_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        payload = rehearsal_journal(run)
+        (record_dir / "controller-rehearsal.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+    run.run_controller_switch = rehearsed_switch
+    return original_switch
 
 
 if __name__ == "__main__":
