@@ -127,12 +127,13 @@ export const gitSubprocess = (
   // closed by the same quote right after the option value, so no dangling
   // quotes and no quoted-space argument survive the rewrite, because ssh
   // would otherwise accept such a leftover empty word as its destination
-  // instead of the configured host.
+  // instead of the configured host. Each removal takes the option span and
+  // its trailing delimiter, leaving the leading one; nothing else is
+  // rewritten and no global whitespace normalization runs, so all other
+  // command text, including whitespace inside quoted shell arguments, is
+  // preserved exactly.
   const enforceBatchMode = (command: string): string => {
-    const stripped = command
-      .replace(/(?<=^|\s)(["']?)-o\s*batchmode=\S*?\1(?=$|\s)/gi, ' ')
-      .trim()
-      .replace(/\s+/g, ' ');
+    const stripped = command.replace(/(?<=^|\s)(["']?)-o\s*batchmode=\S*?\1(?=$|\s)\s*/gi, '');
     return `${stripped} -oBatchMode=yes`;
   };
   if (env['GIT_SSH'] === undefined && env['GIT_SSH_COMMAND'] === undefined) {
