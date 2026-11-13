@@ -3,9 +3,12 @@ from runtime_target import DEFAULT_BRANCH, DEFAULT_REF
 import repo_registry
 import review_receipt
 import copy
+import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import tempfile
 from crq_repair import (DetectorUnavailable, atomic, findings, git as wt_git,
                          hack_detector, verify)
 from crq_repair.bounded import JOB_ID, identity, job_path, require_canonical_delivery, source_path, validate_revalidation
@@ -862,6 +865,51 @@ def repair_source_entry(c, head, path):
     return mode, blob
 
 
+# Containment proof bounds: a pathological record must not make a tick expensive.
+MAX_COMPARED_PATHS = 128
+MAX_PUBLISHED_COMMITS = 64
+MAX_CONTAINMENT_PATCH_BYTES = 262_144
+MAX_CONTAINMENT_TOTAL_BYTES = 4_000_000
+MAX_RECORDED_PATCH_BYTES = 2048
+MAX_RECORDED_PATCH_TOTAL = 8192
+MAX_EVIDENCE_COMMITS = 32
+
+
+def published_change_base(c, first):
+    """The parent of the first published commit, or None for a root commit."""
+    lineage = c.git('rev-list', '--parents', '-n', '1', first).split()
+    return lineage[1] if len(lineage) > 1 else None
+
+
+def published_change_patch(c, first, parent, published, path):
+    """Full-context diff of the published span for exactly one path."""
+    options = ['--no-color', '--no-ext-diff', '--no-textconv', '--binary', '--no-renames', '-U3']
+    if parent:
+        return c.git('diff', *options, parent, published, '--', path)
+    return c.git('diff-tree', '-p', '--root', '--no-commit-id', *options, first, '--', path)
+
+
+def published_change_contained(c, patch_file, env):
+    """Reverse the published change against the head index; clean means contained."""
+    try:
+        c.git('apply', '--cached', '--reverse', '--check', '--unidiff-zero',
+              '--whitespace=nowarn', str(patch_file), env=env)
+    except Exception:
+        # Any apply failure is a refusal, never an acceptance (fail closed).
+        return False
+    return True
+
+
+def extra_commits(c, published, actual_head):
+    """Commits added between the published head and the merged PR head, bounded."""
+    total = int(c.git('rev-list', '--count', published + '..' + actual_head))
+    listing = c.git('log', '--max-count=' + str(MAX_EVIDENCE_COMMITS), '--format=%H%x09%s',
+                    published + '..' + actual_head)
+    commits = [{'sha': line.split('\t', 1)[0], 'subject': line.split('\t', 1)[1][:200]}
+               for line in listing.splitlines() if '\t' in line]
+    return commits, total
+
+
 def merge_head_evidence(c, record, actual_head):
     published = record.get('publication', {}).get('head')
     if not published:
@@ -870,11 +918,14 @@ def merge_head_evidence(c, record, actual_head):
     if actual_head == published:
         return evidence
     fixed = [v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED']
-    if not actual_head or not fixed or not c.is_ancestor(published, actual_head):
+    if (not isinstance(actual_head, str) or not re.fullmatch(r'[0-9a-f]{40}', actual_head)
+            or not fixed or not c.is_ancestor(published, actual_head)):
         raise ValueError('merged repair head is not a descendant of the published fix')
     commits = record.get('publication', {}).get('commits')
     if not isinstance(commits, list) or not commits:
         raise ValueError('published repair commits unavailable; needs revalidation')
+    if len(commits) > MAX_PUBLISHED_COMMITS:
+        raise ValueError('published repair commits exceed bound; needs revalidation')
     anchors = {source_path(json.loads((c.STATE / 'repair/inbox' / (j + '.json')).read_text())['finding']) for j in fixed}
     changed = set()
     for sha in commits:
@@ -883,15 +934,57 @@ def merge_head_evidence(c, record, actual_head):
         changed.update(p for p in c.git('diff-tree', '--root', '--no-commit-id', '--name-only',
                                         '--no-renames', '-r', '-z', sha).split('\0') if p)
     paths = anchors | {p for p in changed if not repair_test_path(p)}
-    evidence.update(compared_paths=sorted(paths), excluded_test_paths=sorted(changed - paths), source_modes={})
-    for path in sorted(paths):
-        source_path({'path': path})
-        before = repair_source_entry(c, published, path)
-        after = repair_source_entry(c, actual_head, path)
-        if before != after:
-            raise ValueError('merged repair source changed; needs revalidation: ' + path)
-        evidence['source_blobs'][path] = before[1] if before else None
-        evidence['source_modes'][path] = before[0] if before else None
+    if len(paths) > MAX_COMPARED_PATHS:
+        raise ValueError('merged repair compared paths exceed bound; needs revalidation')
+    recorded, total = extra_commits(c, published, actual_head)
+    evidence.update(compared_paths=sorted(paths), excluded_test_paths=sorted(changed - paths),
+                    published_commits=list(commits), source_modes={}, containment={},
+                    extra_commits=recorded, extra_commits_total=total,
+                    extra_commits_truncated=total > len(recorded),
+                    match='containment' if paths else 'no-compared-paths')
+    patch_budget = MAX_RECORDED_PATCH_TOTAL
+    total_bytes = 0
+    published_parent = published_change_base(c, commits[0])
+    with tempfile.TemporaryDirectory(prefix='cq-repair-containment-') as tmp:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / 'index'))
+        c.git('read-tree', actual_head, env=env)
+        for index, path in enumerate(sorted(paths)):
+            source_path({'path': path})
+            before = repair_source_entry(c, published, path)
+            after = repair_source_entry(c, actual_head, path)
+            evidence['source_blobs'][path] = before[1] if before else None
+            evidence['source_modes'][path] = before[0] if before else None
+            result = {'published': before, 'actual': after}
+            evidence['containment'][path] = result
+            if before == after:
+                result['status'] = 'identical'
+                continue
+            if before is not None and after is None:
+                raise ValueError('merged repair source changed; needs revalidation: ' + path)
+            patch = published_change_patch(c, commits[0], published_parent, published, path)
+            if not patch.strip():
+                # The published span never changed this path (for example an
+                # anchor with its fix in a helper): there is no change to lose.
+                result.update(status='unchanged-by-publication', published_parent=published_parent)
+                continue
+            size = len(patch.encode('utf-8', 'surrogateescape'))
+            total_bytes += size
+            if size > MAX_CONTAINMENT_PATCH_BYTES or total_bytes > MAX_CONTAINMENT_TOTAL_BYTES:
+                raise ValueError('published repair change too large to verify; needs revalidation: ' + path)
+            patch_file = Path(tmp) / ('published-' + str(index) + '.patch')
+            patch_file.write_text(patch.rstrip('\n') + '\n', encoding='utf-8')
+            if not published_change_contained(c, patch_file, env):
+                raise ValueError('merged repair source changed; needs revalidation: ' + path)
+            result.update(status='contained', published_parent=published_parent,
+                          patch_sha256=hashlib.sha256(patch.encode('utf-8', 'surrogateescape')).hexdigest(),
+                          patch_bytes=size, patch_truncated=False, patch_omitted=False)
+            kept = min(MAX_RECORDED_PATCH_BYTES, patch_budget)
+            if kept > 0:
+                result['patch'] = patch[:kept]
+                result['patch_truncated'] = len(patch) > kept
+                patch_budget -= min(kept, len(patch))
+            else:
+                result['patch_omitted'] = True
     return evidence
 
 

@@ -2,6 +2,7 @@
 import datetime as dt
 import copy
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -30,6 +31,11 @@ ROLES = {'fixer': {'driver': 'cq', 'model': 'zai/glm-5.3-flash'},
          'judge': {'driver': 'cq', 'model': 'zai/glm-5.3-flash'},
          'judge_critical': {'driver': 'cq', 'model': 'zai/glm-5.3'}}
 BLACKOUT = {'tz': 'Asia/Singapore', 'days': [1, 2, 3, 4, 5], 'start': '14:00', 'end': '18:00'}
+SOURCE_TEXT = ('line one\nline two\nline three\nline four\nline five\nline six\n'
+               'def handler(value):\n    first = value\n    second = first\n    return second\n'
+               'line eleven\nline twelve\nline thirteen\nline fourteen\nline fifteen\nline sixteen\n')
+FIXED_TEXT = SOURCE_TEXT.replace('    second = first\n    return second\n',
+                                 '    second = first + 1\n    checked = second\n    return checked\n')
 
 
 def utc(text):
@@ -437,9 +443,13 @@ class RepairDrainTest(unittest.TestCase):
                             is_ancestor=lambda a, b: subprocess.run(
                                 ['git', '-C', str(self.clone), 'merge-base', '--is-ancestor', a, b],
                                 capture_output=True).returncode == 0)
-        cases = [(formatted, True, 'src/kept.ts'), (extra_file, True, 'src/kept.ts')]
+        # A formatting-only commit or an unrelated file is not compared. A head
+        # edit to an anchor the published span never changed (other_changed) is
+        # likewise accepted: there is no published change at that path to lose.
+        cases = [(formatted, True, 'src/kept.ts'), (extra_file, True, 'src/kept.ts'),
+                 (other_changed, True, 'src/kept.ts')]
         cases += [(head, False, 'src/kept.ts') for head in
-                  (reverted, helper_reverted, other_changed, config_changed, docs_changed, restored, removed_added, self.tip)]
+                  (reverted, helper_reverted, config_changed, docs_changed, restored, removed_added, self.tip)]
         cases.append((formatted, False, test_path))  # A test-file anchor is never exempt.
         for actual, allowed, anchor in cases:
             with self.subTest(actual=actual, anchor=anchor):
@@ -470,6 +480,13 @@ class RepairDrainTest(unittest.TestCase):
                     self.assertEqual(proof['excluded_test_paths'], [test_path])
                     self.assertIsNone(proof['source_blobs']['src/obsolete.ts'])
                     self.assertEqual(proof['source_blobs']['src/helper.ts'], self.git('rev-parse', published + ':src/helper.ts'))
+                    self.assertEqual([commit['sha'] for commit in proof['extra_commits']], [actual])
+                    self.assertEqual(proof['extra_commits_total'], 1)
+                    self.assertFalse(proof['extra_commits_truncated'])
+                    statuses = {path: value['status'] for path, value in proof['containment'].items()}
+                    self.assertEqual(statuses['src/kept.ts'], 'identical')
+                    self.assertEqual(statuses['src/moved.ts'],
+                                     'unchanged-by-publication' if actual == other_changed else 'identical')
                 else:
                     self.assertIn('source_publication_error', record)
 
@@ -485,6 +502,113 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(proof['actual_head'], self.tip)
         c.git.assert_not_called()
         c.is_ancestor.assert_not_called()
+
+    def commit_files(self, base, files, message):
+        self.git('checkout', '-q', '--detach', base)
+        for name, text in files.items():
+            path = self.clone / name
+            if text is None:
+                path.unlink()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+        self.git('add', '-A')
+        self.git('commit', '-qm', message)
+        return self.git('rev-parse', 'HEAD')
+
+    def containment_record(self, job_id, published, commits=None):
+        job_file = self.root / 'state/repair/inbox' / (job_id + '.json')
+        job = json.loads(job_file.read_text())
+        job['finding']['path'] = 'src/app.ts'
+        atomic(job_file, job)
+        return {'jobs': [job_id], 'fix_pr': {'number': 99},
+                'publication': {'head': published, 'commits': commits or [published]},
+                'verdicts': [{'job': job_id, 'verdict': 'FIXED'}]}
+
+    def containment_client(self):
+        return SimpleNamespace(STATE=self.root / 'state', iso=lambda: 'now', git=self.git,
+                               is_ancestor=lambda a, b: subprocess.run(
+                                   ['git', '-C', str(self.clone), 'merge-base', '--is-ancestor', a, b],
+                                   capture_output=True).returncode == 0)
+
+    def test_merged_fix_survives_later_formatting_commit_and_records_containment(self):
+        # Live shape: publish the fix, then polish the branch after publication.
+        base = self.commit_files(self.tip, {'src/app.ts': SOURCE_TEXT}, 'review evidence fixture')
+        published = self.commit_files(base, {'src/app.ts': FIXED_TEXT}, 'fix app')
+        formatted = self.commit_files(published, {'src/app.ts': FIXED_TEXT.replace(
+            'line fifteen\n', 'line fifteen (formatted)\n')}, 'format app')
+        job_id = 'crq-run1-F1'
+        record = self.containment_record(job_id, published)
+        self.queue['items'][0]['repair_runs'] = {'run1': record}
+        info = {'number': 99, 'state': 'MERGED', 'headRefOid': formatted,
+                'mergeCommit': {'oid': self.tip}}
+        c = self.containment_client()
+        c.pr_info = mock.Mock(return_value=info)
+        with mock.patch.object(repair_tick, 'mark_finding_outcome') as mark, \
+             mock.patch.object(repair_tick, 'publish_source_resolution', return_value=False) as source:
+            repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertNotIn('source_publication_error', record)
+        self.assertEqual(record['fix_merged'], 'now')
+        self.assertEqual(mark.call_count, 1)
+        self.assertEqual(source.call_count, 1)
+        proof = record['validated_merge_head']
+        self.assertEqual(proof['match'], 'containment')
+        self.assertEqual(proof['containment']['src/app.ts']['status'], 'contained')
+        self.assertEqual([commit['sha'] for commit in proof['extra_commits']], [formatted])
+        self.assertEqual(proof['extra_commits_total'], 1)
+        patch = proof['containment']['src/app.ts']['patch']
+        self.assertIn('+    checked = second\n', patch)
+        self.assertEqual(proof['containment']['src/app.ts']['patch_sha256'],
+                         hashlib.sha256(patch.encode()).hexdigest())
+        self.assertFalse(proof['containment']['src/app.ts']['patch_truncated'])
+
+    def test_merged_main_head_with_unrelated_anchor_edits_is_accepted(self):
+        base = self.commit_files(self.tip, {'src/app.ts': SOURCE_TEXT}, 'review evidence fixture')
+        published = self.commit_files(base, {'src/app.ts': FIXED_TEXT}, 'fix app')
+        # origin/main moves the same file far from the published hunk, then merges.
+        main = self.commit_files(base, {'src/app.ts': 'main header\n' + FIXED_TEXT.replace(
+            'line one\n', 'line one (main)\n')}, 'main moves app')
+        self.git('checkout', '-q', '--detach', published)
+        self.git('merge', '-q', '--no-ff', '-m', 'Merge main into fix', main)
+        merged = self.git('rev-parse', 'HEAD')
+        record = self.containment_record('crq-run1-F1', published)
+        proof = repair_tick.merge_head_evidence(self.containment_client(), record, merged)
+        self.assertEqual(proof['containment']['src/app.ts']['status'], 'contained')
+        self.assertEqual({commit['sha'] for commit in proof['extra_commits']}, {main, merged})
+        self.assertEqual(proof['extra_commits_total'], 2)
+        self.assertIn('+    checked = second\n', proof['containment']['src/app.ts']['patch'])
+        self.assertEqual(proof['source_blobs']['src/app.ts'],
+                         self.git('rev-parse', published + ':src/app.ts'))
+
+    def test_merge_head_proof_refuses_altered_removed_or_unavailable_changes(self):
+        base = self.commit_files(self.tip, {'src/app.ts': SOURCE_TEXT}, 'review evidence fixture')
+        published = self.commit_files(base, {'src/app.ts': FIXED_TEXT}, 'fix app')
+        formatted = self.commit_files(published, {'src/app.ts': FIXED_TEXT.replace(
+            'line fifteen\n', 'line fifteen (formatted)\n')}, 'format app')
+        altered = self.commit_files(published, {'src/app.ts': FIXED_TEXT.replace(
+            'checked = second', 'checked = first')}, 'alter the fix')
+        reverted = self.commit_files(published, {'src/app.ts': SOURCE_TEXT}, 'remove the fix')
+        deleted = self.commit_files(published, {'src/app.ts': None}, 'delete the anchor')
+        c = self.containment_client()
+        record = self.containment_record('crq-run1-F1', published)
+        for head in (altered, reverted, deleted):
+            with self.subTest(head=head), self.assertRaisesRegex(ValueError, 'source changed'):
+                repair_tick.merge_head_evidence(c, record, head)
+        outside = self.commit_files(base, {'src/other.ts': 'unrelated\n'}, 'unrelated branch')
+        with self.assertRaisesRegex(ValueError, 'not a descendant'):
+            repair_tick.merge_head_evidence(c, record, outside)
+        missing = {**record, 'publication': {'head': published}}
+        with self.assertRaisesRegex(ValueError, 'commits unavailable'):
+            repair_tick.merge_head_evidence(c, missing, formatted)
+        broken = {**record, 'publication': {'head': published, 'commits': ['f' * 40]}}
+        with self.assertRaisesRegex(ValueError, 'lineage unavailable'):
+            repair_tick.merge_head_evidence(c, broken, formatted)
+        job_file = self.root / 'state/repair/inbox/crq-run1-F1.json'
+        job = json.loads(job_file.read_text())
+        job['finding']['path'] = '../escape.ts'
+        atomic(job_file, job)
+        with self.assertRaisesRegex(ValueError, 'repository-relative'):
+            repair_tick.merge_head_evidence(c, record, formatted)
 
     def test_fix_pr_provenance_includes_threadless_and_pr_sources(self):
         path = self.root / 'state/repair/inbox/crq-run1-F1.json'
@@ -1143,9 +1267,9 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(record['state'], 'stale')
         self.assertEqual(result.read_bytes(), before)
 
-    def git(self, *args):
+    def git(self, *args, env=None):
         return subprocess.run(['git', '-C', str(self.clone), *args], check=True,
-                              capture_output=True, text=True).stdout.strip()
+                              capture_output=True, text=True, env=env).stdout.strip()
 
     def item(self, item_id, run, jobs, open_pr, state='queued'):
         return {'id': item_id, 'pr': 1, 'kind': 'open' if open_pr else 'merged', 'state': 'repairing',
@@ -1820,8 +1944,11 @@ class CanonicalFixedProjectionTest(unittest.TestCase):
         ledger.validate_sequence([self.review, confirmed, delivered, self.fixed])
         self.info = {'number': 99, 'state': 'MERGED', 'headRefOid': self.actual,
                      'mergeCommit': {'oid': self.merge}}
+        def git_with_env(*args, env=None):
+            return subprocess.run(['git', '-C', str(self.f.root), *args], check=True,
+                                  capture_output=True, text=True, env=env).stdout.strip()
         self.c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: self.at,
-                                 pr_info=lambda _: self.info, git=self.f.git,
+                                 pr_info=lambda _: self.info, git=git_with_env,
                                  is_ancestor=lambda a, b: subprocess.run(
                                      ['git', '-C', str(self.f.root), 'merge-base', '--is-ancestor', a, b],
                                      capture_output=True).returncode == 0)
