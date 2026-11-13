@@ -284,7 +284,7 @@ function bindingFor(
 }
 
 /** Decoded-JSON shape only: prototype Object.prototype or null (not Map, Date, Set, a class instance). */
-function isPlainObject(value: unknown): boolean {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const proto: unknown = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
@@ -310,8 +310,19 @@ function bindingProblems(bindings: DriverFactoryConfig['bindings']): string[] {
   }
   for (const [role, byProvider] of Object.entries(bindings ?? {})) {
     const row: unknown = byProvider;
-    if (typeof row !== 'object' || row === null || Array.isArray(row)) {
-      const got = row === null ? 'null' : Array.isArray(row) ? 'an array' : typeof row;
+    // A Map/Set/Date/class-instance row IS an object but has no own
+    // enumerable entries: the provider loop below would silently accept it
+    // and a default provider would fall through to its default lane. The
+    // same plain-shape rule as the table check above applies per row.
+    if (!isPlainObject(row)) {
+      const got =
+        row === null
+          ? 'null'
+          : Array.isArray(row)
+            ? 'an array'
+            : typeof row === 'object'
+              ? 'a non-plain object'
+              : typeof row;
       problems.push(`binding table for role '${role}' must map provider → lane (got ${got})`);
       continue;
     }
