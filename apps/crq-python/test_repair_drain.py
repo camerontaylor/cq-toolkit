@@ -1015,7 +1015,10 @@ class RepairDrainTest(unittest.TestCase):
             service.publish_refusal()
             (self.root / 'state/runner-disabled').unlink()
             published.write_text('published\n')
-            time.sleep(0.4)
+            # Long enough that the child is certainly still alive when the
+            # coordinator decides: a short delay lets an exit-status based
+            # stop pass this test, which is what it must not do.
+            time.sleep(5)
             return service.RUNNER_DISABLED_OUTCOME
 
         def reap_after_publish(active):

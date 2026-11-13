@@ -909,6 +909,7 @@ def drain_items(config, groups, order):
             while len(active) >= limit:
                 stopped = reap_item(active) or stopped
             stopped = reap_completed(active)[0] or stopped
+            stopped = refusal_published(active) or stopped
             # One coordinator admission check, after any capacity wait and before
             # the next item: it covers a marker that was already present when the
             # item's turn arrived and one written while this pass waited at the
