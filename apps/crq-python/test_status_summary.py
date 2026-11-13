@@ -453,7 +453,8 @@ class ReposSummaryTests(unittest.TestCase):
                       failures=1)
         in_flight = dict(id="lr-live", kind="local-review", generation=1,
                          state="reviewing", created_at="2026-11-06T02:00:00Z",
-                         run={"run_id": "run3", "started_at": "2026-11-06T02:00:00Z"},
+                         run={"run_id": "run3", "band": "interactive",
+                              "started_at": "2026-11-06T02:00:00Z"},
                          attempts=[])
         app_item = dict(id="app1", kind="open", state="reviewing",
                         pr_review_request={"run_id": "pr1", "pr": 7},
@@ -494,12 +495,13 @@ class ReposSummaryTests(unittest.TestCase):
         # PR-associated: lr-first attempt (1) — repeat/live have no PR link
         self.assertEqual(m["vendor_starts"], 4)
         self.assertEqual(m["operation_events_24h"], {"review_started": 1, "spawn_failed": 1})
-        # wait: 5s interactive (first), 30min interactive + 31min background (repeat)
+        # wait: 5s interactive (first), 30min interactive + 31min background
+        # (repeat); the in-flight live run adds a 0s interactive observation
         self.assertEqual(m["queue_wait"]["interactive"],
-                         {"count": 2, "buckets": {"lt_60s": 1, "lt_600s": 0, "lt_3600s": 1, "gte_3600s": 0}})
+                         {"count": 3, "buckets": {"lt_60s": 2, "lt_600s": 0, "lt_3600s": 1, "gte_3600s": 0}})
         self.assertEqual(m["queue_wait"]["background"],
                          {"count": 1, "buckets": {"lt_60s": 0, "lt_600s": 0, "lt_3600s": 1, "gte_3600s": 0}})
-        self.assertEqual(m["queue_wait"]["first"]["count"], 1)
+        self.assertEqual(m["queue_wait"]["first"]["count"], 2)
         self.assertEqual(m["queue_wait"]["repeat"]["count"], 2)
         # completion latency: 45s interactive first; 40min background repeat
         # (terminal attempt's own band, not a majority vote)
@@ -589,6 +591,20 @@ class ReposSummaryTests(unittest.TestCase):
         # The reuse attempt (started_at null: bookkeeping, not a launch) is
         # unknown; skipped/too_large are no-review outcomes, not failures.
         self.assertEqual(m["attempts"], {"failed": 0, "unknown": 1, "no_review": 2})
+
+    def test_review_metrics_active_run_counts_in_queue_wait(self):
+        """A started-but-unharvested run is a queue-wait observation."""
+        running = dict(id="lr-live", kind="local-review", generation=1,
+                       state="reviewing", created_at="2026-11-06T02:00:00Z",
+                       run={"run_id": "run3", "band": "interactive",
+                            "started_at": "2026-11-06T02:02:00Z"},
+                       attempts=[])
+        queue = {"items": [running], "review_requests": {}, "review_notify_outbox": {}}
+        data = adapter.summarize({"generated_at": "2026-11-07T00:00:00Z"}, queue, {},
+                                 {"repo": "owner/repo", "max_starts_per_hour": 8}, [], 0)
+        m = data["review_metrics"]
+        self.assertEqual(m["queue_wait"]["interactive"],
+                         {"count": 1, "buckets": {"lt_60s": 0, "lt_600s": 1, "lt_3600s": 0, "gte_3600s": 0}})
 
 
 if __name__ == "__main__":

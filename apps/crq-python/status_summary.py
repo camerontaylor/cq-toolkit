@@ -435,6 +435,21 @@ def review_metrics(queue, events, now):
                 add_to["buckets"][_bucket(lag)] += 1
                 wait[band]["count"] += 1
                 wait[band]["buckets"][_bucket(lag)] += 1
+        # Active runs keep started_at/band in item.run until harvest moves
+        # them into attempts; measuring only the attempts loop would report
+        # zero observations for a running queue. A spawn-failed run never
+        # launched, so its (synthetic) start time is not an observation.
+        run_band = run.get("band") if isinstance(run, dict) else None
+        run_started = timestamp(run.get("started_at")) if isinstance(run, dict) else None
+        if (isinstance(run, dict) and not run.get("spawn_failed_at")
+                and run_band in ("interactive", "background")
+                and run_started is not None and created_at is not None):
+            lag = max(0, run_started - created_at)
+            add_to = wait_class["repeat"] if repeated else wait_class["first"]
+            add_to["count"] += 1
+            add_to["buckets"][_bucket(lag)] += 1
+            wait[run_band]["count"] += 1
+            wait[run_band]["buckets"][_bucket(lag)] += 1
         if (created_at is not None and item.get("state") == "done" and
                 item.get("scope_adequate") is True):
             completed_at = timestamp(item.get("completed_at"))
