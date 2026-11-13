@@ -167,6 +167,7 @@ describe('review.address candidate isolation', () => {
     ['yarn shorthand', 'yarn compile', 'compile'],
     ['bun run', 'bun run compile', 'compile'],
     ['bun shorthand', 'bun compile', 'compile'],
+    ['path-qualified run-s', './node_modules/.bin/run-s compile', 'compile'],
     ['npm argument', 'concurrently "npm:compile"', 'compile'],
     ['runner options', 'pnpm --silent run compile', 'compile'],
     ['workspace runner', 'yarn workspace pkg compile', 'compile'],

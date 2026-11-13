@@ -191,8 +191,11 @@ export async function assertAddressDependencyMetadata(
           if (!name || /[*?\[]/.test(name)) ambiguous = true;
           else literal.add(name);
         }
-        if (['npm-run-all', 'run-s', 'run-p'].includes(token)) ambiguous = true;
         const runner = token.split('/').at(-1) ?? '';
+        // Normalize path-qualified .bin invocations (e.g. ./node_modules/.bin/run-s)
+        // to the runner name so the npm-run-all family stays ambiguous, keeping
+        // the scripts it names reachable.
+        if (['npm-run-all', 'run-s', 'run-p'].includes(runner)) ambiguous = true;
         if (!['npm', 'pnpm', 'yarn', 'bun'].includes(runner)) continue;
         let name = tokens[index + 1];
         if (name === 'run' || name === 'run-script') name = tokens[index + 2];
