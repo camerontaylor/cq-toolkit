@@ -87,13 +87,49 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 
 OPS_DIR = Path(__file__).resolve().parent
+
+# Bootstrap trust (frozen-range review F3). The GO pins THIS file, but this
+# file imports digests.py and loads deploy-invariants.schema.json, and an
+# unpinned sibling can quietly undo every pin: with a substituted digests.py
+# whose file_digest returns a constant, check_pinned_revision compared the
+# constant with itself and PASSED, and a widened schema admitted a manifest
+# the reviewed schema rejects. So the bootstrapping below uses ONLY stdlib
+# hashlib, before any sibling is imported or read:
+#
+#   * RUNBOOK_SELF_DIGEST is the stdlib hash of these bytes, never the
+#     sibling's idea of them;
+#   * digests.py and the schema are checked against the digests of the
+#     reviewed bytes, and a mismatch refuses to start at all.
+#
+# These two constants are the reviewed bytes' digests. A change to either
+# sibling must update them in the same reviewed change; the test
+# test_pinned_siblings_match_the_reviewed_bytes recomputes both, so a stale
+# constant fails in CI rather than at deploy time. No approval role, no
+# second manifest: this is the same pin the GO already makes, extended to the
+# files an import executes.
+REVIEWED_SIBLING_SHA256 = {
+    "digests.py":
+        "93362d4678867a771a50d4512bbee4a05aebbec045c60ca832401feb9775edc1",
+    "deploy-invariants.schema.json":
+        "ff1d3f722347ce85bd487443dd8098ee9685637b064847fe809f4fb0d84a24fd",
+}
+RUNBOOK_SELF_DIGEST = hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()
+for _sibling_name, _sibling_want in REVIEWED_SIBLING_SHA256.items():
+    _sibling_got = hashlib.sha256(
+        (OPS_DIR / _sibling_name).read_bytes()).hexdigest()
+    if _sibling_got != _sibling_want:
+        raise RuntimeError(
+            "ops sibling " + _sibling_name + " does not match the reviewed "
+            "digest: got " + _sibling_got + " want " + _sibling_want
+            + "; refusing to import or use unverified ops bytes")
+del _sibling_name, _sibling_want, _sibling_got
+
 if str(OPS_DIR) not in sys.path:
     sys.path.insert(0, str(OPS_DIR))
 
-import digests  # noqa: E402  (sibling module, stdlib only)
+import digests  # noqa: E402  (sibling module, verified above)
 
 RUNBOOK_SCHEMA_VERSION = 1
-RUNBOOK_SELF_DIGEST = digests.file_digest(Path(__file__).resolve())
 HEX40_RE = re.compile(r"[0-9a-f]{40}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
 ANCESTRY_MODES = ("must", "must_not", "either")
@@ -1601,7 +1637,10 @@ def cmd_status(args, units=None) -> int:
     file (resolved through realpath so a copied gate at another path is
     still pinned to the recorded revision), so a stale copy never reports on
     a run it did not perform. Refusals report in a fixed order: artifacts,
-    digest, marker. Requirement 2: the gate answers "does the host still
+    digest, marker. The recorded marker path is an absolute host path, so the
+    gate answers for THIS host and THIS output dir: pass --root and the record
+    must name that checkout's own marker, or the answer is refused as another
+    checkout's. Requirement 2: the gate answers "does the host still
     match the release record" too — it prints released_at, final_triggers
     AND the live observed state of every trigger, and refuses when any live
     state differs from final_triggers. Exit 0 is the only permitted basis
@@ -1633,16 +1672,31 @@ def cmd_status(args, units=None) -> int:
                             "not perform")
     marker_refusal = None
     marker_record = output_dir / "marker.path"
-    marker_path = None
+    recorded_marker = None
     if marker_record.is_file():
         try:
-            marker_path = Path(json.loads(marker_record.read_text())["path"])
+            recorded_marker = Path(json.loads(marker_record.read_text())["path"])
         except (OSError, ValueError, KeyError) as exc:
             marker_refusal = "marker.path unreadable: " + str(exc)[:120]
     else:
         marker_refusal = ("run recorded no marker.path; the gate cannot "
                           "verify the hold is released")
-    if marker_refusal is None and marker_path is not None and marker_path.exists():
+    # Finding (frozen-range review F5): the record holds an absolute host
+    # path, so a copied output dir on another host - or under another root -
+    # could report released while this host's marker is elsewhere. With an
+    # explicit --root the recorded path must be that checkout's own marker;
+    # without it the same-host/same-output-dir precondition is documented on
+    # the subcommand rather than assumed silently.
+    if marker_refusal is None and recorded_marker is not None \
+            and getattr(args, "root", None) is not None:
+        expected = marker_path(args.root)
+        if Path(recorded_marker) != expected:
+            marker_refusal = (
+                "recorded marker.path " + str(recorded_marker) + " is not the "
+                "marker of --root " + str(Path(args.root)) + " (expected "
+                + str(expected) + "); a copied output dir must not report on "
+                "another checkout's hold")
+    if marker_refusal is None and recorded_marker is not None and recorded_marker.exists():
         marker_refusal = "runner-disabled marker is present again after release"
     live_refusal = None
     final_triggers = release.get("final_triggers") if release else None
@@ -1671,7 +1725,7 @@ def cmd_status(args, units=None) -> int:
             and marker_refusal is None and live_refusal is None:
         provider = units
         if provider is None:
-            provider = RealUnits(marker_path.parent)
+            provider = RealUnits(recorded_marker.parent)
         live_triggers = read_observed_triggers(provider, live_document(phase))
         drifted = {unit: {"live": state, "released_as": final_triggers.get(unit)}
                    for unit, state in live_triggers.items()
@@ -1690,7 +1744,7 @@ def cmd_status(args, units=None) -> int:
         "released_at": release.get("released_at") if release else None,
         "final_triggers": final_triggers,
         "live_triggers": live_triggers,
-        "marker_path": str(marker_path) if marker_path else None,
+        "marker_path": str(recorded_marker) if recorded_marker else None,
         "runbook_sha256": self_digest,
     }, indent=2, sort_keys=True))
     return 0 if refused is None else 1
@@ -1726,8 +1780,20 @@ def main(argv=None, effects_factory=None, status_units=None) -> int:
     sub = parser.add_subparsers(dest="operation")
     status = sub.add_parser("status", help="released-flag gate")
     status.add_argument("--output-dir", required=True, type=Path)
+    status.add_argument("--root", type=Path, default=None,
+                        help="deployment checkout the tick reads its marker "
+                             "from; when given, the recorded marker.path must "
+                             "be that checkout's own marker")
+    # Accepted for compatibility, and redundant by construction: status is
+    # always a require-released gate - it refuses any record that does not
+    # say released, so the flag cannot loosen it and is never read. Kept so
+    # existing operator command lines stay valid; the help says so rather
+    # than implying a behaviour switch that does not exist.
     status.add_argument("--require-released", action="store_true",
-                        dest="status_require_released", default=False)
+                        dest="status_require_released", default=False,
+                        help="accepted for compatibility; status always "
+                             "requires a released record and never reports on "
+                             "an unreleased one")
 
     def parser_error(message):
         # Machine-mode boundary for argparse itself: argument errors used to

@@ -2005,6 +2005,64 @@ class CLIStatusGateTests(RunbookFixture):
         self.assertEqual(stderr, "")
         self.assertEqual(json.loads(stdout)["operation"], "status")
 
+    def test_pinned_siblings_match_the_reviewed_bytes(self):
+        # The runbook's bootstrap pins digests.py and the schema by hash with
+        # stdlib hashlib before importing or loading either. Those constants
+        # are only meaningful if they name the bytes in this tree, so they are
+        # recomputed here: a stale constant fails in CI instead of refusing a
+        # correct deploy, and a changed sibling without a constant update
+        # fails too.
+        for name, want in rb.REVIEWED_SIBLING_SHA256.items():
+            got = hashlib.sha256(
+                (rb.OPS_DIR / name).read_bytes()).hexdigest()
+            self.assertEqual(got, want, name + " drifted from its reviewed digest")
+        self.assertEqual(
+            rb.RUNBOOK_SELF_DIGEST,
+            hashlib.sha256(Path(rb.__file__).resolve().read_bytes()).hexdigest(),
+            "the self digest must be the stdlib hash of this file")
+
+    def test_a_coerced_digests_module_cannot_change_the_self_digest(self):
+        # The counterfactual to F3: with a substituted digests.py whose
+        # file_digest returns a constant, the module must not report that
+        # constant as its own digest - and must refuse to start at all, since
+        # the sibling no longer matches its reviewed digest.
+        with tempfile.TemporaryDirectory() as workdir:
+            ops = Path(workdir)
+            for name in ("deploy-runbook.py", "deploy-invariants.schema.json"):
+                shutil.copy2(rb.OPS_DIR / name, ops / name)
+            (ops / "digests.py").write_text(
+                'def file_digest(path):\n    return "0" * 64\n\n'
+                'def tree_digest(path):\n    return "0" * 64\n')
+            with self.assertRaisesRegex(Exception,
+                                       "does not match the reviewed digest"):
+                _load("probe_coerced_runbook", ops / "deploy-runbook.py")
+
+    def test_status_refuses_a_record_from_another_checkout(self):
+        # Finding F5: the record holds an absolute marker path, so with an
+        # explicit --root the record must name THIS checkout's marker; a
+        # copied output dir must not report on another tree's hold.
+        self.write_released()
+        units = FakeUnits(self.marker_path)
+        argv = self.status_argv() + ["--root", str(self.base / "other-root")]
+        stdout = io_string()
+        with mock.patch.object(sys, "stdout", stdout):
+            code = rb.main(argv, status_units=units)
+        document = json.loads(stdout.getvalue())
+        self.assertNotEqual(code, 0)
+        self.assertIn("is not the marker of --root", json.dumps(document))
+
+    def test_status_with_the_matching_root_reports_released(self):
+        # The same record passes when --root is the checkout it names: the
+        # check binds the answer to a tree, it does not refuse status.
+        self.write_released()
+        units = FakeUnits(self.marker_path)
+        argv = self.status_argv() + ["--root", str(self.root)]
+        stdout = io_string()
+        with mock.patch.object(sys, "stdout", stdout):
+            code = rb.main(argv, status_units=units)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["released"], True)
+
     def test_live_trigger_drift_refuses(self):
         # Requirement 2: one trigger not in final_triggers state refuses the
         # gate, and the refusal names the unit, its live and released states.
