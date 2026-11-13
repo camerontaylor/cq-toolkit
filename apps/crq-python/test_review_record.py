@@ -695,9 +695,10 @@ class PublicationWireTests(RecordTransportBase, unittest.TestCase):
         operation.validate("response", second)
         self.assertEqual(second["action"], "quarantined")
         self.assertEqual(second["reason"], first["reason"])
-        # Publication state stays honest: no new event spooled, so the second
-        # answer must not claim the disposition was freshly spooled.
-        self.assertNotEqual(second.get("publication"), "spooled")
+        # Publication state stays honest: the reuse mints no new event, but
+        # the retained disposition IS already spooled (by the first import),
+        # so under this rollout the answer still says spooled.
+        self.assertEqual(second.get("publication"), "spooled")
         pending = self.state / "backfill" / "publication" / "pending"
         events = [json.loads(p.read_text()) for p in sorted(pending.glob("*.json"))]
         quarantines = [v for v in events if v["event_type"] == "import-result"]
@@ -726,6 +727,28 @@ class PublicationWireTests(RecordTransportBase, unittest.TestCase):
         follow = self.call(dict(v=1, op="record", producer="manual", source_id="after-huge",
                                 report=dict(encoding="utf8", data="a clean report")))
         self.assertEqual(follow["action"], "recorded")
+
+    def test_oversize_reuse_answers_spooled_under_a_rollout(self):
+        # A repeated oversize import reuses a disposition that is already in
+        # the shared publication outbox; with a rollout configured the answer
+        # stays truthful about that: the disposition IS spooled (earlier, by
+        # the first import), so reuse must not answer disabled.
+        huge_interval_row = {"path": "a.ts", "blob": "c" * 64,
+                             "intervals": [[i, i] for i in range(1, 40000)]}
+        req = dict(v=1, op="record", producer="manual", source_id="huge-scope-3",
+                   claimed_scope=[huge_interval_row],
+                   report=dict(encoding="utf8", data="scope dump"))
+        first = self.call(req)
+        self.assertEqual(first["publication"], "spooled")
+        self.runner.iso = lambda: "2026-11-13T03:00:00Z"  # a later import
+        second = self.call(req)
+        self.assertEqual(second["action"], "quarantined")
+        self.assertEqual(second["publication"], "spooled")
+        pending = self.state / "backfill" / "publication" / "pending"
+        quarantines = [json.loads(p.read_text()) for p in sorted(pending.glob("*.json"))
+                       if json.loads(p.read_text())["event_type"] == "import-result"]
+        self.assertEqual(len(quarantines), 1)
+        ledger.validate_sequence(quarantines)
 
 
 class CapabilityTests(unittest.TestCase):

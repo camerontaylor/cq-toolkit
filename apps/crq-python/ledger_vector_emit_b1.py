@@ -527,8 +527,13 @@ def validate_vectors() -> Dict[str, Any]:
          # Not _regenerated: rehashing would recompute the id and the
          # supersedes pointer would no longer name the event's own id, so the
          # semantic defect would vanish and the vector would validate as ok.
-         # The stale hash is intentional here; the identity check runs after
-         # provenance, so the self-supersede refusal is the observed failure.
+         # The stale hash is intentional here. Note what this vector actually
+         # pins: validate checks the event hash before provenance/supersedes,
+         # so the observed failure is "event hash mismatch", not the
+         # self-supersede refusal (a valid-hash self-supersede is a hash fixed
+         # point, unreachable through validate; the refusal itself is covered
+         # by the direct validate_provenance test in
+         # test_ledger_vector_emit_b1.py).
          _changed(record, lambda v: v["payload"].__setitem__("supersedes", v["id"]))),
         ("record-supersedes-on-vendor-run",
          _regenerated(review, lambda v: v["payload"].__setitem__("supersedes", "e" * 64))),

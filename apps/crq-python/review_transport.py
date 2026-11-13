@@ -245,6 +245,11 @@ def _oversize_quarantine(runner, submitted, retained_ref, retained, box, result,
     if previous is not None:
         result["action"] = "quarantined"
         result["reason"] = reason
+        # The retained disposition is already in the publication outbox (the
+        # first import spooled it); under a rollout the answer stays honest
+        # about that instead of claiming publication is disabled.
+        if config:
+            result["publication"] = "spooled"
         return result
     quarantine = review_record._quarantine_event(
         reason=reason, digest_hex=digest_hex, submitted=submitted, at=runner.iso())
