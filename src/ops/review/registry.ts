@@ -59,6 +59,7 @@
 import { z } from 'zod';
 import {
   HistoryInputSchema,
+  RecordInputSchema,
   ReferenceSchema,
   StatusInputSchema,
   SubmitInputSchema,
@@ -715,6 +716,14 @@ export const registry: OpRegistryEntry[] = [
     name: 'review.history',
     inputSchema: HistoryInputSchema,
     importer: async () => (await import('./history.js')).makeHistory() as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.record',
+    inputSchema: RecordInputSchema,
+    // S3b: the import op mirrors the review-record wire operation. Importing
+    // is evidence recording only: it never dispatches work or reserves a
+    // vendor slot, so resolving the entry stays closure-only like history.
+    importer: async () => (await import('./record.js')).makeRecord() as Op<unknown, unknown>,
   },
   // ./queue.js owns queue-v1; ./internal/queueEvidence.js is isolated from findings v1.
   {
