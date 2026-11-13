@@ -123,6 +123,40 @@ describe('claude-code driver, CLI transport specifics (fake agent CLI)', () => {
     });
   }, 20_000);
 
+  test('a listener that throws mid-stream neither stops collection nor loses later lines', async () => {
+    await withScratch(async (scratchDir) => {
+      // The report is one deferred warning from the close handler; spy so the
+      // assertion does not depend on Node's warning-event plumbing.
+      const warn = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
+      try {
+        const child = spawnManaged({
+          command: process.execPath,
+          args: ['-e', `process.stdout.write('one\\ntwo\\nthree\\nfour');`],
+          cwd: scratchDir,
+          maxRetainedBytes: 64 * 1024,
+        });
+        const seen: string[] = [];
+        // The throw lands on a NEWLINE-TERMINATED line, i.e. inside collection
+        // (`onChunk`), not inside the close handler's final flush.
+        child.onStdoutLine((line) => {
+          if (line === 'one') throw new Error('collection listener boom');
+        });
+        child.onStdoutLine((line) => seen.push(line));
+        const close = await child.close;
+        // Every line still reached the other listener, including the ones
+        // after the throw and the final unterminated fragment.
+        expect(seen).toEqual(['one', 'two', 'three', 'four']);
+        expect(close.stdout).toBe('one\ntwo\nthree\nfour');
+        // Contained, not silent: reported once, naming the contained throw.
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(String(warn.mock.calls[0]?.[0])).toContain('listener threw');
+        expect(String(warn.mock.calls[0]?.[0])).toContain('collection listener boom');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  }, 20_000);
+
   test('oversized lines fail loudly while retention stays bounded', async () => {
     await withScratch(async (scratchDir) => {
       const child = spawnManaged({
