@@ -242,8 +242,8 @@ Enforcement. In brief:
 
 The PR and doctrine templates under [`policy/templates/`](policy/templates/)
 are adoptable by other repositories. Target `main`, require `static` and
-`denylist`, obtain an independent review comment, and merge with a merge commit.
-CRQ reviews after merge. See [merge policy](docs/promotion-policy.md) and the
+`denylist`, obtain an independent exact-head PASS, leave no review comment
+unaddressed, and merge with a merge commit. A crq review PASS at the exact head counts as that review; CRQ also reviews merged PRs after merge. See [merge policy](docs/promotion-policy.md) and the
 [adoption guide](policy/README.md).
 
 ## Self-hosting

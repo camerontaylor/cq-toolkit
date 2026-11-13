@@ -34,10 +34,11 @@ CI runs full TS checks on code/shared/unknown PR changes, and skips TS work
 only for recognized prose/Python-only changes; formatting stays unconditional.
 Python runs for Python/shared changes. Main pushes and nightly run full checks.
 Required workflows keep unfiltered triggers; job selection avoids feature-push
-duplicates. The merge bar remains
-**green `static` and `denylist` on the exact PR head**, plus one independent
-exact-head review comment, is the merge bar for PRs directly to `main`.
-CRQ reviews after merge. See [merge policy](docs/promotion-policy.md).
+duplicates. PRs directly to `main` use the fleet merge bar (global
+`AGENTS.md`, "Publishing"), with **green `static` and `denylist` on the exact
+PR head** as the required checks. A crq review at the exact head counts as the
+independent PASS; CRQ still reviews merged PRs it has not seen. See
+[merge policy](docs/promotion-policy.md).
 
 Escalate a shared interface, dependency/tooling or config change — and any
 impact you cannot classify — to the coordinator with the reason, rather than
@@ -108,9 +109,10 @@ use a non-GLM provider or wait.
 ## Code review
 
 CodeRabbit is advisory; handle its findings like any other review comment.
-The merge bar is green `static` and `denylist` on the exact PR head plus
-one independent exact-head `PASS`. Reviewer independence is between agents
-or humans, not GitHub accounts. See [review guidance](docs/coderabbit-review.md).
+The merge bar is green `static` and `denylist` on the exact PR head, one
+independent exact-head `PASS` (an agent review or a crq review), and no
+unaddressed review comments. Reviewer independence is between agents or
+humans, not GitHub accounts. See [review guidance](docs/coderabbit-review.md).
 
 ## Doctrine
 

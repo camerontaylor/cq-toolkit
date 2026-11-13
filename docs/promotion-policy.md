@@ -61,10 +61,13 @@ gh pr merge <number> --merge --match-head-commit <sha>
 `ci` is the workflow name; its required check-run name is `static`.
 `denylist` is both the workflow and check-run name. The cq policy, acceptance
 and ratchet reports are advisory. A ratchet drop opens or updates the single
-`ratchet` issue. Bot threads are reported, not a merge condition: fix accepted
-cheap findings and group deferred work into one issue per PR.
+`ratchet` issue. No review comment may be left unaddressed at merge, bot threads included:
+fix each finding or answer it with a reason, then resolve the thread. Group
+deferred work into one issue per PR and link it in the reply.
 
-CRQ discovers merged PRs and reviews them after merge as visible review debt.
+A crq review (`cq-review[bot]`, `crq-findings` marker) PASS at the exact head
+counts as the independent review. CRQ also discovers merged PRs it has not
+reviewed and reviews them after merge as visible review debt.
 No promotion signer status, fast-forward promotion, label, settle-ledger
 receipt or admin flag is part of the normal merge path. Keep the ordinary
 history protections; never rewrite shared history or force-push `main`.

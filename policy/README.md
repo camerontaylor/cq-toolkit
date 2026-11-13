@@ -1,8 +1,8 @@
 # Policy — PR checks and quality ratchets
 
 PRs target `main`. Required check-run names are `static` and `denylist`, with
-one independent exact-head review comment read by the merging agent. CRQ reviews
-after merge. See [merge policy](../docs/promotion-policy.md).
+one independent exact-head PASS read by the merging agent, and no unaddressed
+review comments. A crq review PASS at the exact head counts as that review; CRQ also reviews merged PRs after merge. See [merge policy](../docs/promotion-policy.md).
 
 [Doctrine](DOCTRINE.md) describes the behavioral invariants. The
 [templates](templates/) provide advisory cq reports, ratchet measurement and

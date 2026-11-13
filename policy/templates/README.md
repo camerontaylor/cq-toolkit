@@ -1,7 +1,7 @@
 # Workflow templates
 
 PRs target `main`: require `static` and `denylist` and one independent exact-head
-review comment. CRQ reviews after merge. See [merge policy](../../docs/promotion-policy.md).
+PASS, with no unaddressed review comments. A crq review PASS at the exact head counts as that review; CRQ also reviews merged PRs after merge. See [merge policy](../../docs/promotion-policy.md).
 
 ## Files
 
