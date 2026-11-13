@@ -122,6 +122,11 @@ class RunbookFixture(unittest.TestCase):
         self.root.mkdir(exist_ok=True)
         self.candidate = self._artifact("candidate")
         self.prior = self._artifact("prior")
+        # The live runtime: the overlay points repair.cq_bin here, so the
+        # live-dist assertion has a real tree to hash. It starts as a copy
+        # of the candidate dist (the deployed artifact), exactly as a
+        # completed deploy leaves it.
+        shutil.copytree(self.candidate / "dist", self.base / "runtime/dist")
         self.command = lambda *args: subprocess.run(
             ["git", "-C", str(self.root), *args], check=True,
             capture_output=True, text=True).stdout
@@ -336,7 +341,10 @@ class RunbookFixture(unittest.TestCase):
         """A Run bound to the real candidate helper/controller modules, a
         fake unit provider, and a fake controller journal: run_controller_switch
         is overridden so no controller subprocess executes; the journal
-        assertions still apply to the fake journal that lands."""
+        assertions still apply to the fake journal that lands. The fake
+        switch performs the REAL git checkout to the target (the production
+        controller's switch does), so post-switch assertions like the
+        pointer render and the live-dist digest see the deployed state."""
         host_mod = _load("runbook_host_" + str(id(args)),
                          self.candidate / "apps/crq-python/ops/prepare-host.py")
         controller_mod = _load(
@@ -348,7 +356,27 @@ class RunbookFixture(unittest.TestCase):
         run = rb.Run(args, units or self.units, host_mod, controller_mod,
                      effects, document, **kwargs)
         self.install_fake_controller_journal(run)
+        original_fake = run.run_controller_switch
+
+        def switching_fake(record_dir):
+            # The production helper restores tracked config and detaches at
+            # the target; emulate that here (the live render is recorded by
+            # live_render before the switch and rewritten after it).
+            subprocess.run(["git", "-C", str(self.args_root(args)),
+                            "checkout", "-q", "--",
+                            "apps/crq-python/config.json"], check=True,
+                           capture_output=True)
+            subprocess.run(["git", "-C", str(self.args_root(args)),
+                            "checkout", "-q", "--detach",
+                            args.target_sha], check=True,
+                           capture_output=True)
+            original_fake(record_dir)
+
+        run.run_controller_switch = switching_fake
         return run
+
+    def args_root(self, args):
+        return args.root
 
     def fake_journal(self):
         return {
@@ -356,7 +384,9 @@ class RunbookFixture(unittest.TestCase):
             "prior_head": self.prior_sha, "target": self.target,
             "tag": self.target_tag, "helper_sha256": self.helper_sha,
             "automatic_rollback_permitted": False,
-            "rollback_compatibility": {"checked": True},
+            "rollback_compatibility": {"checked": True,
+                                       "schema_marker_present": False,
+                                       "schema_observations": []},
             "prior_tag": self.prior_tag,
             "prior_config_sha256": sha256_file(self.runner / "config.json"),
             "schema_version": 1, "transaction_id": "f" * 32,
@@ -912,15 +942,15 @@ class ReleasedFlagGateTests(RunbookFixture):
         self.digest = sha256_file(OPS / "deploy-runbook.py")
 
     def write_pair(self, release=None, phase=None, marker_record=True,
-                   phase_triggers=True):
+                   phase_triggers=True, rehearsal=False):
         rb.durable_write(self.output_dir / "release.json", release or {
             "released_at": "2026-11-13T12:00:00Z",
             "final_triggers": {unit: "active" for unit in TRIGGERS},
-            "rehearsal": True,
+            "rehearsal": rehearsal,
             "runbook_sha256": self.digest})
         document = {
             "phase": "completed", "released": True,
-            "rehearsal": True,
+            "rehearsal": rehearsal,
             "final_triggers": {unit: "active" for unit in TRIGGERS},
             "runbook_sha256": self.digest}
         if phase_triggers:
@@ -933,7 +963,10 @@ class ReleasedFlagGateTests(RunbookFixture):
 
     def status(self):
         with mock.patch.dict(os.environ, {"HOME": str(self.base)}):
-            return rb.cmd_status(self.status_args)
+            return rb.cmd_status(self.status_args,
+                                 units=FakeUnits(
+                                     self.marker_path,
+                                     {unit: "active" for unit in TRIGGERS}))
 
     def test_passes_after_release_and_prints_the_map(self):
         self.write_pair()
@@ -1025,8 +1058,10 @@ class ReleasedFlagGateTests(RunbookFixture):
         argv = ["status", "--output-dir", str(self.output_dir),
                 "--require-released"]
         stdout = io_string()
+        units = FakeUnits(self.marker_path,
+                          {unit: "active" for unit in TRIGGERS})
         with mock.patch.object(sys, "stdout", stdout):
-            code = rb.main(argv)
+            code = rb.main(argv, status_units=units)
         self.assertEqual(code, 0)
         artifact = json.loads(stdout.getvalue())
         self.assertTrue(artifact["released"])
@@ -1089,7 +1124,9 @@ class JournalAssertionTests(RunbookFixture):
             "prior_head": self.prior_sha, "target": self.target,
             "tag": self.target_tag, "helper_sha256": self.helper_sha,
             "automatic_rollback_permitted": False,
-            "rollback_compatibility": {"checked": True},
+            "rollback_compatibility": {"checked": True,
+                                       "schema_marker_present": False,
+                                       "schema_observations": []},
             "prior_tag": self.prior_tag,
             "prior_config_sha256": sha256_file(self.runner / "config.json"),
             "schema_version": 1, "transaction_id": "abc123",
@@ -1479,7 +1516,7 @@ class CLIStatusGateTests(RunbookFixture):
         self.units = FakeUnits(self.marker_path,
                                {unit: "active" for unit in TRIGGERS})
 
-    def write_released(self, runbook_sha256=None, rehearsal=True):
+    def write_released(self, runbook_sha256=None, rehearsal=False):
         rb.durable_write(self.output_dir / "release.json", {
             "released_at": "2026-11-13T12:00:00Z",
             "final_triggers": {unit: "active" for unit in TRIGGERS},
@@ -1541,6 +1578,42 @@ class CLIStatusGateTests(RunbookFixture):
             code, artifact = self.run_status(units=self.units)
         self.assertEqual(code, 0)
         self.assertTrue(artifact["released"])
+
+    def test_rehearsal_record_is_refused_by_the_gate(self):
+        # Non-negotiable: a rehearsal record must never authorize a
+        # production start. The gate marks the result rehearsal-only and
+        # refuses under --require-released.
+        self.write_released(rehearsal=True)
+        code, artifact = self.run_status(units=self.units)
+        self.assertEqual(code, 1)
+        self.assertFalse(artifact["released"])
+        self.assertIn("rehearsal", artifact["refusal"])
+
+    def test_missing_trigger_inventory_refuses(self):
+        # A completed record without a trigger inventory must refuse, not
+        # pass vacuously on an empty expected list.
+        self.write_released()
+        phase = json.loads(
+            (self.output_dir / "phase.json").read_text())
+        phase.pop("triggers")
+        rb.durable_write(self.output_dir / "phase.json", phase)
+        code, artifact = self.run_status(units=self.units)
+        self.assertEqual(code, 1)
+        self.assertFalse(artifact["released"])
+        self.assertIn("trigger inventory", artifact["refusal"])
+
+    def test_inventory_mismatching_final_triggers_refuses(self):
+        # An inventory that does not match final_triggers is an unverified
+        # expectation: refuse instead of comparing the wrong unit set.
+        self.write_released()
+        phase = json.loads(
+            (self.output_dir / "phase.json").read_text())
+        phase["triggers"] = {unit: "active" for unit in TRIGGERS
+                             if unit != "crq-tick.timer"}
+        rb.durable_write(self.output_dir / "phase.json", phase)
+        code, artifact = self.run_status(units=self.units)
+        self.assertEqual(code, 1)
+        self.assertIn("trigger inventory", artifact["refusal"])
 
     def test_passing_gate_prints_live_and_released_maps(self):
         self.write_released()
@@ -1781,10 +1854,12 @@ class CqBinPointerTests(RunbookFixture):
 
     def test_rendered_move_requires_authorization(self):
         # A real rendered pointer move (the live pointer resolved to a
-        # different host path than the approved target render) must refuse
-        # at release when unauthorized and pass when authorized: the check
-        # compares the RELEASED live pointer against the approved target
-        # pointer, not committed text.
+        # different host path than the approved target render) refuses at
+        # release: the written-bytes digest check fires first, and the
+        # pointer comparison remains the authorization boundary for the
+        # authorized case (which also verifies the digest, so a moved
+        # pointer only passes with cq_bin_pointer_may_move AND a manifest
+        # pinning the moved target state).
         moved_render = lambda run: mock.patch.object(
             run.host, "live_render",
             side_effect=lambda root, ov, raw: (
@@ -1792,13 +1867,22 @@ class CqBinPointerTests(RunbookFixture):
                     self.host_mod.encode(self._moved_config(root))))
         run = self.pointer_run(False)
         with moved_render(run):
+            # The whole-bytes digest gate fires first: moved bytes are not
+            # the pinned target state, whatever the authorization flag says.
             with self.assertRaisesRegex(
                     rb.Refused,
-                    "pointer moved the cq_bin without authorization"):
+                    "released config digest mismatch"):
                 run.point()
-        run2 = self.pointer_run(True)
-        with moved_render(run2):
-            run2.point()
+        # The pointer comparison remains the authorization boundary: with
+        # cq_bin_pointer_may_move and a manifest pinned to the moved state
+        # (this fixture's config.json now IS the moved render), the
+        # authorized run releases the moved pointer.
+        run3 = self.pointer_run(True)
+        with moved_render(run3):
+            run3.point()
+        live = json.loads((Path(run3.args.root)
+                           / "apps/crq-python/config.json").read_text())
+        self.assertEqual(live["repair"]["cq_bin"], "/opt/cq/bin.other")
 
     def _moved_config(self, root):
         """The approved target render, with the pointer resolved elsewhere:

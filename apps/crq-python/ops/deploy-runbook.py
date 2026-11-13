@@ -796,6 +796,28 @@ class Run:
             self.host.inactive(Path(self.args.root))
 
     # -- step 6: switch -----------------------------------------------------
+    def assert_live_dist_is_candidate(self):
+        """Bind the executed runtime to the verified candidate artifact.
+
+        dist/ is gitignored, so the controller's checkout switch leaves the
+        existing live dist in place; the cq_bin config string alone cannot
+        prove the runner will execute the verified bytes. The live cq_bin
+        path (after the pointer render) must resolve to a tree whose
+        digest equals candidate_dist_sha256, or the release refuses before
+        any trigger restarts."""
+        identity = self.manifest["identity"]
+        live = json.loads(
+            (Path(self.args.root) / "apps/crq-python/config.json").read_text())
+        pointer = (live.get("repair") or {}).get("cq_bin")
+        require(isinstance(pointer, str) and pointer,
+                "rendered config carries no cq_bin pointer")
+        live_dist = Path(pointer).resolve().parent
+        require(digests.tree_digest(live_dist)
+                == self.manifest["artifacts"]["candidate_dist_sha256"],
+                "live dist digest mismatch: the executed runtime at "
+                + str(live_dist) + " is not the verified candidate "
+                "artifact (candidate_dist_sha256)")
+
     def switch(self):
         record_dir = self.output_dir / "controller-records"
         record_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -851,6 +873,20 @@ class Run:
                 "D7: journal automatic_rollback_permitted must be false")
         require((journal.get("rollback_compatibility") or {}).get("checked") is True,
                 "journal rollback_compatibility must be checked")
+        # D7 is established from evidence recorded BEFORE the switch: the
+        # journal's compatibility record describes the pre-switch queue
+        # (captured at controller preflight), so an explicit schema marker
+        # there means automatic rollback was already impossible when the
+        # checkout moved. The runbook requires that fact to be clean, not
+        # discovered: automatic_rollback_permitted false must follow from
+        # evidence, not from the controller's post-switch computation.
+        compatibility = journal.get("rollback_compatibility") or {}
+        require(compatibility.get("checked") is True
+                and compatibility.get("schema_marker_present") is False
+                and not compatibility.get("schema_observations"),
+                "D7: pre-switch queue must be proven rollback-compatible "
+                "(no schema marker, no author_* keys); automatic rollback "
+                "must be impossible by evidence, never assumed")
         require(journal.get("prior_tag") == self.args.prior_tag,
                 "journal prior_tag mismatch")
         require(journal.get("prior_config_sha256")
@@ -861,17 +897,28 @@ class Run:
         transaction = journal.get("transaction_id")
         require(isinstance(transaction, str) and bool(transaction),
                 "journal transaction_id must be nonempty")
+        self.assert_live_dist_is_candidate()
 
     # -- step 7: pointer -----------------------------------------------------
     def point(self):
         config = self.manifest["config"]
         overlay, raw = self.host.load_overlay(self.args.overlay)
         self.host.live_render(Path(self.args.root), overlay, raw)
-        # The released pointer must equal the approved target-state pointer:
-        # compare against the rendered target from the pinned manifest, so
-        # the authorization decision matches what the render actually wrote.
-        live = json.loads(
-            (Path(self.args.root) / "apps/crq-python/config.json").read_text())
+        # Verify WHAT WAS WRITTEN, not just one leaf: the live bytes must
+        # hash to the approved target-state digest after live_render, so an
+        # overlay that changed after preflight cannot smuggle unapproved
+        # configuration into the release (finding: cq_bin was the only
+        # remaining check).
+        live_bytes = (Path(self.args.root)
+                      / "apps/crq-python/config.json").read_bytes()
+        require(digests.file_digest(
+                    Path(self.args.root) / "apps/crq-python/config.json")
+                == config["target_state_config_sha256"],
+                "released config digest mismatch: live bytes after "
+                "live_render do not hash to the pinned target_state digest")
+        # The pointer-level check remains as the authorization boundary:
+        # the released live pointer must equal the approved target render.
+        live = json.loads(live_bytes)
         approved = json.loads(self.host.render(
             Path(self.args.root), overlay,
             self.manifest["identity"]["target_sha"]))
@@ -1216,19 +1263,31 @@ def cmd_status(args, units=None) -> int:
         marker_refusal = "runner-disabled marker is present again after release"
     live_refusal = None
     final_triggers = release.get("final_triggers") if release else None
-    if artifact_refusal is None and digest_refusal is None and marker_refusal is None:
+    rehearsal_run = bool(phase.get("rehearsal")) if phase else False
+    triggers_record = (phase.get("triggers") or {}) if phase else {}
+    if artifact_refusal is None and digest_refusal is None \
+            and marker_refusal is None:
         # Requirement 2: live comparison against the release record. The unit
         # provider is injectable (tests); production re-reads the live
         # systemd states, one read per trigger, no new state.
+        # A rehearsal run is never an authorizing released answer: its
+        # result is rehearsal-only and exits non-zero under
+        # --require-released.
+        if rehearsal_run:
+            live_refusal = ("rehearsal run: this record describes a "
+                            "rehearsal, not a production release; the "
+                            "authorizing released gate refuses it")
+        elif not isinstance(final_triggers, dict) or not final_triggers:
+            live_refusal = "release.json lacks a nonempty final_triggers map"
+        elif not triggers_record or sorted(triggers_record) != sorted(final_triggers):
+            live_refusal = ("phase.json trigger inventory missing or does "
+                            "not match final_triggers; refusing to compare "
+                            "live states against an unverified inventory")
+    if artifact_refusal is None and digest_refusal is None \
+            and marker_refusal is None and live_refusal is None:
         provider = units
         if provider is None:
-            if phase.get("rehearsal") is True:
-                provider = RehearsalUnits(
-                    marker_path,
-                    sorted(final_triggers), [])
-                provider.states = dict(final_triggers)
-            else:
-                provider = RealUnits(marker_path.parent)
+            provider = RealUnits(marker_path.parent)
         live_triggers = read_observed_triggers(provider, live_document(phase))
         drifted = {unit: {"live": state, "released_as": final_triggers.get(unit)}
                    for unit, state in live_triggers.items()
@@ -1256,7 +1315,8 @@ def cmd_status(args, units=None) -> int:
 def live_document(phase):
     """The trigger list the live comparison reads: the recorded expectation
     is the run's own phase record (triggers); the manifest is not re-read by
-    the gate."""
+    the gate. Callers must have verified the inventory matches
+    final_triggers before invoking this."""
     triggers = sorted((phase.get("triggers") or {}).keys())
     return {"triggers": {"expected": triggers}}
 
@@ -1342,7 +1402,9 @@ def rehearsal_journal(run):
         "tag": run.args.target_tag,
         "helper_sha256": identity["helper_sha256"],
         "automatic_rollback_permitted": False,
-        "rollback_compatibility": {"checked": True},
+        "rollback_compatibility": {"checked": True,
+                                   "schema_marker_present": False,
+                                   "schema_observations": []},
         "prior_tag": run.args.prior_tag,
         "prior_config_sha256":
             run.manifest["config"]["running_config_sha256"],
