@@ -1,0 +1,611 @@
+{
+  "schema": "cq.crq-group-p-vector/v1",
+  "family": "tick-admission",
+  "cases": [
+    {
+      "name": "usage-slot-budget",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": []
+        },
+        "usage": {
+          "remaining": 3,
+          "limit": 10
+        },
+        "reserved": [],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 10,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": null,
+          "remaining": 0,
+          "start_attempts": 3,
+          "log": [],
+          "starts": 3,
+          "usage": {
+            "remaining": 3,
+            "limit": 10
+          },
+          "backfill_starts_at_observation": 0
+        }
+      }
+    },
+    {
+      "name": "usage-reservations-reduce-slots",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "rev",
+              "kind": "open",
+              "state": "reviewing",
+              "run": {
+                "run_id": "open-1-20261113T230000Z",
+                "started_at": "2026-11-13T23:00:00Z"
+              }
+            }
+          ]
+        },
+        "usage": {
+          "remaining": 3,
+          "limit": 10
+        },
+        "reserved": [
+          "2026-11-13T23:00:00Z"
+        ],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 10,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": null,
+          "remaining": 0,
+          "start_attempts": 2,
+          "log": [],
+          "starts": 2,
+          "usage": {
+            "remaining": 3,
+            "limit": 10
+          },
+          "backfill_starts_at_observation": 0
+        }
+      }
+    },
+    {
+      "name": "usage-below-reservations-is-zero",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "rev",
+              "kind": "open",
+              "state": "reviewing",
+              "run": {
+                "run_id": "open-1-20261113T230000Z",
+                "started_at": "2026-11-13T23:00:00Z"
+              }
+            }
+          ]
+        },
+        "usage": {
+          "remaining": 0,
+          "limit": 10
+        },
+        "reserved": [
+          "2026-11-13T23:00:00Z"
+        ],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 10,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": "slots",
+          "remaining": 0,
+          "start_attempts": 0,
+          "log": [
+            "included review slots exhausted"
+          ],
+          "starts": 0,
+          "usage": {
+            "remaining": 0,
+            "limit": 10
+          },
+          "backfill_starts_at_observation": 0
+        }
+      }
+    },
+    {
+      "name": "per-tick-ceiling",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": []
+        },
+        "usage": {
+          "remaining": 9,
+          "limit": 10
+        },
+        "reserved": [],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 2,
+        "max_inflight": 10,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": null,
+          "remaining": 7,
+          "start_attempts": 2,
+          "log": [],
+          "starts": 2,
+          "usage": {
+            "remaining": 9,
+            "limit": 10
+          },
+          "backfill_starts_at_observation": 0
+        }
+      }
+    },
+    {
+      "name": "inflight-ceiling",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "rev",
+              "kind": "open",
+              "state": "reviewing",
+              "run": {
+                "run_id": "open-1-20261113T230000Z",
+                "started_at": "2026-11-13T23:00:00Z"
+              }
+            }
+          ]
+        },
+        "usage": {
+          "remaining": 9,
+          "limit": 10
+        },
+        "reserved": [],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 1,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": "inflight",
+          "remaining": 9,
+          "start_attempts": 0,
+          "log": [
+            "1 review(s) in flight (max 1)"
+          ],
+          "starts": 0,
+          "usage": {
+            "remaining": 9,
+            "limit": 10
+          },
+          "backfill_starts_at_observation": 0
+        }
+      }
+    },
+    {
+      "name": "paused-gate-outranks-slots",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": [],
+          "paused": true,
+          "pause_reason": "auth on run-9"
+        },
+        "usage": {
+          "remaining": 0,
+          "limit": 10
+        },
+        "reserved": [],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 10,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": "paused",
+          "remaining": 0,
+          "start_attempts": 0,
+          "log": [
+            "queue paused: auth on run-9"
+          ],
+          "starts": 0,
+          "usage": {
+            "remaining": 0,
+            "limit": 10
+          },
+          "backfill_starts_at_observation": 0
+        }
+      }
+    },
+    {
+      "name": "paused-without-reason",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": [],
+          "paused": true
+        },
+        "usage": {
+          "remaining": 2,
+          "limit": 10
+        },
+        "reserved": [],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 10,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": "paused",
+          "remaining": 2,
+          "start_attempts": 0,
+          "log": [
+            "queue paused: None"
+          ],
+          "starts": 0,
+          "usage": {
+            "remaining": 2,
+            "limit": 10
+          },
+          "backfill_starts_at_observation": 0
+        }
+      }
+    },
+    {
+      "name": "cooldown-gate",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": [],
+          "cooldown_until": "2026-11-14T00:30:00Z"
+        },
+        "usage": {
+          "remaining": 2,
+          "limit": 10
+        },
+        "reserved": [],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 10,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": "cooldown",
+          "remaining": 2,
+          "start_attempts": 0,
+          "log": [
+            "rate-limit cooldown until 2026-11-14T00:30:00Z"
+          ],
+          "starts": 0,
+          "usage": {
+            "remaining": 2,
+            "limit": 10
+          },
+          "backfill_starts_at_observation": 0
+        }
+      }
+    },
+    {
+      "name": "expired-cooldown-is-open",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": [],
+          "cooldown_until": "2026-11-13T23:30:00Z"
+        },
+        "usage": {
+          "remaining": 2,
+          "limit": 10
+        },
+        "reserved": [],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 10,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": null,
+          "remaining": 0,
+          "start_attempts": 2,
+          "log": [],
+          "starts": 2,
+          "usage": {
+            "remaining": 2,
+            "limit": 10
+          },
+          "backfill_starts_at_observation": 0
+        }
+      }
+    },
+    {
+      "name": "slots-exhausted-with-usage",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": []
+        },
+        "usage": {
+          "remaining": 0,
+          "limit": 10
+        },
+        "reserved": [],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 10,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": "slots",
+          "remaining": 0,
+          "start_attempts": 0,
+          "log": [
+            "included review slots exhausted"
+          ],
+          "starts": 0,
+          "usage": {
+            "remaining": 0,
+            "limit": 10
+          },
+          "backfill_starts_at_observation": 0
+        }
+      }
+    },
+    {
+      "name": "hourly-fallback-usage-unavailable",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": [],
+          "starts": [
+            "2026-11-13T23:30:00Z",
+            "2026-11-13T22:00:00Z"
+          ]
+        },
+        "usage": null,
+        "reserved": [],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 10,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": null,
+          "remaining": 0,
+          "start_attempts": 4,
+          "log": [],
+          "starts": 6,
+          "usage": null,
+          "backfill_starts_at_observation": 2
+        }
+      }
+    },
+    {
+      "name": "hourly-fallback-protects-undated-holds",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": [],
+          "starts": []
+        },
+        "usage": null,
+        "reserved": [
+          "2026-11-13T22:00:00Z",
+          null
+        ],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 10,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": null,
+          "remaining": 0,
+          "start_attempts": 3,
+          "log": [],
+          "starts": 3,
+          "usage": null,
+          "backfill_starts_at_observation": 0
+        }
+      }
+    },
+    {
+      "name": "hourly-fallback-ignores-recent-dated-holds",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": [],
+          "starts": []
+        },
+        "usage": null,
+        "reserved": [
+          "2026-11-13T23:30:00Z"
+        ],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 10,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": null,
+          "remaining": 0,
+          "start_attempts": 5,
+          "log": [],
+          "starts": 5,
+          "usage": null,
+          "backfill_starts_at_observation": 0
+        }
+      }
+    },
+    {
+      "name": "hourly-fallback-exhausted",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": [],
+          "starts": [
+            "2026-11-13T23:10:00Z",
+            "2026-11-13T23:20:00Z",
+            "2026-11-13T23:30:00Z",
+            "2026-11-13T23:40:00Z",
+            "2026-11-13T23:50:00Z"
+          ]
+        },
+        "usage": null,
+        "reserved": [],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 10,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": "slots",
+          "remaining": 0,
+          "start_attempts": 0,
+          "log": [
+            "hourly cap reached (usage unavailable; conservative start-log fallback)"
+          ],
+          "starts": 5,
+          "usage": null,
+          "backfill_starts_at_observation": 5
+        }
+      }
+    },
+    {
+      "name": "inflight-gate",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "rev",
+              "kind": "open",
+              "state": "reviewing",
+              "run": {
+                "run_id": "open-1-20261113T230000Z",
+                "started_at": "2026-11-13T23:00:00Z"
+              }
+            },
+            {
+              "id": "rev2",
+              "kind": "open",
+              "state": "reviewing",
+              "run": {
+                "run_id": "open-2-20261113T230000Z",
+                "started_at": "2026-11-13T23:00:00Z"
+              }
+            }
+          ]
+        },
+        "usage": {
+          "remaining": 4,
+          "limit": 10
+        },
+        "reserved": [],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 2,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": "inflight",
+          "remaining": 4,
+          "start_attempts": 0,
+          "log": [
+            "2 review(s) in flight (max 2)"
+          ],
+          "starts": 0,
+          "usage": {
+            "remaining": 4,
+            "limit": 10
+          },
+          "backfill_starts_at_observation": 0
+        }
+      }
+    },
+    {
+      "name": "rank4-vendor-owner-counts-inflight",
+      "source": "crq.admit_available",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "id": "cov",
+              "kind": "coverage",
+              "state": "pending",
+              "vendor_state": "live"
+            }
+          ]
+        },
+        "usage": {
+          "remaining": 4,
+          "limit": 10
+        },
+        "reserved": [],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 1,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "gate": "inflight",
+          "remaining": 4,
+          "start_attempts": 0,
+          "log": [
+            "1 review(s) in flight (max 1)"
+          ],
+          "starts": 0,
+          "usage": {
+            "remaining": 4,
+            "limit": 10
+          },
+          "backfill_starts_at_observation": 0
+        }
+      }
+    }
+  ]
+}
