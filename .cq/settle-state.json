@@ -80,15 +80,15 @@
         }
       ]
     },
-    "1549": {
+    "1673": {
       "tuple": {
-        "head": "52fbf0757932f6e74a71ec82cd9faae71665dd48",
-        "base": "c47f9c0bea36db9a1c91d8b4fc634ee6676704b2",
+        "head": "774f76d0033070be287927118e9b572a292adf90",
+        "base": "c1c383e7a275506b676768a37629c77f0fdcc01b",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-12T00:14:03.499Z",
+          "observedAt": "2026-11-13T02:21:33.557Z",
           "by": "self-merge-prs:observe"
         }
       ]
