@@ -39,6 +39,9 @@ def narrate(message):
 # Host handover marker: one phrase for every entry point, so an operator greps
 # one string. The repair pass consults it only at admission points.
 RUNNER_DISABLED = 'runner disabled for host handover (state/runner-disabled)'
+# Admission outcome distinct from a rate-limit stop, so a refusal inside a
+# forked child ends the pass instead of reading as normal completion.
+RUNNER_DISABLED_OUTCOME = 'runner-disabled'
 
 
 def runner_disabled():
@@ -789,6 +792,11 @@ def drain(config):
     if error is not None:
         narrate('repair drain skipped: ' + error[:200])
         return
+    # A marker written while the fetch ran must stop the pass before triage
+    # spends: the guard at the top was sampled before the network work.
+    if runner_disabled():
+        narrate(RUNNER_DISABLED + ': pass stopped before triage')
+        return
     try:
         triage_phase(config)
     except Exception as exc:  # backfill deferral must not starve existing repair jobs
@@ -823,7 +831,7 @@ def drain_item(config, item, job_ids):
     # item already running is never interrupted.
     if runner_disabled():
         narrate(RUNNER_DISABLED + ': item ' + str(item) + ' not admitted')
-        return None
+        return RUNNER_DISABLED_OUTCOME
     if blocked(config['repair']) or dispatch_paused(config):
         return 'rate-limit'
     # Re-read the queue per item: the tick may harvest or the tip may move
@@ -878,10 +886,14 @@ def drain_items(config, groups, order):
             while len(active) >= limit:
                 stopped = reap_item(active) or stopped
             stopped = reap_completed(active)[0] or stopped
+            # A marker written while waiting for capacity must stop the pass too.
+            if runner_disabled():
+                narrate(RUNNER_DISABLED + ': pass stopped before ' + str(item))
+                break
             if stopped or blocked(config['repair']) or dispatch_paused(config):
                 break
             if limit == 1:
-                if drain_item(config, item, groups[item]) == 'rate-limit':
+                if drain_item(config, item, groups[item]) in ('rate-limit', RUNNER_DISABLED_OUTCOME):
                     break
                 continue
             # Linearize admission against provider pause writes under the same
@@ -898,7 +910,8 @@ def drain_items(config, groups, order):
             if pid == 0:
                 try:
                     outcome = drain_item(config, item, groups[item])
-                    code = 2 if outcome == 'rate-limit' else 0
+                    code = (2 if outcome == 'rate-limit'
+                            else 3 if outcome == RUNNER_DISABLED_OUTCOME else 0)
                 except BaseException:
                     code = 1
                 # Do not run the coordinator's finally/atexit handlers in a child.
@@ -927,6 +940,7 @@ def reap_completed(active):
             if status:
                 code = os.waitstatus_to_exitcode(status)
                 message = ('provider pause; stopping new admission' if code == 2 else
+                           'runner disabled; stopping new admission' if code == 3 else
                            'worker exited with code ' + str(code) if code >= 0 else
                            'worker terminated by signal ' + str(-code))
                 narrate('repair item ' + item + ': ' + message)
@@ -1075,6 +1089,11 @@ def main(argv=None):
     parser.add_argument('--finding-sha256')
     parser.add_argument('--recover-job')
     args = parser.parse_args(argv)
+    # CLI admission before the lock, the state directory and every alternate
+    # path (--recover-job, --job): a handed-over host must not write or spend.
+    if runner_disabled():
+        narrate(RUNNER_DISABLED + ': dispatch refused')
+        return 0
     config = json.loads((ROOT / 'config.json').read_text())
     repair = config.get('repair', {})
     authorization = repair.get('spend_authorization')

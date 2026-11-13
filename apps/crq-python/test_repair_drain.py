@@ -1559,9 +1559,84 @@ class RepairDrainTest(unittest.TestCase):
         stderr = io.StringIO()
         with mock.patch.object(service, 'process_item') as process_item, \
              contextlib.redirect_stderr(stderr):
-            self.assertIsNone(service.drain_item(self.config, 'pr1-merged', ['crq-run1-F1']))
+            self.assertEqual(service.drain_item(self.config, 'pr1-merged', ['crq-run1-F1']),
+                             service.RUNNER_DISABLED_OUTCOME)
         process_item.assert_not_called()
         self.assertIn('item pr1-merged not admitted', stderr.getvalue())
+
+    def test_main_refuses_before_the_lock_and_every_dispatch_path(self):
+        # CLI admission: no state directory, no lock file, no --job dispatch and
+        # no --recover-job fetch or judge while the marker is present.
+        (self.root / 'state/runner-disabled').write_text('handover\n')
+        (self.root / 'config.json').write_text(json.dumps(self.config))
+        import shutil
+        shutil.rmtree(self.root / 'state/repair', ignore_errors=True)
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'process_item') as process_item, \
+             mock.patch.object(service, 'recover_job') as recover_job, \
+             mock.patch.object(service, 'fetch_clone') as fetch, \
+             contextlib.redirect_stderr(stderr):
+            self.assertEqual(service.main([]), 0)
+            self.assertEqual(service.main(['--job', 'crq-run1-F1', '--source-sha', self.pin,
+                                           '--finding-sha256', 'a' * 64]), 0)
+            self.assertEqual(service.main(['--recover-job', 'crq-run1-F1']), 0)
+        process_item.assert_not_called()
+        recover_job.assert_not_called()
+        fetch.assert_not_called()
+        self.assertFalse((self.root / 'state/repair').exists())
+        self.assertEqual(stderr.getvalue().count('dispatch refused'), 3)
+
+    def test_forked_child_refusal_stops_the_pass(self):
+        # With concurrency above one, the refusal happens inside a forked child.
+        # It must end the pass: the child exits with the stop code, the parent
+        # names it and admits nothing else.
+        self.config['repair']['max_concurrent_items'] = 2
+        parent = os.getpid()
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'runner_disabled',
+                               side_effect=lambda: os.getpid() != parent), \
+             mock.patch.object(service, 'process_item') as process_item, \
+             contextlib.redirect_stderr(stderr):
+            service.drain_items(self.config, {'a': ['crq-run1-F1'], 'b': ['crq-run2-F1']}, ['a', 'b'])
+        process_item.assert_not_called()
+        self.assertIn('runner disabled; stopping new admission', stderr.getvalue())
+        self.assertIsNone(self.result('crq-run1-F1'))
+        self.assertIsNone(self.result('crq-run2-F1'))
+
+    def test_marker_written_during_fetch_stops_before_triage(self):
+        # The guard at pass start is sampled before the network fetch; a marker
+        # written while the fetch runs must stop the pass before paid triage.
+        def fetch_writes_marker(config):
+            (self.root / 'state/runner-disabled').write_text('handover\n')
+            return None
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'fetch_clone', side_effect=fetch_writes_marker), \
+             mock.patch.object(service, 'triage_phase') as triage_phase, \
+             contextlib.redirect_stderr(stderr):
+            service.drain(self.config)
+        triage_phase.assert_not_called()
+        self.assertIn('pass stopped before triage', stderr.getvalue())
+
+    def test_marker_written_while_waiting_for_capacity_stops_the_pass(self):
+        # Capacity wait can be long; a marker written during it must stop the
+        # next admission instead of being sampled only at the top of the loop.
+        self.config['repair']['max_concurrent_items'] = 2
+        active_seen = {}
+
+        def reap_writes_marker(active):
+            active_seen.update(active)
+            (self.root / 'state/runner-disabled').write_text('handover\n')
+            active.clear()
+            return False
+
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'reap_item', side_effect=reap_writes_marker), \
+             mock.patch.object(service, 'drain_item', return_value=None), \
+             contextlib.redirect_stderr(stderr):
+            service.drain_items(self.config, {'a': ['crq-run1-F1'], 'b': ['crq-run2-F1'],
+                                              'c': ['crq-run3-F1']}, ['a', 'b', 'c'])
+        self.assertEqual(set(active_seen.values()), {'a', 'b'})
+        self.assertIn('pass stopped before c', stderr.getvalue())
 
     def test_process_item_starts_no_finding_inside_blackout(self):
         _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
