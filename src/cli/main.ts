@@ -500,12 +500,18 @@ async function dispatchCli(
     const opEntries = await list(opsRoot === undefined ? {} : { opsRoot });
     // A defective plan module must not turn pure help into a failure: degrade
     // to the op-only surface and surface the skip on stderr (the registry's
-    // skippedFamilies visibility posture). Help itself stays exit 0.
+    // skippedFamilies visibility posture). Help itself stays exit 0. The skip is
+    // human narration only: I1 keeps stderr EMPTY in machine mode.
     let planNames: string[] = [];
     try {
       planNames = await listPlanNames(opts?.plansRoot);
     } catch (err) {
-      narrate(io, `plan registry scan failed — help lists op subcommands only: ${messageOf(err)}`);
+      if (rawMode !== 'json') {
+        narrate(
+          io,
+          `plan registry scan failed — help lists op subcommands only: ${messageOf(err)}`,
+        );
+      }
     }
     io.stdout(renderGlobalHelp(subcommandNames(opEntries, planNames)));
     return EXIT_CODES.ok;
