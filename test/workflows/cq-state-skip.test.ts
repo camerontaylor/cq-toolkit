@@ -196,7 +196,7 @@ describe('unit shard aggregation', () => {
     // a pull request whose shards were cancelled) must be absent, because a
     // skipped required job counts as SUCCESS.
     expect(condition).toContain(
-      "(needs.unit.result != 'cancelled' || github.event_name == 'pull_request')",
+      "(needs.unit.result != 'cancelled' || github.event_name != 'push')",
     );
     expect(condition).not.toContain("|| github.event_name == 'push')");
     expect(condition).not.toContain("needs.unit.result == 'cancelled'");

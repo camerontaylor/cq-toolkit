@@ -203,9 +203,10 @@ jobs:
     # shard is cancelled here, static runs and the first step below fails it.
     # Only a default-branch push may skip static, and only when its shards
     # were cancelled as superseded (slice 3), so that commit claims nothing.
-    # The guard step fails a cancelled shard on every other event, so a
-    # nightly or manual run cannot report a passing static either.
-    if: ${{ always() && !cancelled() && (needs.unit.result != 'cancelled' || github.event_name == 'pull_request') && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
+    # Every other event runs static so the guard step below can fail it: a
+    # nightly or manual run whose shard was cancelled reports a red static,
+    # not a skipped one (a skipped job is a silent success).
+    if: ${{ always() && !cancelled() && (needs.unit.result != 'cancelled' || github.event_name != 'push') && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
     steps:
       - name: Unit shards passed
         if: ${{ needs.unit.result == 'failure' || (github.event_name != 'push' && needs.unit.result == 'cancelled') || needs.changes.result == 'cancelled' }}
