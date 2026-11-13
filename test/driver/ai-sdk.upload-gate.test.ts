@@ -1,7 +1,7 @@
 // The worker upload gate (the former ai-sdk.test.ts upload tests): the
 // pre-send scan refusal, serializeRequestForScan's lossy/cyclic payload
 // contract, and the configured gitleaks upload policy.
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test, vi } from 'vitest';
@@ -16,10 +16,15 @@ test.each(['initial', 'read', 'run'] as const)(
   'upload gate refuses %s bytes before the next provider send',
   async (mode) => {
     const root = await mkdtemp(join(tmpdir(), 'aidrv-upload-'));
+    // The session binding file lives OUTSIDE the model-editable workspace
+    // (Annex A, issue #1197): sessions stay at the scratch root, the bound
+    // workspace is the child holding the model-visible fixture.
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace);
     let sends = 0;
     const scanned: string[] = [];
     try {
-      await writeFile(join(root, 'secret.txt'), 'DO_NOT_UPLOAD');
+      await writeFile(join(workspace, 'secret.txt'), 'DO_NOT_UPLOAD');
       const command = process.execPath + ' -e "process.stdout.write(\'DO_NOT_UPLOAD\')"';
       const model = new MockLanguageModelV4({
         modelId: 'mock-1',
@@ -57,7 +62,7 @@ test.each(['initial', 'read', 'run'] as const)(
       const result = await driver.run(
         invocation({
           prompt: mode === 'initial' ? 'DO_NOT_UPLOAD' : 'safe',
-          workspace: { path: root },
+          workspace: { path: workspace },
           budget: {},
         }),
       );
@@ -94,6 +99,8 @@ test.each(['private', 'public', 'newline', 'prompt'] as const)(
   'configured upload policy preserves source paths and decoded text (%s)',
   async (mode) => {
     const root = await mkdtemp(join(tmpdir(), 'aidrv-path-upload-'));
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace);
     const gitleaks = await makeGitleaksFixture();
     vi.stubEnv('PATH', gitleaks.path);
     let sends = 0;
@@ -117,8 +124,10 @@ test.each(['private', 'public', 'newline', 'prompt'] as const)(
         ].join('\n'),
       );
       const file = mode === 'private' ? 'private.txt' : 'public.txt';
+      // The model reads this through the driver workspace (the child);
+      // the scanner config above resolves against the dispatch repoRoot.
       await writeFile(
-        join(root, file),
+        join(workspace, file),
         mode === 'newline' ? '\nBLOCKEDWORD' : 'ordinary private bytes',
       );
       const bindings = bindingsFromDispatch(
@@ -171,7 +180,7 @@ test.each(['private', 'public', 'newline', 'prompt'] as const)(
       const result = await driver.run(
         invocation({
           prompt: mode === 'prompt' ? '\nBLOCKEDWORD' : 'safe',
-          workspace: { path: root },
+          workspace: { path: workspace },
           budget: {},
         }),
       );

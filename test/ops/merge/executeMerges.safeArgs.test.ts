@@ -4,10 +4,12 @@ import { describe, expect, test } from 'vitest';
 import {
   UnsafeMergeArgsError,
   headRefFor,
+  mergeWorktreeBranchFor,
   realMergeEffects,
   safeArgs,
   safeRunner,
 } from '../../../src/adapters/forge-github/mergeEffects.js';
+import { HARDENED_DIFF_FLAGS } from '../../../src/shared/gitHarden.js';
 import { OK, sha } from './executeMerges.helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -15,16 +17,44 @@ import { OK, sha } from './executeMerges.helpers.js';
 // ---------------------------------------------------------------------------
 
 describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
+  // Every push argv leads with the hardened prefix (PR #1641): the flag-less
+  // shape is refused, so a refspec test that omitted the flags would fail
+  // for the wrong reason (or pass as "refused" without reaching the check
+  // it names).
+  const push = (...refspecs: string[]): string[] => [
+    'push',
+    '--no-follow-tags',
+    '--recurse-submodules=no',
+    'origin',
+    ...refspecs,
+  ];
+
   test('squash: a squash-merge argv throws', () => {
     expect(() => safeArgs(['pr', 'merge', '7', '--squash'])).toThrow(UnsafeMergeArgsError);
     expect(() => safeArgs(['pr', 'merge', '7', 'squash'])).toThrow(UnsafeMergeArgsError);
   });
 
   test("force: '--force' (and --force-with-lease) throws", () => {
-    expect(() => safeArgs(['push', 'origin', '--force', 'feat'])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['push', 'origin', '--force-with-lease=feat', 'feat'])).toThrow(
-      UnsafeMergeArgsError,
-    );
+    expect(() =>
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        '--force',
+        'feat',
+      ]),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(() =>
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        '--force-with-lease=feat',
+        'feat',
+      ]),
+    ).toThrow(UnsafeMergeArgsError);
   });
 
   test('-f throws', () => {
@@ -41,22 +71,52 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
   });
 
   test('push-to-main throws in every spelling', () => {
-    expect(() => safeArgs(['push', 'origin', 'main'])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['push', 'origin', 'HEAD:main'])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['push', 'origin', 'feat:refs/heads/main'])).toThrow(
-      UnsafeMergeArgsError,
-    );
-    expect(() => safeArgs(['-C', '/repo', 'push', 'origin', ':main'])).toThrow(
-      UnsafeMergeArgsError,
-    );
+    expect(() =>
+      safeArgs(['push', '--no-follow-tags', '--recurse-submodules=no', 'origin', 'main']),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(() =>
+      safeArgs(['push', '--no-follow-tags', '--recurse-submodules=no', 'origin', 'HEAD:main']),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(() =>
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        'feat:refs/heads/main',
+      ]),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(() =>
+      safeArgs([
+        '-C',
+        '/repo',
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        ':main',
+      ]),
+    ).toThrow(UnsafeMergeArgsError);
   });
 
   test('round-1: a push with NO explicit refspec is refused (push.default could pick the protected branch)', () => {
-    expect(() => safeArgs(['push', 'origin'])).toThrow(UnsafeMergeArgsError);
+    expect(() =>
+      safeArgs(['push', '--no-follow-tags', '--recurse-submodules=no', 'origin']),
+    ).toThrow(UnsafeMergeArgsError);
     expect(() => safeArgs(['push'])).toThrow(UnsafeMergeArgsError);
     // An explicit src:dst refspec keeps the push legal.
-    expect(safeArgs(['push', 'origin', 'feat:refs/heads/feat'])).toEqual([
+    expect(
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        'feat:refs/heads/feat',
+      ]),
+    ).toEqual([
       'push',
+      '--no-follow-tags',
+      '--recurse-submodules=no',
       'origin',
       'feat:refs/heads/feat',
     ]);
@@ -108,10 +168,22 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
       '/wt/pr-7',
       'refs/pull/7/head',
     ]);
-    expect(safeArgs(['-C', '/wt/pr-7', 'push', 'origin', 'HEAD:refs/heads/feat-7'])).toEqual([
+    expect(
+      safeArgs([
+        '-C',
+        '/wt/pr-7',
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        'HEAD:refs/heads/feat-7',
+      ]),
+    ).toEqual([
       '-C',
       '/wt/pr-7',
       'push',
+      '--no-follow-tags',
+      '--recurse-submodules=no',
       'origin',
       'HEAD:refs/heads/feat-7',
     ]);
@@ -123,35 +195,88 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
       seen.push(args);
       return OK;
     });
-    expect(() => run(['push', 'origin', 'main'])).toThrow(UnsafeMergeArgsError);
+    expect(() =>
+      run(['push', '--no-follow-tags', '--recurse-submodules=no', 'origin', 'main']),
+    ).toThrow(UnsafeMergeArgsError);
     await expect(run(['pr', 'merge', '7', '--merge'])).resolves.toEqual(OK);
     expect(seen).toEqual([['pr', 'merge', '7', '--merge']]);
   });
 
   test('CR-5: the protected branch is configurable — "deliver" pushes refused, "main" pushes pass', () => {
-    expect(() => safeArgs(['push', 'origin', 'deliver'], { protectedBranch: 'deliver' })).toThrow(
-      UnsafeMergeArgsError,
-    );
     expect(() =>
-      safeArgs(['push', 'origin', 'HEAD:deliver'], { protectedBranch: 'deliver' }),
+      safeArgs(['push', '--no-follow-tags', '--recurse-submodules=no', 'origin', 'deliver'], {
+        protectedBranch: 'deliver',
+      }),
     ).toThrow(UnsafeMergeArgsError);
     expect(() =>
-      safeArgs(['push', 'origin', 'feat:refs/heads/deliver'], { protectedBranch: 'deliver' }),
+      safeArgs(['push', '--no-follow-tags', '--recurse-submodules=no', 'origin', 'HEAD:deliver'], {
+        protectedBranch: 'deliver',
+      }),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(() =>
+      safeArgs(
+        [
+          'push',
+          '--no-follow-tags',
+          '--recurse-submodules=no',
+          'origin',
+          'feat:refs/heads/deliver',
+        ],
+        {
+          protectedBranch: 'deliver',
+        },
+      ),
     ).toThrow(UnsafeMergeArgsError);
     // Under 'deliver' protection, main is an ordinary branch.
     expect(
-      safeArgs(['push', 'origin', 'main:refs/heads/main'], { protectedBranch: 'deliver' }),
-    ).toEqual(['push', 'origin', 'main:refs/heads/main']);
+      safeArgs(
+        ['push', '--no-follow-tags', '--recurse-submodules=no', 'origin', 'main:refs/heads/main'],
+        {
+          protectedBranch: 'deliver',
+        },
+      ),
+    ).toEqual([
+      'push',
+      '--no-follow-tags',
+      '--recurse-submodules=no',
+      'origin',
+      'main:refs/heads/main',
+    ]);
     expect(
-      safeArgs(['push', 'origin', 'feat:refs/heads/main'], { protectedBranch: 'deliver' }),
-    ).toEqual(['push', 'origin', 'feat:refs/heads/main']);
+      safeArgs(
+        ['push', '--no-follow-tags', '--recurse-submodules=no', 'origin', 'feat:refs/heads/main'],
+        {
+          protectedBranch: 'deliver',
+        },
+      ),
+    ).toEqual([
+      'push',
+      '--no-follow-tags',
+      '--recurse-submodules=no',
+      'origin',
+      'feat:refs/heads/main',
+    ]);
   });
 
   test('CR-5: the default protected branch is still main (existing callers unchanged)', () => {
-    expect(() => safeArgs(['push', 'origin', 'main'])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['push', 'origin', 'HEAD:main'])).toThrow(UnsafeMergeArgsError);
-    expect(safeArgs(['push', 'origin', 'deliver:refs/heads/deliver'])).toEqual([
+    expect(() =>
+      safeArgs(['push', '--no-follow-tags', '--recurse-submodules=no', 'origin', 'main']),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(() =>
+      safeArgs(['push', '--no-follow-tags', '--recurse-submodules=no', 'origin', 'HEAD:main']),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        'deliver:refs/heads/deliver',
+      ]),
+    ).toEqual([
       'push',
+      '--no-follow-tags',
+      '--recurse-submodules=no',
       'origin',
       'deliver:refs/heads/deliver',
     ]);
@@ -166,9 +291,21 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
       },
       { protectedBranch: 'deliver' },
     );
-    expect(() => run(['push', 'origin', 'deliver'])).toThrow(UnsafeMergeArgsError);
-    await expect(run(['push', 'origin', 'main:refs/heads/main'])).resolves.toEqual(OK);
-    expect(seen).toEqual([['push', 'origin', 'main:refs/heads/main']]); // deliver never reached the runner
+    expect(() =>
+      run(['push', '--no-follow-tags', '--recurse-submodules=no', 'origin', 'deliver']),
+    ).toThrow(UnsafeMergeArgsError);
+    await expect(
+      run([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        'main:refs/heads/main',
+      ]),
+    ).resolves.toEqual(OK);
+    expect(seen).toEqual([
+      ['push', '--no-follow-tags', '--recurse-submodules=no', 'origin', 'main:refs/heads/main'],
+    ]); // deliver never reached the runner
   });
 
   test('CR-5: realMergeEffects threads the protected branch (guard fires before any process)', () => {
@@ -179,13 +316,29 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
   });
 
   test('round-2: a force-marked PUSH refspec is refused outright (+main, +refs/heads/main)', () => {
-    expect(() => safeArgs(['push', 'origin', '+main'])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['push', 'origin', '+refs/heads/main'])).toThrow(UnsafeMergeArgsError);
+    expect(() =>
+      safeArgs(['push', '--no-follow-tags', '--recurse-submodules=no', 'origin', '+main']),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(() =>
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        '+refs/heads/main',
+      ]),
+    ).toThrow(UnsafeMergeArgsError);
     // I3 forbids force outright — even a non-protected destination may not
     // ride the marker through the guard.
-    expect(() => safeArgs(['push', 'origin', '+feat:refs/heads/feat'])).toThrow(
-      UnsafeMergeArgsError,
-    );
+    expect(() =>
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        '+feat:refs/heads/feat',
+      ]),
+    ).toThrow(UnsafeMergeArgsError);
   });
 
   test('round-2: a FETCH refspec forcing the protected branch is refused; the legal fetch stays legal', () => {
@@ -201,10 +354,24 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
   });
 
   test('round-2: bare symbolic push refspecs are refused — explicit src:dst required', () => {
-    expect(() => safeArgs(['push', 'origin', 'HEAD'])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['push', 'origin', '@'])).toThrow(UnsafeMergeArgsError);
-    expect(safeArgs(['push', 'origin', 'feat:refs/heads/feat'])).toEqual([
+    expect(() =>
+      safeArgs(['push', '--no-follow-tags', '--recurse-submodules=no', 'origin', 'HEAD']),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(() =>
+      safeArgs(['push', '--no-follow-tags', '--recurse-submodules=no', 'origin', '@']),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        'feat:refs/heads/feat',
+      ]),
+    ).toEqual([
       'push',
+      '--no-follow-tags',
+      '--recurse-submodules=no',
       'origin',
       'feat:refs/heads/feat',
     ]);
@@ -263,28 +430,33 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     ).toThrow(UnsafeMergeArgsError);
   });
 
-  test('round-193: the base-ref read shape passes; broader gh pr view shapes are refused', () => {
-    expect(safeArgs(['pr', 'view', '7', '--json', 'baseRefName'])).toEqual([
+  test('round-193 + round-1193-r3: the base-ref read shape passes (tip OID added); broader gh pr view shapes are refused', () => {
+    expect(safeArgs(['pr', 'view', '7', '--json', 'baseRefName,baseRefOid'])).toEqual([
       'pr',
       'view',
       '7',
       '--json',
-      'baseRefName',
+      'baseRefName,baseRefOid',
     ]);
-    // A different json field, a multi-field list, a missing pr number, a
-    // trailing flag, and a non-numeric pr are all unknown — the read stays
-    // exactly one shape.
+    // A different json field, a field list without the OID, a missing pr
+    // number, a trailing flag, and a non-numeric pr are all unknown — the
+    // read stays exactly one shape.
     expect(() => safeArgs(['pr', 'view', '7', '--json', 'headRefName'])).toThrow(
       /refused: unknown argv shape/,
     );
     expect(() => safeArgs(['pr', 'view', '7', '--json', 'baseRefName,headRefName'])).toThrow(
       UnsafeMergeArgsError,
     );
-    expect(() => safeArgs(['pr', 'view', '--json', 'baseRefName'])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['pr', 'view', '7', '--json', 'baseRefName', '--jq', '.'])).toThrow(
+    expect(() => safeArgs(['pr', 'view', '7', '--json', 'baseRefName'])).toThrow(
       UnsafeMergeArgsError,
     );
-    expect(() => safeArgs(['pr', 'view', 'abc', '--json', 'baseRefName'])).toThrow(
+    expect(() => safeArgs(['pr', 'view', '--json', 'baseRefName,baseRefOid'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() =>
+      safeArgs(['pr', 'view', '7', '--json', 'baseRefName,baseRefOid', '--jq', '.']),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['pr', 'view', 'abc', '--json', 'baseRefName,baseRefOid'])).toThrow(
       UnsafeMergeArgsError,
     );
   });
@@ -292,27 +464,78 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
   test('round-3: push FLAGS are refused — the discarded-flag blind spot is closed', () => {
     // Each would otherwise be a legal explicit src:dst push — refused
     // BECAUSE of the force token riding the tail.
-    expect(() => safeArgs(['push', 'origin', '--force', 'feat:refs/heads/feat'])).toThrow(
-      /flags are not part of the documented push shape/,
+    expect(() =>
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        '--force',
+        'feat:refs/heads/feat',
+      ]),
+    ).toThrow(
+      /flags beyond --no-follow-tags and --recurse-submodules=no are not part of the documented push shape/,
     );
     expect(() =>
-      safeArgs(['push', 'origin', '--force-with-lease', 'feat:refs/heads/feat']),
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        '--force-with-lease',
+        'feat:refs/heads/feat',
+      ]),
     ).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['push', 'origin', '-qf', 'feat:refs/heads/feat'])).toThrow(
-      UnsafeMergeArgsError,
-    );
+    expect(() =>
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        '-qf',
+        'feat:refs/heads/feat',
+      ]),
+    ).toThrow(UnsafeMergeArgsError);
     // The flag-free explicit push stays legal.
-    expect(safeArgs(['push', 'origin', 'feat:refs/heads/feat'])).toEqual([
+    expect(
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        'feat:refs/heads/feat',
+      ]),
+    ).toEqual([
       'push',
+      '--no-follow-tags',
+      '--recurse-submodules=no',
       'origin',
       'feat:refs/heads/feat',
     ]);
   });
 
   test('round-3: an empty-src deletion refspec is refused (remote-branch deletion)', () => {
-    expect(() => safeArgs(['push', 'origin', ':refs/heads/feat'])).toThrow(UnsafeMergeArgsError);
-    expect(safeArgs(['push', 'origin', 'feat:refs/heads/feat'])).toEqual([
+    expect(() =>
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        ':refs/heads/feat',
+      ]),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        'feat:refs/heads/feat',
+      ]),
+    ).toEqual([
       'push',
+      '--no-follow-tags',
+      '--recurse-submodules=no',
       'origin',
       'feat:refs/heads/feat',
     ]);
@@ -322,39 +545,49 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     // `refs/heads/*:refs/heads/*` IS an explicit src:dst, and its literal
     // destination never equals the protected branch — yet the push updates
     // it. No glob metacharacter may ride a push refspec.
-    expect(() => safeArgs(['push', 'origin', 'refs/heads/*:refs/heads/*'])).toThrow(
-      /contains a glob/,
-    );
-    expect(() => safeArgs(['push', 'origin', 'feat:refs/heads/*'])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['push', 'origin', 'refs/heads/*:refs/heads/main'])).toThrow(
-      UnsafeMergeArgsError,
-    );
-    expect(() => safeArgs(['push', 'origin', 'feat:refs/heads/?ain'])).toThrow(
-      UnsafeMergeArgsError,
-    );
-    expect(() => safeArgs(['push', 'origin', 'feat:refs/heads/[m]ain'])).toThrow(
-      UnsafeMergeArgsError,
-    );
+    expect(() => safeArgs(push('refs/heads/*:refs/heads/*'))).toThrow(/contains a glob/);
+    expect(() => safeArgs(push('feat:refs/heads/*'))).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(push('refs/heads/*:refs/heads/main'))).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(push('feat:refs/heads/?ain'))).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(push('feat:refs/heads/[m]ain'))).toThrow(UnsafeMergeArgsError);
     // The glob-free explicit push stays legal.
-    expect(safeArgs(['push', 'origin', 'feat:refs/heads/feat'])).toEqual([
-      'push',
-      'origin',
-      'feat:refs/heads/feat',
-    ]);
+    expect(safeArgs(push('feat:refs/heads/feat'))).toEqual(push('feat:refs/heads/feat'));
   });
 
   test('round-4: the heads/<branch> partial-name alias is the protected branch too', () => {
-    expect(() => safeArgs(['push', 'origin', 'feat:heads/main'])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['push', 'origin', 'heads/main'])).toThrow(UnsafeMergeArgsError);
-    expect(() =>
-      safeArgs(['push', 'origin', 'feat:heads/deliver'], { protectedBranch: 'deliver' }),
-    ).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(push('feat:heads/main'))).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(push('heads/main'))).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(push('feat:heads/deliver'), { protectedBranch: 'deliver' })).toThrow(
+      UnsafeMergeArgsError,
+    );
     // An unrelated branch under the alias spelling stays legal.
-    expect(safeArgs(['push', 'origin', 'feat:heads/feat'])).toEqual([
-      'push',
-      'origin',
-      'feat:heads/feat',
-    ]);
+    expect(safeArgs(push('feat:heads/feat'))).toEqual(push('feat:heads/feat'));
+  });
+
+  test('round-4: the fetch shape is FLAG-FREE and GLOB-FREE — the remote slot included', () => {
+    // A flag with no ':' is not a refspec, so the destination loop below
+    // never saw it: unconditional refusal on sight.
+    expect(() => safeArgs(['fetch', 'origin', '--upload-pack=<cmd>'])).toThrow(
+      /flags and globs are not part of the documented fetch shape/,
+    );
+    // The flag lands in the remote slot — still refused.
+    expect(() => safeArgs(['fetch', '--upload-pack=<cmd>', 'origin', 'x'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['-C', '/repo', 'fetch', '-q', 'origin', 'main'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    // A glob names no single destination, so the protected-branch check
+    // cannot see the forced update of main it authorizes.
+    expect(() => safeArgs(['fetch', 'origin', '+refs/heads/*:refs/heads/*'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['fetch', 'origin', 'refs/heads/main?'])).toThrow(UnsafeMergeArgsError);
+    // The executor's own fetch (and the flag-free plain forms) stay legal.
+    expect(
+      safeArgs(['-C', '/repo', 'fetch', 'origin', '+refs/pull/7/head:refs/pull/7/head']),
+    ).toEqual(['-C', '/repo', 'fetch', 'origin', '+refs/pull/7/head:refs/pull/7/head']);
+    expect(safeArgs(['fetch', 'origin', 'main'])).toEqual(['fetch', 'origin', 'main']);
   });
 
   test('round-3: worktree list/remove are flag-free — --force is refused', () => {
@@ -396,17 +629,39 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     ]);
   });
 
-  test('realMergeEffects.readBaseRef reads exactly `gh pr view <n> --json baseRefName` (injected runner)', async () => {
+  test('realMergeEffects.readBaseRef reads exactly `gh pr view <n> --json baseRefName,baseRefOid` (injected runner)', async () => {
     const ghCalls: string[][] = [];
     const effects = realMergeEffects({
       repoRoot: '/repo',
       run: async (args: string[]) => {
         ghCalls.push(args);
-        return { code: 0, stdout: '{"baseRefName":"main"}\n', stderr: '' };
+        return {
+          code: 0,
+          stdout:
+            '{"baseRefName":"main","baseRefOid":"1111222233334444555566667777888899990000"}\n',
+          stderr: '',
+        };
       },
     });
-    expect(await effects.readBaseRef(7)).toEqual({ ok: true, baseRefName: 'main' });
-    expect(ghCalls).toEqual([['pr', 'view', '7', '--json', 'baseRefName']]);
+    const tip = '1111222233334444555566667777888899990000';
+    expect(await effects.readBaseRef(7)).toEqual({
+      ok: true,
+      baseRefName: 'main',
+      baseTipSha: tip,
+    });
+    expect(ghCalls).toEqual([['pr', 'view', '7', '--json', 'baseRefName,baseRefOid']]);
+
+    // An OID that is not full 40-hex is OMITTED (the gate refuses a
+    // merge parent it cannot verify), never guessed.
+    const shortOid = realMergeEffects({
+      repoRoot: '/repo',
+      run: async () => ({
+        code: 0,
+        stdout: '{"baseRefName":"main","baseRefOid":"abc123"}\n',
+        stderr: '',
+      }),
+    });
+    expect(await shortOid.readBaseRef(7)).toEqual({ ok: true, baseRefName: 'main' });
 
     // A nonzero exit, unparseable JSON, and a missing/empty field all fail
     // closed as { ok: false } — never a guessed base.
@@ -479,7 +734,15 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     expect(gitCalls).toEqual([
       ['-C', '/repo', 'rev-parse', '--verify', '--quiet', 'refs/pull/7/head^{commit}'],
       ['-C', '/repo', 'fetch', 'origin', '+refs/pull/7/head:refs/pull/7/head'],
-      ['-C', '/wt/pr-7', 'push', 'origin', 'HEAD:refs/heads/feat-7'],
+      [
+        '-C',
+        '/wt/pr-7',
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        'HEAD:refs/heads/feat-7',
+      ],
     ]);
     // An unresolvable ref is { ok: false }, never a throw.
     const missing = realMergeEffects({
@@ -491,5 +754,318 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
 
   test('headRefFor is the PR-number truth ref', () => {
     expect(headRefFor(7)).toBe('refs/pull/7/head');
+  });
+
+  test('mergeWorktreeBranchFor is the prepared worktree branch the resolver gates on (#1193)', () => {
+    expect(mergeWorktreeBranchFor(7)).toBe('refs/heads/cq-merge/pr-7');
+  });
+});
+
+describe('safeArgs round-1193: the read-only diff shape (the resolver pre-push scan)', () => {
+  const from = sha('a');
+  const to = sha('b');
+  // The hardened flag list is load-bearing (review P1, PR #1628): the
+  // pinned set is the shape, asserted verbatim so the gate cannot drift
+  // off it.
+  const FLAGS = [...HARDENED_DIFF_FLAGS, '--unified=0'];
+  const legal = (): string[] => ['-C', '/repo', 'diff', ...FLAGS, from, to];
+
+  test('the EXACT shape passes — the hardened flags verbatim, then two full 40-hex shas', () => {
+    expect(safeArgs(legal())).toEqual(['-C', '/repo', 'diff', ...FLAGS, from, to]);
+    // The hardening is present, by name (review P1, PR #1628).
+    expect(legal()).toContain('--no-ext-diff');
+    expect(legal()).toContain('--no-textconv');
+  });
+
+  test('every deviation is an unknown shape — shas must be FULL hex, flags fixed, arity exact', () => {
+    const base = ['diff', ...FLAGS] as string[];
+    // A short sha or a revision expression can never ride the shape.
+    expect(() => safeArgs([...base, 'abc123', to])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs([...base, `${from}..${to}`, to])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs([...base, from, 'refs/heads/feat'])).toThrow(UnsafeMergeArgsError);
+    // Flag drift: reordered, dropped, or extra.
+    const reordered = ['diff', FLAGS[1] as string, FLAGS[0] as string, ...FLAGS.slice(2), from, to];
+    expect(() => safeArgs(reordered)).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['diff', ...FLAGS.slice(1), from, to])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs([...base, '--stat', from, to])).toThrow(UnsafeMergeArgsError);
+    // The historical pre-hardening argv (--no-color + --unified=0 only) is
+    // refused — the old shape must not keep passing beside the new one.
+    expect(() => safeArgs(['diff', '--no-color', '--unified=0', from, to])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    // Arity drift.
+    expect(() => safeArgs(['diff', ...FLAGS, from])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['diff'])).toThrow(UnsafeMergeArgsError);
+    // A mutation vocabulary is still refused: diff is READ-ONLY by shape,
+    // and no flag can turn it otherwise.
+    expect(() => safeArgs([...base, '--output=/tmp/x', from, to])).toThrow(UnsafeMergeArgsError);
+  });
+
+  test('realMergeEffects.diffPatch routes the exact hardened argv at the repo root (injected runner — zero processes, no fs)', async () => {
+    const gitCalls: string[][] = [];
+    const effects = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async (args: string[]) => {
+        gitCalls.push(args);
+        return { code: 0, stdout: 'diff --git a/x b/x\n', stderr: '' };
+      },
+    });
+    const result = await effects.diffPatch(from, to);
+    expect(result).toEqual({ code: 0, stdout: 'diff --git a/x b/x\n', stderr: '' });
+    expect(gitCalls).toEqual([['-C', '/repo', 'diff', ...FLAGS, from, to]]);
+  });
+});
+
+describe('safeArgs round-1193-r2: the topology read shape (rev-list --parents)', () => {
+  const resolved = sha('c');
+
+  test('the EXACT shape passes — --parents -n 1 plus one full 40-hex sha', () => {
+    expect(safeArgs(['-C', '/repo', 'rev-list', '--parents', '-n', '1', resolved])).toEqual([
+      '-C',
+      '/repo',
+      'rev-list',
+      '--parents',
+      '-n',
+      '1',
+      resolved,
+    ]);
+  });
+
+  test('every deviation is an unknown shape', () => {
+    expect(() => safeArgs(['rev-list', '--parents', '-n', '1', 'abc123'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['rev-list', '-n', '1', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['rev-list', '--parents', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['rev-list', '--parents', '-n', '2', resolved])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['rev-list', '--parents', '-n', '1', resolved, 'HEAD'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['rev-list', '--parents', '-n', '1'])).toThrow(UnsafeMergeArgsError);
+  });
+
+  test('realMergeEffects.commitParents routes the exact argv and excludes the queried sha (injected runner)', async () => {
+    const gitCalls: string[][] = [];
+    const effects = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async (args: string[]) => {
+        gitCalls.push(args);
+        return { code: 0, stdout: `${resolved} ${sha('a')} ${sha('b')}\n`, stderr: '' };
+      },
+    });
+    const answer = await effects.commitParents(resolved);
+    expect(answer).toEqual({ ok: true, parents: [sha('a'), sha('b')] });
+    expect(gitCalls).toEqual([['-C', '/repo', 'rev-list', '--parents', '-n', '1', resolved]]);
+    const missing = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async () => ({ code: 128, stdout: '', stderr: 'bad object' }),
+    });
+    expect(await missing.commitParents(resolved)).toEqual({ ok: false });
+  });
+});
+
+describe('safeArgs round-1193-r3: the ancestry read shape (merge-base --is-ancestor)', () => {
+  const parent = sha('a');
+  const tip = sha('b');
+
+  test('the EXACT shape passes — --is-ancestor plus two full 40-hex shas', () => {
+    expect(safeArgs(['-C', '/repo', 'merge-base', '--is-ancestor', parent, tip])).toEqual([
+      '-C',
+      '/repo',
+      'merge-base',
+      '--is-ancestor',
+      parent,
+      tip,
+    ]);
+  });
+
+  test('every deviation is an unknown shape', () => {
+    expect(() => safeArgs(['merge-base', parent, tip])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['merge-base', '--is-ancestor', 'abc123', tip])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['merge-base', '--is-ancestor', parent, 'refs/heads/main'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['merge-base', '--is-ancestor', parent])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['merge-base', '--is-ancestor', '--all', parent, tip])).toThrow(
+      UnsafeMergeArgsError,
+    );
+  });
+
+  test('realMergeEffects.isAncestor routes the exact argv (injected runner — zero processes)', async () => {
+    const gitCalls: string[][] = [];
+    const effects = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async (args: string[]) => {
+        gitCalls.push(args);
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    });
+    const answer = await effects.isAncestor(parent, tip);
+    expect(answer).toEqual({ code: 0, stdout: '', stderr: '' });
+    expect(gitCalls).toEqual([['-C', '/repo', 'merge-base', '--is-ancestor', parent, tip]]);
+    // Exit 1 is a NOT-ancestor ANSWER, not a fault.
+    const no = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async () => ({ code: 1, stdout: '', stderr: '' }),
+    });
+    expect((await no.isAncestor(parent, tip)).code).toBe(1);
+  });
+});
+
+describe('safeArgs round-1193-r4: the message read and object-presence shapes (P2 ntJt/ntJj)', () => {
+  const resolved = sha('c');
+
+  test('the EXACT log shape passes — -1 --encoding=UTF-8 --format=%B plus one full 40-hex sha', () => {
+    expect(
+      safeArgs(['-C', '/repo', 'log', '-1', '--encoding=UTF-8', '--format=%B', resolved]),
+    ).toEqual(['-C', '/repo', 'log', '-1', '--encoding=UTF-8', '--format=%B', resolved]);
+    // Message-shaping drift (patches, ranges, extra commits) is refused,
+    // and the encoding is PINNED: the old flag-less shape and any other
+    // encoding must not pass (review P1 q2-s).
+    expect(() => safeArgs(['log', '-1', '--format=%b', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['log', '-p', '--format=%B', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['log', '-1', '--format=%B', 'abc123'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['log', '--format=%B', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['log', '-1', '--format=%B', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['log', '-1', '--encoding=UTF-16LE', '--format=%B', resolved])).toThrow(
+      UnsafeMergeArgsError,
+    );
+  });
+
+  test('the EXACT cat-file shape passes — -e plus one full 40-hex sha', () => {
+    expect(safeArgs(['-C', '/repo', 'cat-file', '-e', resolved])).toEqual([
+      '-C',
+      '/repo',
+      'cat-file',
+      '-e',
+      resolved,
+    ]);
+    // Type/flag drift is refused.
+    expect(() => safeArgs(['cat-file', '-e', resolved, 'commit'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['cat-file', '-t', resolved])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['cat-file', '-e', 'abc123'])).toThrow(UnsafeMergeArgsError);
+  });
+
+  test('the gate base fetch rides the existing colon-less fetch shape (safeArgs admits it)', () => {
+    expect(safeArgs(['-C', '/repo', 'fetch', 'origin', 'main'])).toEqual([
+      '-C',
+      '/repo',
+      'fetch',
+      'origin',
+      'main',
+    ]);
+  });
+
+  test('realMergeEffects routes the new argv shapes (injected runners — zero processes)', async () => {
+    const gitCalls: string[][] = [];
+    const effects = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async (args: string[]) => {
+        gitCalls.push(args);
+        return { code: 0, stdout: 'resolve\n', stderr: '' };
+      },
+    });
+    expect(await effects.readCommitMessage(resolved)).toEqual({
+      code: 0,
+      stdout: 'resolve\n',
+      stderr: '',
+    });
+    await effects.objectExists(resolved);
+    await effects.fetchBaseBranch('main');
+    expect(gitCalls).toEqual([
+      ['-C', '/repo', 'log', '-1', '--encoding=UTF-8', '--format=%B', resolved],
+      ['-C', '/repo', 'cat-file', '-e', resolved],
+      ['-C', '/repo', 'fetch', 'origin', 'main'],
+    ]);
+  });
+});
+
+describe('safeArgs round-1193-r5: the hardened push shape (--no-follow-tags, review P1 p522)', () => {
+  const sha1 = sha('a');
+
+  test('the hardened shape passes; the flag-LESS historical shape is now REFUSED', () => {
+    expect(
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        `${sha1}:refs/heads/feat`,
+      ]),
+    ).toEqual([
+      'push',
+      '--no-follow-tags',
+      '--recurse-submodules=no',
+      'origin',
+      `${sha1}:refs/heads/feat`,
+    ]);
+    // The old argv — the shape every pre-p522 caller sent — refuses:
+    // push.followTags must be structurally impossible, not discouraged.
+    expect(() => safeArgs(['push', 'origin', `${sha1}:refs/heads/feat`])).toThrow(
+      /must lead with --no-follow-tags/,
+    );
+    expect(() => safeArgs(['push'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['push', '--no-follow-tags'])).toThrow(UnsafeMergeArgsError);
+    expect(() =>
+      safeArgs(['push', '--no-follow-tags', '--recurse-submodules=no', 'origin']),
+    ).toThrow(UnsafeMergeArgsError);
+    // The one-flag shape (pre-rw4S) is refused too: recurseSubmodules=only
+    // can exit 0 WITHOUT pushing the branch, so the recursion mode is
+    // pinned, not inherited.
+    expect(() =>
+      safeArgs(['push', '--no-follow-tags', 'origin', `${sha1}:refs/heads/feat`]),
+    ).toThrow(/must lead with --no-follow-tags and --recurse-submodules=no/);
+    expect(() =>
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=on-demand',
+        'origin',
+        `${sha1}:refs/heads/feat`,
+      ]),
+    ).toThrow(/must lead with --no-follow-tags and --recurse-submodules=no/);
+  });
+
+  test('no SECOND flag can follow the hardened prefix — --force cannot ride', () => {
+    expect(() =>
+      safeArgs([
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        '--force',
+        'feat:refs/heads/feat',
+      ]),
+    ).toThrow(/flags beyond --no-follow-tags/);
+    expect(() => safeArgs(['push', '--follow-tags', 'origin', 'feat:refs/heads/feat'])).toThrow(
+      /must lead with --no-follow-tags/,
+    );
+  });
+
+  test('realMergeEffects.pushRef routes the hardened argv (injected runner — zero processes)', async () => {
+    const gitCalls: string[][] = [];
+    const effects = realMergeEffects({
+      repoRoot: '/repo',
+      gitRun: async (args: string[]) => {
+        gitCalls.push(args);
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    });
+    await effects.pushRef(`${sha1}:refs/heads/feat`, '/wt/pr-7');
+    expect(gitCalls).toEqual([
+      [
+        '-C',
+        '/wt/pr-7',
+        'push',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        'origin',
+        `${sha1}:refs/heads/feat`,
+      ],
+    ]);
   });
 });

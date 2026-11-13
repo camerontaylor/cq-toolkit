@@ -15,6 +15,7 @@ import {
   HEAD_REF,
   LABEL,
   NEW_SHA,
+  SHA,
   runLoop,
   scratchDirs,
 } from './review-loop.helpers.js';
@@ -96,6 +97,32 @@ test('second publication uses the confirmed advanced lease', async () => {
   expect(pushes).toHaveLength(2);
   expect(pushes[1]?.[3]).toBe(`--force-with-lease=refs/heads/${HEAD_REF}:${NEW_SHA}`);
   expect(outcome.actionsPosted).toBeGreaterThan(0);
+});
+
+test('publication callback runs only after a successful push', async () => {
+  for (const fails of [false, true]) {
+    const world = defaultWorld();
+    if (fails) world.pushFailAt = 1;
+    const gitLog: string[][] = [];
+    const confirmed: string[] = [];
+    let pushCompleted = false;
+    await runLoop(world, {
+      gitLog,
+      driverResults: [completeWorker(fixLine(true, 'fix', [NEW_SHA]))],
+      gitHook: async (args, run) => {
+        const result = await run(args);
+        if (args[2] === 'push' && result.code === 0) pushCompleted = true;
+        return result;
+      },
+      onPublished: (sha) => {
+        expect(pushCompleted).toBe(true);
+        expect(sha).toBe(SHA);
+        confirmed.push(sha);
+      },
+    });
+    if (fails) expect(confirmed).toEqual([]);
+    else expect(confirmed.length).toBeGreaterThan(0);
+  }
 });
 
 test('rejected publication is reconciled and withholds all replies without retry', async () => {

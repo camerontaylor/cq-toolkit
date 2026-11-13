@@ -144,6 +144,8 @@ class DeployPlanTests(DeployPlanFixture):
 
         for side_effect in (unit_changed, status_changed, state_changed):
             with self.subTest(side_effect=side_effect.__name__):
+                for path in self.record_dir.glob("controller-*.json"):
+                    path.unlink()
                 with mock.patch.object(host, "switch", side_effect=side_effect):
                     with self.assertRaises(dc.RecoveryRequired) as raised:
                         dc.deploy_plan(self.effects, host, self.target, self.tag,
@@ -154,6 +156,8 @@ class DeployPlanTests(DeployPlanFixture):
                 self.write_state("queue.json", {"items": [
                     {"id": "pr1", "kind": "merged", "state": "done"}], "starts": []})
         # Unchanged surfaces that cannot be observed are never absence proof.
+        for path in self.record_dir.glob("controller-*.json"):
+            path.unlink()
         with mock.patch.object(host, "switch", side_effect=ValueError("early")):
             with mock.patch.object(dc, "no_change_observation",
                                    side_effect=OSError("units unreadable")):

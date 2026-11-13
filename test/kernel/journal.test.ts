@@ -226,6 +226,19 @@ describe('makeManifest', () => {
     expect(() => makeManifest(plan)).toThrow(/job 'd1'.*not plain JSON data/);
   });
 
+  test('rejects an array carrying a non-index property the hash would omit', () => {
+    // structuredClone keeps an enumerable non-index array property while
+    // canonicalJson covers only 0..length-1, so two inputs differing only in
+    // that property would hash alike and a resume could reuse a stale result.
+    const list = [1, 2] as number[] & { extra?: string };
+    list.extra = 'not hashed';
+    const plan: Plan = {
+      id: 'plan-array-property',
+      jobs: [{ id: 'a1', op: 'op-a', input: { list } }],
+    };
+    expect(() => makeManifest(plan)).toThrow(/job 'a1'.*input.list.*array property 'extra'/);
+  });
+
   test('rejects a nested class instance before its prototype is erased', () => {
     class InputValue {
       n = 1;

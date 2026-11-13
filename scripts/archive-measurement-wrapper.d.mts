@@ -6,6 +6,8 @@ export interface MeasurementArchiveResult {
   host: string;
   destination?: string;
   localBundle: string | null;
+  /** Set when a required or invalid CLI input failed validation (exit 2, I1). */
+  usage?: true;
   reason?: string;
   archive: { state: 'present' | 'unavailable' | 'unknown'; reason?: string };
 }

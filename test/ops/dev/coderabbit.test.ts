@@ -74,6 +74,14 @@ describe('parseReviewerStream', () => {
     expect(parsed.findings[0]).not.toHaveProperty('rule');
   });
 
+  test.each(['mystery', ['reviewing'], null])('rejects unknown progress status %s', (status) => {
+    const stream = [
+      JSON.stringify({ type: 'status', status }),
+      JSON.stringify({ type: 'complete', status: 'review_completed' }),
+    ].join('\n');
+    expect(decideCompletion(0, parseReviewerStream(stream)).kind).toBe('blocked');
+  });
+
   test('a full cycle: status beats, findings, and a terminal complete', () => {
     const stdout = [
       JSON.stringify({ type: 'review_context', sha: 'abc' }),

@@ -754,5 +754,128 @@
       }
     },
     "valid": true
+  },
+  {
+    "name": "history-wire",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "review-history",
+      "repo": "camerontaylor/cq-toolkit",
+      "target": "main",
+      "head_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "task": "S3a",
+      "branch": "feat/local-first-s3a",
+      "limit": 10,
+      "cursor": 0
+    },
+    "valid": true
+  },
+  {
+    "name": "history-limit-zero-refused",
+    "type": "wire",
+    "value": {
+      "v": 1,
+      "op": "review-history",
+      "repo": "camerontaylor/cq-toolkit",
+      "target": "main",
+      "limit": 0,
+      "cursor": 0
+    },
+    "valid": false
+  },
+  {
+    "name": "history-response",
+    "type": "history",
+    "value": {
+      "v": 1,
+      "status": "ok",
+      "scope": "task",
+      "relation": "ancestral",
+      "repeat": true,
+      "predecessor": {
+        "request_id": "local-1",
+        "item": "lr-aaaaaaaaaaaa-g1",
+        "generation": 1,
+        "state": "done",
+        "created_at": "2026-11-01T00:00:00Z",
+        "head_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "head_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "same_task": true,
+        "same_branch": true,
+        "relationship": "ancestral",
+        "ancestry": "server",
+        "commits_ahead": 3
+      },
+      "delta": {
+        "method": "tree",
+        "files": 2,
+        "insertions": 10,
+        "deletions": 4,
+        "binary_files": 0,
+        "partial": false,
+        "commits_ahead": 3,
+        "ancestry": "server"
+      },
+      "summary": {
+        "requests": 2,
+        "invocations": 1,
+        "completed": 1,
+        "failed": 0
+      },
+      "cue": "Previously reviewed at aaaaaaaaaaaa. Since then: 3 commits (server-verified), 2 files, +10/-4 (tree comparison). 1 CodeRabbit review(s) completed for this work. This request will wait behind first reviews. It is queued; keep working or wait.",
+      "entries": [
+        {
+          "item": "lr-aaaaaaaaaaaa-g1",
+          "request_id": "local-1",
+          "generation": 1,
+          "state": "done",
+          "created_at": "2026-11-01T00:00:00Z",
+          "head_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "head_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "task": "S3a",
+          "branch": "feat/local-first-s3a",
+          "same_task": true,
+          "same_branch": true,
+          "relationship": "ancestral",
+          "ancestry": "server",
+          "commits_ahead": 3,
+          "delta": {
+            "method": "tree",
+            "files": 2,
+            "insertions": 10,
+            "deletions": 4,
+            "binary_files": 0,
+            "partial": false
+          }
+        }
+      ],
+      "cursor": 0,
+      "next_cursor": null,
+      "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "valid": true
+  },
+  {
+    "name": "history-degraded-response",
+    "type": "history",
+    "value": {
+      "v": 1,
+      "status": "degraded",
+      "reason": "index unavailable",
+      "scope": "none",
+      "relation": "none",
+      "repeat": false,
+      "predecessor": null,
+      "delta": null,
+      "summary": null,
+      "cue": null,
+      "entries": [],
+      "cursor": 0,
+      "next_cursor": null,
+      "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "valid": true
   }
 ]

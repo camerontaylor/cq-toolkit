@@ -58,6 +58,18 @@ function expectEveryJobGuarded(text: string, file: string): void {
 }
 
 describe('required workflow event selection', () => {
+  it('instantiates the required-check example without drift', () => {
+    const doc = read('policy/templates/required-check.md');
+    const yaml = doc.split('```yaml\n')[1]?.split('\n```')[0];
+    expect(yaml).toBeDefined();
+    const rendered = yaml!
+      .replaceAll('{{RUNNER}}', 'ubuntu-latest')
+      .replaceAll('{{NODE_VERSION}}', '24')
+      .replaceAll('{{INSTALL_CMD}}', 'pnpm install --frozen-lockfile');
+    expect(read('.github/workflows/ci.yml')).toBe(
+      `# instantiated from policy/templates/required-check.md — edit the template, not this file\n${rendered}\n`,
+    );
+  });
   it.each(['.github/workflows/ci.yml', '.github/workflows/denylist.yml'])(
     'every job in %s selects PRs and main pushes at the JOB level',
     (file) => {

@@ -1,3 +1,4 @@
+import { managedTerminal } from '../dev/reviewTestKit.js';
 import { describe, expect, it } from 'vitest';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -35,6 +36,9 @@ describe('review.run', () => {
           : undefined,
       );
       const result = await makeReviewRun({
+        managedSubmit: managedTerminal([
+          { severity: 'major', fileName: 'src/a.ts', line: 1, excerpt: 'vendor wording' },
+        ]),
         drivers: scriptedDrivers(undefined, 0, () => [
           { ...identity, severity: 'high', text: 'agent wording' },
         ]),

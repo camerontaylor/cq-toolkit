@@ -2,14 +2,16 @@
 
 Pattern: available for instantiation from phase 1. In this repo, the
 unfiltered push/pull_request CI workflow's static job is the current test
-enforcer and runs the `test:unit` and `test:e2e` lanes on every PR and
-push (except the machine-written `cq-state` ledger branch); the retired `merge-queue-gate` template's workflow ran no tests. Affected-test
+enforcer: it runs the `test:unit` and `test:e2e` lanes on every PR head,
+nightly and manual dispatches, and default-branch pushes; recognized
+prose/Python-only PRs run formatting without the TS gates. The retired
+`merge-queue-gate` template's workflow ran no tests. Affected-test
 selection is required locally through `pnpm test:narrow`, alongside
 `pnpm run check:static` and `pnpm run format:check`, under the canonical
 [focused-checks contract](../../docs/focused-checks-contract.md). Full-suite
-checks run only in CI; green required CI on the exact candidate SHA is the
-sole full-gate authority. The optional CI job below is an adoption example,
-not the repository's local test command.
+checks run only in CI; green required CI (`static` and `denylist`) on the
+exact PR head is the sole full-gate authority. The optional CI job below is
+an adoption example, not the repository's local test command.
 
 ## The idea
 
@@ -26,10 +28,12 @@ dependencies that are invisible to the module graph — dynamic imports,
 fixture coupling, global setup, behavior fixed by config or data files —
 mean a change can break a test that no file-graph mapping would select.
 That is why the unfiltered push/pull_request CI static job is the safety net:
-it runs the full suite on main pushes (and on every PR head), and it,
-not the reduced-selection job, enforces completeness. The retired `merge-queue-gate`
-template's workflow ran no tests. Required local selection provides focused
-feedback; it does not establish full candidate correctness.
+it runs the full suite on main pushes, nightly and manual dispatches, and on
+every PR head with TypeScript changes (recognized prose/Python-only PRs run
+formatting only; undetected or unknown changes fall back to full checks), and
+it, not the reduced-selection job, enforces completeness. The retired
+`merge-queue-gate` template's workflow ran no tests. Required local selection
+provides focused feedback; it does not establish full candidate correctness.
 
 ## The I4 interplay
 

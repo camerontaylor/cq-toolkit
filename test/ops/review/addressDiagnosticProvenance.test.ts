@@ -8,6 +8,7 @@ import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { describe, expect, test } from 'vitest';
+import { withAddressOwnership } from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 import { makeAddressWorker, type AddressAttempt } from '../../../src/ops/review/addressWorker.js';
 import { resolveCqConfigDefaults } from '../../../src/ops/analyze/cqConfigDefaults.js';
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
@@ -121,7 +122,13 @@ async function fixture(options: {
   });
   return {
     repo,
-    engine,
+    engine: {
+      ...engine,
+      fix: (...args: Parameters<typeof engine.fix>) =>
+        withAddressOwnership({ repoRoot: repo.root, git, source: 'local', production: false }, () =>
+          engine.fix(...args),
+        ),
+    },
     attempts,
     captured,
     calls: () => calls,

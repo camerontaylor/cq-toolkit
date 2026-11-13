@@ -65,6 +65,9 @@ const LAST_COMMIT = '2026-01-01T00:00:00Z';
 const LAST_COMMIT_MS = Date.parse(LAST_COMMIT);
 export const NOW_MS = LAST_COMMIT_MS + REVIEW_ACCEPT_SETTLE_MS;
 const AFTER_COMMIT = '2026-01-01T00:00:00.500Z';
+/** The reviewed head SHA — `eligible()` and `approved()` agree on it so the
+ * default fixture is a valid head-bound pair (#1213). */
+export const HEAD = 'a'.repeat(40);
 
 /** An acceptable review that is NOT an all-clear: non-author, APPROVED,
  * postdates the last commit (the classifyPrs.helpers.ts fixture body — known
@@ -74,6 +77,7 @@ export const approved = (pr: number): ReviewSummary => ({
   authorLogin: 'alice',
   state: 'APPROVED',
   body: 'approving the cache changes',
+  commitOid: HEAD,
   submittedAt: AFTER_COMMIT,
 });
 
@@ -89,6 +93,7 @@ export const eligible = (pr: number, extra?: Partial<MergePrsCandidate>): MergeP
   reviews: [approved(pr)],
   issueComments: [],
   lastCommitAt: LAST_COMMIT,
+  headRefOid: HEAD,
   headRefName: `feat/${String(pr)}`,
   baseRefName: 'main',
   state: 'open',
@@ -122,7 +127,10 @@ export const baseInput = (
  * every call; scriptable failures: a nonzero fetchRef and per-pr mergePr
  * failures (the union test's failed-merge surface). validateRef answers
  * the same sha EXCEPT for refs listed in driftRefs, which drift after
- * their first validate (the acted-verification surface).
+ * their first validate (the plan→run drift-stale surface), and EXCEPT for
+ * the merge family's worktree branches (`refs/heads/cq-merge/pr-<n>` —
+ * issue #1193), where the publication gate's single read answers
+ * `resolutionSha` (default MOVED off the baseline; null = unresolvable).
  */
 export class FakeMergeEffects implements MergeEffects {
   readonly calls: string[] = [];
@@ -141,11 +149,17 @@ export class FakeMergeEffects implements MergeEffects {
   /** Refs whose head MOVES between the baseline validate (call 1) and any
    * later validate — the plan→run drift-stale scripting hook. */
   readonly driftRefs = new Set<string>();
+  /** The sha the publication gate reads on a prepared worktree's branch
+   * (issue #1193); null = unresolvable. Default MOVED off the baseline. */
+  resolutionSha: string | null = 'c'.repeat(40);
   private validateCounts = new Map<string, number>();
   private mergeCallCounts = new Map<number, number>();
 
   async validateRef(ref: string): Promise<{ ok: boolean; sha?: string }> {
     this.calls.push(`validate:${ref}`);
+    if (ref.startsWith('refs/heads/cq-merge/')) {
+      return this.resolutionSha === null ? { ok: false } : { ok: true, sha: this.resolutionSha };
+    }
     const count = (this.validateCounts.get(ref) ?? 0) + 1;
     this.validateCounts.set(ref, count);
     if (this.driftRefs.has(ref) && count > 1) return { ok: true, sha: 'd'.repeat(40) };
@@ -193,6 +207,42 @@ export class FakeMergeEffects implements MergeEffects {
     return OK;
   }
 
+  async diffPatch(from: string, to: string): Promise<GhResult> {
+    this.calls.push(`diff:${from}..${to}`);
+    return OK;
+  }
+  async commitParents(): Promise<{ ok: boolean; parents?: string[] }> {
+    // The valid topology the publication gate expects (review P1 round 2):
+    // exactly one parent, and that parent is the baseline validateRef
+    // answers with — a resolution stacked directly on the prepared head.
+    return { ok: true, parents: ['b'.repeat(40)] };
+  }
+  async isAncestor(): Promise<GhResult> {
+    return { code: 1, stdout: '', stderr: '' };
+  }
+  async readCommitMessage(): Promise<GhResult> {
+    return { code: 0, stdout: 'resolve\n', stderr: '' };
+  }
+
+  async readCommitEncoding(): Promise<GhResult> {
+    return { code: 0, stdout: '', stderr: '' };
+  }
+
+  async readCommitIdentity(): Promise<GhResult> {
+    return {
+      code: 0,
+      stdout: 'Fixture <fixture@localhost>\nFixture <fixture@localhost>\n',
+      stderr: '',
+    };
+  }
+
+  async objectExists(): Promise<GhResult> {
+    return { code: 0, stdout: '', stderr: '' };
+  }
+
+  async fetchBaseBranch(): Promise<GhResult> {
+    return { code: 0, stdout: '', stderr: '' };
+  }
   async pushRef(ref: string, fromPath: string): Promise<GhResult> {
     this.calls.push(`push:${ref}@${fromPath}`);
     return OK;

@@ -6,7 +6,10 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { describe, expect, test } from 'vitest';
 import { parseFlags } from '../../src/cli/main.js';
+import { KnownUsageSummarySchema } from '../../src/kernel/schema.js';
+import type { CliErrorArtifact } from '../../src/cli/output.js';
 import { list } from '../../src/registry/index.js';
+import { makeTmpPlansRoot } from './registry.helpers.js';
 import {
   capture,
   makeTmpDir,
@@ -227,4 +230,81 @@ describe('4bdffd1 pins: silence matrix, null-proto flags, URL-escape, reserved s
       }
     },
   );
+});
+
+// #1195: spend on every exit where it is known — the machine-mode error
+// artifact of a THROWN op carries the op's validated usage carrier (the
+// carrier review.run attaches to its rejections), and a bare throw keeps the
+// artifact carrier-free.
+describe('#1195 thrown-exit usage carrier', () => {
+  test('machine mode: an op that throws WITH a settled-usage carrier writes it on the error artifact', async () => {
+    const { code, out, err } = await capture(['spendthrow', '--json'], { opsRoot });
+    expect(code).toBe(1);
+    // The error artifact replaced the (never-existing) result: single stdout
+    // artifact, no `status` key, stderr empty.
+    const artifact = JSON.parse(out) as CliErrorArtifact;
+    expect(artifact.error).toMatchObject({ kind: 'thrown', subcommand: 'spendthrow', exitCode: 1 });
+    expect(Object.hasOwn(artifact, 'status')).toBe(false);
+    // The carrier is schema-valid (the kernel's own validator) and exact.
+    expect(KnownUsageSummarySchema.parse(artifact.error.usageSummary)).toEqual({
+      usage: { input: 120, output: 40, cacheRead: 8, cacheWrite: 0 },
+      knownCount: 1,
+      unknownCount: 0,
+      unpricedCount: 1,
+    });
+    expect(err).toBe('');
+  });
+
+  test('machine mode: a BARE throw keeps the artifact carrier-free (no regression)', async () => {
+    const { code, out, err } = await capture(['plainthrow', '--json'], { opsRoot });
+    expect(code).toBe(1);
+    const artifact = JSON.parse(out) as CliErrorArtifact;
+    expect(artifact.error).toMatchObject({
+      kind: 'thrown',
+      subcommand: 'plainthrow',
+      exitCode: 1,
+    });
+    expect(Object.hasOwn(artifact.error, 'usageSummary')).toBe(false);
+    expect(err).toBe('');
+  });
+
+  test('human mode: the spendthrow narration is unchanged (one cq: line, stdout empty)', async () => {
+    const { code, out, err } = await capture(['spendthrow'], { opsRoot });
+    expect(code).toBe(1);
+    expect(out).toBe('');
+    expect(err).toBe('cq: spendthrow threw: spendthrow: deliberate throw after settled spend\n');
+  });
+
+  test('machine mode: a plan-subcommand runtime throw carries its usage carrier too', async () => {
+    // A plan importer that rejects with the carrier escapes runPlanEntryCommand
+    // to the plan-subcommand thrown site — the second thrown exit.
+    const root = await makeTmpPlansRoot('cq-i1-spendplan-');
+    await writeFile(
+      join(root, 'spendplan.js'),
+      [
+        'export const plan = {',
+        "  name: 'spendplan',",
+        '  importer: async () => {',
+        "    const error = new Error('spendplan: importer threw after settled spend');",
+        '    error.usageSummary = { knownCount: 0, unknownCount: 1, unpricedCount: 1 };',
+        '    throw error;',
+        '  },',
+        '};',
+        '',
+      ].join('\n'),
+    );
+    const { code, out, err } = await capture(['spendplan', '--json'], {
+      opsRoot,
+      plansRoot: root,
+    });
+    expect(code).toBe(1);
+    const artifact = JSON.parse(out) as CliErrorArtifact;
+    expect(artifact.error).toMatchObject({ kind: 'thrown', subcommand: 'spendplan', exitCode: 1 });
+    expect(KnownUsageSummarySchema.parse(artifact.error.usageSummary)).toEqual({
+      knownCount: 0,
+      unknownCount: 1,
+      unpricedCount: 1,
+    });
+    expect(err).toBe('');
+  });
 });

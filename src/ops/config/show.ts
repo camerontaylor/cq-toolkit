@@ -1,7 +1,13 @@
 // config.show — print what the toolkit's CQ_* environment resolves to.
 //
-// Read-only: resolves `readCqEnv(process.env)` and reports each live key with
-// its value (`set` for secrets) and source layer, then the warnings and errors.
+// Read-only: reports the entry/run `CqEnv` snapshot, with each live key's
+// value (`set` for secrets) and source layer, then the warnings and errors.
+// The snapshot is taken once at the process entry (or run start), so an
+// ambient `CQ_*` change after entry is never reported here. Outside a run the
+// fallback is one fresh read (`currentCqEnv()`), which keeps a standalone
+// `cq config` a live diagnostic; an explicit raw environment record remains
+// the deliberate injection seam for callers and tests.
+//
 // An op result cannot carry exit 2, so the report is returned `ok` even when it
 // lists errors: the CLI (src/cli/main.ts) exits 2 for `config` when the snapshot
 // has errors, after the report reached stdout. `strict` fails the op (exit 1)
@@ -9,13 +15,14 @@
 import {
   readCqEnv,
   formatCqEnvDiagnostics,
+  type CqEnv,
   type CqEnvDiagnostic,
   type CqEnvSource,
 } from '../../config/env.js';
 import { CQ_ENV_ENTRIES } from '../../config/env-registry.js';
+import { currentCqEnv } from '../../config/run-env.js';
 import type { Op } from '../../kernel/types.js';
 import { redactIfUrl } from '../../shared/urlRedact.js';
-import { processEnv } from '../../config/process-env.js';
 
 export interface ConfigShowInput {
   /** Fail (not just report) when there are warnings. */
@@ -40,11 +47,18 @@ function showValue(name: string, value: unknown): unknown {
   return typeof value === 'string' ? redactIfUrl(name, value) : value;
 }
 
-/** Build the report from an environment (exported for tests). */
+/**
+ * Build the report from an explicit raw environment (the injection seam), or
+ * from the entry/run snapshot when none is supplied. Outside a run the
+ * snapshot fallback is one fresh read of the live environment.
+ */
 export function buildConfigShowReport(
-  env: Readonly<Record<string, string | undefined>> = processEnv(),
+  env?: Readonly<Record<string, string | undefined>>,
 ): ConfigShowReport {
-  const snapshot = readCqEnv(env);
+  return reportFromSnapshot(env === undefined ? currentCqEnv() : readCqEnv(env));
+}
+
+function reportFromSnapshot(snapshot: CqEnv): ConfigShowReport {
   const keys: ConfigShowKey[] = CQ_ENV_ENTRIES.filter((e) => e.status === 'live').map((e) => {
     const value = snapshot.values[e.name];
     return {
@@ -62,13 +76,15 @@ export function buildConfigShowReport(
   return { keys, warnings: [...snapshot.warnings], errors: [...snapshot.errors] };
 }
 
-const configShow: Op<ConfigShowInput, ConfigShowReport> = async (input) => {
-  const report = buildConfigShowReport();
-  const lines = formatCqEnvDiagnostics(report);
-  if (report.errors.length === 0 && input.strict === true && report.warnings.length > 0) {
-    return { status: 'failed', error: lines.join('\n') };
-  }
-  return { status: 'ok', value: report };
-};
+export function makeConfigShow(snapshot?: CqEnv): Op<ConfigShowInput, ConfigShowReport> {
+  return async (input) => {
+    const report = snapshot === undefined ? buildConfigShowReport() : reportFromSnapshot(snapshot);
+    const lines = formatCqEnvDiagnostics(report);
+    if (report.errors.length === 0 && input.strict === true && report.warnings.length > 0) {
+      return { status: 'failed', error: lines.join('\n') };
+    }
+    return { status: 'ok', value: report };
+  };
+}
 
-export default configShow;
+export default makeConfigShow();

@@ -29,6 +29,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
 CRQ = ROOT / 'crq.py'
+CQ_SNAPSHOT = {'source_sha': 'a' * 40, 'source_blob_sha': 'b' * 40, 'finding_sha256': 'c' * 64,
+               'path': 'a', 'line_start': 1, 'line_end': 1, 'source': '1: x', 'incomplete': False}
 
 
 def _load(name, path):
@@ -340,7 +342,7 @@ class CqSessionsDirTest(unittest.TestCase):
         config = {'repo': 'o/r', 'repair': {'cq_bin': 'cq.js',
                                             'budget': {'max_tokens': 1, 'wall_clock_min': 1}}}
         job = {'job': 'j', 'pr': 1, 'finding': {'path': 'a', 'line': 1, 'body': 'b'},
-               'source_snapshot': {}}
+               'source_snapshot': CQ_SNAPSHOT}
         with tempfile.TemporaryDirectory() as tmp:
             job_dir = Path(tmp) / 'job'
             job_dir.mkdir()
@@ -394,6 +396,33 @@ class CqSessionsDirTest(unittest.TestCase):
         self.assertEqual(session['sessionIds'], [])
         self.assertIsNone(session['sessionsDir'])
 
+    def test_invalid_output_still_writes_the_session_link(self):
+        """A crashed run yields non-JSON stdout (or a non-dict value); the
+        session it created must still be linked from session.json."""
+        cqd = _load('crq_cq_invalid_output', ROOT / 'crq_repair' / 'drivers' / 'cq.py')
+        config = {'repo': 'o/r', 'repair': {'cq_bin': 'cq.js',
+                  'budget': {'max_tokens': 1, 'wall_clock_min': 1}}}
+        job = {'job': 'j', 'finding': {'path': 'a', 'line': 1, 'body': 'b'},
+               'source_snapshot': CQ_SNAPSHOT}
+        for stdout in ('boom', '{"status": "ok", "value": []}'):
+            with self.subTest(stdout=stdout), tempfile.TemporaryDirectory() as tmp:
+                job_dir = Path(tmp) / 'job'
+                job_dir.mkdir()
+
+                def command(argv, cwd=None, env=None, timeout=None):
+                    Path(env['CQ_SESSIONS_DIR']).mkdir()
+                    (Path(env['CQ_SESSIONS_DIR']) / 's-9.jsonl').write_text('{}\n')
+                    return mock.Mock(returncode=1, stdout=stdout, stderr='')
+
+                with mock.patch.object(cqd, 'command', command):
+                    result = cqd.invoke(config, {'model': 'p/m', 'budget': {}}, job,
+                                        Path(tmp), job_dir)
+                self.assertEqual((result['stop'], result['summary']),
+                                 ('error', 'invalid cq output'))
+                session = json.loads((job_dir / 'session.json').read_text())
+                self.assertEqual(session['sessionId'], 's-9')
+                self.assertEqual(session['sessionIds'], ['s-9'])
+
     def test_value_session_id_wins(self):
         session, _ = self._run(True, value_sid='s-value')
         self.assertEqual(session['sessionId'], 's-value')
@@ -402,7 +431,7 @@ class CqSessionsDirTest(unittest.TestCase):
         cqd = _load('crq_cq_retry_driver', ROOT / 'crq_repair' / 'drivers' / 'cq.py')
         config = {'repo': 'o/r', 'repair': {'cq_bin': 'cq.js',
                   'budget': {'max_tokens': 1, 'wall_clock_min': 1}}}
-        job = {'job': 'j', 'finding': {'path': 'a', 'line': 1, 'body': 'b'}, 'source_snapshot': {}}
+        job = {'job': 'j', 'finding': {'path': 'a', 'line': 1, 'body': 'b'}, 'source_snapshot': CQ_SNAPSHOT}
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             sessions = directory / 'sessions'
@@ -436,13 +465,15 @@ class CqTimeoutLogTest(unittest.TestCase):
     def test_invoke_logs_the_timed_out_invocation(self):
         cqd = _load('crq_cq_driver_timeout', ROOT / 'crq_repair' / 'drivers' / 'cq.py')
         job = {'job': 'j', 'pr': 1, 'finding': {'path': 'a', 'line': 1, 'body': 'b'},
-               'source_snapshot': {}}
+               'source_snapshot': CQ_SNAPSHOT}
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             with mock.patch.object(cqd, 'command', side_effect=self._timeout()):
-                with self.assertRaises(subprocess.TimeoutExpired):
-                    cqd.invoke(self._config(), {'model': 'p/m', 'budget': {}}, job,
-                               directory, directory)
+                # The deadline kill is the runner's typed budget stop (PR #1507);
+                # the log-preservation guarantee is unchanged.
+                report = cqd.invoke(self._config(), {'model': 'p/m', 'budget': {}}, job,
+                                    directory, directory)
+            self.assertEqual(report['stop'], 'budget')
             log = (directory / 'driver.log').read_text()
             self.assertIn('# invocation', log)
             self.assertIn('partial-out', log)
@@ -453,8 +484,9 @@ class CqTimeoutLogTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             with mock.patch.object(cqd, 'command', side_effect=self._timeout()):
-                with self.assertRaises(subprocess.TimeoutExpired):
-                    cqd.judge(self._config(), {'model': 'p/m'}, {}, directory, directory)
+                report = cqd.judge(self._config(), {'model': 'p/m'}, {}, directory, directory)
+            self.assertEqual(report['stop'], 'budget')
+            self.assertEqual(report['verdict'], 'unsure')
             log = (directory / 'driver.log').read_text()
             self.assertIn('partial-out', log)
             self.assertIn('partial-err', log)

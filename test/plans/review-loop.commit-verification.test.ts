@@ -14,7 +14,7 @@ import {
 
 // ---------------------------------------------------------------------------
 // Verification-failure stages, pinned DIRECTLY on the gate (round-1/2 low):
-// `not-40-hex` is unreachable through the loop — parseFixOutput already
+// `not-40-hex` is unreachable through the loop — parseFixContract already
 // rejects non-40-hex claims — so the taxonomy is pinned by calling
 // commitVerificationFailure itself over a minimal fake git.
 // ---------------------------------------------------------------------------

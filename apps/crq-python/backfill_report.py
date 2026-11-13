@@ -4,11 +4,19 @@ from pathlib import Path
 
 import review_ledger as ledger
 
+# The typed failure-class enum accepted by repair_tick.mark_finding_outcome;
+# reporting mirrors it to recognize legacy or foreign rows without inferring.
+FAILURE_CLASSES = frozenset(("transient", "exhausted", "evidence", "protected-path", "owner-decision"))
+
 
 def finding_triage(root, *, strict=True, limit=None):
     """Read atomic rows; status may expose partial counts with explicit errors."""
     counts = collections.Counter()
     needs_human = []
+    owner_decisions = []
+    operator_attention = []
+    unknown_failure = []
+    owner_count = operator_count = unknown_failure_count = 0
     context_failures = []
     human_count = error_count = context_failure_count = 0
     errors = []
@@ -40,9 +48,43 @@ def finding_triage(root, *, strict=True, limit=None):
                 context_failures.append({**detail, "status": status, "context_error": row["context_error"]})
         if status == "needs-human":
             human_count += 1
+            failure_class = row.get("failure_class")
+            # D7 (crq-ts-migration-plan-20261109 item 8): a failed tool, missing
+            # evidence or an exhausted attempt is never an owner decision, and a
+            # legacy row written before typed classes existed proves nothing
+            # either way. Only the explicit typed owner-decision class routes
+            # there; absent, unrecognized or non-string classes stay operator
+            # attention under an honest unknown bucket. Never inferred from
+            # reason prose; malformed JSON values are data, not owner authority.
+            is_unknown = not (isinstance(failure_class, str)
+                              and failure_class in FAILURE_CLASSES)
+            if failure_class == "owner-decision":
+                owner_count += 1
+                if limit is None or len(owner_decisions) < limit:
+                    owner_decisions.append({**detail, "failure_class": failure_class})
+            elif not is_unknown:
+                operator_count += 1
+                if limit is None or len(operator_attention) < limit:
+                    operator_attention.append({**detail, "failure_class": failure_class})
+            else:
+                unknown_failure_count += 1
+                if limit is None or len(unknown_failure) < limit:
+                    unknown_failure.append({**detail, "failure_class": failure_class})
+                operator_count += 1
             if limit is None or len(needs_human) < limit:
                 needs_human.append(detail)
     result = {"counts": dict(sorted(counts.items())), "needs_human": needs_human}
+    if human_count:
+        result.update(owner_decisions=owner_decisions, operator_attention=operator_attention,
+                      owner_decisions_count=owner_count, operator_attention_count=operator_count,
+                      unknown_failure_class=unknown_failure,
+                      unknown_failure_class_count=unknown_failure_count)
+        if unknown_failure_count:
+            result["unknown_failure_class_note"] = (
+                "rows with an absent or unrecognized failure_class (including "
+                "non-string legacy values); treated as operator attention, not "
+                "owner decisions (D7); unknown_failure_class_count is a subset "
+                "of operator_attention_count")
     if context_failure_count:
         result["context_failures"] = context_failures
         result["context_failures_count"] = context_failure_count
@@ -51,7 +93,8 @@ def finding_triage(root, *, strict=True, limit=None):
         result.update(counts_complete=error_count == 0, error_count=error_count,
                       errors=errors, errors_omitted=error_count - len(errors),
                       needs_human_count=human_count,
-                      needs_human_omitted=human_count - len(needs_human))
+                      needs_human_omitted=human_count - len(needs_human),
+                      unknown_failure_class_omitted=unknown_failure_count - len(unknown_failure))
     return result
 
 
@@ -79,8 +122,12 @@ def summary(repo, ranked, queue, original=None, *, findings_root=None):
             group["unresolved_objects"].append({"path": row["path"], "reason": row["reason"], "countable_lines": row["lines"]})
         group["empty_files"] += row["disposition"] == "empty"
     baseline_result = None
-    if original:
-        if original["id"] != ledger.digest({k: v for k, v in original.items() if k != "id"}):
+    # An empty {} baseline is provided evidence too: validate its digest rather
+    # than silently omitting baseline accounting (falsy-but-present values).
+    if original is not None:
+        # A baseline without an id (an empty {} included) is malformed evidence:
+        # report it through the module's error type, never a bare KeyError.
+        if "id" not in original or original["id"] != ledger.digest({k: v for k, v in original.items() if k != "id"}):
             raise ledger.IntegrityError("baseline hash mismatch")
         baseline_result = {"id": original["id"], "target": original["target"], "surviving_T1_debt": 0,
                            "baseline_T1_reviewed_since": 0, "baseline_T1_removed_or_superseded": 0,

@@ -25,6 +25,21 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'spend authorization'):
             host.apply(committed, overlay)
 
+    def test_overlay_fixer_concurrency_is_optional_and_bounded(self):
+        committed = host.committed(self.root)
+        self.assertEqual(committed['repair']['max_concurrent_items'], 1)
+        host.validate(self.overlay)
+        self.assertEqual(host.apply(committed, self.overlay)['repair']['max_concurrent_items'], 1)
+        overlay = copy.deepcopy(self.overlay)
+        overlay['config']['repair']['max_concurrent_items'] = 10
+        host.validate(overlay)
+        self.assertEqual(json.loads(host.render(self.root, overlay))['repair']['max_concurrent_items'], 10)
+        for value in (True, False, 0, 11, 1.5, '10', None):
+            with self.subTest(value=value):
+                overlay['config']['repair']['max_concurrent_items'] = value
+                with self.assertRaisesRegex(ValueError, 'max_concurrent_items'):
+                    host.validate(overlay)
+
     def test_overlay_blackout_switch_is_optional_boolean(self):
         committed = host.committed(self.root)
         self.assertIs(committed['repair']['blackout']['enabled'], False)
@@ -43,6 +58,16 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         overlay['config']['repair']['blackout'] = {'start': '00:00'}
         with self.assertRaises(ValueError):
             host.validate(overlay)
+
+    def test_missing_overlay_parent_is_a_refusal_not_a_created_block(self):
+        # The accepted legacy baseline carries no repair.blackout object.
+        committed = host.committed(self.root)
+        del committed['repair']['blackout']
+        overlay = copy.deepcopy(self.overlay)
+        overlay['config']['repair']['blackout'] = {'enabled': True}
+        host.validate(overlay)
+        with self.assertRaisesRegex(ValueError, r'repair\.blackout'):
+            host.apply(committed, overlay)
 
     def test_transition_legacy_record_template_is_checked_before_render(self):
         for template in ['http://queue.example.invalid/{item',

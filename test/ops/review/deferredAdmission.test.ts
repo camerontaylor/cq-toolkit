@@ -1,3 +1,4 @@
+import { managedTerminal } from '../dev/reviewTestKit.js';
 import { afterEach, expect, test, vi } from 'vitest';
 import { writeFile } from 'node:fs/promises';
 import type { DriverFactory } from '../../../src/driver/factory.js';
@@ -76,8 +77,10 @@ async function fixture() {
     ...records: Parameters<ReturnType<typeof effects.openLedger>['save']>[0]['records']
   ) => effects.openLedger(state.branch).save({ version: 2, branch: state.branch, records });
   save(origin);
+  const managedSubmit = vi.fn(managedTerminal([]));
   const run = () =>
     makeReviewRun({
+      managedSubmit,
       drivers: cleanDrivers(),
       effectsFactory: () => effects,
       queueClient: client,
@@ -113,7 +116,7 @@ async function fixture() {
     save(origin, { kind: 'vendor-debt', debt, at: effects.nowIso() });
     return debt;
   };
-  return { repo, effects, state, client, origin, save, run, enroll };
+  return { repo, effects, state, client, origin, save, run, enroll, managedSubmit };
 }
 
 function cleanDrivers() {
@@ -168,7 +171,8 @@ for (const [name, patch] of staleCases)
       'terminal',
     );
     expect(result.report?.deferredVendorDebt).toBeUndefined();
-    expect(f.effects.calls.filter((call) => call.command === 'coderabbit')).toHaveLength(1);
+    expect(f.managedSubmit).toHaveBeenCalledOnce();
+    expect(f.effects.calls.filter((call) => call.command === 'coderabbit')).toHaveLength(0);
     expect(f.client.enqueue).not.toHaveBeenCalled();
     expect(
       f.effects
@@ -187,7 +191,9 @@ test('no debt: dirty current state falls back without claiming debt', async () =
     await prepareDeferredVendorReview(f.effects, 'main', read.state, f.client),
   ).toBeUndefined();
   const result = await f.run();
-  expect(f.effects.calls.filter((call) => call.command === 'coderabbit')).toHaveLength(1);
+  expect(f.managedSubmit).toHaveBeenCalledOnce();
+  expect(result.status).toBe('ok');
+  expect(f.effects.calls.filter((call) => call.command === 'coderabbit')).toHaveLength(0);
   expect(result.report?.deferredVendorDebt).toBeUndefined();
   expect(f.client.enqueue).not.toHaveBeenCalled();
 });

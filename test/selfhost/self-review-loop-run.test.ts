@@ -121,7 +121,7 @@ describe('runSelfReviewLoop — real run', () => {
     const summary = await runSelfReviewLoop(
       {
         gh,
-        git: async (): Promise<GhResult> => ({ code: 0, stdout: '', stderr: '' }),
+        git: async (): Promise<GhResult> => ({ code: 0, stdout: journalRoot, stderr: '' }),
         nowMs: () => {
           reads += 1;
           return laterRead;
@@ -148,7 +148,7 @@ describe('runSelfReviewLoop — real run', () => {
     const summary = await runSelfReviewLoop(
       {
         gh,
-        git: async (): Promise<GhResult> => ({ code: 0, stdout: '', stderr: '' }),
+        git: async (): Promise<GhResult> => ({ code: 0, stdout: journalRoot, stderr: '' }),
         nowMs: () => (tick += 1),
         loop: fakeLoop(calls, async (pr) => fakeOutcome(pr)),
       },

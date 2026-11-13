@@ -116,7 +116,11 @@ function sdkDriver(scratchDir: string, frames: readonly unknown[]): ClaudeCodeDr
         for (const frame of frames) yield frame;
       },
       tool: (name: string) => ({ name }),
-      createSdkMcpServer: (options: { name: string }) => ({ name: options.name, tools: [] }),
+      createSdkMcpServer: (options: { name: string }) => ({
+        name: options.name,
+        tools: [],
+        instance: { server: { setRequestHandler() {} } },
+      }),
     }),
   });
 }

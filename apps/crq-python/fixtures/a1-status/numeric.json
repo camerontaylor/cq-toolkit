@@ -1,0 +1,280 @@
+{
+  "schema": "cq.crq-a1-status-vector/v1",
+  "family": "numeric",
+  "note": "Python numeric comparison edges",
+  "cases": [
+    {
+      "name": "int-float-equal",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "1",
+        "b": "1.0"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": true,
+          "compare": 0
+        }
+      }
+    },
+    {
+      "name": "bigint-float-exact",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "9007199254740992",
+        "b": "9007199254740992.0"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": true,
+          "compare": 0
+        }
+      }
+    },
+    {
+      "name": "adjacent-bigint-float-greater",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "9007199254740993",
+        "b": "9007199254740992.0"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": false,
+          "compare": 1
+        }
+      }
+    },
+    {
+      "name": "adjacent-bigint-sort-reverse",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "9007199254740992",
+        "b": "9007199254740993"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": false,
+          "compare": -1
+        }
+      }
+    },
+    {
+      "name": "bool-int-equal",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "true",
+        "b": "1"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": true,
+          "compare": 0
+        }
+      }
+    },
+    {
+      "name": "bool-float-equal",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "false",
+        "b": "0.0"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": true,
+          "compare": 0
+        }
+      }
+    },
+    {
+      "name": "negative-zero-equal",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "-0.0",
+        "b": "0"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": true,
+          "compare": 0
+        }
+      }
+    },
+    {
+      "name": "float-equal",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "0.1",
+        "b": "0.1"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": true,
+          "compare": 0
+        }
+      }
+    },
+    {
+      "name": "float-less",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "0.1",
+        "b": "0.2"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": false,
+          "compare": -1
+        }
+      }
+    },
+    {
+      "name": "infinity-pair",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "1e400",
+        "b": "1e400"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": true,
+          "compare": 0
+        }
+      }
+    },
+    {
+      "name": "infinity-greater-than-bigint",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "1e400",
+        "b": "9007199254740993"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": false,
+          "compare": 1
+        }
+      }
+    },
+    {
+      "name": "negative-infinity-less-than-bigint",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "-1e400",
+        "b": "-9007199254740993"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": false,
+          "compare": -1
+        }
+      }
+    },
+    {
+      "name": "negative-infinity-less-than-infinity",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "-1e400",
+        "b": "1e400"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": false,
+          "compare": -1
+        }
+      }
+    },
+    {
+      "name": "nan-never-equal",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "NaN",
+        "b": "NaN"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": false,
+          "compare": 0
+        }
+      }
+    },
+    {
+      "name": "nan-vs-int",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "NaN",
+        "b": "1"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": false,
+          "compare": 0
+        }
+      }
+    },
+    {
+      "name": "string-vs-int-type-error",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "\"x\"",
+        "b": "1"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": false,
+          "compare": null,
+          "error": "TypeError"
+        }
+      }
+    },
+    {
+      "name": "bool-vs-string-type-error",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "true",
+        "b": "\"1\""
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": false,
+          "compare": null,
+          "error": "TypeError"
+        }
+      }
+    },
+    {
+      "name": "none-vs-int-type-error",
+      "source": "python.numeric_compare",
+      "input": {
+        "a": "null",
+        "b": "0"
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "equal": false,
+          "compare": null,
+          "error": "TypeError"
+        }
+      }
+    }
+  ]
+}

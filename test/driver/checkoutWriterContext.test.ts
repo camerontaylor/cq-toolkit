@@ -203,6 +203,37 @@ test('begin compensation restores verified checkout binding (mutation: default c
   }
 });
 
+test.each(['controlled-child', 'checkout-mutator'] as const)(
+  'parent %s mutation prevents child compensation (mutation: ignore parent mutation state)',
+  async (boundary) => {
+    const f = await fixture();
+    const child = new CheckoutWriterContext(async (common, key) => {
+      const slot = await acquireSlot(common, key);
+      return key === 4
+        ? {
+            ...slot,
+            writeMetadata: async () => {
+              throw new Error('injected child persistence failure');
+            },
+          }
+        : slot;
+    }, f.context);
+    try {
+      // A real writer boundary has already run in the original coordination context.
+      if (boundary === 'controlled-child')
+        await f.context.run(() => makeGhRunner({ bin: process.execPath })([f.script]));
+      else f.context.markCheckoutMutation();
+      const earlier = await child.acquire(f.root, 3);
+      await child.acquire(f.root, 4);
+      await expect(child.begin()).rejects.toThrow('injected child persistence failure');
+      expect((await earlier.readMetadata())?.incomplete).toBe(true);
+    } finally {
+      await child.close();
+      await f.context.close();
+    }
+  },
+);
+
 test.each([
   {
     name: 'nonzero',

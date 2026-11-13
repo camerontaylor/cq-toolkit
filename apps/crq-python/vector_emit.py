@@ -97,10 +97,17 @@ def canonical_vectors() -> Dict[str, Any]:
 
     cases = [
         receipt("sorted-keys-and-scalars", {"b": 1, "a": [True, False, None], "c": {"z": "x", "y": 2}}),
+        receipt("key-order-is-code-point-not-utf16be", {"\uffff": 1, "\U00010000": 2, "a": 3, "\u00e9": 4}),
         receipt("ascii-escapes-unicode", {"unicode": "雪", "emoji": "😀"}),
         receipt("escapes-controls", {"text": "quote\" backslash\\ newline\n tab\t"}),
+        receipt("escapes-del-and-unicode-separators", {"text": "\x00\x01\x08\x0b\x0c\x1f\x7f\u0080\u2028\u2029\"\\/"}),
         receipt("python-float-repr-is-preserved", {"float": 1.0, "small": 0.1,
                                                    "negative_zero": -0.0, "exponent": 1e20}),
+        receipt("float-repr-boundaries", {"fixed_high": 1e15, "scientific_high": 1e16,
+                                          "fixed_low": 1e-4, "scientific_low": 1e-5,
+                                          "subnormal": 5e-324, "maximum": 1.7976931348623157e308,
+                                          "integer_valued": 1234567890123456.0,
+                                          "shortest_round_trip": 0.30000000000000004}),
         receipt("large-integers-are-written-in-full", {"safe": 9007199254740991,
                                                        "unsafe": 9007199254740993,
                                                        "wide": 2 ** 63}),
@@ -108,6 +115,9 @@ def canonical_vectors() -> Dict[str, Any]:
         receipt("lone-high-surrogate-round-trips-as-an-escape", {"value": "\ud800"}),
         ledger("sorted-keys-and-scalars", {"b": 1, "a": [True, False, None], "c": {"z": "x", "y": 2}}),
         ledger("utf8-without-escapes", {"unicode": "雪", "emoji": "😀", "control": "\u0001"}),
+        ledger("escapes-controls-and-del", {"text": "\x00\x01\x08\x0b\x0c\x1f\x7f\u0080\u2028\u2029\"\\/"}),
+        ledger("astral-and-bmp-scalars-stay-literal", {"emoji": "😀", "unicode": "雪",
+                                                       "del": "\u007f", "separator": "\u2028"}),
         ledger("utf16be-key-order", {"\uffff": 1, "\U00010000": 2, "a": 3, "\u00e9": 4}),
         ledger("integer-bounds", {"maximum": 9007199254740991, "minimum": -9007199254740991}),
         ledger("float-is-refused", {"bad": 1.5}),
@@ -129,10 +139,30 @@ def time_vectors() -> Dict[str, Any]:
         ("compact-run-suffix", "20261108T000000.500Z"),
         ("negative-offset", "2026-11-07T19:00:00-05:00"),
         ("microseconds", "2026-11-08T00:00:00.123456Z"),
+        ("fraction-truncates-to-microseconds", "2026-11-08T00:00:00.1234567Z"),
+        ("comma-fraction", "2026-11-08T00:00:00,5Z"),
+        ("basic-date-and-time", "20261108T0000Z"),
+        ("hour-only", "2026-11-08T00"),
+        ("midnight-rollover", "2026-11-08T24:00:00Z"),
+        ("lowercase-separator", "2026-11-08t00:00:00Z"),
+        ("space-separator", "2026-11-08 00:00:00Z"),
+        ("iso-week-without-weekday", "2026-W45T00:00:00Z"),
+        ("iso-week-53-exists", "2026-W53-1"),
+        ("offset-hour-only", "2026-11-08T00:00:00+10"),
+        ("offset-basic", "2026-11-08T00:00:00+1000"),
+        ("offset-with-seconds-and-fraction", "2026-11-08T00:00:00+10:00:30.5"),
+        ("negative-zero-offset", "2026-11-08T00:00:00-00:00"),
+        ("leap-day", "2024-02-29T00:00:00Z"),
         ("non-string", 123),
         ("empty", ""),
         ("garbage", "garbage"),
         ("impossible-month", "2026-13-08T00:00:00Z"),
+        ("invalid-leap-day", "2026-02-29T00:00:00Z"),
+        ("year-zero", "0000-01-01T00:00:00Z"),
+        ("iso-week-53-missing", "2025-W53-1"),
+        ("offset-exceeds-day", "2026-11-08T00:00:00+24:00"),
+        ("offset-seconds-out-of-range", "2026-11-08T00:00:00+23:59:60"),
+        ("fraction-separator-without-digits", "2026-11-08T00:00:00."),
         ("offset-overflow", "0001-01-01T00:00:00+10:00"),
     ]
     cases = []
@@ -142,10 +172,15 @@ def time_vectors() -> Dict[str, Any]:
     for name, value in [
         ("iso-exact-seconds", "2026-11-08T00:00:00Z"),
         ("iso-strips-zero-milliseconds", "2026-11-08T00:00:00.000Z"),
+        ("iso-non-padded-components", "2026-11-8T0:0:0Z"),
         ("iso-nonzero-fraction-raises", "2026-11-08T00:00:00.500Z"),
         ("iso-six-digit-fraction-raises", "2026-11-08T00:00:00.000000Z"),
+        ("iso-four-zero-fraction-shifts-and-raises", "2026-11-08T00:00:00.0000Z"),
+        ("iso-nonzero-fraction-after-zero-milliseconds-raises", "2026-11-08T00:00:00.000123Z"),
         ("iso-offset-raises", "2026-11-08T10:00:00+10:00"),
         ("iso-date-only-raises", "2026-11-08"),
+        ("iso-trailing-newline-is-trimmed-by-slice", "2026-11-08T00:00:00Z\n"),
+        ("iso-double-z-is-trimmed", "2026-11-08T00:00:00ZZ"),
         ("iso-none-is-none", None),
         ("iso-empty-is-none", ""),
     ]:
@@ -260,7 +295,7 @@ def classify_vectors() -> Dict[str, Any]:
                   '{"type":"error","errorType":"network_error","recoverable":true}\n'
                   '{"type":"complete","status":"review_completed"}\n', 1),
         _classify("timeout-exit-is-transient", "", 124),
-        _classify("sighup-exit-is-transient", "", 129),
+        _classify("sighup-exit-is-not-transient", "", 129),
         _classify("empty-existing-stream-is-interrupted", "", 0),
         _classify("absent-stream-is-interrupted", None, 0),
         _classify("unknown-severity-is-counted-under-its-name",
@@ -269,7 +304,6 @@ def classify_vectors() -> Dict[str, Any]:
     ]
     d2_whitelist = {
         "affirmative-no-fresh-completion-is-skipped",
-        "complete-status-other-than-review-completed-is-skipped",
     }
     for case in cases:
         if case["name"] in d2_whitelist:
@@ -347,14 +381,54 @@ def queue_bytes_vectors() -> Dict[str, Any]:
         "rl_backoff_min": 15,
     }
     canonical = json.dumps(realistic, indent=2) + "\n"
+    # The C1 repair-prepare commit point rewrites the whole queue from a
+    # re-serialized parse. These are the value shapes a production queue can
+    # contain that a naive encoder loses: float repr, integers beyond 2**53,
+    # non-BMP text, numeric-looking keys, and empty/nested containers.
+    production_shaped = {
+        "items": [
+            {
+                "id": "pr-9007199254740993",
+                "pr": 9007199254740993,
+                "kind": "merged",
+                "state": "done",
+                "ratio": 0.1,
+                "weight": 1.0,
+                "runs": {
+                    "10": {"round": 2, "nested": {"empty": {}, "list": []}},
+                    "2": {"round": 1, "canonical_id": "f" * 64},
+                },
+                "notes": ["\u96ea", "\U0001f600", "\u007f"],
+                "empty": {},
+                "nested": {"a": {"b": [1, 2.5, None, False]}},
+            }
+        ],
+        "paused": False,
+        "cooldown_until": None,
+        "rl_backoff_min": 15,
+        "counter": 2 ** 63,
+        "tiny": 5e-324,
+    }
     cases = [
         encoded("insertion-order-is-preserved", {"z": 1, "a": 2, "m": {"b": 1, "a": 2}}),
         encoded("ascii-escaping-is-the-default", {"emoji": "😀", "unicode": "雪",
                                                     "control": "\u0001"}),
+        encoded("escapes-keys-and-del", {"\u007f": 1, "\u2028": 2, "quote\"": 3}),
+        encoded("nested-indent-layout", {"a": [], "b": {}, "c": [[], {}],
+                                           "d": [{"e": []}, [1, [2, {"f": 3}]]]}),
+        encoded("deep-indent-layout", {"x": {"y": {"z": [1, 2, {"w": "雪"}]}}}),
+        encoded("unicode-keys-and-values", {"雪": 1, "😀": 2, "del": "\u007f"}),
         encoded("python-float-repr-is-preserved", {"one": 1.0, "tenth": 0.1,
                                                     "negative_zero": -0.0, "exponent": 1e20}),
+        encoded("float-repr-boundaries", {"fixed_high": 1e15, "scientific_high": 1e16,
+                                           "fixed_low": 1e-4, "scientific_low": 1e-5,
+                                           "subnormal": 5e-324,
+                                           "maximum": 1.7976931348623157e308,
+                                           "integer_valued": 1234567890123456.0,
+                                           "shortest_round_trip": 0.30000000000000004}),
         encoded("large-integers-are-written-in-full", {"safe": 9007199254740991,
                                                        "wide": 2 ** 63}),
+        encoded("production-shaped-queue-values", production_shaped),
         encoded("empty-containers-and-scalars", {"array": [], "object": {},
                                                  "none": None, "false": False}),
         encoded("realistic-queue-shape", realistic),
