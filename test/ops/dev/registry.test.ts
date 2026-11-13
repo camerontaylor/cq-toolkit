@@ -154,6 +154,29 @@ describe('dev family registry entries', () => {
     }
   });
 
+  test('dev.check parses the dispatched input BEFORE any repository read', async () => {
+    // An SDK caller can dispatch null (or an empty repoRoot) straight at the
+    // op: the setup reads the repository (the scanner probe), so the guard
+    // must answer with the `failed` taxonomy — never a rejected promise, and
+    // never a read of `/cq.json` for a repoRoot it did not parse.
+    const effects = vi.spyOn(effectModule, 'makeSubprocessDevEffects');
+    const scanner = vi.spyOn(denylistModule, 'checkScannerFor');
+    try {
+      const op = (await entryByName('dev.check').importer()) as (input: unknown) => Promise<{
+        status: string;
+        error?: string;
+      }>;
+      const absent = await op(null);
+      expect(absent.status).toBe('failed');
+      expect(absent.error).toContain('dev.check: invalid input');
+      expect((await op({ repoRoot: '' })).status).toBe('failed');
+      expect(effects).not.toHaveBeenCalled();
+      expect(scanner).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   test('the family carries exactly the strategy §3 lane-1 entries', () => {
     expect(registry.map((entry) => entry.name).sort()).toEqual([...ENTRY_NAMES].sort());
   });

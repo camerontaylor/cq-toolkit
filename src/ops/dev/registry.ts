@@ -214,11 +214,17 @@ export const registry: OpRegistryEntry[] = [
               import('./denylist.js'),
               import('node:fs/promises'),
             ]);
-            const dev = effects.makeSubprocessDevEffects(input.repoRoot);
-            const scanSecrets = await denylist.checkScannerFor(input.repoRoot, dev, (path) =>
-              fs.readFile(path, 'utf8'),
-            );
-            return m.makeDevCheck(dev, scanSecrets)(input);
+            // The setup reads the repository (the scanner probe), so it runs
+            // only AFTER the guard parsed the dispatched input: an SDK caller
+            // passing a null input or an empty repoRoot gets the `failed`
+            // taxonomy, never a rejection or a read of `/cq.json`.
+            return effects.guardDevOp('dev.check', DevCheckInputSchema, async (parsed) => {
+              const dev = effects.makeSubprocessDevEffects(parsed.repoRoot);
+              const scanSecrets = await denylist.checkScannerFor(parsed.repoRoot, dev, (path) =>
+                fs.readFile(path, 'utf8'),
+              );
+              return m.makeDevCheck(dev, scanSecrets)(parsed);
+            })(input);
           }) as Op<unknown, unknown>,
       ),
   },
