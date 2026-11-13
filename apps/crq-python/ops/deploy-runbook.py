@@ -919,11 +919,24 @@ class Run:
         raise RecoveryRequired(str(reason), record)
 
     def restore_before_switch(self, reason):
-        """Nothing live was switched: restart what this run stopped and
-        release this run's own marker. A restore failure is a fail-stop."""
+        """Nothing live was switched: verify the pre-switch measurements
+        still hold, then restart what this run stopped and release this
+        run's own marker. A restore failure is a fail-stop."""
         if self.hold is None or not getattr(self.hold, "acquired", False):
             return
         try:
+            # Nothing was switched, so the live config and the preserved
+            # queue identity must still match what was measured before the
+            # switch. Changed or unreadable state keeps the hold and falls
+            # through to the fail-stop below; only surfaces verified
+            # unchanged may restart triggers and release admission.
+            require(read_config(self.root) == self.original_config,
+                    "live config no longer matches the pre-switch "
+                    "measurement")
+            require(self.controller.preserved_digests(self.effects)
+                    == self.preserved,
+                    "preserved queue identity no longer matches the "
+                    "pre-switch measurement")
             active = sorted(unit for unit, state in (self.original or {}).items()
                             if state == "active")
             if self.original:
