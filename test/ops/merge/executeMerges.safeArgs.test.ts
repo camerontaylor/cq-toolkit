@@ -17,6 +17,18 @@ import { OK, sha } from './executeMerges.helpers.js';
 // ---------------------------------------------------------------------------
 
 describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
+  // Every push argv leads with the hardened prefix (PR #1641): the flag-less
+  // shape is refused, so a refspec test that omitted the flags would fail
+  // for the wrong reason (or pass as "refused" without reaching the check
+  // it names).
+  const push = (...refspecs: string[]): string[] => [
+    'push',
+    '--no-follow-tags',
+    '--recurse-submodules=no',
+    'origin',
+    ...refspecs,
+  ];
+
   test('squash: a squash-merge argv throws', () => {
     expect(() => safeArgs(['pr', 'merge', '7', '--squash'])).toThrow(UnsafeMergeArgsError);
     expect(() => safeArgs(['pr', 'merge', '7', 'squash'])).toThrow(UnsafeMergeArgsError);
@@ -527,6 +539,29 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
       'origin',
       'feat:refs/heads/feat',
     ]);
+  });
+
+  test('round-4: a glob push refspec is refused — git EXPANDS it at push time', () => {
+    // `refs/heads/*:refs/heads/*` IS an explicit src:dst, and its literal
+    // destination never equals the protected branch — yet the push updates
+    // it. No glob metacharacter may ride a push refspec.
+    expect(() => safeArgs(push('refs/heads/*:refs/heads/*'))).toThrow(/contains a glob/);
+    expect(() => safeArgs(push('feat:refs/heads/*'))).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(push('refs/heads/*:refs/heads/main'))).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(push('feat:refs/heads/?ain'))).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(push('feat:refs/heads/[m]ain'))).toThrow(UnsafeMergeArgsError);
+    // The glob-free explicit push stays legal.
+    expect(safeArgs(push('feat:refs/heads/feat'))).toEqual(push('feat:refs/heads/feat'));
+  });
+
+  test('round-4: the heads/<branch> partial-name alias is the protected branch too', () => {
+    expect(() => safeArgs(push('feat:heads/main'))).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(push('heads/main'))).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(push('feat:heads/deliver'), { protectedBranch: 'deliver' })).toThrow(
+      UnsafeMergeArgsError,
+    );
+    // An unrelated branch under the alias spelling stays legal.
+    expect(safeArgs(push('feat:heads/feat'))).toEqual(push('feat:heads/feat'));
   });
 
   test('round-4: the fetch shape is FLAG-FREE and GLOB-FREE — the remote slot included', () => {

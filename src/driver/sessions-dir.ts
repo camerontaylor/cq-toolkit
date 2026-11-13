@@ -20,7 +20,7 @@
 // semantics and is never snapshotted.
 
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { currentCqEnv } from '../config/run-env.js';
 import type { CqEnv } from '../config/env.js';
 import { processEnv } from '../config/process-env.js';
@@ -37,7 +37,7 @@ export function defaultSessionsDir(cqEnv?: CqEnv): string {
   }
   const stateHome = processEnv()['XDG_STATE_HOME'];
   const base =
-    stateHome !== undefined && stateHome.trim() !== ''
+    stateHome !== undefined && stateHome.trim() !== '' && isAbsolute(stateHome)
       ? stateHome
       : join(homedir(), '.local', 'state');
   return join(base, 'cq', 'sessions');

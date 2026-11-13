@@ -1361,8 +1361,8 @@
           },
           "expect": {
             "ok": false,
-            "error": "ValueError",
-            "message": "time data '\u0662\u0660\u0662\u0666-\u0661\u0661-\u0660\u0669T\u0660\u0660:\u0660\u0660:\u0660\u0660Z' does not match format '%Y-%m-%dT%H:%M:%SZ'"
+            "error": "IntegrityError",
+            "message": "expected exact UTC timestamp"
           }
         },
         {
@@ -1372,15 +1372,9 @@
             "value": "\u0662\u0660\u0662\u0666-11-09T00:00:00Z"
           },
           "expect": {
-            "ok": true,
-            "value": {
-              "year": 2026,
-              "month": 11,
-              "day": 9,
-              "hour": 0,
-              "minute": 0,
-              "second": 0
-            }
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "expected exact UTC timestamp"
           }
         },
         {
@@ -1390,15 +1384,9 @@
             "value": "2026-11-1\u0662T00:00:00Z"
           },
           "expect": {
-            "ok": true,
-            "value": {
-              "year": 2026,
-              "month": 11,
-              "day": 12,
-              "hour": 0,
-              "minute": 0,
-              "second": 0
-            }
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "expected exact UTC timestamp"
           }
         },
         {
@@ -1408,15 +1396,9 @@
             "value": "2026-11-09T0\u0662:00:00Z"
           },
           "expect": {
-            "ok": true,
-            "value": {
-              "year": 2026,
-              "month": 11,
-              "day": 9,
-              "hour": 2,
-              "minute": 0,
-              "second": 0
-            }
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "expected exact UTC timestamp"
           }
         },
         {
@@ -1426,15 +1408,9 @@
             "value": "2026-11-09T00:5\u0669:00Z"
           },
           "expect": {
-            "ok": true,
-            "value": {
-              "year": 2026,
-              "month": 11,
-              "day": 9,
-              "hour": 0,
-              "minute": 59,
-              "second": 0
-            }
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "expected exact UTC timestamp"
           }
         },
         {
@@ -1444,15 +1420,9 @@
             "value": "2026-11-09T00:00:5\u0669Z"
           },
           "expect": {
-            "ok": true,
-            "value": {
-              "year": 2026,
-              "month": 11,
-              "day": 9,
-              "hour": 0,
-              "minute": 0,
-              "second": 59
-            }
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "expected exact UTC timestamp"
           }
         },
         {
@@ -1463,8 +1433,8 @@
           },
           "expect": {
             "ok": false,
-            "error": "ValueError",
-            "message": "time data '2026-\u0661\u0661-09T00:00:00Z' does not match format '%Y-%m-%dT%H:%M:%SZ'"
+            "error": "IntegrityError",
+            "message": "expected exact UTC timestamp"
           }
         },
         {
@@ -1475,8 +1445,8 @@
           },
           "expect": {
             "ok": false,
-            "error": "ValueError",
-            "message": "time data '2026-11-\u0662\u0662T00:00:00Z' does not match format '%Y-%m-%dT%H:%M:%SZ'"
+            "error": "IntegrityError",
+            "message": "expected exact UTC timestamp"
           }
         },
         {
