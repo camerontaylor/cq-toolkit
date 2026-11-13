@@ -340,6 +340,15 @@ def record_unpublished_siblings(c, record, handled):
                     'repair run failed before publication; the verified fix was not published',
                     c.iso(), repair_base=job.get('repair_base'), failure_class='exhausted')
             elif result.get('verdict') in ('FAILED', 'NOT-FIXED', 'STALE'):
+                # Sibling results bypass harvest's validation, so apply the
+                # same identity and binding checks before the verdict becomes
+                # an authoritative outcome write-back; anything else stays on
+                # the idempotent replay path.
+                if result.get('job') != other or result.get('item') != job.get('item'):
+                    raise ValueError('repair result identity mismatch')
+                if job.get('source_sha') and any(result.get(k) != job.get(k)
+                        for k in ('source_sha', 'finding_sha256', 'origin_job')):
+                    raise ValueError('prepared repair result source/evidence binding mismatch')
                 mark_finding_outcome(c, job, result)
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
             # One sibling's ledger write must not skip the healthy ones; the
