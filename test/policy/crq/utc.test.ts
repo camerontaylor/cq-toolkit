@@ -3,6 +3,8 @@ import {
   compactUtc,
   parseIso,
   parseUtc,
+  parseUtcDetailed,
+  parseUtcUnchecked,
   UtcParseError,
   utcFromMillis,
 } from '../../../src/policy/crq/utc.js';
@@ -122,4 +124,66 @@ test('accepts arbitrary single separators but refuses a missing time', () => {
   }
   expect(parseUtc('2026-11-08T')).toBeNull();
   expect(parseUtc('2026-11-08')?.iso).toBe('2026-11-08T00:00:00.000000Z');
+});
+
+describe('parseUtcUnchecked — parse-only companion', () => {
+  test('keeps a valid UTC instant', () => {
+    expect(parseUtcUnchecked('2026-11-08T00:00:00Z')).toBe(
+      parseUtc('2026-11-08T00:00:00Z')?.epochMicros,
+    );
+  });
+
+  test('exposes the instant that parseUtc collapses to null on overflow', () => {
+    expect(parseUtc('9999-12-31T23:00:00-05:00')).toBeNull();
+    expect(parseUtcUnchecked('9999-12-31T23:00:00-05:00')).not.toBeNull();
+    expect(parseUtc('0001-01-01T00:00:00+01:00')).toBeNull();
+    expect(parseUtcUnchecked('0001-01-01T00:00:00+01:00')).not.toBeNull();
+  });
+
+  test('still returns null for malformed or empty input', () => {
+    expect(parseUtcUnchecked('junk')).toBeNull();
+    expect(parseUtcUnchecked('')).toBeNull();
+    expect(parseUtcUnchecked(123)).toBeNull();
+    expect(parseUtcUnchecked('2026-13-01T00:00:00Z')).toBeNull();
+  });
+});
+
+describe('parseUtcDetailed — component-validation messages', () => {
+  test('applies a zero-second fractional offset', () => {
+    const base = parseUtc('2026-11-08T00:00:00Z')?.epochMicros;
+    expect(parseUtcDetailed('2026-11-08T00:00:00+00:00:00.5')).toBe((base as bigint) - 500_000n);
+    expect(parseUtcDetailed('2026-11-08T00:00:00-00:00:00.5')).toBe((base as bigint) + 500_000n);
+  });
+
+  test('keeps Python calendar and clock messages', () => {
+    expect(() => parseUtcDetailed('2026-13-01T00:00:00Z')).toThrow(
+      'month must be in 1..12, not 13',
+    );
+    expect(() => parseUtcDetailed('2026-02-30T00:00:00Z')).toThrow(
+      'day 30 must be in range 1..28 for month 2 in year 2026',
+    );
+    expect(() => parseUtcDetailed('2026-01-01T25:00:00Z')).toThrow('hour must be in 0..23, not 25');
+    expect(() => parseUtcDetailed('2026-01-01T00:60:00Z')).toThrow(
+      'minute must be in 0..59, not 60',
+    );
+    expect(() => parseUtcDetailed('2026-01-01T00:00:60Z')).toThrow(
+      'second must be in 0..59, not 60',
+    );
+    expect(() => parseUtcDetailed('0000-01-01T00:00:00Z')).toThrow(
+      'year must be in 1..9999, not 0',
+    );
+  });
+
+  test('keeps the offset-range message', () => {
+    expect(() => parseUtcDetailed('2026-01-01T00:00:00+25:00')).toThrow(
+      'offset must be a timedelta strictly between -timedelta(hours=24) and ' +
+        'timedelta(hours=24), not datetime.timedelta(days=1, seconds=3600)',
+    );
+  });
+
+  test('returns null for malformed syntax', () => {
+    expect(parseUtcDetailed('junk')).toBeNull();
+    expect(parseUtcDetailed('')).toBeNull();
+    expect(parseUtcDetailed(123)).toBeNull();
+  });
 });

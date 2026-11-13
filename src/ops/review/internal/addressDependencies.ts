@@ -85,7 +85,7 @@ export async function snapshotAddressDependencies(
       // POSIX bin shims can embed paths relative to their original
       // directory. A private launcher preserves that location without
       // exposing the original shim to in-place writes through a link.
-      if (process.platform !== 'win32' && dirname(source) === resolve(installed, '.bin')) {
+      if (process.platform !== 'win32' && resolve(dirname(source)) === resolve(installed, '.bin')) {
         const stat = await lstat(source);
         if (stat.isFile() && (stat.mode & 0o111) !== 0) {
           const quoted = "'" + resolve(source).replaceAll("'", "'\\''") + "'";
@@ -162,14 +162,37 @@ export async function assertAddressDependencyMetadata(
       throw error;
     }
   };
+  // Scripts npm actually executes when installation runs: every lifecycle key,
+  // plus the scripts those lifecycle commands invoke (`npm run X` / `pnpm run X`)
+  // and their implicit pre/post hooks. A change to any of these changes what
+  // installation executes, even when every lifecycle key itself is identical.
+  const invokedScripts = (scripts: Record<string, string>): Set<string> => {
+    const invoked = new Set<string>();
+    for (const [key, command] of Object.entries(scripts)) {
+      if (!installLifecycleScripts.has(key)) continue;
+      for (const target of Object.keys(scripts)) {
+        if (target !== key && command.includes(target)) invoked.add(target);
+      }
+    }
+    for (const name of [...invoked]) {
+      if (`pre${name}` in scripts) invoked.add(`pre${name}`);
+      if (`post${name}` in scripts) invoked.add(`post${name}`);
+    }
+    return invoked;
+  };
   const relevant = (text: string | null) => {
     if (text === null) return text;
     const parsed = DependencyManifest.parse(JSON.parse(text) as unknown);
     const fields = Object.fromEntries(
       Object.entries(parsed).filter(([key]) => !descriptiveManifestFields.has(key)),
     );
-    if (Object.keys(parsed.scripts ?? {}).some((key) => installLifecycleScripts.has(key)))
-      fields.scripts = parsed.scripts;
+    const scripts = parsed.scripts ?? {};
+    const keep = new Set([...installLifecycleScripts].filter((key) => key in scripts));
+    for (const name of invokedScripts(scripts)) {
+      if (name in scripts) keep.add(name);
+    }
+    const lifecycle = Object.fromEntries(Object.entries(scripts).filter(([key]) => keep.has(key)));
+    if (Object.keys(lifecycle).length) fields.scripts = lifecycle;
     return fields;
   };
   const compare = async (path: string, manifest = false) => {

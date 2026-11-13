@@ -34,7 +34,11 @@ THE I1 CLI CONTRACT (landed):
   to stdout instead:
   `{ "error": { "kind": "usage" | "invalid-input" | "invalid-result" |
 "thrown", "subcommand": "<name>" | null, "message": "<text>",
-"exitCode": <n> } }`. It replaces the empty stream and never accompanies a
+"exitCode": <n> } }`. The `error` object may also carry an optional
+  `usageSummary` — a `thrown` exit's validated known spend (the same
+  `KnownUsageSummary` shape as the ok result's envelope, schema-validated
+  before emission; absent, never null, when the throw settled no usage or the
+  attachment failed validation). It replaces the empty stream and never accompanies a
   result artifact; the shapes are told apart by `status` (a result) vs an
   object-valued `error` (this artifact; a `failed` result's `error` is a
   string). Kinds: `usage` = arg-shaped (unknown/missing subcommand, flag

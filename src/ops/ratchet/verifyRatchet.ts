@@ -336,12 +336,18 @@ async function judgeRatchet(
   );
   if ('reason' in subjectRead) return fail(subjectRead.reason);
   const trustValue = trustRead.value;
-  if (
-    input.subjectKind === 'pr' &&
-    def.evidence === 'recompute' &&
-    def.metric === 'typecheck-count' &&
-    input.typecheckSkipped?.trim()
-  ) {
+  const typecheckRecompute =
+    input.subjectKind === 'pr' && def.evidence === 'recompute' && def.metric === 'typecheck-count';
+  // A supplied count and a supplied skip reason conflict: preferring the skip
+  // would discard the count, and a dependency change would then excuse the
+  // skip, so a supplied regression could still pass. Conflicting evidence is
+  // malformed input (I5) — fail, never pick a winning side.
+  if (typecheckRecompute && input.typecheckCount !== undefined && input.typecheckSkipped?.trim()) {
+    return fail(
+      'conflicting typecheck evidence: both a recompute count and a skip reason were supplied',
+    );
+  }
+  if (typecheckRecompute && input.typecheckSkipped?.trim()) {
     return {
       ...base,
       baseline: trustValue,
@@ -446,8 +452,13 @@ export const createVerifyRatchet =
     const guard = checkDiffMonotonicity(normalizeBaselineDiffValues(diff, COVERAGE_BASELINE_PATH));
     const measured = await readMeasurement(input.measurementPath);
     const results: RatchetResult[] = [];
+    // The pinned subject SHA: canonical-baseline reads inside judgeRatchet
+    // must use the guarded commit, never re-resolve the caller's ref (a
+    // branch that moves between gitRevParse above and the read below would
+    // otherwise mix the guarded commit with another commit's baseline).
+    const pinned = { ...input, subject };
     for (const def of manifest.ratchets) {
-      results.push(await judgeRatchet(def, input, trust, measured));
+      results.push(await judgeRatchet(def, pinned, trust, measured));
     }
 
     const reasons: string[] = [];

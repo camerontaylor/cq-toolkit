@@ -148,6 +148,31 @@ describe('fixReviewItem untrusted-content fences (finding 3)', () => {
     expect(prompt.includes('y'.repeat(MAX_ITEM_BODY_CHARS))).toBe(true);
     expect(prompt.includes('y'.repeat(MAX_ITEM_BODY_CHARS + 1))).toBe(false);
   });
+
+  // The cap is counted in UTF-16 code units (JavaScript string length), the
+  // same unit crq's Python driver budgets its item body in. A code-point
+  // rewrite would let astral content through, so pin the existing boundary.
+  test('the body cap counts UTF-16 units: 4,000 astral scalars fill MAX_ITEM_BODY_CHARS exactly', async () => {
+    const { op, invocations } = scriptedOp([completeWorker(UNCHANGED)]);
+    const input = baseInput();
+    input.item.body = '😀'.repeat(MAX_ITEM_BODY_CHARS / 2);
+    expect(input.item.body.length).toBe(MAX_ITEM_BODY_CHARS);
+    const value = expectOk(await op(input));
+    expect(value.truncated).toBeUndefined();
+    expect(invocations[0]?.prompt).toContain(input.item.body);
+  });
+
+  test('one astral scalar past the boundary truncates (a code-point count would not)', async () => {
+    const { op, invocations } = scriptedOp([completeWorker(UNCHANGED)]);
+    const input = baseInput();
+    input.item.body = '😀'.repeat(MAX_ITEM_BODY_CHARS / 2 + 1);
+    expect(input.item.body.length).toBe(MAX_ITEM_BODY_CHARS + 2);
+    const value = expectOk(await op(input));
+    expect(value.truncated).toBe(true);
+    const prompt = invocations[0]?.prompt ?? '';
+    expect(prompt.includes('😀'.repeat(MAX_ITEM_BODY_CHARS / 2))).toBe(true);
+    expect(prompt.includes(input.item.body)).toBe(false);
+  });
 });
 
 describe('defangFenceLines (round-3 item 5)', () => {

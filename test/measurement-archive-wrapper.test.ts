@@ -81,9 +81,12 @@ describe('measurement archive CLI entry guard', () => {
       );
       expect(result.error).toBeUndefined();
       expect(result.stderr).toBe('');
-      expect(result.status).toBe(1);
+      // A missing --target is a CLI usage error, which I1 maps to exit 2; only
+      // a thrown/transport failure exits 1.
+      expect(result.status).toBe(2);
       expect(JSON.parse(result.stdout)).toMatchObject({
         state: 'failed',
+        usage: true,
         reason: 'measurement archive: no valid rclone target',
       });
     },
@@ -148,6 +151,7 @@ describe('M8b nominal evidence', () => {
       root,
       destination,
       '--one-way',
+      '--download',
       '--exclude',
       '/manifest.json',
       '--copy-links',
@@ -174,6 +178,7 @@ describe('M8b nominal evidence', () => {
       root,
       destination,
       '--one-way',
+      '--download',
       '--include',
       '/manifest.json',
       '--copy-links',
@@ -213,6 +218,32 @@ describe('M8b missing evidence', () => {
     expect(result.localBundle).toBeNull();
     expect(result.reason).toContain('absent');
     expect(result.archive.state).toBe('unknown');
+    expect(calls).toEqual([]);
+  });
+
+  test('a bundle path that names a file is a usage error (exit 2 via usage flag)', async () => {
+    const base = await workspace();
+    const notADirectory = join(base, 'bundle-file.txt');
+    await writeFile(notADirectory, 'not a bundle');
+    const calls: string[] = [];
+    const run = async (_command: string, args: string[]) => {
+      calls.push(args[0] ?? '');
+      return { code: 0 };
+    };
+
+    const result = await runMeasurementArchive({
+      bundleDir: notADirectory,
+      target: TARGET,
+      host: 'triton',
+      run,
+    });
+
+    // crq finding F1: an invalid --bundle path is a misconfigured invocation,
+    // so it carries usage: true (the CLI maps that to exit 2, I1) instead of
+    // the plain exit-1 archive failure the prose used to claim.
+    expect(result.state).toBe('failed');
+    expect(result.usage).toBe(true);
+    expect(result.reason).toContain('not a directory');
     expect(calls).toEqual([]);
   });
 });
@@ -367,6 +398,7 @@ describe('M8b failure evidence', () => {
       await realpath(bundle),
       destination,
       '--one-way',
+      '--download',
       '--exclude',
       '/manifest.json',
       '--copy-links',

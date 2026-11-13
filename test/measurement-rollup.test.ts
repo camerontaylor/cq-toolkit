@@ -897,7 +897,7 @@ describe('M10d failure evidence', () => {
     expect(await readdir(dir)).toEqual([]);
     // The CLI entry is the documented path to the readout: a real subprocess
     // writes exactly the two reports over explicit local paths and exits 0,
-    // and a missing input exits 1 with an error object, writing nothing.
+    // and a missing input file exits 1 (thrown error), writing nothing.
     const cliDir = await mkdtemp(join(tmpdir(), 'm10d-cli-'));
     const inputPath = join(cliDir, 'readout-input.json');
     await writeFile(inputPath, JSON.stringify(input()));
@@ -926,7 +926,7 @@ describe('M10d failure evidence', () => {
         markdown: join(out, 'measurement-readout.md'),
       }),
     );
-    let failure: { code?: number; stderr?: string } = {};
+    let failure: { code?: number; stdout?: string; stderr?: string } = {};
     try {
       await runCli(process.execPath, [
         resolve('scripts', 'measurement-rollup.mjs'),
@@ -936,11 +936,28 @@ describe('M10d failure evidence', () => {
         join(cliDir, 'bad'),
       ]);
     } catch (error) {
-      failure = error as { code?: number; stderr?: string };
+      failure = error as { code?: number; stdout?: string; stderr?: string };
     }
+    // I1: the machine-readable error object goes to stdout (one JSON
+    // artifact) and the human narration to stderr — never the reverse.
     expect(failure.code).toBe(1);
-    const failureReport = JSON.parse(failure.stderr ?? '{}') as { error: string };
-    expect(failureReport.error).toContain('ENOENT');
+    const failureReport = JSON.parse(failure.stdout ?? '{}') as { error: { message: string } };
+    expect(failureReport.error.message).toContain('ENOENT');
+    expect(failure.stderr).toContain('ENOENT');
+    expect((failure.stderr ?? '').trim().startsWith('{')).toBe(false);
+    // A missing --input is an argument error: exit code 2 (I1), with the
+    // machine-readable error object on stdout and the usage narration on stderr.
+    let usage: { code?: number; stdout?: string; stderr?: string } = {};
+    try {
+      await runCli(process.execPath, [resolve('scripts', 'measurement-rollup.mjs')]);
+    } catch (error) {
+      usage = error as { code?: number; stdout?: string; stderr?: string };
+    }
+    expect(usage.code).toBe(2);
+    const usageReport = JSON.parse(usage.stdout ?? '{}') as { error: { message: string } };
+    expect(usageReport.error.message).toContain('missing required --input');
+    expect(usage.stderr).toContain('usage: node scripts/measurement-rollup.mjs --input');
+    expect((usage.stderr ?? '').trim().startsWith('{')).toBe(false);
     // Only the input file and the out directory exist: nothing else was
     // written, and the failed run created nothing.
     expect((await readdir(cliDir)).sort()).toEqual(['out', 'readout-input.json']);
