@@ -413,13 +413,14 @@ class FactorySwitchTests(FactoryFixture):
     def test_watchdog_declared_timeout_bounds_completion(self):
         unit = "crq-watchdog.service"
         self.assertEqual(self.inventory[unit]["service_timeout_seconds"], 300)
-        self.assertEqual(self.inventory[unit]["timer_bound_seconds"], 720)
+        # 12 min OnUnitActiveSec plus systemd's 1 min default AccuracySec.
+        self.assertEqual(self.inventory[unit]["timer_bound_seconds"], 780)
         _write(self.unit_dir / unit, self.node_service(unit)["bytes"], 0o644)
         self.systemd.active["crq-watchdog.timer"] = "active"
         self.systemd.prior(unit, "c" * 32, 900)
         adapter, _selection = self.compose(unit=unit)
         prior = adapter.preflight(unit, "python")
-        self.assertEqual(prior["completion_window"], 1080)
+        self.assertEqual(prior["completion_window"], 1140)
 
     def test_changed_installed_bytes_refuse_completion(self):
         alternate = self.python_service("crq-slot.service")
