@@ -417,20 +417,22 @@ function readUint16(bytes: Uint8Array, index: number, bigEndian: boolean): numbe
   return bigEndian ? (first << 8) | second : (second << 8) | first;
 }
 
-const TIMESTAMP_SHAPE =
-  /^(\p{Nd}{4})-(\p{Nd}{2})-(\p{Nd}{2})T(\p{Nd}{2}):(\p{Nd}{2}):(\p{Nd}{2})Z$/u;
+// Python's shape check is ASCII-only (`[0-9]`, not the Unicode-aware `\d`), so
+// a non-ASCII decimal digit never reaches strptime and is refused here as an
+// integrity error rather than a field-grammar one.
+const TIMESTAMP_SHAPE = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z$/;
 const TIMESTAMP_MONTH = /^(?:1[0-2]|0[1-9])$/;
-const TIMESTAMP_DAY = /^(?:3[01]|0[1-9]|[12]\p{Nd})$/u;
-const TIMESTAMP_HOUR = /^(?:2[0-3]|[01]\p{Nd})$/u;
-const TIMESTAMP_MINUTE = /^(?:[0-5]\p{Nd})$/u;
-const TIMESTAMP_SECOND = /^(?:6[01]|[0-5]\p{Nd})$/u;
-const DECIMAL_DIGIT = /\p{Nd}/u;
+const TIMESTAMP_DAY = /^(?:3[01]|0[1-9]|[12][0-9])$/;
+const TIMESTAMP_HOUR = /^(?:2[0-3]|[01][0-9])$/;
+const TIMESTAMP_MINUTE = /^(?:[0-5][0-9])$/;
+const TIMESTAMP_SECOND = /^(?:6[01]|[0-5][0-9])$/;
 
 /**
- * `review_ledger.timestamp`: exactly `YYYY-MM-DDTHH:MM:SSZ`, with Python's
- * Unicode `\d` shape check followed by `strptime`'s field grammar. CPython's
- * `%Y` accepts any Unicode decimal digits, and `%d`/`%H`/`%M`/`%S` accept a
- * Unicode digit after an ASCII `0`/`1`/`2`/`5`; `%m` is ASCII-only.
+ * `review_ledger.timestamp`: exactly `YYYY-MM-DDTHH:MM:SSZ`. The shape check is
+ * ASCII-only, so any non-ASCII decimal digit fails with the same integrity
+ * error Python raises before `strptime` runs; what remains of `strptime`'s
+ * grammar is the field range and calendar check, whose failure stays the
+ * ValueError class.
  */
 export function ledgerTimestamp(value: JsonValue | undefined): LedgerTimestamp {
   if (typeof value !== 'string') fail('expected exact UTC timestamp');
@@ -453,12 +455,12 @@ export function ledgerTimestamp(value: JsonValue | undefined): LedgerTimestamp {
     throw new LedgerTimestampError(`time data '${value}' does not match format`);
   }
 
-  const year = pythonDigits(yearField);
+  const year = Number(yearField);
   const month = Number(monthField);
-  const day = pythonDigits(dayField);
-  const hour = pythonDigits(hourField);
-  const minute = pythonDigits(minuteField);
-  const second = pythonDigits(secondField);
+  const day = Number(dayField);
+  const hour = Number(hourField);
+  const minute = Number(minuteField);
+  const second = Number(secondField);
   if (
     year < 1 ||
     month < 1 ||
@@ -472,26 +474,6 @@ export function ledgerTimestamp(value: JsonValue | undefined): LedgerTimestamp {
     throw new LedgerTimestampError(`time data '${value}' does not match format`);
   }
   return { year, month, day, hour, minute, second };
-}
-
-/** Python `int()` for a string of Unicode decimal digits. */
-function pythonDigits(text: string): number {
-  let value = 0;
-  for (const character of text) value = value * 10 + decimalDigitValue(character);
-  return value;
-}
-
-/**
- * Unicode `Nd` code points occur in aligned runs of ten, so the digit value is
- * the offset from the start of the character's run.
- */
-function decimalDigitValue(character: string): number {
-  const codePoint = character.codePointAt(0);
-  if (codePoint === undefined) throw new LedgerTimestampError('empty timestamp field');
-  if (codePoint >= 0x30 && codePoint <= 0x39) return codePoint - 0x30;
-  let start = codePoint;
-  while (start > 0 && DECIMAL_DIGIT.test(String.fromCodePoint(start - 1))) start -= 1;
-  return (codePoint - start) % 10;
 }
 
 function daysInMonth(year: number, month: number): number {
