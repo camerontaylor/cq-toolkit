@@ -438,7 +438,7 @@ def process(config, job, wt):
                 if git(wt, 'status', '--porcelain') or git(wt, 'rev-parse', 'HEAD') != base:
                     raise ValueError('unchanged report left repository changes')
                 reason = report.get('summary') or 'no change proposed'
-                if report.get('disposition') == 'unchanged_with_reason':
+                if disposition == 'unchanged_with_reason':
                     citations = report.get('evidence')
                     if not isinstance(citations, list) or not citations:
                         raise ValueError('unchanged outcome requires source evidence')
