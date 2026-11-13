@@ -574,6 +574,13 @@ class Run:
                 + json.dumps(unsettled, sort_keys=True))
         self.phase("prepared", triggers=self.original,
                    cq_bin=self.cq_bin)
+        # The switch fence renders config only: nothing in this flow installs
+        # or verifies unit files, reloads the user manager, or restores prior
+        # definitions on rollback. A target that changes rendered unit
+        # templates would restart triggers against stale installed
+        # definitions, so detect the delta here and refuse before any unit
+        # is stopped.
+        self.require_unchanged_unit_templates()
 
         self.hold = Hold(self.root)
         self.hold.acquire()
@@ -700,6 +707,40 @@ class Run:
                 "drain: " + compatibility_reason(compatibility)
                 + "; nothing was switched")
         self.phase("remeasured", preserved=sorted(self.preserved))
+
+    def require_unchanged_unit_templates(self):
+        """Refuse a target that changes the rendered unit templates.
+
+        Unit installation is owner ceremony (prepare --units-output into the
+        user manager), not part of this flow: the switch fence renders the
+        config only, so a changed crq-* template (added, removed or
+        rewritten) would leave the restarted triggers running stale
+        installed definitions, and a rollback could not restore the prior
+        ones. The rendered bytes are the template bytes with the fixed
+        checkout root and no runtime override, so comparing the committed
+        template blobs is exact; any delta must be installed and verified
+        by the owner first, and this deploy refuses before stopping units.
+        """
+        source_dir = "apps/crq-python/ops/systemd/"
+
+        def templates(sha):
+            listing = self.git("ls-tree", "-r", "--name-only", sha,
+                               source_dir)
+            return {name: self.git("rev-parse", sha + ":" + name)
+                    for name in sorted(listing.splitlines())
+                    if Path(name).name.startswith("crq-")}
+
+        prior = templates(self.prior_sha)
+        target = templates(self.target)
+        changed = sorted(name for name in set(prior) | set(target)
+                         if prior.get(name) != target.get(name))
+        require(not changed,
+                "target " + self.target[:12] + " changes rendered unit "
+                "templates this flow cannot reconcile: it installs no unit "
+                "files, verifies none with the user manager, and rollback "
+                "cannot restore the prior definitions. The owner must "
+                "install and verify the changed unit definitions against "
+                "this target first: " + ", ".join(changed))
 
     def verify_after_switch(self):
         """The three facts a switch must not change: queue bytes, runtime

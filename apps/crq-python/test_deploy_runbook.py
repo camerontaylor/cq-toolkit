@@ -298,6 +298,24 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertEqual(self.units.stopped, [])
         self.assertEqual(self.head(), self.prior)
 
+    def test_changed_unit_templates_refuse_before_units_stop(self):
+        # Nothing in the deploy flow installs unit files or reloads the user
+        # manager, and rollback cannot restore prior definitions, so a target
+        # that changes a crq-* template must be refused before any unit is
+        # stopped, with the host untouched.
+        timer = self.runner / "ops/systemd/crq-tick.timer"
+        timer.write_text(timer.read_text() + "# template drift\n")
+        self.command("commit", "-qm", "unit template change", "--",
+                     "apps/crq-python/ops/systemd/crq-tick.timer")
+        target = self.head()
+        self.command("update-ref", "refs/remotes/origin/main", target)
+        run = self.build(target_sha=target)
+        with self.assertRaisesRegex(rb.Refused, "unit templates"):
+            run.run()
+        self.assertEqual(self.units.stopped, [])
+        self.assertFalse(self.marker().exists())
+        self.assertEqual(self.head(), self.prior)
+
     def test_queue_that_loses_rollback_permission_during_drain_refuses(self):
         # Preflight measured a compatible queue; a tick wrote a schema marker
         # before the drain settled. Re-measuring after the drain must refuse
