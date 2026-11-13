@@ -17,16 +17,35 @@
     "range_note"
   ],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {
+      "const": 1
+    },
     "deploy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["reason", "operator", "approved_by", "approved_at"],
+      "required": [
+        "reason",
+        "operator",
+        "approved_by",
+        "approved_at"
+      ],
       "properties": {
-        "reason": {"type": "string", "minLength": 1},
-        "operator": {"type": "string", "minLength": 1},
-        "approved_by": {"type": "string", "minLength": 1},
-        "approved_at": {"type": "string", "minLength": 1}
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "approved_by": {
+          "type": "string",
+          "minLength": 1
+        },
+        "approved_at": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "identity": {
@@ -42,12 +61,30 @@
         "baseline_journal_fields"
       ],
       "properties": {
-        "prior_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-        "target_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-        "receipt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "helper_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "controller_file_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "baseline_journal_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "prior_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "target_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "receipt_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "helper_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "controller_file_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "baseline_journal_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
         "baseline_journal_fields": {
           "type": "object",
           "minProperties": 1,
@@ -58,10 +95,21 @@
     "ancestry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["prior_is_ancestor_of_target", "target_on_origin_main"],
+      "required": [
+        "prior_is_ancestor_of_target",
+        "target_on_origin_main"
+      ],
       "properties": {
-        "prior_is_ancestor_of_target": {"type": "boolean"},
-        "target_on_origin_main": {"enum": ["must", "must_not", "either"]}
+        "prior_is_ancestor_of_target": {
+          "type": "boolean"
+        },
+        "target_on_origin_main": {
+          "enum": [
+            "must",
+            "must_not",
+            "either"
+          ]
+        }
       }
     },
     "config": {
@@ -77,13 +125,31 @@
         "cq_bin_pointer_may_move"
       ],
       "properties": {
-        "committed_config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "running_config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "target_state_config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "candidate_config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "render_at_prior_reproduces_live": {"type": "boolean"},
-        "head_invariance": {"type": "boolean"},
-        "cq_bin_pointer_may_move": {"type": "boolean"}
+        "committed_config_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "running_config_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "target_state_config_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "candidate_config_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "render_at_prior_reproduces_live": {
+          "type": "boolean"
+        },
+        "head_invariance": {
+          "type": "boolean"
+        },
+        "cq_bin_pointer_may_move": {
+          "type": "boolean"
+        }
       }
     },
     "artifacts": {
@@ -96,10 +162,22 @@
         "candidate_deps_sha256"
       ],
       "properties": {
-        "running_dist_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "candidate_dist_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "running_deps_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "candidate_deps_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        "running_dist_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "candidate_dist_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "running_deps_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "candidate_deps_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
       }
     },
     "triggers": {
@@ -115,20 +193,31 @@
       "properties": {
         "expected": {
           "type": "array",
-          "items": {"type": "string", "minLength": 1},
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
           "description": "The full expected trigger name list; count cross-checked against the observed unit inventory in preflight."
         },
         "long": {
           "type": "array",
-          "items": {"type": "string", "minLength": 1},
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
           "description": "Long-window triggers stopped before preflight; must be a subset of expected."
         },
         "services": {
           "type": "array",
-          "items": {"type": "string", "minLength": 1},
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
           "description": "Expected service unit names for the 180-second first drain bound."
         },
-        "restore_target": {"const": "original_observed"},
+        "restore_target": {
+          "const": "original_observed"
+        },
         "release_order": {
           "type": "array",
           "minItems": 4,
@@ -156,34 +245,80 @@
         "fail_safe_on_expiry"
       ],
       "properties": {
-        "service_drain_deadline_s": {"type": "integer", "minimum": 1},
-        "mode": {"const": "controller_drain_check_owned_runs"},
-        "poll_interval_s": {"type": "integer", "minimum": 1},
-        "deadline_s": {"type": "integer", "minimum": 1},
-        "fail_safe_on_expiry": {"const": true}
+        "service_drain_deadline_s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mode": {
+          "const": "controller_drain_check_owned_runs"
+        },
+        "poll_interval_s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "deadline_s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fail_safe_on_expiry": {
+          "const": true
+        }
       }
     },
     "marker": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "never_remove_foreign"],
+      "required": [
+        "root",
+        "path",
+        "never_remove_foreign"
+      ],
       "properties": {
-        "path": {"type": "string", "minLength": 1},
-        "never_remove_foreign": {"const": true}
+        "root": {
+          "type": "string",
+          "minLength": 2,
+          "description": "Absolute deployment checkout root the deploy was approved against; the runbook refuses a value that is not absolute and one that does not resolve to --root. Compared, not an approval. The comparison cannot prove the unit: two identically wrong values agree, so the GO checklist still needs the unit WorkingDirectory/ExecStart proof."
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "never_remove_foreign": {
+          "const": true
+        }
       }
     },
     "range_note": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["merges", "files", "insertions", "deletions"],
+      "required": [
+        "merges",
+        "files",
+        "insertions",
+        "deletions"
+      ],
       "properties": {
-        "merges": {"type": "integer", "minimum": 0},
-        "files": {"type": "integer", "minimum": 0},
-        "insertions": {"type": "integer", "minimum": 0},
-        "deletions": {"type": "integer", "minimum": 0},
+        "merges": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "files": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "insertions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deletions": {
+          "type": "integer",
+          "minimum": 0
+        },
         "corrections": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "description": "Lead/operator corrections recorded so the decision trail shows the true range."
         }
       }

@@ -340,7 +340,8 @@ class RunbookFixture(unittest.TestCase):
                            "mode": "controller_drain_check_owned_runs",
                            "poll_interval_s": 15, "deadline_s": 900,
                            "fail_safe_on_expiry": True},
-            "marker": {"path": "state/runner-disabled",
+            "marker": {"root": str(Path(self.root).resolve()),
+                       "path": "state/runner-disabled",
                        "never_remove_foreign": True},
             "range_note": {"merges": 1, "files": 1, "insertions": 2,
                            "deletions": 0,
@@ -1841,7 +1842,7 @@ class CLITests(RunbookFixture):
         self.assertEqual(sorted(document),
                          ["cq_bin_entry", "final_triggers", "journal",
                           "marker_path", "operation", "outcome", "output_dir",
-                          "prior_sha", "rehearsal", "released",
+                          "prior_sha", "rehearsal", "released", "root",
                           "runbook_sha256", "target", "target_tag"])
 
     def test_a_second_invocation_cannot_claim_the_same_output_dir(self):
@@ -2240,6 +2241,35 @@ class MarkerPathTests(RunbookFixture):
         self.assertEqual(built, [])
         self.assertFalse((self.runner / "state" / "somewhere-else").exists())
         self.assertFalse(self.marker_path.exists())
+
+    def test_manifest_root_must_match_the_flag(self):
+        # The marker is derived from --root, so an approved-root mismatch is
+        # exactly the wrong-checkout case: refuse before any host read.
+        self.build_repo()
+        document = self.manifest()
+        document["marker"]["root"] = str(self.base / "other-checkout")
+        args = self.args(manifest_path=self.write_manifest(document))
+        built = []
+
+        def factory(marker, effects_builder):
+            built.append(marker)
+            return FakeUnits(marker)
+
+        with self.assertRaisesRegex(rb.Refused, "deployment root mismatch"):
+            rb.execute(args, effects_factory=factory)
+        self.assertEqual(built, [])
+        self.assertFalse(self.marker_path.exists())
+
+    def test_manifest_root_must_be_absolute(self):
+        # A relative approved root could mean anything from a different
+        # working directory, so it is refused rather than resolved.
+        self.build_repo()
+        document = self.manifest()
+        document["marker"]["root"] = "apps/crq-python"
+        args = self.args(manifest_path=self.write_manifest(document))
+        with self.assertRaisesRegex(rb.Refused,
+                                    "must be the absolute deployment root"):
+            rb.execute(args, effects_factory=lambda marker, builder: FakeUnits(marker))
 
     def test_execute_hands_the_provider_the_tick_path(self):
         # The value execute() derives is --root's tick file, not the manifest
