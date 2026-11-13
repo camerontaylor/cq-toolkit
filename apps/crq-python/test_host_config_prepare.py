@@ -62,7 +62,7 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         self.assertIn(['systemctl', '--user', 'daemon-reload'], calls)
         self.assertFalse(any('start' in argv or 'enable' in argv for argv in calls))
 
-    def test_prepare_installs_only_verified_commit_units_despite_worktree_drift(self):
+    def test_prepare_rejects_worktree_drift_before_installing_units(self):
         self.command('checkout', '-q', '--detach', self.target)
         directory = self.runner / 'ops/systemd'
         expected = {
@@ -75,24 +75,17 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         unit.write_text(unit.read_text() + '\nExecStartPost=/unapproved-command\n')
         (directory / 'crq-slot.timer').unlink()
         (directory / 'crq-extra.service').write_text('[Service]\nExecStart=@CRQ_ROOT@/extra\n')
-        verified = []
-
-        def stopped(argv):
-            if argv[0] == 'systemd-analyze':
-                verified.append({Path(p).name: Path(p).read_bytes() for p in argv[3:]})
-                self.assertFalse((self.base / 'installed').exists())
-                return ''
-            return self.stopped(argv)
-
-        with mock.patch.object(host, 'run', side_effect=stopped):
-            host.main(['--overlay', str(self.overlay_path), 'prepare',
-                       '--units-output', str(self.base / 'installed'), '--tag', self.tag])
-        self.assertEqual(verified, [expected])
-        installed = {p.name: p.read_bytes() for p in (self.base / 'installed').iterdir()}
-        self.assertEqual(installed, expected)
-        receipt = json.loads(next((self.base / 'records').glob('*.json')).read_text())
-        self.assertEqual(receipt['sha'], self.target)
-        self.assertEqual(receipt['unit_sha256'], {name: host.digest(data) for name, data in expected.items()})
+        # The published units execute the working tree, so prepare must refuse
+        # drift before publishing anything; render_units itself still reads
+        # only the verified commit.
+        paths = host.render_units(self.root, self.base / 'units', self.target)
+        self.assertEqual({Path(p).name: Path(p).read_bytes() for p in paths}, expected)
+        with mock.patch.object(host, 'run', side_effect=self.stopped):
+            with self.assertRaisesRegex(ValueError, 'other than rendered config'):
+                host.prepare(self.root, self.overlay, self.raw, self.base / 'installed',
+                             self.tag)
+        self.assertFalse((self.base / 'installed').exists())
+        self.assertFalse((self.base / 'records').exists())
 
 
 if __name__ == '__main__':
