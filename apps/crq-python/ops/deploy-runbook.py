@@ -1006,9 +1006,18 @@ class Run:
         record = self.document("recovery_required", reason=str(reason)[:400])
         record["written_at"] = now_iso()
         if self.run_dir is not None:
-            durable_write(Path(self.run_dir) / "deploy.json", record)
-            self.phase("recovery_required", reason=str(reason)[:400],
-                       triggers=self.original)
+            try:
+                durable_write(Path(self.run_dir) / "deploy.json", record)
+                self.phase("recovery_required", reason=str(reason)[:400],
+                           triggers=self.original)
+            except OSError as exc:
+                # A storage failure here must not escape fail-stop: surface
+                # the in-memory receipt and the persistence error through
+                # RecoveryRequired so the owner learns nothing was written.
+                record["persistence_error"] = repr(exc)[:400]
+                raise RecoveryRequired(
+                    str(reason) + "; the recovery record could not be "
+                    "persisted (" + repr(exc)[:200] + ")", record) from exc
         raise RecoveryRequired(str(reason), record)
 
     def restore_before_switch(self, reason):
@@ -1046,8 +1055,17 @@ class Run:
                            + str(reason)[:200] + "): " + repr(exc))
             return
         if self.run_dir is not None:
-            self.write_record("refused", reason=str(reason)[:400])
-            self.phase("refused", reason=str(reason)[:400])
+            try:
+                self.write_record("refused", reason=str(reason)[:400])
+                self.phase("refused", reason=str(reason)[:400])
+            except OSError as exc:
+                # The host was restored but the refusal cannot be recorded;
+                # a storage failure must not end the run unrecorded, so it
+                # fail-stops into RecoveryRequired with the receipt.
+                self.fail_stop("the refused record could not be persisted ("
+                               + repr(exc)[:200] + ") after: "
+                               + str(reason)[:200])
+                return
 
     def recover(self, exc):
         """Route a failure to the safe terminal state."""
