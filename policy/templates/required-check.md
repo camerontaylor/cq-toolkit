@@ -159,12 +159,24 @@ jobs:
     needs: changes
     if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && (needs.changes.result != 'success' || needs.changes.outputs.typescript != 'false') }}
     # Fail-fast false: every shard reports, so a red run names all failing
-    # shards instead of the first one to finish. (Slice 3 adds per-shard
-    # job-level concurrency here; it is deliberately not in this change.)
+    # shards instead of the first one to finish. The slice 3 concurrency
+    # block below adds one running and one pending execution per shard on
+    # default-branch pushes, and leaves pull requests on today's cancel.
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
+    # Slice 3: one running and one pending execution per shard per ref on
+    # default-branch pushes. GitHub replaces the older pending entry by
+    # arrival and never cancels the running one, so a burst of merges costs
+    # two or three executions per shard and the newest arrival is tested.
+    # Pull requests keep today's behaviour: a new push cancels the
+    # superseded run. A superseded commit's shards report `cancelled` and its
+    # static is skipped, so that commit claims no result.
+    concurrency:
+      group: ${{ github.workflow }}-unit-${{ matrix.shard }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
