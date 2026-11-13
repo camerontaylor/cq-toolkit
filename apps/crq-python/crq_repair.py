@@ -996,10 +996,10 @@ def main(argv=None):
     selectors = (args.job, args.source_sha, args.finding_sha256)
     if args.recover_job and (any(selectors) or args.triage_dry_run):
         print('repair dispatch refused: recovery selects exactly one job')
-        return
+        return 2
     if any(selectors) and not all(selectors):
         print('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
-        return
+        return 2
     # Validate all configured paid lanes before any A0 spend. Missing hard
     # budget support is an activation prerequisite, never a soft prompt promise.
     drivers = {role['driver'] for role in repair['roles'].values()}
@@ -1050,4 +1050,4 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
