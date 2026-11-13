@@ -9,6 +9,7 @@ import signal
 import sys
 
 import author_snapshot
+import backfill_runtime
 import queue_transport
 import review_admission as admission
 import review_operation as operation
@@ -21,7 +22,9 @@ MAX_BYTES = 6 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024
 DEADLINE_S = 120
 OPERATIONS = ["capabilities", "submit", "status", "result", "cancel", "notify-update",
-              "review-history"]
+              "review-history", "record"]
+FEATURES = ["original-commit-snapshot-v1", "chunked-result-v1", "repeat-generations-v1",
+            "review-history-v1", "review-record-v1"]
 
 
 def decode(raw):
@@ -35,9 +38,7 @@ def decode(raw):
 
 
 def capabilities():
-    return dict(v=1, command="review-v1", operations=OPERATIONS,
-                features=["original-commit-snapshot-v1", "chunked-result-v1", "repeat-generations-v1",
-                          "review-history-v1"],
+    return dict(v=1, command="review-v1", operations=OPERATIONS, features=FEATURES,
                 limits=dict(max_request_bytes=MAX_BYTES, max_snapshot_bytes=MAX_SNAPSHOT_BYTES,
                             max_content_bytes=author_snapshot.MAX_ORIGINAL_CONTENT,
                             max_objects=author_snapshot.MAX_OBJECTS, chunk_bytes=review_receipt.CHUNK_BYTES))
@@ -127,6 +128,188 @@ def resolve(runner, inputs, stored):
     return facts
 
 
+def record_import(q, req, req_principal, runner):
+    """S3b review-record: normalize one import, retain and publish it.
+
+    The import is idempotent on (producer, source id, report digest); one
+    malformed import quarantines alone with a readable reason and never stops
+    queue scheduling. The authenticated submitter is the server-authenticated
+    principal, never client input. Events spool into the publication worker's
+    outbox (backfill_runtime.services) so the next publication drains them into
+    the shared ledger; without a rollout configuration the disposition still
+    answers honestly with a publication-disabled marker and nothing is
+    dispatched and no vendor capacity is reserved.
+    """
+    import review_ledger
+    import review_record
+    submitted = {
+        "producer": req["producer"],
+        "id": req["source_id"],
+        "report_bytes": req["report"]["data"].encode("utf-8"),
+        "repo": req.get("repo"),
+        "head": req.get("head_commit"),
+        "base": req.get("base_commit"),
+        "head_tree": req.get("head_tree"),
+        "target": req.get("target"),
+        "reviewer": req.get("reviewer"),
+        # Provenance split: the trusted principal is the authenticated
+        # submitter; the claimed reviewer is client metadata that earns no
+        # credit. Client-supplied submitter identity is ignored.
+        "authenticated_submitter": req_principal,
+        "verdict": req.get("verdict"),
+        "claimed_scope": req.get("claimed_scope"),
+        "independence": req.get("independence"),
+        "supersedes": req.get("supersedes"),
+        "forge_evidence": req.get("forge_evidence"),
+    }
+    if req.get("repo") is not None and not repo_registry.same_repo(req["repo"], runner.REPO) \
+            and repo_registry.by_repo(getattr(runner, "REPOS", []), req["repo"]) is None:
+        return dict(v=1, op="record", action="refused", record_digest=None,
+                    duplicate_of=None, supersedes=req.get("supersedes"),
+                    reason="unsupported-repo")
+    # Admission accepts equivalent spellings (identity comparison), but the
+    # ledger schema pins the repository fields to the canonical spelling, so
+    # an alternate-casing import for the supported repo must normalize under
+    # the canonical name instead of quarantining as malformed.
+    if req.get("repo") is not None:
+        submitted["repo"] = runner.REPO if repo_registry.same_repo(req["repo"], runner.REPO) \
+            else repo_registry.by_repo(getattr(runner, "REPOS", []), req["repo"])["repo"]
+    retained = _retained_records(runner)
+    events, action = review_record.import_record(submitted, runner.iso(), retained)
+    kind, _, detail = action.partition(":")
+    result = dict(v=1, op="record", action="recorded" if kind == "record" else kind,
+                  record_digest=None, duplicate_of=None, supersedes=req.get("supersedes"),
+                  publication="disabled")
+    if events:
+        # Publication shares the durable rollout: the record lands in the same
+        # outbox the backfill publisher drains, with artifacts in the configured
+        # durable store. Rehashing with the durable reference changes the record
+        # id, so the response carries the retained (published) id, not the
+        # import preview. The spooled marker moves to the code paths that
+        # actually spool: oversized quarantine reuse answers disabled.
+        config = backfill_runtime.settings(runner.STATE)
+        if config:
+            # services() builds the publisher transport too; the record path
+            # needs only the shared durable store and outbox, so construct
+            # them directly from the rollout configuration exactly as
+            # backfill_runtime.services does, without touching the publisher
+            # (no Git, no SSH from the import path).
+            store = review_ledger.ArtifactStore(config["durable_artifact_root"])
+            box = review_ledger.Outbox(runner.STATE / "backfill/publication", store)
+        else:
+            store = review_ledger.ArtifactStore(runner.STATE / "record-artifacts")
+            box = review_ledger.Outbox(runner.STATE / "record-outbox", store)
+        retained_ref = store.put(req["report"]["data"].encode("utf-8"))
+        for value in events:
+            value = copy.deepcopy(value)
+            value["payload"]["artifacts"] = [dict(retained_ref, kind="report")]
+            value["id"] = review_ledger.digest({k: v for k, v in value.items() if k != "id"})
+            review_ledger.validate(value)
+            if len(review_ledger.canonical(value)) > review_record.MAX_EVENT_BYTES:
+                # The publisher refuses events above its validation bound while
+                # building publication groups, which would block the shared
+                # outbox for every queued event; quarantine the oversized
+                # import at the door instead of spooling a poison event.
+                return _oversize_quarantine(runner, submitted, retained_ref,
+                                            retained, box, result, config)
+            if value["event_type"] == "review":
+                detail = value["id"]
+                retained.append(value)
+            box.spool(value)
+        if config:
+            result["publication"] = "spooled"
+            # The durable background request makes the next publisher pass
+            # drain the spooled record; safe under tick.lock, no Git/network.
+            backfill_runtime.publish(runner, q)
+    if kind == "record":
+        result["record_digest"] = detail
+    elif kind == "duplicate":
+        result["duplicate_of"] = detail
+    elif kind in ("quarantined", "refused"):
+        result["reason"] = detail
+    return result
+
+
+def _oversize_quarantine(runner, submitted, retained_ref, retained, box, result, config):
+    """Quarantine an import whose serialized event exceeds the publisher bound.
+
+    The report bytes stay retained in the durable store (the disposition
+    references them, so the outbox can verify) and the oversized review event
+    itself never enters the shared outbox to block other queued evidence. A
+    repeated identical oversize import reuses the retained disposition (same
+    source key, same id): minting a second event would collide in
+    validate_sequence and block all publication. The response answers
+    quarantined honestly, spooled only when a new event actually spooled.
+    """
+    import review_ledger
+    import review_record
+    reason = "serialized event exceeds the 1 MiB publisher bound"
+    digest_hex = hashlib.sha256(submitted["report_bytes"]).hexdigest()
+    quarantine_key = review_record.quarantine_source_key(reason=reason,
+                                                         digest_hex=digest_hex)
+    previous = next((v for v in retained if v.get("event_type") == "import-result"
+                     and v.get("source_key") == quarantine_key), None)
+    if previous is not None:
+        result["action"] = "quarantined"
+        result["reason"] = reason
+        # The retained disposition is already in the publication outbox (the
+        # first import spooled it); under a rollout the answer stays honest
+        # about that instead of claiming publication is disabled.
+        if config:
+            result["publication"] = "spooled"
+        return result
+    quarantine = review_record._quarantine_event(
+        reason=reason, digest_hex=digest_hex, submitted=submitted, at=runner.iso())
+    if quarantine is None:
+        result["action"] = "refused"
+        result["reason"] = reason
+        return result
+    quarantine["payload"]["artifacts"] = [dict(retained_ref, kind="report")]
+    quarantine["id"] = review_ledger.digest({k: v for k, v in quarantine.items() if k != "id"})
+    review_ledger.validate(quarantine)
+    box.spool(quarantine)
+    result["action"] = "quarantined"
+    result["reason"] = reason
+    result["publication"] = "spooled" if config else result["publication"]
+    return result
+
+
+def _retained_records(runner):
+    """Retained record events for idempotency; an unreadable one is skipped.
+
+    Idempotency consults both spool locations: with a durable rollout the
+    record lives in the publication worker's outbox (pending side; ack files
+    carry only ids, so acknowledged events are read from pending, which the
+    publisher keeps as recovery authority), otherwise in the legacy local
+    record-outbox. A ledger read failure never blocks scheduling.
+    """
+    import review_ledger
+    records = []
+    roots = [runner.STATE / "backfill/publication", runner.STATE / "record-outbox"]
+    seen = set()
+    for root in roots:
+        directory = root / "pending"
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.json")):
+            try:
+                value = review_ledger.loads(path.read_bytes())
+            except (review_ledger.IntegrityError, OSError):
+                continue
+            if value.get("event_type") == "review" and value.get("id") not in seen:
+                seen.add(value["id"])
+                records.append(value)
+            elif (value.get("event_type") == "import-result"
+                  and str(value.get("source_key", "")).startswith("record:")
+                  and value.get("id") not in seen):
+                # Retained quarantine dispositions participate in import
+                # idempotency: a repeated identical malformed import reuses the
+                # original event instead of minting a colliding duplicate.
+                seen.add(value["id"])
+                records.append(value)
+    return records
+
+
 def retained(runner, item):
     """Disk bytes, not queue metadata, authorize completed-result reuse."""
     try:
@@ -148,9 +331,28 @@ def handle(raw, runner, *, principal, policy):
         return review_receipt.canonical(capabilities())
     if policy.get("enabled") is not True:
         return review_receipt.canonical(dict(v=1, action="observed", state="unsupported", reason="review-disabled"))
-    q = runner.load_queue()
     op = req["op"]
-    if op == "submit":
+    if op == "record":
+        # The operator's policy repository allowlist applies to record
+        # imports exactly as to submit: configuration alone is not
+        # authorization, so a configured clone for another repo cannot
+        # publish evidence the policy never allowed. The effective repo is
+        # resolved first (normalize_record defaults an omitted repo to the
+        # runner's own), so omitting repo cannot bypass the allowlist.
+        effective_repo = req.get("repo") or runner.REPO
+        allowed = [policy["repo"], *policy.get("repos", [])]
+        # Compare like submit: identity equality (owner/name casing), not
+        # exact string, so an alternate spelling of an allowed repo is
+        # accepted instead of falling through to a misleading quarantine.
+        if not any(repo_registry.same_repo(effective_repo, a) for a in allowed):
+            return review_receipt.canonical(dict(v=1, op="record", action="refused",
+                                                 record_digest=None, duplicate_of=None,
+                                                 supersedes=req.get("supersedes"),
+                                                 reason="unsupported-repo"))
+    q = runner.load_queue()
+    if op == "record":
+        result = record_import(q, req, principal, runner)
+    elif op == "submit":
         inputs = req["inputs"]
         allowed = [policy["repo"], *policy.get("repos", [])]
         configured = repo_registry.same_repo(inputs["repo"], runner.REPO) or repo_registry.by_repo(getattr(runner, "REPOS", []), inputs["repo"]) is not None

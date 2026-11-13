@@ -2950,6 +2950,252 @@
           }
         },
         {
+          "name": "valid-agent-record",
+          "source": "review_ledger.validate",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "review",
+              "source_key": "camerontaylor/cq-toolkit:agent:import-1:dddddddddddddddd",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "repo": "camerontaylor/cq-toolkit",
+                "subject_id": "subject",
+                "job_id": "record:agent:import-1",
+                "attempt_id": "record:dddddddddddddddd",
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "agent",
+                  "type": "agent",
+                  "id": "import-1:dddddddddddddddd",
+                  "authenticated": false
+                },
+                "provenance": {
+                  "authenticated_submitter": "queue-client",
+                  "claimed_reviewer": "helper-agent",
+                  "forge_evidence": "off-forge-import",
+                  "completion_evidence": null,
+                  "scope_confidence": "unknown",
+                  "independence": "agent lane: separate session, unverified"
+                },
+                "base": "0000000000000000000000000000000000000000",
+                "head": "0000000000000000000000000000000000000000",
+                "head_tree": "0000000000000000000000000000000000000000",
+                "target": "0000000000000000000000000000000000000000",
+                "target_tree": "0000000000000000000000000000000000000000",
+                "policy_digest": "ab371734a88229a8390c3db403f8436b1682f2fd9e236b5fb7bc7dae45468645",
+                "scope_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "paths": [],
+                "requested_scope": [],
+                "input_scope": [],
+                "reviewed_scope": [],
+                "completion": {
+                  "terminal": false,
+                  "skipped": false,
+                  "scope_verified": false,
+                  "exit_code": -1,
+                  "errors": [
+                    "no verifiable completion evidence"
+                  ]
+                },
+                "outcome": "unverified",
+                "artifacts": [
+                  {
+                    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "location": "/fixtures/artifacts/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "kind": "report"
+                  }
+                ],
+                "findings": []
+              },
+              "id": "1d592f6767668788219866d0e319e36ddbbca9eefa619bbd353a206225cea253"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "review",
+              "source_key": "camerontaylor/cq-toolkit:agent:import-1:dddddddddddddddd",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "repo": "camerontaylor/cq-toolkit",
+                "subject_id": "subject",
+                "job_id": "record:agent:import-1",
+                "attempt_id": "record:dddddddddddddddd",
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "agent",
+                  "type": "agent",
+                  "id": "import-1:dddddddddddddddd",
+                  "authenticated": false
+                },
+                "provenance": {
+                  "authenticated_submitter": "queue-client",
+                  "claimed_reviewer": "helper-agent",
+                  "forge_evidence": "off-forge-import",
+                  "completion_evidence": null,
+                  "scope_confidence": "unknown",
+                  "independence": "agent lane: separate session, unverified"
+                },
+                "base": "0000000000000000000000000000000000000000",
+                "head": "0000000000000000000000000000000000000000",
+                "head_tree": "0000000000000000000000000000000000000000",
+                "target": "0000000000000000000000000000000000000000",
+                "target_tree": "0000000000000000000000000000000000000000",
+                "policy_digest": "ab371734a88229a8390c3db403f8436b1682f2fd9e236b5fb7bc7dae45468645",
+                "scope_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "paths": [],
+                "requested_scope": [],
+                "input_scope": [],
+                "reviewed_scope": [],
+                "completion": {
+                  "terminal": false,
+                  "skipped": false,
+                  "scope_verified": false,
+                  "exit_code": -1,
+                  "errors": [
+                    "no verifiable completion evidence"
+                  ]
+                },
+                "outcome": "unverified",
+                "artifacts": [
+                  {
+                    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "location": "/fixtures/artifacts/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "kind": "report"
+                  }
+                ],
+                "findings": []
+              },
+              "id": "1d592f6767668788219866d0e319e36ddbbca9eefa619bbd353a206225cea253"
+            }
+          }
+        },
+        {
+          "name": "valid-manual-record",
+          "source": "review_ledger.validate",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "review",
+              "source_key": "camerontaylor/cq-toolkit:manual:note-1:dddddddddddddddd",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "repo": "camerontaylor/cq-toolkit",
+                "subject_id": "subject",
+                "job_id": "record:manual:note-1",
+                "attempt_id": "record:dddddddddddddddd",
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "manual",
+                  "type": "manual",
+                  "id": "note-1:dddddddddddddddd",
+                  "authenticated": false
+                },
+                "provenance": {
+                  "authenticated_submitter": "queue-client",
+                  "claimed_reviewer": "helper-agent",
+                  "forge_evidence": "off-forge-import",
+                  "completion_evidence": null,
+                  "scope_confidence": "unknown",
+                  "independence": "agent lane: separate session, unverified"
+                },
+                "base": "0000000000000000000000000000000000000000",
+                "head": "0000000000000000000000000000000000000000",
+                "head_tree": "0000000000000000000000000000000000000000",
+                "target": "0000000000000000000000000000000000000000",
+                "target_tree": "0000000000000000000000000000000000000000",
+                "policy_digest": "ab371734a88229a8390c3db403f8436b1682f2fd9e236b5fb7bc7dae45468645",
+                "scope_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "paths": [],
+                "requested_scope": [],
+                "input_scope": [],
+                "reviewed_scope": [],
+                "completion": {
+                  "terminal": false,
+                  "skipped": false,
+                  "scope_verified": false,
+                  "exit_code": -1,
+                  "errors": [
+                    "no verifiable completion evidence"
+                  ]
+                },
+                "outcome": "unverified",
+                "artifacts": [
+                  {
+                    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "location": "/fixtures/artifacts/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "kind": "report"
+                  }
+                ],
+                "findings": []
+              },
+              "id": "18287a2b8fb59b319d3c03e1db150d38c277b4a009ae7a1e3a2cfeb75d162bba"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "review",
+              "source_key": "camerontaylor/cq-toolkit:manual:note-1:dddddddddddddddd",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "repo": "camerontaylor/cq-toolkit",
+                "subject_id": "subject",
+                "job_id": "record:manual:note-1",
+                "attempt_id": "record:dddddddddddddddd",
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "manual",
+                  "type": "manual",
+                  "id": "note-1:dddddddddddddddd",
+                  "authenticated": false
+                },
+                "provenance": {
+                  "authenticated_submitter": "queue-client",
+                  "claimed_reviewer": "helper-agent",
+                  "forge_evidence": "off-forge-import",
+                  "completion_evidence": null,
+                  "scope_confidence": "unknown",
+                  "independence": "agent lane: separate session, unverified"
+                },
+                "base": "0000000000000000000000000000000000000000",
+                "head": "0000000000000000000000000000000000000000",
+                "head_tree": "0000000000000000000000000000000000000000",
+                "target": "0000000000000000000000000000000000000000",
+                "target_tree": "0000000000000000000000000000000000000000",
+                "policy_digest": "ab371734a88229a8390c3db403f8436b1682f2fd9e236b5fb7bc7dae45468645",
+                "scope_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "paths": [],
+                "requested_scope": [],
+                "input_scope": [],
+                "reviewed_scope": [],
+                "completion": {
+                  "terminal": false,
+                  "skipped": false,
+                  "scope_verified": false,
+                  "exit_code": -1,
+                  "errors": [
+                    "no verifiable completion evidence"
+                  ]
+                },
+                "outcome": "unverified",
+                "artifacts": [
+                  {
+                    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "location": "/fixtures/artifacts/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "kind": "report"
+                  }
+                ],
+                "findings": []
+              },
+              "id": "18287a2b8fb59b319d3c03e1db150d38c277b4a009ae7a1e3a2cfeb75d162bba"
+            }
+          }
+        },
+        {
           "name": "valid-finding-event",
           "source": "review_ledger.validate",
           "input": {
@@ -4567,6 +4813,512 @@
             "ok": false,
             "error": "IntegrityError",
             "message": "completed review lacks authenticated scoped completion"
+          }
+        },
+        {
+          "name": "record-provenance-missing",
+          "source": "review_ledger.validate",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "review",
+              "source_key": "camerontaylor/cq-toolkit:agent:import-1:dddddddddddddddd",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "repo": "camerontaylor/cq-toolkit",
+                "subject_id": "subject",
+                "job_id": "record:agent:import-1",
+                "attempt_id": "record:dddddddddddddddd",
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "agent",
+                  "type": "agent",
+                  "id": "import-1:dddddddddddddddd",
+                  "authenticated": false
+                },
+                "base": "0000000000000000000000000000000000000000",
+                "head": "0000000000000000000000000000000000000000",
+                "head_tree": "0000000000000000000000000000000000000000",
+                "target": "0000000000000000000000000000000000000000",
+                "target_tree": "0000000000000000000000000000000000000000",
+                "policy_digest": "ab371734a88229a8390c3db403f8436b1682f2fd9e236b5fb7bc7dae45468645",
+                "scope_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "paths": [],
+                "requested_scope": [],
+                "input_scope": [],
+                "reviewed_scope": [],
+                "completion": {
+                  "terminal": false,
+                  "skipped": false,
+                  "scope_verified": false,
+                  "exit_code": -1,
+                  "errors": [
+                    "no verifiable completion evidence"
+                  ]
+                },
+                "outcome": "unverified",
+                "artifacts": [
+                  {
+                    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "location": "/fixtures/artifacts/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "kind": "report"
+                  }
+                ],
+                "findings": []
+              },
+              "id": "ac17bb342cee392ced549eb113e35c7658e3d10d655d1a3017a7b29e599df7ae"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "manual/agent record requires provenance"
+          }
+        },
+        {
+          "name": "record-provenance-on-vendor-run",
+          "source": "review_ledger.validate",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "review",
+              "source_key": "camerontaylor/cq-toolkit:crq-runner-app:run-1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "repo": "camerontaylor/cq-toolkit",
+                "subject_id": "subject",
+                "job_id": "subject:0",
+                "attempt_id": "subject:0:1",
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "crq-runner-app",
+                  "type": "crq-run",
+                  "id": "run-1",
+                  "authenticated": true
+                },
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "scope_digest": "c38ff74dbe52efc3cc353a69aaeec07f6315d2a02cf02c64c4809b0f89a53c78",
+                "paths": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "mode": "100644",
+                    "disposition": "included",
+                    "reason": "verified",
+                    "baseline": {}
+                  }
+                ],
+                "requested_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        2
+                      ]
+                    ]
+                  }
+                ],
+                "input_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        2
+                      ]
+                    ]
+                  }
+                ],
+                "reviewed_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        2
+                      ]
+                    ]
+                  }
+                ],
+                "completion": {
+                  "terminal": true,
+                  "skipped": false,
+                  "scope_verified": true,
+                  "exit_code": 0,
+                  "errors": []
+                },
+                "outcome": "completed",
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ],
+                "findings": [
+                  {
+                    "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                    "severity": "major",
+                    "source_id": null,
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        1
+                      ]
+                    ],
+                    "title": "\u6807\u9898 \ud83d\ude00",
+                    "body": "details \u0001 with control",
+                    "status": "untriaged",
+                    "anchor_status": "verified"
+                  }
+                ],
+                "provenance": {
+                  "authenticated_submitter": "op",
+                  "claimed_reviewer": "x",
+                  "forge_evidence": "off-forge-import",
+                  "completion_evidence": null,
+                  "scope_confidence": "unknown",
+                  "independence": null
+                }
+              },
+              "id": "bcbb361a6b14b66f72c4d9602e1979c14fc4d1542db50db899566a6c9329bc41"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "provenance is a manual/agent record field"
+          }
+        },
+        {
+          "name": "record-forge-evidence-unknown",
+          "source": "review_ledger.validate",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "review",
+              "source_key": "camerontaylor/cq-toolkit:agent:import-1:dddddddddddddddd",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "repo": "camerontaylor/cq-toolkit",
+                "subject_id": "subject",
+                "job_id": "record:agent:import-1",
+                "attempt_id": "record:dddddddddddddddd",
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "agent",
+                  "type": "agent",
+                  "id": "import-1:dddddddddddddddd",
+                  "authenticated": false
+                },
+                "provenance": {
+                  "authenticated_submitter": "queue-client",
+                  "claimed_reviewer": "helper-agent",
+                  "forge_evidence": "someone-said-so",
+                  "completion_evidence": null,
+                  "scope_confidence": "unknown",
+                  "independence": "agent lane: separate session, unverified"
+                },
+                "base": "0000000000000000000000000000000000000000",
+                "head": "0000000000000000000000000000000000000000",
+                "head_tree": "0000000000000000000000000000000000000000",
+                "target": "0000000000000000000000000000000000000000",
+                "target_tree": "0000000000000000000000000000000000000000",
+                "policy_digest": "ab371734a88229a8390c3db403f8436b1682f2fd9e236b5fb7bc7dae45468645",
+                "scope_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "paths": [],
+                "requested_scope": [],
+                "input_scope": [],
+                "reviewed_scope": [],
+                "completion": {
+                  "terminal": false,
+                  "skipped": false,
+                  "scope_verified": false,
+                  "exit_code": -1,
+                  "errors": [
+                    "no verifiable completion evidence"
+                  ]
+                },
+                "outcome": "unverified",
+                "artifacts": [
+                  {
+                    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "location": "/fixtures/artifacts/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "kind": "report"
+                  }
+                ],
+                "findings": []
+              },
+              "id": "8978d57128face5ea40a31174dae330aa9aa6cf662947939df4c12c761298b0e"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "record forge evidence must name the observed source"
+          }
+        },
+        {
+          "name": "record-supersedes-self",
+          "source": "review_ledger.validate",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "review",
+              "source_key": "camerontaylor/cq-toolkit:agent:import-1:dddddddddddddddd",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "repo": "camerontaylor/cq-toolkit",
+                "subject_id": "subject",
+                "job_id": "record:agent:import-1",
+                "attempt_id": "record:dddddddddddddddd",
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "agent",
+                  "type": "agent",
+                  "id": "import-1:dddddddddddddddd",
+                  "authenticated": false
+                },
+                "provenance": {
+                  "authenticated_submitter": "queue-client",
+                  "claimed_reviewer": "helper-agent",
+                  "forge_evidence": "off-forge-import",
+                  "completion_evidence": null,
+                  "scope_confidence": "unknown",
+                  "independence": "agent lane: separate session, unverified"
+                },
+                "base": "0000000000000000000000000000000000000000",
+                "head": "0000000000000000000000000000000000000000",
+                "head_tree": "0000000000000000000000000000000000000000",
+                "target": "0000000000000000000000000000000000000000",
+                "target_tree": "0000000000000000000000000000000000000000",
+                "policy_digest": "ab371734a88229a8390c3db403f8436b1682f2fd9e236b5fb7bc7dae45468645",
+                "scope_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "paths": [],
+                "requested_scope": [],
+                "input_scope": [],
+                "reviewed_scope": [],
+                "completion": {
+                  "terminal": false,
+                  "skipped": false,
+                  "scope_verified": false,
+                  "exit_code": -1,
+                  "errors": [
+                    "no verifiable completion evidence"
+                  ]
+                },
+                "outcome": "unverified",
+                "artifacts": [
+                  {
+                    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "location": "/fixtures/artifacts/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "kind": "report"
+                  }
+                ],
+                "findings": [],
+                "supersedes": "1d592f6767668788219866d0e319e36ddbbca9eefa619bbd353a206225cea253"
+              },
+              "id": "1d592f6767668788219866d0e319e36ddbbca9eefa619bbd353a206225cea253"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "event hash mismatch"
+          }
+        },
+        {
+          "name": "record-supersedes-on-vendor-run",
+          "source": "review_ledger.validate",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "review",
+              "source_key": "camerontaylor/cq-toolkit:crq-runner-app:run-1",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "repo": "camerontaylor/cq-toolkit",
+                "subject_id": "subject",
+                "job_id": "subject:0",
+                "attempt_id": "subject:0:1",
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "crq-runner-app",
+                  "type": "crq-run",
+                  "id": "run-1",
+                  "authenticated": true
+                },
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "scope_digest": "c38ff74dbe52efc3cc353a69aaeec07f6315d2a02cf02c64c4809b0f89a53c78",
+                "paths": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "mode": "100644",
+                    "disposition": "included",
+                    "reason": "verified",
+                    "baseline": {}
+                  }
+                ],
+                "requested_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        2
+                      ]
+                    ]
+                  }
+                ],
+                "input_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        2
+                      ]
+                    ]
+                  }
+                ],
+                "reviewed_scope": [
+                  {
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        2
+                      ]
+                    ]
+                  }
+                ],
+                "completion": {
+                  "terminal": true,
+                  "skipped": false,
+                  "scope_verified": true,
+                  "exit_code": 0,
+                  "errors": []
+                },
+                "outcome": "completed",
+                "artifacts": [
+                  {
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                ],
+                "findings": [
+                  {
+                    "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                    "severity": "major",
+                    "source_id": null,
+                    "path": "src/\u96ea.ts",
+                    "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "intervals": [
+                      [
+                        1,
+                        1
+                      ]
+                    ],
+                    "title": "\u6807\u9898 \ud83d\ude00",
+                    "body": "details \u0001 with control",
+                    "status": "untriaged",
+                    "anchor_status": "verified"
+                  }
+                ],
+                "supersedes": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+              },
+              "id": "ab737829f6cd9c9d323f833d16d5d889df79a0707f45c996ec00fc74b890d74e"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "superseding is a manual/agent record field"
+          }
+        },
+        {
+          "name": "record-completed-without-evidence",
+          "source": "review_ledger.validate",
+          "input": {
+            "value": {
+              "schema": "cq.review-ledger/v1",
+              "event_type": "review",
+              "source_key": "camerontaylor/cq-toolkit:agent:import-1:dddddddddddddddd",
+              "occurred_at": "2026-10-30T00:00:00Z",
+              "payload": {
+                "repo": "camerontaylor/cq-toolkit",
+                "subject_id": "subject",
+                "job_id": "record:agent:import-1",
+                "attempt_id": "record:dddddddddddddddd",
+                "source": {
+                  "repo": "camerontaylor/cq-toolkit",
+                  "producer": "agent",
+                  "type": "agent",
+                  "id": "import-1:dddddddddddddddd",
+                  "authenticated": false
+                },
+                "provenance": {
+                  "authenticated_submitter": "queue-client",
+                  "claimed_reviewer": "helper-agent",
+                  "forge_evidence": "off-forge-import",
+                  "completion_evidence": null,
+                  "scope_confidence": "unknown",
+                  "independence": "agent lane: separate session, unverified"
+                },
+                "base": "0000000000000000000000000000000000000000",
+                "head": "0000000000000000000000000000000000000000",
+                "head_tree": "0000000000000000000000000000000000000000",
+                "target": "0000000000000000000000000000000000000000",
+                "target_tree": "0000000000000000000000000000000000000000",
+                "policy_digest": "ab371734a88229a8390c3db403f8436b1682f2fd9e236b5fb7bc7dae45468645",
+                "scope_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "paths": [],
+                "requested_scope": [],
+                "input_scope": [],
+                "reviewed_scope": [],
+                "completion": {
+                  "terminal": true,
+                  "skipped": false,
+                  "scope_verified": false,
+                  "exit_code": 0,
+                  "errors": []
+                },
+                "outcome": "completed",
+                "artifacts": [
+                  {
+                    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "location": "/fixtures/artifacts/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "kind": "report"
+                  }
+                ],
+                "findings": []
+              },
+              "id": "2c65fe609da3b32c831e91e2a657dc58cdf6eaa5ac31c3f0d9c40b1a5681e17f"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "completed record requires completion evidence or unknown outcome"
           }
         },
         {

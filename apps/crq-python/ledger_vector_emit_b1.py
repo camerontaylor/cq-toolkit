@@ -125,6 +125,40 @@ def _review(*, source: str = "run-1", path: str = "src/a.ts", findings: List[Dic
     return ledger.event("review", ledger.REPO + ":crq-runner-app:" + source, AT, payload)
 
 
+def _record(*, source: str = "import-1", producer: str = "agent", **payload_overrides: Any) -> Dict[str, Any]:
+    """An S3b manual/agent report record: unverified, uncredited, provenance split."""
+    rows: List[Dict[str, Any]] = []
+    payload: Dict[str, Any] = {
+        "repo": ledger.REPO,
+        "subject_id": "subject",
+        "job_id": "record:" + producer + ":" + source,
+        "attempt_id": "record:" + "d" * 16,
+        "source": {"repo": ledger.REPO, "producer": producer, "type": producer,
+                   "id": source + ":" + "d" * 16, "authenticated": False},
+        "provenance": {"authenticated_submitter": "queue-client",
+                       "claimed_reviewer": "helper-agent",
+                       "forge_evidence": "off-forge-import",
+                       "completion_evidence": None,
+                       "scope_confidence": "unknown",
+                       "independence": "agent lane: separate session, unverified"},
+        **{key: "0" * 40 for key in ("base", "head", "head_tree", "target", "target_tree")},
+        "policy_digest": ledger.digest({"unknown-policy": True}),
+        "scope_digest": ledger.digest(rows),
+        "paths": [],
+        "requested_scope": [],
+        "input_scope": [],
+        "reviewed_scope": [],
+        "completion": {"terminal": False, "skipped": False, "scope_verified": False,
+                       "exit_code": -1, "errors": ["no verifiable completion evidence"]},
+        "outcome": "unverified",
+        "artifacts": [{"sha256": "d" * 64, "location": "/fixtures/artifacts/" + "d" * 64,
+                       "kind": "report"}],
+        "findings": [],
+    }
+    payload.update(payload_overrides)
+    return ledger.event("review", f"{ledger.REPO}:{producer}:{source}:" + "d" * 16, AT, payload)
+
+
 def _finding(*, path: str = "src/a.ts", interval: List[int] | None = None) -> Dict[str, Any]:
     return {"id": "e" * 64, "severity": "major", "source_id": None, "path": path,
             "blob": SHA, "intervals": [interval or [1, 1]], "title": "标题 😀",
@@ -435,6 +469,8 @@ def validate_vectors() -> Dict[str, Any]:
                                    "type": "github-review", "id": "review-1", "authenticated": True}
     github["source_key"] = ledger.REPO + ":coderabbitai[bot]:review-1"
     _rehash(github)
+    record = _record()
+    manual_record = _record(source="note-1", producer="manual")
 
     finding_event = ledger.event("finding-event", "triage:1", AT, {
         "finding_id": "e" * 64, "review_id": github["id"], "previous_event_id": None,
@@ -446,6 +482,8 @@ def validate_vectors() -> Dict[str, Any]:
     values: List[tuple[str, Dict[str, Any]]] = [
         ("valid-review", review),
         ("valid-github-review", github),
+        ("valid-agent-record", record),
+        ("valid-manual-record", manual_record),
         ("valid-finding-event", finding_event),
         ("valid-job-state", job),
         ("valid-import-result", imported),
@@ -474,6 +512,36 @@ def validate_vectors() -> Dict[str, Any]:
          _regenerated(review, lambda v: v["payload"]["findings"][0]["intervals"].clear())),
         ("completed-not-creditable",
          _regenerated(review, lambda v: v["payload"]["completion"].__setitem__("errors", ["error"]))),
+        ("record-provenance-missing",
+         _regenerated(record, lambda v: v["payload"].pop("provenance"))),
+        ("record-provenance-on-vendor-run",
+         _regenerated(review, lambda v: v["payload"].__setitem__(
+             "provenance", {"authenticated_submitter": "op", "claimed_reviewer": "x",
+                            "forge_evidence": "off-forge-import",
+                            "completion_evidence": None, "scope_confidence": "unknown",
+                            "independence": None}))),
+        ("record-forge-evidence-unknown",
+         _regenerated(record, lambda v: v["payload"]["provenance"].__setitem__(
+             "forge_evidence", "someone-said-so"))),
+        ("record-supersedes-self",
+         # Not _regenerated: rehashing would recompute the id and the
+         # supersedes pointer would no longer name the event's own id, so the
+         # semantic defect would vanish and the vector would validate as ok.
+         # The stale hash is intentional here. Note what this vector actually
+         # pins: validate checks the event hash before provenance/supersedes,
+         # so the observed failure is "event hash mismatch", not the
+         # self-supersede refusal (a valid-hash self-supersede is a hash fixed
+         # point, unreachable through validate; the refusal itself is covered
+         # by the direct validate_provenance test in
+         # test_ledger_vector_emit_b1.py).
+         _changed(record, lambda v: v["payload"].__setitem__("supersedes", v["id"]))),
+        ("record-supersedes-on-vendor-run",
+         _regenerated(review, lambda v: v["payload"].__setitem__("supersedes", "e" * 64))),
+        ("record-completed-without-evidence",
+         _regenerated(record, lambda v: v["payload"].update(
+             {"outcome": "completed",
+              "completion": {"terminal": True, "skipped": False, "scope_verified": False,
+                             "exit_code": 0, "errors": []}}))),
         ("missing-evidence", _regenerated(finding_event, lambda v: v["payload"].__setitem__("evidence", {}))),
         ("fixed-without-verification",
          _regenerated(finding_event, lambda v: v["payload"].update(
