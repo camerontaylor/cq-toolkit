@@ -132,13 +132,15 @@ for _sibling_name, _sibling_want in REVIEWED_SIBLING_SHA256.items():
         # One machine-readable refusal and a nonzero exit. Only stdlib has
         # been used at this point, so the documented error document can be
         # emitted without importing or executing anything from the ops
-        # directory.
+        # directory. SystemExit(1), not RuntimeError: the document on stdout
+        # is the refusal, and a traceback on stderr would report a crash for a
+        # decision this file made deliberately.
         sys.stdout.write(json.dumps(
             {"error": {"kind": "unverified_ops_bytes",
                        "message": _message}},
             indent=2, sort_keys=True) + "\n")
         sys.stdout.flush()
-        raise RuntimeError(_message)
+        raise SystemExit(1)
     VERIFIED_SIBLING_BYTES[_sibling_name] = _sibling_bytes
 del _sibling_name, _sibling_want, _sibling_got, _sibling_bytes
 
@@ -165,7 +167,6 @@ RELEASE_ORDER = ("start_original_active", "assert_original",
                  "record_final_triggers", "remove_marker")
 DRAIN_MODE = "controller_drain_check_owned_runs"
 RESTORE_TARGET = "original_observed"
-SCHEMA_PATH = OPS_DIR / "deploy-invariants.schema.json"
 _VERIFIED_SCHEMA = None
 LONG_SERVICES = ("crq-repair.service", "crq-backfill.service")
 ACTIVE_STATES = ("active", "inactive")
