@@ -348,9 +348,24 @@ def fsync_dir(directory):
         os.close(fd)
 
 
+def make_dirs_durable(directory):
+    directory = Path(directory)
+    missing = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for created in reversed(missing):
+        try:
+            created.mkdir()
+        except FileExistsError:
+            continue
+        fsync_dir(created.parent)
+
+
 def atomic(filename, data):
     filename = Path(filename)
-    filename.parent.mkdir(parents=True, exist_ok=True)
+    make_dirs_durable(filename.parent)
     with tempfile.NamedTemporaryFile(dir=filename.parent, delete=False) as stream:
         stream.write(data)
         stream.flush()
@@ -404,7 +419,7 @@ class ArtifactStore:
                 hasher.update(chunk)
         ident = hasher.hexdigest()
         destination = self.root / "sha256" / ident
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        make_dirs_durable(destination.parent)
         if not destination.exists():
             with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
                 with Path(filename).open("rb") as source:
