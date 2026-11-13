@@ -114,6 +114,11 @@ DEFAULT_DRAIN_DEADLINE_S = 900
 # restates this path for review, and execute() refuses any other value so the
 # two can never drift.
 MARKER_RELPATH = "state/runner-disabled"
+# The host placeholder a committed config carries for the runner's cq_bin.
+# Only the overlay's render names a real runtime, so any check of the live
+# pointer must run after live_render and refuse this token explicitly rather
+# than resolving it against the checkout's parent.
+PLACEHOLDER = "@HOST_CQ_BIN@"
 
 
 def marker_path(root) -> Path:
@@ -1007,13 +1012,27 @@ class Run:
         prove the runner will execute the verified bytes. The live cq_bin
         path (after the pointer render) must resolve to a tree whose
         digest equals candidate_dist_sha256, or the release refuses before
-        any trigger restarts."""
+        any trigger restarts.
+
+        Only meaningful AFTER ``point()`` rendered the target config: a
+        commit normally carries the ``@HOST_CQ_BIN@`` placeholder, so the
+        committed bytes name no runtime at all and comparing them here (at
+        the end of the switch, before the render) refused a correct deploy
+        after the drain with HEAD already moved."""
         live = json.loads(
             (Path(self.args.root) / "apps/crq-python/config.json").read_text())
         pointer = (live.get("repair") or {}).get("cq_bin")
+        require(not (isinstance(pointer, str) and PLACEHOLDER in pointer),
+                "rendered config still carries the " + PLACEHOLDER
+                + " placeholder: the overlay did not render repair.cq_bin, "
+                "so the executed runtime cannot be bound to the verified "
+                "candidate artifact")
         require(isinstance(pointer, str) and pointer,
                 "rendered config carries no cq_bin pointer")
         live_dist = Path(pointer).resolve().parent
+        require(live_dist.is_dir(),
+                "live cq_bin directory does not exist: " + str(live_dist)
+                + " (the rendered pointer names no runtime to bind)")
         require(digests.tree_digest(live_dist)
                 == self.manifest["artifacts"]["candidate_dist_sha256"],
                 "live dist digest mismatch: the executed runtime at "
@@ -1147,7 +1166,6 @@ class Run:
         transaction = journal.get("transaction_id")
         require(isinstance(transaction, str) and bool(transaction),
                 "journal transaction_id must be nonempty")
-        self.assert_live_dist_is_candidate()
 
     # -- step 7: pointer -----------------------------------------------------
     def point(self):
@@ -1166,6 +1184,10 @@ class Run:
                 == config["target_state_config_sha256"],
                 "released config digest mismatch: live bytes after "
                 "live_render do not hash to the pinned target_state digest")
+        # The runtime the release will execute is only knowable once the
+        # render above exists: a commit carries the @HOST_CQ_BIN@ placeholder,
+        # so this check belongs here and nowhere earlier.
+        self.assert_live_dist_is_candidate()
         # The pointer-level check remains as the authorization boundary:
         # the released live pointer must equal the approved target render.
         live = json.loads(live_bytes)

@@ -200,11 +200,24 @@ class RunbookFixture(unittest.TestCase):
         }
         return host.encode(overlay)
 
-    def build_repo(self):
+    # Set by a subclass whose fixture target must carry the committed
+    # @HOST_CQ_BIN@ placeholder: setUp() builds the repo before any test body
+    # runs, so the mode has to be a class attribute rather than an argument.
+    PLACEHOLDER_TARGET = False
+
+    def build_repo(self, placeholder_target=None):
         """Commit baseline (prior), render PRIOR + overlay over the live
         config (the production drift-free baseline), commit the rendered
         config as the target, tag both, set origin/main at the target
-        (ancestry `must` by default)."""
+        (ancestry `must` by default).
+
+        ``placeholder_target`` commits a target whose config.json is still the
+        repository's ``@HOST_CQ_BIN@`` placeholder, which is what a real range
+        looks like: the artifact root carries the render, the commit does not.
+        The live checkout is still the rendered prior afterwards, exactly as a
+        host leaves it."""
+        if placeholder_target is None:
+            placeholder_target = self.PLACEHOLDER_TARGET
         if getattr(self, "_repo_built", False):
             return
         self._repo_built = True
@@ -222,9 +235,17 @@ class RunbookFixture(unittest.TestCase):
         overlay, _raw = host_mod.load_overlay(self.overlay_path)
         (self.runner / "config.json").write_bytes(
             host_mod.render(self.root, overlay, self.prior_sha))
-        self.command("commit", "-qam", "rendered live config")
+        if placeholder_target:
+            # The target commit changes something else and leaves config.json
+            # as committed (the placeholder). The artifact root is built at
+            # the target, so it carries the render.
+            (self.runner / "ops" / "RANGE").write_text("next range\n")
+            self.command("add", "apps/crq-python/ops/RANGE")
+            self.command("commit", "-qm", "range content without a render")
+        else:
+            self.command("commit", "-qam", "rendered live config")
         self.target = self.command("rev-parse", "HEAD").strip()
-        # The candidate artifact carries the target's committed config bytes
+        # The candidate artifact carries the target's rendered config bytes
         # (a real artifact root is built at the target commit).
         shutil.copy(self.runner / "config.json",
                     self.candidate / "apps/crq-python/config.json")
@@ -276,8 +297,11 @@ class RunbookFixture(unittest.TestCase):
             "baseline_journal_fields": {"outcome": "completed",
                                         "target": self.prior_sha},
         }
+        committed = self.command(
+            "show", self.target + ":apps/crq-python/config.json")
         config = {
-            "committed_config_sha256": sha256_file(self.runner / "config.json"),
+            "committed_config_sha256": hashlib.sha256(
+                committed.encode()).hexdigest(),
             "running_config_sha256": sha256_file(self.runner / "config.json"),
             "target_state_config_sha256": sha256_file(self.runner / "config.json"),
             "candidate_config_sha256": sha256_file(
@@ -976,6 +1000,39 @@ class DrainTests(RunbookFixture):
         self.assertEqual(phase["phase"], "recovery_required")
         self.assertFalse(phase["released"])
 
+
+class PlaceholderTargetTests(RunbookFixture):
+    """A real target commit carries the @HOST_CQ_BIN@ placeholder, so the live
+    runtime can only be bound to the candidate artifact AFTER point() rendered
+    the config. The check used to sit at the end of the switch, which refused
+    a correct deploy after the drain with HEAD already moved."""
+
+    PLACEHOLDER_TARGET = True
+
+    def test_placeholder_target_releases_after_the_render(self):
+        units = FakeUnits(self.marker_path)
+        run = self.run_runbook(self.args(), units)
+        self.assertEqual(run.run()["outcome"], "completed")
+        committed = self.command(
+            "show", self.target + ":apps/crq-python/config.json")
+        self.assertIn("@HOST_CQ_BIN@", committed,
+                      "the fixture target must carry the placeholder")
+        live = json.loads((self.runner / "config.json").read_text())
+        self.assertNotIn("@HOST_CQ_BIN@", live["repair"]["cq_bin"],
+                         "point() must have rendered the live pointer")
+        self.assertEqual(sorted(units.started),
+                         sorted(u for u in TRIGGERS), "every trigger restarted")
+        self.assertFalse(self.marker_path.exists(), "released")
+
+    def test_unrendered_pointer_refuses_by_name(self):
+        # The overlay is the only thing that names a runtime: a render that
+        # left the placeholder must refuse with its own name, not resolve the
+        # token against the checkout's parent and report a digest mismatch.
+        run = self.run_runbook(self.args(), self.units)
+        (self.runner / "config.json").write_text(json.dumps(
+            {"repair": {"cq_bin": "@HOST_CQ_BIN@"}}))
+        with self.assertRaisesRegex(rb.Refused, "HOST_CQ_BIN@ placeholder"):
+            run.assert_live_dist_is_candidate()
 
 class F4RegressionTests(RunbookFixture):
     """The F4 rule: restore asserts self.original, final_triggers recorded
@@ -2596,7 +2653,11 @@ class CqBinPointerTests(RunbookFixture):
         # (this fixture's config.json now IS the moved render), the
         # authorized run releases the moved pointer.
         run3 = self.pointer_run(True)
-        with moved_render(run3):
+        # The authorized move names a host path this fixture cannot create
+        # (/opt/cq), so the runtime binding is pinned elsewhere
+        # (PlaceholderTargetTests); here only the pointer policy is under test.
+        with moved_render(run3), mock.patch.object(
+                run3, "assert_live_dist_is_candidate"):
             run3.point()
         live = json.loads((Path(run3.args.root)
                            / "apps/crq-python/config.json").read_text())
