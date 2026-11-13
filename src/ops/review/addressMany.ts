@@ -197,6 +197,12 @@ export async function isolateAddressMany(
     const origin = await git('git', ['-C', repoRoot, 'remote', 'get-url', 'origin']);
     await git('git', ['clone', '--no-hardlinks', '--', repoRoot, root]);
     await git('git', ['-C', root, 'remote', 'set-url', 'origin', origin.stdout.trim()]);
+    // Clone-setup calls carry the caller's sshCommand only through this flow's
+    // environment; later Git calls in the clone (fetch, addressing, push) run
+    // without it, so persist the resolved command in the clone's local
+    // configuration. With none configured the clone keeps Git's defaults.
+    if (sshCommand !== undefined)
+      await git('git', ['-C', root, 'config', 'core.sshCommand', sshCommand]);
     for (const role of ['author', 'committer']) {
       let ident: string;
       try {
