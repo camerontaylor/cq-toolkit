@@ -227,16 +227,17 @@ class EndpointGh:
 def _apply_reviews_jq(argv, raw):
     """Model real `gh api --jq` over the recorded raw API response.
 
-    Real `gh --paginate` feeds jq ONE STREAM of concatenated pages, each a
-    JSON array on its own line (`[page1]\n[page2]`); jq processes documents
-    in sequence and reports where an error hit. Modelled here:
+    Real `gh api --paginate --jq` evaluates the filter once per page response,
+    feeding jq each page on its own, so jq's error locations are page-local.
+    The recorded stream holds every page, one JSON array per line
+    (`[page1]\n[page2]`); each line is modelled as one separate jq run:
 
-    - each line of the input is one JSON document (a page); unparsable
-      input -> jq parse failure naming the failing line (returncode 2),
+    - each line of the input is one page; unparsable input -> jq parse
+      failure naming the failing line within the page (returncode 2),
     - a non-array page -> `Cannot iterate over null` naming its line (rc 2),
     - a non-object row -> jq's runtime error (returncode 5) after emitting
       any earlier matches to stdout (real jq streams results as it goes;
-      the message names the row's actual JSON type and the input line),
+      the message names the row's actual JSON type and the page-local line),
     - rows are filtered by the selector's `user.login` and marker predicate
       (`startswith`/`contains`) and projected to `{id, url: .html_url}`.
 
@@ -264,20 +265,21 @@ def _apply_reviews_jq(argv, raw):
     segments = raw.split("\n")
     for line_index, line in enumerate(segments, start=0):
         terminated = line_index + 1 < len(segments)
-        # Real jq 1.8.2 numbers runtime errors by newlines consumed through
-        # the failing document's own terminator: an unterminated final segment
-        # reports one less than its 1-based index (single page without a
-        # trailing "\n" reports <stdin>:0, the same page with it :1; a page-2
-        # error without a trailing "\n" reports :1, with it :2).
-        error_line = line_index + (1 if terminated else 0)
+        # `gh api --paginate --jq` evaluates the filter once per page, feeding
+        # jq each page on its own, so error locations are page-local. jq 1.8.2
+        # still numbers a runtime error by newlines consumed through the
+        # failing document's own terminator: a terminated one-line page
+        # reports <stdin>:1, an unterminated one <stdin>:0.
+        error_line = 1 if terminated else 0
         if not line.strip():
             continue
         try:
             page = json.loads(line)
         except ValueError:
             # Real jq 1.8.2: parse errors exit 5 and report the 1-based input
-            # line (which equals the document line for line-per-page input).
-            return _fail(5, f"jq: parse error: Invalid literal at line {line_index + 1}",
+            # line of the page jq was fed (line 1: the stream records one page
+            # per line, so a page's own input is a single line).
+            return _fail(5, "jq: parse error: Invalid literal at line 1",
                          keep="".join(l + "\n" for l in out_lines))
         if not isinstance(page, list):
             return _fail(5,
