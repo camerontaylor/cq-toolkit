@@ -6,7 +6,8 @@ import copy
 import json
 from pathlib import Path
 import re
-from crq_repair import atomic, findings, git as wt_git, hack_detector, verify
+from crq_repair import (DetectorUnavailable, atomic, findings, git as wt_git,
+                         hack_detector, verify)
 from crq_repair.bounded import JOB_ID, identity, job_path, require_canonical_delivery, source_path, validate_revalidation
 
 
@@ -288,6 +289,51 @@ def repair_provenance(c, record, run):
     return lines
 
 
+def record_terminal_failure(c, q, item, record, verdicts, expected, job_id, exc):
+    """Shared terminal path for a deterministic repair artifact defect: it can
+    never pass on a later tick, so record the failure instead of blocking the
+    item on a retried identical result."""
+    failure = {'job': job_id, 'item': item['id'], 'verdict': 'FAILED',
+               'reason': 'invalid repair result: ' + str(exc)[:300],
+               'finding': expected['finding']}
+    record['verdicts'] = verdicts + [failure]
+    record.update(state='failed', error=str(exc)[:300])
+    if item['kind'] == review_receipt.KIND:
+        item['state'] = 'done'
+        item['repair_outcome'] = record['state']
+        item['last_error'] = None
+    else:
+        item['state'] = 'repair_failed'
+        item['last_error'] = 'repair_failed; needs human'
+    c.save_queue(q)  # terminal identity before authoritative write-back
+    mark_finding_outcome(c, expected, failure)
+    record_unpublished_siblings(c, record, {job_id})
+
+
+def record_unpublished_siblings(c, record, handled):
+    """A failed run can never publish. A FIXED sibling records no outcome of
+    its own (only publication fixes a finding), so give each verified sibling an
+    explicit decision instead of leaving it bound to a dead run. `handled` are
+    the jobs whose own outcome the caller records. Idempotent, so the terminal
+    replay path can repeat it after a failed ledger write."""
+    for other in record.get('jobs') or ():
+        if other in handled or not isinstance(other, str):
+            continue
+        try:
+            result = json.loads((c.STATE / 'repair' / other / 'result.json').read_text())
+            job = json.loads((c.STATE / 'repair/inbox' / (other + '.json')).read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(result, dict) or not isinstance(job, dict):
+            continue
+        if result.get('verdict') != 'FIXED' or not job.get('canonical_finding_id'):
+            continue
+        finding_inbox(c).repair_outcome(
+            job['canonical_finding_id'], other, 'needs-human',
+            'repair run failed before publication; the verified fix was not published',
+            c.iso(), repair_base=job.get('repair_base'), failure_class='exhausted')
+
+
 def harvest(c, q, item, dry=False):
     messages = []
     for run, record in item.get('repair_runs', {}).items():
@@ -295,6 +341,7 @@ def harvest(c, q, item, dry=False):
             # A terminal local failure can outlive a failed ledger write. Replay
             # retained FAILED outcomes through the ledger's idempotent event chain.
             if not dry and record['state'] == 'failed':
+                handled = set()
                 for result in record.get('verdicts', []):
                     if (result.get('verdict') != 'FAILED'
                             or not result.get('reason', '').startswith('invalid repair result: ')):
@@ -304,9 +351,13 @@ def harvest(c, q, item, dry=False):
                     expected = json.loads((c.STATE / 'repair/inbox' / (result['job'] + '.json')).read_text())
                     if expected.get('job') != result['job'] or expected.get('item') != item['id']:
                         raise ValueError('terminal repair job identity mismatch')
+                    handled.add(result['job'])
                     if expected.get('canonical_finding_id'):
                         c.save_queue(q)  # also retry any prior failed terminal save
                         mark_finding_outcome(c, expected, result)
+                # A write-back that failed before the sibling decision is replayed
+                # here; every sibling decision is idempotent.
+                record_unpublished_siblings(c, record, handled)
             if not dry and record.get('verdicts') and hasattr(c, 'WT_ROOT') and hasattr(c, 'CLONE'):
                 from crq_repair.retain import cleanup_harvested
                 for result in record['verdicts']:
@@ -379,20 +430,7 @@ def harvest(c, q, item, dry=False):
                 # A deterministic artifact defect can never pass on a later tick,
                 # so record it as a terminal failure instead of blocking the item.
                 if not dry:
-                    failure = {'job': job_id, 'item': item['id'], 'verdict': 'FAILED',
-                               'reason': 'invalid repair result: ' + str(exc)[:300],
-                               'finding': expected['finding']}
-                    record['verdicts'] = verdicts + [failure]
-                    record.update(state='failed', error=str(exc)[:300])
-                    if item['kind'] == review_receipt.KIND:
-                        item['state'] = 'done'
-                        item['repair_outcome'] = record['state']
-                        item['last_error'] = None
-                    else:
-                        item['state'] = 'repair_failed'
-                        item['last_error'] = 'repair_failed; needs human'
-                    c.save_queue(q)  # terminal identity before authoritative write-back
-                    mark_finding_outcome(c, expected, failure)
+                    record_terminal_failure(c, q, item, record, verdicts, expected, job_id, exc)
                 break
             if result.get('verdict') == 'FIXED' and not dry:
                 # Later findings move the shared HEAD; validate each immutable
@@ -405,30 +443,18 @@ def harvest(c, q, item, dry=False):
                     module = util.module_from_spec(spec)
                     spec.loader.exec_module(module)
                     module.mechanical(c.CONFIG, check_wt, predecessor, commits, job_id, path.parent)
+                except DetectorUnavailable:
+                    # The detector never rendered a verdict; keep it on the
+                    # retry path, as RuntimeError from git() already is.
+                    raise
                 except ValueError as exc:
-                    # verify/mechanical defects (duplicate commits, hack detector)
-                    # are deterministic, so route them to terminal failure exactly
-                    # like a malformed result artifact above; git failures from
-                    # make_worktree stay outside this handler and retry.
-                    failure = {'job': job_id, 'item': item['id'], 'verdict': 'FAILED',
-                               'reason': 'invalid repair result: ' + str(exc)[:300],
-                               'finding': expected['finding']}
-                    if not dry:
-                        record['verdicts'] = verdicts + [failure]
-                        record.update(state='failed', error=str(exc)[:300])
-                        if item['kind'] == review_receipt.KIND:
-                            item['state'] = 'done'
-                            item['repair_outcome'] = record['state']
-                            item['last_error'] = None
-                        else:
-                            item['state'] = 'repair_failed'
-                            item['last_error'] = 'repair_failed; needs human'
-                        c.save_queue(q)  # terminal identity before authoritative write-back
-                        mark_finding_outcome(c, expected, failure)
+                    # A rejected claimed range is deterministic (duplicate
+                    # commits, oversize or flagged diff), so record the same
+                    # terminal failure as a defective result artifact.
+                    record_terminal_failure(c, q, item, record, verdicts, expected, job_id, exc)
                     break
                 finally:
                     c.remove_worktree(check_wt, branch)
-            if result.get('verdict') == 'FIXED':
                 predecessor = commits[-1]
             if not dry:
                 mark_finding_outcome(c, expected, result)

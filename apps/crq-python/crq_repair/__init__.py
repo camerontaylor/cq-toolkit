@@ -87,6 +87,20 @@ def verify(wt, base, commits, job):
 MAX_HACK_DETECTOR_DIFF_BYTES = 120_000
 
 
+class DetectorRejection(ValueError):
+    """The detector rendered a verdict over this exact diff.
+
+    Findings, an oversized diff or an unparseable diff are properties of the
+    repair itself, so the same verdict returns on every later tick."""
+
+
+class DetectorUnavailable(ValueError):
+    """The detector produced no verdict, so a later tick may succeed.
+
+    A CliErrorArtifact means the CLI never ran the op; that cause is
+    environmental. Retrying is the documented behaviour for such failures."""
+
+
 def hack_detector(cq_bin, diff, cwd):
     """Run `cq gates.hackDetector` over the diff TEXT. Fail closed: raise
     ValueError unless the op returns status ok with no findings.
@@ -95,21 +109,27 @@ def hack_detector(cq_bin, diff, cwd):
     path string, which never parses as a diff, so every repair commit was
     rejected as `indeterminate`. Pass the diff itself."""
     if len(diff.encode()) > MAX_HACK_DETECTOR_DIFF_BYTES:
-        raise ValueError('hack detector did not pass: repair diff too large to scan (%d bytes)'
-                         % len(diff.encode()))
+        raise DetectorRejection('hack detector did not pass: repair diff too large to scan (%d bytes)'
+                                % len(diff.encode()))
     p = command(['node', cq_bin, 'gates.hackDetector', '--diff=' + diff, '--json'], cwd=cwd)
     try:
         data = json.loads(p.stdout)
     except ValueError:
-        raise ValueError('hack detector did not pass: unreadable output (exit %s): %s'
-                         % (p.returncode, (p.stderr or p.stdout)[:300])) from None
+        raise DetectorUnavailable('hack detector did not pass: unreadable output (exit %s): %s'
+                                  % (p.returncode, (p.stderr or p.stdout)[:300])) from None
+    if not isinstance(data, dict):
+        raise DetectorUnavailable('hack detector did not pass: unexpected output shape: '
+                                  + str(p.stdout)[:300])
     value = data.get('value')
     if p.returncode or data.get('status') != 'ok' or not isinstance(value, list) or value:
         detail = (json.dumps([{k: f.get(k) for k in ('kind', 'file', 'message')} for f in value
                               if isinstance(f, dict)])
                   if isinstance(value, list) and value else
                   str(data.get('detail') or data.get('error') or data.get('status')))
-        raise ValueError('hack detector did not pass: ' + detail[:600])
+        # `{"error": {...}}` is the CLI's CliErrorArtifact: the op never ran.
+        unavailable = isinstance(data.get('error'), dict)
+        raise (DetectorUnavailable if unavailable else DetectorRejection)(
+            'hack detector did not pass: ' + detail[:600])
     return data
 
 

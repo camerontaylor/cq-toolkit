@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest import mock
-from crq_repair import atomic
+from crq_repair import DetectorUnavailable, atomic
 from crq_repair import bounded
 import repair_tick
 
@@ -473,6 +473,101 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(record['state'], 'failed')
         self.assertIn('without valid commits', record['error'])
         self.assertEqual(item['state'], 'repair_failed')
+
+    def test_terminal_failure_replays_sibling_outcomes_after_a_failed_write(self):
+        job_id, job = self.prepare()
+        item = self.queue['items'][0]
+        record = item['repair_runs'][job['run']]
+        sibling_id = 'crq-run1-F2'
+        sibling = copy.deepcopy(job)
+        sibling.update(job=sibling_id, canonical_finding_id='d' * 64)
+        atomic(bounded.job_path(self.root, sibling_id), sibling)
+        record['jobs'] = [job_id, sibling_id]
+        row = self.root / 'state/backfill/findings/triage' / ('d' * 64 + '.json')
+        atomic(row, {'status': 'delivered', 'receipt': {'repair_task': sibling_id},
+                     'review_id': 'e' * 64, 'previous_event_id': None})
+        atomic(self.root / 'state/repair' / sibling_id / 'result.json',
+               {'job': sibling_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
+                'attempts': [{'rung': 'A0'}], 'repair_base': record['base'],
+                'worktree': str(self.root / 'wt/crq-repair-pr1-merged')})
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': [],
+                'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'],
+                'origin_job': OLD, 'repair_base': record['base']})
+        self.c.iso = lambda: '2026-11-12T00:00:00Z'
+        import finding_delivery
+        import review_ledger as ledger
+        out = ledger.Outbox(self.root / 'outbox', ledger.ArtifactStore(self.root / 'durable'))
+        inbox = finding_delivery.Inbox(self.root / 'state/backfill/findings', out)
+        # The terminal queue write lands, then the ledger write fails.
+        with mock.patch.object(repair_tick, 'mark_finding_outcome', side_effect=OSError('ledger write')):
+            with self.assertRaisesRegex(OSError, 'ledger write'):
+                repair_tick.harvest(self.c, self.queue, item)
+        self.assertEqual(record['state'], 'failed')
+        self.assertEqual(json.loads(row.read_text())['status'], 'delivered')
+        with mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
+            repair_tick.harvest(self.c, self.queue, item)
+        self.assertEqual(json.loads(row.read_text())['status'], 'needs-human')
+        # Replay is idempotent: one retained decision, no duplicate event.
+        with mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
+            repair_tick.harvest(self.c, self.queue, item)
+        self.assertEqual(json.loads(row.read_text())['status'], 'needs-human')
+
+    def test_unavailable_detector_keeps_the_run_retryable(self):
+        job_id, job = self.prepare()
+        item = self.queue['items'][0]
+        record = item['repair_runs'][job['run']]
+        self.c.WT_ROOT = self.root / 'wt'
+        self.c.make_worktree = lambda name, sha: (self.root / 'wt/verify', 'branch')
+        self.c.remove_worktree = lambda wt, branch: None
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
+                'attempts': [{'rung': 'A0'}], 'reason': 'test',
+                'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'],
+                'origin_job': OLD, 'repair_base': record['base'],
+                'worktree': str(self.root / 'wt/crq-repair-pr1-merged')})
+        with mock.patch.object(repair_tick, 'verify', side_effect=DetectorUnavailable(
+                'hack detector did not pass: ' + str({'kind': 'import-error'}))):
+            with self.assertRaises(DetectorUnavailable):
+                repair_tick.harvest(self.c, self.queue, item)
+        self.assertEqual(record['state'], 'queued')
+
+    def test_terminal_failure_leaves_no_finding_bound_to_the_dead_run(self):
+        job_id, job = self.prepare()
+        item = self.queue['items'][0]
+        record = item['repair_runs'][job['run']]
+        sibling_id = 'crq-run1-F2'
+        sibling = copy.deepcopy(job)
+        sibling.update(job=sibling_id, canonical_finding_id='d' * 64)
+        atomic(bounded.job_path(self.root, sibling_id), sibling)
+        record['jobs'] = [job_id, sibling_id]
+        row = self.root / 'state/backfill/findings/triage' / ('d' * 64 + '.json')
+        atomic(row, {'status': 'delivered', 'receipt': {'repair_task': sibling_id},
+                     'review_id': 'e' * 64, 'previous_event_id': None})
+        atomic(self.root / 'state/repair' / sibling_id / 'result.json',
+               {'job': sibling_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': ['a' * 40],
+                'attempts': [{'rung': 'A0'}], 'repair_base': record['base'],
+                'worktree': str(self.root / 'wt/crq-repair-pr1-merged')})
+        # The first job's artifact is defective, so the run can never publish.
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': [],
+                'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'],
+                'origin_job': OLD, 'repair_base': record['base']})
+        self.c.iso = lambda: '2026-11-12T00:00:00Z'
+        import finding_delivery
+        import review_ledger as ledger
+        out = ledger.Outbox(self.root / 'outbox', ledger.ArtifactStore(self.root / 'durable'))
+        inbox = finding_delivery.Inbox(self.root / 'state/backfill/findings', out)
+        with mock.patch.object(inbox, 'repair_outcome', wraps=inbox.repair_outcome) as outcome, \
+             mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
+            repair_tick.harvest(self.c, self.queue, item)
+        self.assertEqual(record['state'], 'failed')
+        self.assertEqual(json.loads(row.read_text())['status'], 'needs-human')
+        sibling = [call for call in outcome.call_args_list if call.args[0] == 'd' * 64]
+        self.assertEqual(len(sibling), 1)
+        self.assertEqual(sibling[0].args[1], sibling_id)
+        self.assertEqual(sibling[0].args[2], 'needs-human')
+        self.assertIn('not published', sibling[0].args[3])
 
     def test_bad_fixed_attempts_fail_once_across_ticks(self):
         for attempts in (None, [], [{}], [{'rung': 'A3'}], 'invalid'):
