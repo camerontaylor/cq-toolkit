@@ -168,6 +168,42 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(self.judge.call_count, 3)
         self.prepare.assert_not_called()
 
+    def test_blackout_deferral_resumes_after_a_default_branch_advance(self):
+        self.judge.return_value = {'stop': 'configuration', 'errorClass': 'blackout',
+                                   'reason': 'GLM peak blackout; recovery judge deferred'}
+        self.assertEqual(self.run_recovery()['state'], 'deferred')
+        artifact = self.root / 'state/repair/crq-job/recovery.json'
+        saved = json.loads(artifact.read_text())
+        self.assertEqual(saved['attempts'], 0)
+        self.assertTrue(saved['blackout_since'])
+        (self.repo / 'unrelated').write_text('advanced while paused\n')
+        self.run_git(self.repo, 'add', 'unrelated')
+        self.run_git(self.repo, 'commit', '-qm', 'advance default branch')
+        tip = self.run_git(self.repo, 'rev-parse', 'HEAD')
+        self.run_git(self.repo, 'update-ref', 'refs/remotes/origin/main', tip)
+        self.judge.return_value = {'stop': 'ok', 'verdict': 'valid', 'reason': 'current bug',
+                                   'current_path': 'a.py', 'current_lines': [[1, 1]], 'quoted_text': 'original'}
+        recovered = self.run_recovery()
+        self.assertEqual(recovered['disposition'], 'retry')
+        self.assertEqual(recovered['binding']['source_sha'], tip)
+        self.assertEqual(self.scan.call_args.args[0]['tip'], tip)
+        self.assertEqual(json.loads((self.root / 'state/repair/crq-job/recovery-evidence.json').read_text())['tip'], tip)
+        self.assertEqual(self.judge.call_count, 2)
+        self.prepare.assert_called_once()
+
+    def test_rate_limit_deferral_still_refuses_a_moved_default_branch(self):
+        self.judge.return_value = {'stop': 'rate-limit'}
+        self.assertEqual(self.run_recovery()['state'], 'deferred')
+        (self.repo / 'unrelated').write_text('new\n')
+        self.run_git(self.repo, 'add', 'unrelated')
+        self.run_git(self.repo, 'commit', '-qm', 'advance default branch')
+        self.run_git(self.repo, 'update-ref', 'refs/remotes/origin/main',
+                     self.run_git(self.repo, 'rev-parse', 'HEAD'))
+        with self.assertRaisesRegex(ValueError, 'evidence or source changed'):
+            self.run_recovery()
+        self.judge.assert_called_once()
+        self.prepare.assert_not_called()
+
     def test_moved_anchor_never_creates_replacement(self):
         self.judge.return_value['current_lines'] = [[2, 2]]
         self.assertEqual(self.run_recovery()['disposition'], 'unresolved')
