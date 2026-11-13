@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { RecordInputSchema, RecordResponseSchema } from './internal/reviewOperation.js';
 import { QueueUnsupported } from './internal/queueClient.js';
 import { reviewOp } from './internal/localReview.js';
@@ -43,7 +44,24 @@ export const makeRecord = (transport?: QueueTransport) =>
         ...(i.forgeEvidence === undefined ? {} : { forge_evidence: i.forgeEvidence }),
         report: { encoding: 'utf8' as const, data: i.report },
       };
-      return RecordResponseSchema.parse(await client.request(wire));
+      // An operator-disabled runner answers the generic unsupported envelope
+      // (action observed, state unsupported) instead of a record result;
+      // preserve that disposition rather than letting the record parse turn
+      // it into an indeterminate failure, so callers can distinguish an
+      // operator-disabled import from an unknown-delivery fault.
+      const raw = await client.request(wire);
+      const unsupported = z
+        .object({
+          v: z.literal(1),
+          action: z.literal('observed'),
+          state: z.literal('unsupported'),
+          reason: z.string().min(1),
+        })
+        .loose()
+        .safeParse(raw);
+      if (unsupported.success)
+        return { state: unsupported.data.state, reason: unsupported.data.reason };
+      return RecordResponseSchema.parse(raw);
     },
     transport,
   );

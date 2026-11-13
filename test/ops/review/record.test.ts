@@ -163,6 +163,25 @@ describe('review.record', () => {
     });
   });
 
+  test('preserves the unsupported disposition when policy disables review', async () => {
+    // A runner advertising record support but running with policy
+    // enabled:false answers with the generic unsupported envelope (action
+    // observed, state unsupported, reason review-disabled). That operator
+    // decision must surface as an explicit unsupported disposition, not be
+    // lost to a record-schema parse failure and reported indeterminate.
+    const { transport } = fakeTransport(() => ({
+      v: 1,
+      action: 'observed',
+      state: 'unsupported',
+      reason: 'review-disabled',
+    }));
+    const result = await makeRecord(transport)(goodInput);
+    expect(result).toEqual({
+      status: 'ok',
+      value: { state: 'unsupported', reason: 'review-disabled' },
+    });
+  });
+
   test('fails input missing the report body without contacting the queue', async () => {
     const { transport, requests } = fakeTransport(() => ({}));
     const record = makeRecord(transport);
