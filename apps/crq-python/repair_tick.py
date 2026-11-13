@@ -1242,7 +1242,7 @@ def reconcile_fix_prs(c, q):
         else:
             stats['deferred'] += 1
         if len(stats['errors']) < 5:
-            stats['errors'].append({'item': item['id'], 'run': run,
+            stats['errors'].append({'item': item.get('id'), 'run': run,
                                     'error': '%s: %s' % (type(exc).__name__, exc)})
 
     for item in q['items']:

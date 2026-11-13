@@ -3439,7 +3439,11 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         # managed below, because a starved pass and a quiet pass used to look
         # identical in the tick log.
         with forge_window(ForgeBudget(requests=80, seconds=60)):
-            reconciled = repair_tick.reconcile_fix_prs(sys.modules[__name__], q) or {}
+            reconciled = repair_tick.reconcile_fix_prs(sys.modules[__name__], q)
+        # Only a counts dict is a report. A caller or test double that returns
+        # anything else is reporting nothing, and must not break the tick.
+        if not isinstance(reconciled, dict):
+            reconciled = {}
         # Report the pass even when it projected nothing: "examined 0" and
         # "examined 12, starved 12" are different states, and only one of them
         # means the queue is genuinely quiet.
