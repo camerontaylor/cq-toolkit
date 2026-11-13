@@ -314,8 +314,8 @@ def record_unpublished_siblings(c, record, handled):
     explicit decision instead of leaving it bound to a dead run. `handled` are
     the jobs whose own outcome the caller records. Idempotent, so the terminal
     replay path can repeat it after a failed ledger write."""
-    for other in record['jobs']:
-        if other in handled:
+    for other in record.get('jobs') or ():
+        if other in handled or not isinstance(other, str):
             continue
         try:
             result = json.loads((c.STATE / 'repair' / other / 'result.json').read_text())
