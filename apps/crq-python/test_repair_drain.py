@@ -1,9 +1,11 @@
 """Automatic repair drain: selection, stale skip, GLM blackout. Real local Git, no models."""
+import contextlib
 import datetime as dt
 import copy
 import fcntl
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -1577,6 +1579,44 @@ class RepairDrainTest(unittest.TestCase):
              mock.patch.object(service, 'drain') as drain:
             service.main([])
         drain.assert_called_once()
+
+    def test_disabled_dispatch_narrates_on_stderr_and_keeps_stdout_empty(self):
+        # I1: stdout is the machine-readable channel; the disabled-dispatch
+        # narration is stderr-only and nothing is written to stdout.
+        disabled = {**self.config, 'repair': {**self.config['repair'], 'spend_authorization': '  '}}
+        atomic(self.root / 'config.json', disabled)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(service, 'ROOT', self.root), \
+             mock.patch.object(service, 'drain') as drain, \
+             mock.patch.dict(os.environ, {'ZAI_API_KEY': 'unused-fixture'}), \
+             contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            service.main([])
+        drain.assert_not_called()
+        self.assertEqual(stdout.getvalue(), '')
+        self.assertIn('repair dispatch disabled', stderr.getvalue())
+
+    def test_selector_refusal_writes_nothing_to_stdout_and_returns_2(self):
+        # 1692: refusal exit code 2, and (I1) nothing on stdout for it.
+        atomic(self.root / 'config.json', self.config)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(service, 'ROOT', self.root), \
+             mock.patch.object(service, 'drain') as drain, \
+             mock.patch.dict(os.environ, {'ZAI_API_KEY': 'unused-fixture'}), \
+             contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = service.main(['--job', 'crq-run1-F1'])
+        self.assertEqual(code, 2)
+        drain.assert_not_called()
+        self.assertEqual(stdout.getvalue(), '')
+        self.assertIn('repair dispatch refused', stderr.getvalue())
+
+    def test_write_result_emits_one_single_line_json_document(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            service.write_result({'a': 1})
+        lines = stdout.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(stdout.getvalue()), {'a': 1})
+        self.assertEqual(stderr.getvalue(), '')
 
     def test_backfill_job_ids_sort_without_finding_suffix(self):
         jobs = [{'job': 'crq-run1-F10', 'run': 'run1'}, {'job': 'crq-run1-F2', 'run': 'run1'},
