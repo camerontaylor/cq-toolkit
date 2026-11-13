@@ -201,6 +201,8 @@ export const RequestSchema = z
     item: z.string().min(1),
     created_at: z.string().min(1),
     principal: z.string().min(1).optional(),
+    // Retained queue-binding admission decision (S3c metrics); never on the wire.
+    admission_action: z.enum(['created', 'joined', 'reused', 'observed']).optional(),
     notify_status: NotifyStateSchema.optional(),
     supersedes: z
       .string()
