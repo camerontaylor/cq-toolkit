@@ -1991,23 +1991,42 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
 # --------------------------------------------------------------------- main
 
 
-def _error_artifact(kind: str, subcommand: str, message: str, exit_code: int) -> dict:
+def _error_artifact(kind: str, subcommand: str | None, message: str,
+                    exit_code: int) -> dict:
     """The one JSON artifact for an error with no result (doctrine I1)."""
     return {"error": {"kind": kind, "subcommand": subcommand,
                       "message": message, "exitCode": exit_code}}
 
 
-class _UsageError(Exception):
-    """Argument error raised instead of argparse's stderr-and-exit path."""
-
-
 class _JsonArgumentParser(argparse.ArgumentParser):
-    def error(self, message):
-        raise _UsageError(message)
+    """argparse parser that answers argument failures with the I1 artifact.
+
+    Machine mode (--json) is shared with the subparsers argparse derives from
+    this class, so every usage error -- on this parser or a subparser --
+    writes one error object to stdout with exit code 2 and keeps stderr
+    empty. Without --json, the same artifact still goes to stdout (I1:
+    stdout is always one JSON artifact) and the usage narration goes to
+    stderr.
+    """
+
+    json_mode = False
+    subcommand: str | None = None
+
+    def error(self, message: str):
+        print(json.dumps(_error_artifact("usage", self.subcommand, message, 2),
+                         indent=2, sort_keys=True))
+        if not self.json_mode:
+            print("usage: " + message, file=sys.stderr)
+        raise SystemExit(2)
 
 
 def main(argv=None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
     parser = _JsonArgumentParser(description=__doc__)
+    # Machine mode is needed before the parse, because a usage error is the
+    # one failure that never produces a namespace to read --json from.
+    parser.json_mode = "--json" in argv
     parser.add_argument("--root", required=True, type=Path,
                         help="deployment checkout root (full monorepo)")
     parser.add_argument("--overlay", required=True, type=Path,
@@ -2019,6 +2038,9 @@ def main(argv=None) -> int:
     parser.add_argument("--expect-helper-sha256", metavar="HEX64",
                         help="owner-pinned sha256 of the helper; a mismatch refuses "
                              "before import, lock and preflight")
+    parser.add_argument("--json", action="store_true",
+                        help="machine mode: every error emits one JSON artifact "
+                             "on stdout (exit 2) and keeps stderr empty")
     sub = parser.add_subparsers(dest="operation", required=True)
     switch = sub.add_parser("switch", help="preflight, drain, switch, verify, journal")
     switch.add_argument("--unit", choices=sorted(UNIT_RUNTIMES))
@@ -2041,17 +2063,15 @@ def main(argv=None) -> int:
                              "polls --first-tick-timeout-seconds instead)")
     health.add_argument("--first-tick-timeout-seconds", type=int, default=1500,
                         help="first completed-tick wait (default: 20-minute cadence plus 5-minute slack)")
-    operation = ""
-    try:
-        args = parser.parse_args(argv)
-        operation = args.operation
-        if args.operation == "health" and (args.first_tick_timeout_seconds < 0 or args.interval_seconds < 0):
-            raise _UsageError("health wait intervals must be nonnegative")
-    except _UsageError as exc:
-        print(json.dumps(_error_artifact("usage", operation, str(exc), 2),
-                         indent=2, sort_keys=True))
-        print("usage: " + str(exc), file=sys.stderr)
-        return 2
+    # Argument failures raised by a subparser (e.g. a missing required option)
+    # must honor --json too, and name the operation in the artifact.
+    for name, child in sub.choices.items():
+        child.json_mode = parser.json_mode
+        child.subcommand = name
+    args = parser.parse_args(argv)
+    parser.subcommand = args.operation
+    if args.operation == "health" and (args.first_tick_timeout_seconds < 0 or args.interval_seconds < 0):
+        parser.error("health wait intervals must be nonnegative")
 
     root = args.root.resolve()
     helper_path = args.helper or (root / "apps/crq-python/ops/prepare-host.py")
@@ -2129,16 +2149,19 @@ def main(argv=None) -> int:
                 return 1
     except RecoveryRequired as exc:
         print(json.dumps(exc.recovery, indent=2, sort_keys=True))
-        print("recovery required: " + str(exc), file=sys.stderr)
+        if not parser.json_mode:
+            print("recovery required: " + str(exc), file=sys.stderr)
         return 3
     except NoChangeRefused as exc:
         print(json.dumps(exc.record, indent=2, sort_keys=True))
-        print("refused: " + str(exc), file=sys.stderr)
+        if not parser.json_mode:
+            print("refused: " + str(exc), file=sys.stderr)
         return 2
     except Refused as exc:
         print(json.dumps(_error_artifact("refused", args.operation, str(exc), 2),
                          indent=2, sort_keys=True))
-        print("refused: " + str(exc), file=sys.stderr)
+        if not parser.json_mode:
+            print("refused: " + str(exc), file=sys.stderr)
         return 2
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         if args.operation == "health":
@@ -2148,7 +2171,8 @@ def main(argv=None) -> int:
         message = str(exc)[:400] or type(exc).__name__
         print(json.dumps(_error_artifact("refused", args.operation, message, 2),
                          indent=2, sort_keys=True))
-        print("refused: " + message, file=sys.stderr)
+        if not parser.json_mode:
+            print("refused: " + message, file=sys.stderr)
         return 2
     return 0
 
