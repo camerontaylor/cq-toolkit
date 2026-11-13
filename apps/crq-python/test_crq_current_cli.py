@@ -68,6 +68,19 @@ class CurrentTest(CurrentFixture, unittest.TestCase):
         self.assertIn("needs-human", err.getvalue())
         self.assertEqual(crq.QUEUE.read_bytes(), before)
 
+    def test_fixed_revalidation_cli_reports_refusal_without_traceback(self):
+        with tempfile.TemporaryDirectory() as td:
+            evidence = Path(td) / 'evidence.json'
+            evidence.write_text('{}')
+            with mock.patch.object(sys, 'argv', ['crq', 'repair-revalidate-fixed', 'crq-run-F1',
+                                                 '--revalidation', str(evidence)]), \
+                 mock.patch.object(crq.repair_tick, 'record_fixed_publication_evidence',
+                                   side_effect=ValueError('binding changed')), \
+                 contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(crq.main(), 3)
+            self.assertIn('repair-revalidate-fixed refused: binding changed', err.getvalue())
+            self.assertNotIn('Traceback', err.getvalue())
+
     def test_lock_busy_mutating_commands_exit_needs_human(self):
         for argv in (["crq", "init"], ["crq", "measure"], ["crq", "pause"],
                      ["crq", "author-observe", "manifest.json"]):

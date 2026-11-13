@@ -1,5 +1,4 @@
 import type { SlotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegistry.js';
-import type { SlotMetadata } from '../../../src/adapters/lock/slotLock.js';
 import { mkdirSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
 import { afterEach } from 'vitest';
@@ -65,12 +64,8 @@ import { realTmpDirSync } from '../../helpers/tmp-dir.js';
 import { dirname, join, sep } from 'node:path';
 import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
 import { reviewBranchFor } from '../../../src/adapters/git/prWorktree.js';
-import type {
-  PrWorktreeOpts,
-  RegistryMap,
-  WorktreeRegistry,
-  WorktreeRegistryEntry,
-} from '../../../src/adapters/git/prWorktree.js';
+import type { PrWorktreeOpts } from '../../../src/adapters/git/prWorktree.js';
+import type { RegistryMap } from './legacyRegistryTypes.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures + the fake git model
@@ -306,19 +301,11 @@ export const fakeGit = (
 /** An in-memory WorktreeRegistry that records load/save/update calls in order. */
 export const memRegistry = (
   initial: RegistryMap = {},
-): WorktreeRegistry & SlotWorktreeRegistry & { calls: string[]; current: () => RegistryMap } => {
+): SlotWorktreeRegistry & { calls: string[]; current: () => RegistryMap } => {
   const calls: string[] = [];
   let stored: RegistryMap = { ...initial };
   return {
     calls,
-    load: async () => {
-      calls.push('load');
-      return { ...stored };
-    },
-    save: async (map: RegistryMap) => {
-      calls.push('save');
-      stored = { ...map };
-    },
     read: async (pr) => {
       calls.push('load');
       const value = stored[String(pr)];
@@ -333,22 +320,16 @@ export const memRegistry = (
         : undefined;
     },
     withPrLock: async (_pr, action) => action(),
-    update: async (key: string | number, value: WorktreeRegistryEntry | SlotMetadata | null) => {
+    update: async (key, value) => {
       const entry =
-        value && 'state' in value
-          ? value.state === 'bound'
-            ? { path: value.checkoutPath, branch: reviewBranchFor(Number(key)), createdAt: NOW }
-            : null
-          : value;
+        value.state === 'bound'
+          ? { path: value.checkoutPath, branch: reviewBranchFor(key), createdAt: NOW }
+          : null;
       calls.push(entry === null ? `update:${key}:null` : `update:${key}`);
-      if (entry === null) {
-        delete stored[key];
-      } else {
-        stored[key] = { ...entry };
-      }
+      if (entry === null) delete stored[key];
+      else stored[key] = entry;
     },
     current: () => ({ ...stored }),
-    withLock: async <T>(fn: () => Promise<T>) => fn(),
   };
 };
 
@@ -357,7 +338,7 @@ export const memRegistry = (
  * and only mkdir/stat touch the real fs. */
 export const baseOpts = (
   model: FakeGit,
-  registry: WorktreeRegistry & SlotWorktreeRegistry,
+  registry: SlotWorktreeRegistry,
   over?: Partial<PrWorktreeOpts>,
 ): PrWorktreeOpts => ({
   repoRoot: REPO,

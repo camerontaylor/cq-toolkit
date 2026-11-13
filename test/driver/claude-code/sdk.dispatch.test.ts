@@ -101,6 +101,63 @@ describe('claude-code sdk transport specifics (mock sdk)', () => {
     }
   });
 
+  test('missing native MCP hook refuses before a session exists', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-hook-'));
+    try {
+      const sessionsDir = join(scratchDir, 'sessions');
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
+        routingTable: conformanceEndpointTable(),
+        sessionsDir,
+        sdkLoader: async () => ({
+          ...mockSdkModule({ calls: [] }),
+          createSdkMcpServer: () => ({}),
+        }),
+      });
+      const err = await thrownBy(driver.run(invocation()));
+      expect(errorClassOf(err)).toBe('config');
+      expect((err as Error).message).toMatch(/request-handler seam/);
+      await expect(stat(sessionsDir)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test.each(['invalid-tool', 'missing-workspace'])(
+    'setup failure %s does not append an undispatched resumed prompt',
+    async (failure) => {
+      const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-setup-'));
+      try {
+        const sessionsDir = join(scratchDir, 'sessions');
+        const workspace =
+          failure === 'missing-workspace' ? join(scratchDir, 'workspace') : scratchDir;
+        const store = new SessionStore(sessionsDir);
+        const record = await store.create(workspace);
+        const driver = new ClaudeCodeDriver({
+          transport: 'sdk',
+          routingTable: conformanceEndpointTable(),
+          sessionsDir,
+          sdkLoader: async () => ({
+            ...mockSdkModule({ calls: [] }),
+            tool: () => null,
+          }),
+        });
+        const err = await thrownBy(
+          driver.run(
+            invocation({
+              sessionRef: record.sessionId,
+              toolPolicy: { allow: ['read'], mode: 'allowlist' },
+            }),
+          ),
+        );
+        expect(errorClassOf(err)).toBe('config');
+        expect((await store.load(record.sessionId))?.messages).toEqual([]);
+      } finally {
+        await rm(scratchDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   test('peer PRESENT but surface-less: capability detection throws pre-dispatch (feature check, never a version check)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {

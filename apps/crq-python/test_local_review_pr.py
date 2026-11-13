@@ -160,6 +160,30 @@ class AssociationTests(SnapshotGitFixture, unittest.TestCase):
         with self.assertRaisesRegex(crq.NotReady, "equivalent-local-review"):
             runtime.reconcile_pr(self.c, self.q, item, dict(base=self.base, head=self.head), False)
 
+    def test_pr_open_with_review_v1_request_associates_without_second_start(self):
+        # S2b-i: an admitted review-v1 request for the PR pins enrolls by
+        # ASSOCIATION - no second review starts. associate() matches
+        # equivalent items (pending or completed) without needing a retained
+        # receipt, so the enrollment path (crq.enroll -> associate ->
+        # continue) enrolls no open/delta item and records the PR link.
+        # The item stays in its admitted (pending) state throughout:
+        # enrollment starts nothing.
+        prior_state = self.item["state"]
+        opened = [dict(number=7, isDraft=False, baseRefName="main",
+                        headRefName="feature", headRefOid=self.head)]
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+        with mock.patch.multiple(crq, CLONE=self.repo, CONFIG={}), \
+             mock.patch.object(crq, "gh_json", return_value=opened), \
+             mock.patch.object(crq, "ensure_commit", return_value=True), \
+             mock.patch.object(crq, "event"):
+            crq.enroll(self.q, False)
+        # No open/delta item started: the only queue item is the admitted
+        # review-v1 item, still pending, and the PR link points at it.
+        self.assertEqual([i["kind"] for i in self.q["items"]], ["local-review"])
+        self.assertEqual(self.item["state"], prior_state)
+        self.assertEqual(self.q["review_pr_links"][crq.REPO + "#7"]["item"], self.item["id"])
+        self.assertEqual(self.q["review_pr_links"][crq.REPO + "#7"]["head"], self.head)
+
     def test_base_difference_preserves_history_without_reuse(self):
         pr.associate(self.c, self.q, crq.REPO, 7, self.base, self.head, False)
         self.assertFalse(pr.associate(self.c, self.q, crq.REPO, 7, self.head, self.head, False))

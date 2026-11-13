@@ -151,10 +151,15 @@ export function scripted(
             await writeFile(join(invocation.workspace.path, 'public-note.txt'), 'safe content\n');
             throw new Error('DO_NOT_UPLOAD synthetic diagnostic');
           }
-          if (mode === 'safe-change' || mode === 'fail-b-safe-change')
+          if (mode === 'safe-change')
             await writeFile(
               join(invocation.workspace.path, 'public-note.txt'),
               'safe public content\n',
+            );
+          if (mode === 'fail-b-safe-change')
+            await writeFile(
+              join(invocation.workspace.path, 'public-note.txt'),
+              `safe public content ${task.files.join(',')} attempt ${Number(/attempt: (\d+)/.exec(invocation.prompt)?.[1] ?? 1)}\n`,
             );
           return {
             stopReason: 'complete',

@@ -79,17 +79,8 @@ export type {
 export type { ProgressReason, VerifyOutcome } from './verifyReviewOutcome.js';
 export { snapshotPrState } from '../../adapters/forge-github/snapshotPrState.js';
 export { verifyPrOutcome } from './verifyReviewOutcome.js';
-export type {
-  PrWorktreeOpts,
-  RegistryMap,
-  WorktreeRegistry,
-  WorktreeRegistryEntry,
-} from '../../adapters/git/prWorktree.js';
-export {
-  fileWorktreeRegistry,
-  removePrWorktree,
-  resolvePrWorktree,
-} from '../../adapters/git/prWorktree.js';
+export type { PrWorktreeOpts } from '../../adapters/git/prWorktree.js';
+export { removePrWorktree, resolvePrWorktree } from '../../adapters/git/prWorktree.js';
 // E4 — the agentic fix half of the loop: fixReviewItem drives ONE worker
 // over ONE review item in the resolved per-PR worktree through the injected
 // Driver seam (conservative harness-derived tool allowlist, head-capped
@@ -104,6 +95,22 @@ export type {
 } from './fixReviewItem.js';
 export { makeFixReviewItem } from './fixReviewItem.js';
 export { defaultFixPrompt } from './prompts/defaultFixPrompt.js';
+// C1 finding-fix op: the typed-disposition / typed-failure-class sibling of
+// review.fixItem. The binding is carried and echoed, never verified here.
+export type {
+  FixFindingBinding,
+  FixFindingDeps,
+  FixFindingFailureClass,
+  FixFindingInput,
+  FixFindingOp,
+  FixFindingReport,
+  FixFindingResult,
+} from './fixFinding.js';
+export {
+  MAX_FIX_FINDING_INSTRUCTIONS_CHARS,
+  MAX_SERIALIZED_DISPATCH_CHARS,
+  makeFixFinding,
+} from './fixFinding.js';
 export { makeReviewAddress, addressBatches } from './address.js';
 export type {
   ReviewAddressInput,

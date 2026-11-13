@@ -121,7 +121,11 @@ import { z } from 'zod';
 import { boundedErrorText, describeError, redactSensitiveText } from '../error-text.js';
 import { DispatchError } from '../errors.js';
 import { assertStrictTokenBudgetSupported } from '../common/strict-budget.js';
-import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
+import {
+  assertSessionsDirOutsideWorkspace,
+  boundWorkspacePath,
+  resumedRecordOrThrow,
+} from '../common/workspace.js';
 import { stripMetaSchema } from '../../shared/json-schema.js';
 import { compileOutputSchema, uncompilableSchemaVerdict } from '../common/structured.js';
 import type {
@@ -237,7 +241,10 @@ export function installNativeToolCallAdapter(
   const protocol = asRecord(instance)?.['server'];
   const setHandler = asRecord(protocol)?.['setRequestHandler'];
   if (typeof setHandler !== 'function') {
-    throw new Error('native SDK MCP server lacks the tools/call request-handler seam');
+    throw new DispatchError(
+      'config',
+      'native SDK MCP server lacks the tools/call request-handler seam',
+    );
   }
   setHandler.call(
     protocol,
@@ -334,7 +341,20 @@ export class ClaudeCodeSdkTransport implements Driver {
     // then the workspace binding.
     const route = resolveRoute(modelSpec, this.routingTable); // unknown provider → the throw
     const keyValue = readKeyEnvOrThrow(route); // missing key env → throw
-    const sdk = await this.loadSdk(); // peer absent / misshaped → throw
+    let sdk;
+    try {
+      sdk = await this.loadSdk(); // peer absent / misshaped → throw
+    } catch (error) {
+      if (signalAborted(signal)) {
+        return {
+          usage: zeroUsage(),
+          usageProvenance: 'unmeasured',
+          denials: [],
+          stopReason: 'aborted',
+        };
+      }
+      throw error;
+    }
     if (
       budget.maxTokens !== undefined &&
       (!Number.isFinite(budget.maxTokens) || budget.maxTokens <= 0)
@@ -390,8 +410,14 @@ export class ClaudeCodeSdkTransport implements Driver {
     // --- I6 isolation / §2.4 workspace table: a fresh record — created in
     // the bound workspace when one is set, else in a fresh temp workspace —
     // or a real resume, which must record the SAME realpath when a workspace
-    // is bound (else a pre-dispatch config throw).
+    // is bound (else a pre-dispatch config throw). Annex A: the session
+    // binding file must live OUTSIDE the model-editable tree — a sessions
+    // dir at or under the bound workspace is refused BEFORE any session
+    // state exists (explicit and default dirs alike).
     const sessionsDir = this.sessionsDir ?? defaultSessionsDir();
+    if (boundWorkspace !== undefined) {
+      assertSessionsDirOutsideWorkspace(sessionsDir, boundWorkspace, 'claude-code driver');
+    }
     const store = new SessionStore(sessionsDir);
     const record =
       sessionRef === undefined
@@ -400,8 +426,6 @@ export class ClaudeCodeSdkTransport implements Driver {
           )
         : await resumedRecordOrThrow(store, sessionRef, boundWorkspace, 'claude-code driver');
     const workspace = record.workspace;
-
-    await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
 
     // --- Tool surface: the SHARED CORE (src/harness/surface.ts) — the one
     // manifest constructor binds the workspace realpath, the sandbox level,
@@ -416,6 +440,11 @@ export class ClaudeCodeSdkTransport implements Driver {
       toolPolicy,
       harness: this.harnessConfig,
       envNames: this.envAllowlist,
+    }).catch((err: unknown) => {
+      throw new DispatchError(
+        'config',
+        `claude-code driver: tool surface setup failed: ${describeError(err)}`,
+      );
     });
     const surface = manifest === undefined ? undefined : createHarnessSurface(manifest);
     const allowed = manifest?.tools ?? [];
@@ -442,6 +471,25 @@ export class ClaudeCodeSdkTransport implements Driver {
       internalTools: outputSchema === undefined ? [] : [STRUCTURED_OUTPUT_TOOL],
     };
 
+    // --- In-flight harness handlers (post-settle race): the SDK can fail or
+    // settle the query while a handler is still executing. That handler
+    // appends to the session and pushes into `observation.denials` AFTER
+    // `run()` returned — the caller would miss the denial. Every dispatch is
+    // tracked here and settled before the observation is persisted and the
+    // verdict built.
+    const inFlightCalls = new Set<Promise<void>>();
+    const trackHarnessCall = (call: Promise<SdkToolCallResult>): Promise<SdkToolCallResult> => {
+      // A settlement-only twin: the handler's own rejection belongs to the
+      // SDK's tool loop, never to the settle wait.
+      inFlightCalls.add(
+        call.then(
+          () => undefined,
+          () => undefined,
+        ),
+      );
+      return call;
+    };
+
     // --- The one SDK call: options assembly. ------------------------------
     const sandbox = sandboxOption(sandboxPolicy.level);
     const sdkTools = (surface?.tools ?? []).map((harnessTool) => {
@@ -452,21 +500,24 @@ export class ClaudeCodeSdkTransport implements Driver {
         // validates calls with its strict compatibility schema.
         harnessTool.inputSchema.shape,
         (args: unknown, extra: unknown): Promise<SdkToolCallResult> =>
-          runHarnessTool(
-            surface as HarnessSurface,
-            harnessTool.name,
-            args,
-            store,
-            record,
-            observation.denials,
-            // Cancellation reaches the executor: the governed signal (I8 —
-            // forwarded, never decided here) and the SDK's per-call signal,
-            // whichever fires first; `run` then kills its process group.
-            callSignal(signal, extra),
+          trackHarnessCall(
+            runHarnessTool(
+              surface as HarnessSurface,
+              harnessTool.name,
+              args,
+              store,
+              record,
+              observation.denials,
+              // Cancellation reaches the executor: the governed signal (I8 —
+              // forwarded, never decided here) and the SDK's per-call signal,
+              // whichever fires first; `run` then kills its process group.
+              callSignal(signal, extra),
+            ),
           ),
       );
       const toolDefinition = asRecord(definition);
-      if (!toolDefinition) throw new Error('Claude SDK tool() returned an invalid tool definition');
+      if (!toolDefinition)
+        throw new DispatchError('config', 'Claude SDK tool() returned an invalid tool definition');
       // SDK tool() types accept only a raw shape, but createSdkMcpServer
       // passes this definition to MCP registerTool, which accepts a Zod
       // object. Keep the strict object so tools/list advertises the same
@@ -526,14 +577,16 @@ export class ClaudeCodeSdkTransport implements Driver {
                 sdk.createSdkMcpServer({ name: MCP_SERVER_NAME, tools: sdkTools }),
                 surface,
                 (name, args, extra) =>
-                  runHarnessTool(
-                    surface,
-                    name,
-                    args,
-                    store,
-                    record,
-                    observation.denials,
-                    callSignal(signal, extra),
+                  trackHarnessCall(
+                    runHarnessTool(
+                      surface,
+                      name,
+                      args,
+                      store,
+                      record,
+                      observation.denials,
+                      callSignal(signal, extra),
+                    ),
                   ),
               ),
             },
@@ -554,6 +607,7 @@ export class ClaudeCodeSdkTransport implements Driver {
           }
         : {}),
     };
+    await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
     const abortRoot = abortRootFollowing(signal); // ./process.ts — the wiring only
     if (abortRoot !== undefined) {
       queryOptions['abortController'] = abortRoot.controller;
@@ -596,6 +650,21 @@ export class ClaudeCodeSdkTransport implements Driver {
     // state is captured.
     aborted = aborted || abortRoot?.controller.signal.aborted === true;
     abortRoot?.dispose();
+
+    // Settle the harness handlers the SDK left in flight: a query that failed
+    // (or settled) while a call was executing still has a handler that will
+    // append its tool message and push its denial. Wait for those settlements
+    // — bounded by each call's own cancellation (the governed and per-call
+    // signals) — so the persisted observation and the returned verdict see
+    // the COMPLETE denial set instead of a race-dependent subset.
+    await Promise.allSettled([...inFlightCalls]);
+
+    // An abort that fired DURING the drain must reach the verdict: the
+    // pre-dispose fold above ran before the wait, and disposal has since
+    // detached the root. The governed signal itself is still live here, and
+    // each drained handler received it, so recheck both sources before the
+    // verdict is built — never report 'complete' for a cancelled run.
+    aborted = aborted || abortRoot?.controller.signal.aborted === true || signalAborted(signal);
 
     // Fail closed: a run whose SDK never reported an init surface ran
     // unverified — whatever it reports is not a model outcome.
@@ -903,7 +972,20 @@ function asAgentSdkModule(loaded: unknown): AgentSdkModule {
         `(${missing.join(', ')}) — capability detection is feature-based, never version-based`,
     );
   }
-  return rec as unknown as AgentSdkModule;
+  const sdk = rec as unknown as AgentSdkModule;
+  try {
+    const probe = sdk.createSdkMcpServer({ name: MCP_SERVER_NAME, tools: [] });
+    const server = asRecord(asRecord(probe)?.['instance'])?.['server'];
+    if (typeof asRecord(server)?.['setRequestHandler'] !== 'function') {
+      throw new Error('native SDK MCP server lacks the tools/call request-handler seam');
+    }
+  } catch (err) {
+    throw new DispatchError(
+      'config',
+      `claude-code driver: MCP server capability check failed: ${describeError(err)}`,
+    );
+  }
+  return sdk;
 }
 
 /** The resolved route's key VALUE, read from the host env AT RUN TIME. */

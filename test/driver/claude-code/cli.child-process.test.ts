@@ -99,6 +99,64 @@ describe('claude-code driver, CLI transport specifics (fake agent CLI)', () => {
     });
   }, 20_000);
 
+  test('a throwing stdout listener neither skips the stderr flush nor strands close', async () => {
+    await withScratch(async (scratchDir) => {
+      const child = spawnManaged({
+        command: process.execPath,
+        args: ['-e', `process.stdout.write('final-out'); process.stderr.write('final-err');`],
+        cwd: scratchDir,
+        maxRetainedBytes: 64 * 1024,
+      });
+      const seenErr: string[] = [];
+      // The fragment has no newline, so it is delivered ONLY by the final
+      // flush inside the close handler — the throw lands there.
+      child.onStdoutLine((line) => {
+        if (line === 'final-out') throw new Error('stdout listener boom');
+      });
+      child.onStderrLine((line) => seenErr.push(line));
+      const close = await child.close;
+      // The promise still settles, both streams retain their bytes, and the
+      // OTHER stream's flush ran despite the throw.
+      expect(close.stdout).toBe('final-out');
+      expect(close.stderr).toBe('final-err');
+      expect(seenErr).toEqual(['final-err']);
+    });
+  }, 20_000);
+
+  test('a listener that throws mid-stream neither stops collection nor loses later lines', async () => {
+    await withScratch(async (scratchDir) => {
+      // The report is one deferred warning from the close handler; spy so the
+      // assertion does not depend on Node's warning-event plumbing.
+      const warn = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
+      try {
+        const child = spawnManaged({
+          command: process.execPath,
+          args: ['-e', `process.stdout.write('one\\ntwo\\nthree\\nfour');`],
+          cwd: scratchDir,
+          maxRetainedBytes: 64 * 1024,
+        });
+        const seen: string[] = [];
+        // The throw lands on a NEWLINE-TERMINATED line, i.e. inside collection
+        // (`onChunk`), not inside the close handler's final flush.
+        child.onStdoutLine((line) => {
+          if (line === 'one') throw new Error('collection listener boom');
+        });
+        child.onStdoutLine((line) => seen.push(line));
+        const close = await child.close;
+        // Every line still reached the other listener, including the ones
+        // after the throw and the final unterminated fragment.
+        expect(seen).toEqual(['one', 'two', 'three', 'four']);
+        expect(close.stdout).toBe('one\ntwo\nthree\nfour');
+        // Contained, not silent: reported once, naming the contained throw.
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(String(warn.mock.calls[0]?.[0])).toContain('listener threw');
+        expect(String(warn.mock.calls[0]?.[0])).toContain('collection listener boom');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  }, 20_000);
+
   test('oversized lines fail loudly while retention stays bounded', async () => {
     await withScratch(async (scratchDir) => {
       const child = spawnManaged({
@@ -178,7 +236,14 @@ describe('claude-code driver, CLI transport specifics (fake agent CLI)', () => {
           `
           const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
           const before = signals.map(s => process.listenerCount(s));
-          await import(${JSON.stringify(processUrl)});
+          const beforeHandles = process._getActiveHandles().length;
+          const proc = await import(${JSON.stringify(processUrl)});
+          const signalsModule = await import(${JSON.stringify(new URL('../../../src/shared/process-signals.ts', import.meta.url).href)});
+          let kills = 0;
+          process.kill = () => { kills++; return true; };
+          proc.terminateActiveChildrenOnExit();
+          const force = signalsModule.prepareProcessSignalCleanup();
+          if (kills !== 0 || force.length !== 0 || process._getActiveHandles().length !== beforeHandles) throw new Error('import or empty cleanup started work');
           await import(${JSON.stringify(cliUrl)});
           console.log(JSON.stringify({before, after: signals.map(s => process.listenerCount(s))}));
         `,

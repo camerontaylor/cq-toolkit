@@ -130,6 +130,168 @@ describe('fileDispatchLog', () => {
     }
   });
 
+  test('a line with actionId renamed to id throws naming the line (issue #1199 acceptance)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
+    try {
+      const path = join(dir, 'dispatch.jsonl');
+      // Exactly the pre-version line shape but with the dedupe key renamed:
+      // well-formed JSON, so it is not a truncated tail — it is a refusal.
+      const renamed = { id: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW };
+      await writeFile(path, `${JSON.stringify(renamed)}\n`, 'utf8');
+      await expect(fileDispatchLog(path).load()).rejects.toThrow(
+        /line 1.*malformed record.*actionId/,
+      );
+      // record() applies the same rule before appending: the writer cannot
+      // poison its own log with a renamed key.
+      await expect(
+        fileDispatchLog(path).record({
+          version: 1,
+          id: 'r2',
+          kind: 'issue_comment',
+          resultRef: '8002',
+          at: NOW,
+        } as unknown as DispatchRecord),
+      ).rejects.toThrow(/refusing to record a malformed dispatch record.*actionId/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('malformed record shapes throw fail-closed, naming the line', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
+    try {
+      const path = join(dir, 'dispatch.jsonl');
+      // Each case is a line load() must refuse: the version gate already
+      // passed (absent or 1), but a REQUIRED field is missing or mistyped.
+      // A missing dedupe key would silently re-dispatch (a repost), so the
+      // line throws exactly like a corrupt mid-file line does.
+      const cases: Array<{ name: string; line: unknown; matches: RegExp }> = [
+        {
+          name: 'missing actionId',
+          line: { kind: 'review_reply', resultRef: '8001', at: NOW },
+          matches: /malformed record.*actionId/,
+        },
+        {
+          name: 'legacy line missing actionId (no version excuses no shape)',
+          line: { kind: 'review_reply', resultRef: '8001', at: NOW },
+          matches: /malformed record.*actionId/,
+        },
+        {
+          name: 'empty actionId',
+          line: { version: 1, actionId: '', kind: 'review_reply', resultRef: '8001', at: NOW },
+          matches: /malformed record.*actionId/,
+        },
+        {
+          name: 'non-string actionId',
+          line: { version: 1, actionId: 7, kind: 'review_reply', resultRef: '8001', at: NOW },
+          matches: /malformed record.*actionId/,
+        },
+        {
+          name: 'unknown kind',
+          line: { version: 1, actionId: 'r1', kind: 'review_comment', resultRef: '8001', at: NOW },
+          matches: /malformed record.*kind/,
+        },
+        {
+          name: 'missing kind',
+          line: { version: 1, actionId: 'r1', resultRef: '8001', at: NOW },
+          matches: /malformed record.*kind/,
+        },
+        {
+          name: 'non-string resultRef',
+          line: { version: 1, actionId: 'r1', kind: 'review_reply', resultRef: 8001, at: NOW },
+          matches: /malformed record.*resultRef/,
+        },
+        {
+          name: 'non-numeric at',
+          line: { version: 1, actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: 'now' },
+          matches: /malformed record.*\bat\b/,
+        },
+        {
+          name: 'missing at',
+          line: { version: 1, actionId: 'r1', kind: 'review_reply', resultRef: '8001' },
+          matches: /malformed record.*\bat\b/,
+        },
+        {
+          name: 'stray record of another shape',
+          line: { action: 'review', version: 1 },
+          matches: /malformed record.*actionId/,
+        },
+      ];
+      for (const { name, line, matches } of cases) {
+        await writeFile(path, `${JSON.stringify(line)}\n`, 'utf8');
+        await expect(fileDispatchLog(path).load(), name).rejects.toThrow(matches);
+      }
+      // Non-object lines are refused too: none can ever be a record.
+      for (const [name, raw] of [
+        ['array line', '[1,2]'],
+        ['string line', '"r1"'],
+        ['number line', '7'],
+        ['null line', 'null'],
+      ] as const) {
+        await writeFile(path, `${raw}\n`, 'utf8');
+        await expect(fileDispatchLog(path).load(), name).rejects.toThrow(/not a record object/);
+      }
+      // MID-FILE: a valid record followed by a malformed line names line 2.
+      const first: DispatchRecord = {
+        version: 1,
+        actionId: 'r1',
+        kind: 'review_reply',
+        resultRef: '8001',
+        at: NOW,
+      };
+      await writeFile(
+        path,
+        `${JSON.stringify(first)}\n${JSON.stringify({ version: 1, kind: 'review_reply', resultRef: '8002', at: NOW })}\n`,
+        'utf8',
+      );
+      await expect(fileDispatchLog(path).load()).rejects.toThrow(
+        /line 2.*malformed record.*actionId/,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a v1 line with extra keys still loads (forward compat is the version field, not key strictness)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
+    try {
+      const path = join(dir, 'dispatch.jsonl');
+      const withExtra = {
+        version: 1,
+        actionId: 'r1',
+        kind: 'review_reply',
+        resultRef: '8001',
+        at: NOW,
+        note: 'a future writer key',
+      };
+      await writeFile(path, `${JSON.stringify(withExtra)}\n`, 'utf8');
+      expect(await fileDispatchLog(path).load()).toEqual([withExtra]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('record() refuses a malformed entry without appending (the writer never self-poisons the log)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
+    try {
+      const path = join(dir, 'dispatch.jsonl');
+      const log = fileDispatchLog(path);
+      await expect(
+        log.record({
+          version: 1,
+          actionId: 'r1',
+          kind: 'review_reply',
+          resultRef: '8001',
+          at: 'now',
+        } as unknown as DispatchRecord),
+      ).rejects.toThrow(/refusing to record a malformed dispatch record.*\bat\b/);
+      // Nothing landed: a later load sees an empty log, not a poisoned one.
+      expect(await log.load()).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test('MID-FILE corruption throws a CLEAR error — dispatching on an unreadable log would duplicate posts', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
     try {

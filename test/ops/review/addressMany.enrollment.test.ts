@@ -88,3 +88,45 @@ test('an ineligible enrolled PR remains advisory while eligible siblings dispatc
     expect(result.value.excluded?.[0]?.enrollment.state).toBe('unavailable');
   expect(address).toHaveBeenCalledTimes(1);
 });
+
+for (const change of ['head', 'draft', 'closed', 'isolation'] as const) {
+  test(`does not enroll when ${change} changes or refuses during isolation`, async () => {
+    let isolated = false;
+    const enqueue = vi.fn();
+    const address = vi.fn();
+    const read = async (args: string[]) => {
+      if (args[0] === 'repo') return gh(args);
+      const current = metadata(1);
+      return {
+        code: 0,
+        stderr: '',
+        stdout: JSON.stringify({
+          ...current,
+          ...(isolated && change === 'head'
+            ? { head: { ...current.head, sha: 'b'.repeat(40) } }
+            : {}),
+          ...(isolated && change === 'draft' ? { draft: true } : {}),
+          ...(isolated && change === 'closed' ? { state: 'closed' } : {}),
+        }),
+      };
+    };
+    const result = await makeReviewAddressMany({
+      coordinationRoot: coordinationRoot(),
+      gh: read,
+      address,
+      enqueue,
+      isolate: async (root) => {
+        isolated = true;
+        if (change === 'isolation') throw new Error('isolation refused');
+        return root;
+      },
+    })({ ...input, pulls: [1], enrollments: [{ number: 1, request: enrollmentRequest }] });
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(address).not.toHaveBeenCalled();
+    const value = result.status === 'ok' ? result.value : result.report;
+    expect(value?.rows[0]?.enrollment).toEqual({
+      state: 'unavailable',
+      reason: 'Requested but leg not dispatched',
+    });
+  });
+}

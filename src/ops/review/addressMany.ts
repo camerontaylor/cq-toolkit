@@ -1,6 +1,10 @@
-import { withAddressManyCheckout } from './internal/addressCheckoutOwnership.js';
+import {
+  isAddressCheckoutIncomplete,
+  withAddressManyCheckout,
+} from './internal/addressCheckoutOwnership.js';
 import { checkoutWriterContext } from '../../shared/checkoutWriterContext.js';
 import { checkoutWriterCommand } from '../../shared/checkoutWriterCommand.js';
+import { processEnv } from '../../config/process-env.js';
 import { z } from 'zod';
 import { mkdtemp, symlink, access, readFile, mkdir, rm, realpath, lstat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
@@ -75,13 +79,41 @@ export type ReviewAddressManyResult = OpResult<
 
 class IsolationRefusal extends Error {}
 
+/**
+ * Bounded, non-interactive options for clone-setup Git calls. Git asks for
+ * credentials through `/dev/tty`, not stdin, so a private remote without a
+ * usable credential would otherwise stall the worker (and its reservation)
+ * forever; the timeout bounds hangs that no prompt explains.
+ */
+const gitSubprocess = (): { timeout: number; env: NodeJS.ProcessEnv } => {
+  const env: NodeJS.ProcessEnv = { ...processEnv(), GIT_TERMINAL_PROMPT: '0' };
+  // GIT_TERMINAL_PROMPT=0 covers git's own credential prompts, but OpenSSH
+  // reads /dev/tty directly for passphrase/host-key prompts and ignores it.
+  // BatchMode makes ssh non-interactive (it refuses instead of prompting)
+  // without discarding caller-configured SSH commands or settings; an ssh
+  // variant that does not know BatchMode would only fail earlier, which the
+  // timeout below bounds anyway.
+  if (env['GIT_SSH'] === undefined && env['GIT_SSH_COMMAND'] === undefined) {
+    env['GIT_SSH_COMMAND'] = 'ssh -oBatchMode=yes';
+  } else if (
+    env['GIT_SSH_COMMAND'] !== undefined &&
+    !/(^|[\s"'])-oBatchMode=yes([\s"']|$)/.test(env['GIT_SSH_COMMAND'])
+  ) {
+    env['GIT_SSH_COMMAND'] = `${env['GIT_SSH_COMMAND']} -oBatchMode=yes`;
+  }
+  return { timeout: 300_000, env };
+};
+
 /** Independent object store and common directory; caller receipts remain durable. */
 export async function isolateAddressMany(
   repoRoot: string,
   number: number,
   options: { cloneRoot: string; target?: string; onPartial?: (path: string) => void },
 ): Promise<string> {
-  const git = checkoutWriterContext() ? checkoutWriterCommand : promisify(execFile);
+  const run = promisify(execFile);
+  const git = checkoutWriterContext()
+    ? (file: string, args: string[]) => checkoutWriterCommand(file, args, gitSubprocess())
+    : (file: string, args: string[]) => run(file, args, gitSubprocess());
   // Inspect key names only: helpers, HTTP headers and signing values may contain credentials.
   const scopes = ['--local'];
   try {
@@ -187,6 +219,7 @@ export function makeReviewAddressMany(
     address?: (input: ReviewAddressInput) => Promise<ReviewAddressResult>;
     /** Driver factory for the default address; carries the alias sink wiring. */
     drivers?: DriverFactory;
+    managedSubmit?: import('../dev/managedReview.js').ManagedReviewSubmit;
   } = {},
 ) {
   return async (input: ReviewAddressManyInput): Promise<ReviewAddressManyResult> => {
@@ -227,6 +260,7 @@ function makeReviewAddressManyCore(
     address?: (input: ReviewAddressInput) => Promise<ReviewAddressResult>;
     /** Driver factory for the default address; carries the alias sink wiring. */
     drivers?: DriverFactory;
+    managedSubmit?: import('../dev/managedReview.js').ManagedReviewSubmit;
   } = {},
   record: (id: string, observation: UsageObservation) => void = () => {},
 ) {
@@ -338,7 +372,8 @@ function makeReviewAddressManyCore(
         return { status: 'needs-human', reason: JSON.stringify(selection.refusal) };
       if (!selection.candidates.length)
         return { status: 'needs-human', reason: 'No eligible PRs in selection' };
-      const git = promisify(execFile);
+      const run = promisify(execFile);
+      const git = (file: string, args: string[]) => run(file, args, gitSubprocess());
       const coordinationRoot =
         deps.coordinationRoot ??
         (await realpath(
@@ -366,6 +401,7 @@ function makeReviewAddressManyCore(
         address = makeReviewAddress({
           config,
           coordinationRoot,
+          ...(deps.managedSubmit ? { managedSubmit: deps.managedSubmit } : {}),
           ...(deps.drivers === undefined ? {} : { drivers: deps.drivers }),
         });
       }
@@ -418,30 +454,6 @@ function makeReviewAddressManyCore(
                 let enrollment: AddressManyEnrollment = requestedEnrollment(candidate.number);
                 let isolatedRoot: string | undefined;
                 try {
-                  const request = input.enrollments?.find(
-                    (row) => row.number === candidate.number,
-                  )?.request;
-                  if (request) {
-                    try {
-                      if (request.action && request.action !== 'enqueue')
-                        throw new Error('Enrollment requires enqueue action');
-                      if (
-                        request.binding.kind !== 'deferred-author' ||
-                        request.binding.repo.toLowerCase() !== input.repo.toLowerCase() ||
-                        request.binding.head !== candidate.headOid
-                      )
-                        throw new Error('Enrollment binding does not match admitted PR head');
-                      const queued = await (deps.enqueue ?? makeQueueOps().enqueue)(request);
-                      enrollment =
-                        queued.status === 'ok' &&
-                        queued.value.state !== 'unsupported' &&
-                        queued.value.enqueued === true
-                          ? { state: 'enrolled' }
-                          : { state: 'unavailable', reason: JSON.stringify(queued) };
-                    } catch (error) {
-                      enrollment = { state: 'unavailable', reason: String(error) };
-                    }
-                  }
                   const root = deps.isolate
                     ? await deps.isolate(input.repoRoot, candidate.number, {
                         cloneRoot,
@@ -490,6 +502,30 @@ function makeReviewAddressManyCore(
                       reason: 'PR eligibility, head or base changed before dispatch',
                     };
                   } else {
+                    const request = input.enrollments?.find(
+                      (row) => row.number === candidate.number,
+                    )?.request;
+                    if (request) {
+                      try {
+                        if (request.action && request.action !== 'enqueue')
+                          throw new Error('Enrollment requires enqueue action');
+                        if (
+                          request.binding.kind !== 'deferred-author' ||
+                          request.binding.repo.toLowerCase() !== input.repo.toLowerCase() ||
+                          request.binding.head !== candidate.headOid
+                        )
+                          throw new Error('Enrollment binding does not match admitted PR head');
+                        const queued = await (deps.enqueue ?? makeQueueOps().enqueue)(request);
+                        enrollment =
+                          queued.status === 'ok' &&
+                          queued.value.state !== 'unsupported' &&
+                          queued.value.enqueued === true
+                            ? { state: 'enrolled' }
+                            : { state: 'unavailable', reason: JSON.stringify(queued) };
+                      } catch (error) {
+                        enrollment = { state: 'unavailable', reason: String(error) };
+                      }
+                    }
                     dispatched = true;
                     result = await address({
                       repoRoot: root,
@@ -699,12 +735,16 @@ function makeReviewAddressManyCore(
                 usage: { kind: 'known', tokens: 0 },
               }).state;
             }
-            faults.push(`PR #${candidate.number} slot lifetime refused: ${String(error)}`);
+            const legacyRefusal = isAddressCheckoutIncomplete(error);
+            if (!legacyRefusal)
+              faults.push(`PR #${candidate.number} slot lifetime refused: ${String(error)}`);
             if (!outcomes.some((row) => row.number === candidate.number))
               outcomes.push({
                 number: candidate.number,
                 headOid: candidate.headOid,
-                exception: String(error),
+                ...(legacyRefusal && error instanceof Error
+                  ? { result: { status: 'needs-human' as const, reason: error.message } }
+                  : { exception: String(error) }),
                 enrollment: requestedEnrollment(candidate.number),
               });
           }

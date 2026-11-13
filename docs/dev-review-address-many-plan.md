@@ -107,8 +107,9 @@ self-contradictory is a refusal: a roll-up over a subset could otherwise report
   changes no status. A composition that needs enrollment to block requires its
   own explicit policy input and owner contract.
 - Deferred vendor debt is reported separately: `present` only from a trusted
-  report, `unknown` when the report's head is not attributable, `absent`
-  otherwise.
+  report, `unknown` when the report's head is not attributable or when no report
+  exists at all (a thrown or report-less leg may have left durable debt), and
+  `absent` only from a trusted report that records none.
 - Status precedence is deterministic: a definitive failure (failed,
   indeterminate, exception) outranks a budget stop (sticky stop, any held
   allocation, over-cap accounting, a budget-exhausted leg, a budget-blocked
@@ -133,7 +134,7 @@ extra, duplicate and contradictory outcomes, unattributed ok results, duplicate
 finding ids across PRs, fixes against an advanced head, one unclean PR beside a
 clean one, a held or unresolved sibling, failure outranking a budget stop,
 exceptions and cancelled legs, advisory enrollment, deferred debt, and debt that
-is unknown at an unattributed head.
+is unknown at an unattributed head or on a report-less leg.
 
 ## Not claimed
 

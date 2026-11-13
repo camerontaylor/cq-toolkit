@@ -84,22 +84,10 @@ import {
 // explicit `-C <repoRoot>` prefixes (and `-C <entryPath>` for the registry
 // rev-parse) — the module never assumes where it runs. All persistence goes
 // through the injected SlotWorktreeRegistry; the adapter validates canonical
-// checkout identities before persisting bindings. Legacy map exports below
-// remain uncalled by participating paths until the migration/removal change.
-import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
+// checkout identities before persisting bindings.
+import { lstat, mkdir, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve as pathResolve, sep } from 'node:path';
-import { lock } from 'proper-lockfile';
 import type { GhFn } from '../forge-github/gh.js';
-
-/** One registry entry: where the PR's worktree lives and what it is on. */
-export interface WorktreeRegistryEntry {
-  /** Absolute worktree directory. */
-  path: string;
-  /** The review branch LABEL the entry believes is checked out there (see reviewBranchFor). */
-  branch: string;
-  /** When the entry was (re)registered: the injected nowMs of that run. */
-  createdAt: number;
-}
 
 /**
  * The LOCAL branch label review ops owns: keyed by PR, never by the PR's
@@ -111,169 +99,16 @@ export interface WorktreeRegistryEntry {
  */
 export const reviewBranchFor = (pr: number): string => `cq-review/pr-${pr}`;
 
-/**
- * The PR → worktree registry. Keys are PR numbers as DECIMAL STRINGS
- * (JSON object keys are strings by definition). A cache of step-b's
- * pointers — never evidence: every load re-verifies against the filesystem
- * and git before trusting an entry.
- */
-export type RegistryMap = Record<string, WorktreeRegistryEntry>;
-
-/** The registry persistence seam (injectable; tests use an in-memory map). */
-export interface WorktreeRegistry {
-  load(): Promise<RegistryMap>;
-  save(map: RegistryMap): Promise<void>;
-  /**
-   * MERGE-ON-SAVE for ONE key: load → set the key (null clears it) → save.
-   * This NARROWS the whole-map-clobber window (a last writer erasing every
-   * entry it never saw). UNLOCKED PRIMITIVE: callers MUST hold `withLock`
-   * (the file-backed registry serializes via a lockfile beside the target —
-   * bounded retries; failure to acquire within the bound throws loud). The
-   * in-memory registry is unsynchronized (single-threaded tests).
-   */
-  update(key: string, entry: WorktreeRegistryEntry | null): Promise<void>;
-  /**
-   * Run `fn` under the registry's cross-process lock. MULTI-STEP critical
-   * sections (a resolution's registry-consult → scan → create) MUST hold
-   * this for the whole section — serialized mutations alone cannot stop
-   * two jobs from interleaving the steps BETWEEN their writes (both scan,
-   * both create, one wedges). save/update are unlocked primitives to call
-   * inside this section. withLock is not reentrant; do not nest it.
-   */
-  withLock<T>(fn: () => Promise<T>): Promise<T>;
-}
-
-/**
- * The unique per-save tmp name: pid + monotonic counter, so two saves can
- * never share one `.tmp` (a SHARED name let one concurrent rename remove
- * the other save's source file mid-write). Exposed pure for the
- * uniqueness pin.
- */
-export const registryTmpPath = (path: string, nonce: string): string => `${path}.${nonce}.tmp`;
-let registryTmpCounter = 0;
-export const nextRegistryTmpNonce = (): string => `${process.pid}.${(registryTmpCounter += 1)}`;
-
-/**
- * The file-backed WorktreeRegistry: one JSON object mapping decimal PR
- * number strings to entries. A MISSING file is an empty registry (first
- * run); a CORRUPT file (unparseable JSON, or not a plain object) throws a
- * clear error — resolving worktrees on top of an unreadable registry would
- * silently duplicate trees. WRITES ARE SERIALIZED AND ATOMIC: save and
- * update take a lockfile beside the target (`<path>.lock`, proper-lockfile,
- * bounded retries — a failure to acquire within the bound throws loud
- * naming the path), and the new content is written to a UNIQUE per-call tmp
- * file (`<path>.<pid>.<n>.tmp`) then `fs.rename`d over the target — an
- * interrupted write truncates only the throwaway tmp file, and concurrent
- * saves can never steal each other's source. The in-memory registry (the
- * tests' seam) is unsynchronized: single-threaded by construction.
- */
-export function fileWorktreeRegistry(path: string): WorktreeRegistry {
-  const load = async (): Promise<RegistryMap> => {
-    let text: string;
-    try {
-      text = await readFile(path, 'utf8');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        return {};
-      }
-      throw err;
-    }
-    try {
-      const parsed: unknown = JSON.parse(text);
-      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        throw new Error('not a JSON object');
-      }
-      return parsed as RegistryMap;
-    } catch {
-      throw new Error(
-        `fileWorktreeRegistry: worktree registry at ${JSON.stringify(path)} is corrupt — refusing to resolve worktrees against an unreadable registry; fix or remove the file and re-run`,
-      );
-    }
-  };
-  /**
-   * Materialize an ABSENT registry as the valid empty map. CALLED UNDER THE
-   * LOCK and NON-REPLACING (flag 'wx'): a concurrent creator's file is kept
-   * as-is (EEXIST), so a delayed creation can never clobber a populated map
-   * with {} — the CTX-6 ordering, preserved.
-   */
-  const ensureTarget = async (): Promise<void> => {
-    try {
-      await writeFile(path, `{}\n`, { encoding: 'utf8', flag: 'wx' });
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
-        throw err;
-      }
-    }
-  };
-
-  const saveUnlocked = async (map: RegistryMap): Promise<void> => {
-    // Write-tmp-then-rename, never a plain rewrite: rename(2) within one
-    // directory is atomic, so a crash mid-write can only ever truncate the
-    // throwaway tmp file — the registry on disk stays parseable JSON. The
-    // tmp name is UNIQUE per call (pid + counter): a shared `.tmp` name let
-    // one rename remove the other save's source file mid-write.
-    const tmpPath = registryTmpPath(path, nextRegistryTmpNonce());
-    await writeFile(tmpPath, `${JSON.stringify(map, null, 2)}\n`, 'utf8');
-    await rename(tmpPath, path);
-  };
-  const withLock = async <T>(fn: () => Promise<T>): Promise<T> => {
-    let release: (() => Promise<void>) | undefined;
-    // The section includes git worktree add and the caller's callback.
-    // Keep the 60-retry, ~109s budget for contention. proper-lockfile retries
-    // every error, so handle backoff here to fail immediately on disk errors.
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        release = await lock(path, { stale: 10_000, retries: 0, realpath: false });
-        break;
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException).code;
-        if (code === 'ELOCKED' && attempt < 60) {
-          await new Promise<void>((resolve) =>
-            setTimeout(resolve, Math.min(Math.round(100 * 1.5 ** attempt), 2_000)),
-          );
-          continue;
-        }
-        const reason =
-          code === 'ELOCKED'
-            ? 'within the retry bound — another process still holds it; do not delete a live lock; wait for the holder to finish and re-run'
-            : `— acquisition failed (${code ?? 'unknown error'}); check the registry path and filesystem`;
-        throw new Error(
-          `fileWorktreeRegistry: could not acquire the registry lock ${JSON.stringify(`${path}.lock`)} ${reason}; refusing to write unserialized`,
-          { cause: err },
-        );
-      }
-    }
-    try {
-      await ensureTarget();
-      return await fn();
-    } finally {
-      await release();
-    }
-  };
-  /** UNLOCKED mutation primitive — callers MUST hold `withLock`. */
-  const save = (map: RegistryMap): Promise<void> => saveUnlocked(map);
-  /** UNLOCKED mutation primitive — callers MUST hold `withLock`. */
-  const update = (key: string, entry: WorktreeRegistryEntry | null): Promise<void> =>
-    (async () => {
-      // Load-merge-save scoped to ONE key: entries for other PRs are read
-      // fresh and written back intact (the CALLER holds withLock, which
-      // serializes the whole read-modify-write across processes).
-      const map = await load();
-      if (entry === null) {
-        delete map[key];
-      } else {
-        map[key] = entry;
-      }
-      await saveUnlocked(map);
-    })();
-  return { load, save, update, withLock };
-}
-
 type ResolutionPhase = { checkoutMutation: boolean; metadataWrite: boolean };
 const admissionRefusals = new WeakSet<Error>();
+const incompleteRefusals = new WeakSet<Error>();
 /** A resolver-proven, settled refusal; message text alone cannot forge this proof. */
 export function isPrWorktreeAdmissionRefusal(error: unknown): error is Error {
   return error instanceof Error && admissionRefusals.has(error);
+}
+/** A settled refusal that must retain an unresolved legacy slot. */
+export function isPrWorktreeIncompleteRefusal(error: unknown): error is Error {
+  return error instanceof Error && incompleteRefusals.has(error);
 }
 async function withAdmission<T>(
   opts: PrWorktreeOpts,
@@ -288,6 +123,8 @@ async function withAdmission<T>(
       } catch (error) {
         // Owner ruling on D5.4: a closed fetch/check is not an unaccounted writer.
         // Add/remove/config/worker failures and incomplete metadata writes remain unsafe.
+        // An unresolved legacy hint also cannot be certified: a later run would
+        // otherwise bypass the hint after the unbound slot became complete.
         if (
           error instanceof Error &&
           !phase.checkoutMutation &&
@@ -295,12 +132,14 @@ async function withAdmission<T>(
           settled()
         ) {
           const refusal = new Error(error.message, { cause: error });
-          admissionRefusals.add(refusal);
+          if (opts.registry.legacyHint?.(opts.pr)) incompleteRefusals.add(refusal);
+          else admissionRefusals.add(refusal);
           throw refusal;
         }
         // A refusal proof is for this attempt; replaying an older error after
         // a mutator must not turn that new failure into a settled admission.
-        if (isPrWorktreeAdmissionRefusal(error)) throw new Error(error.message, { cause: error });
+        if (isPrWorktreeAdmissionRefusal(error) || isPrWorktreeIncompleteRefusal(error))
+          throw new Error(error.message, { cause: error });
         throw error;
       }
     }),
@@ -368,6 +207,8 @@ const gitFail = (why: string, code: number, stderr: string, args: string[]): Err
 /** One parsed `worktree list --porcelain` block. */
 interface PorcelainWorktree {
   path: string;
+  head: string | null;
+  prunable: boolean;
   /** refs/heads/ branch name, or null when detached/bare. */
   branch: string | null;
 }
@@ -376,7 +217,7 @@ interface PorcelainWorktree {
  * Parse `git worktree list --porcelain` output: blank-line-separated
  * blocks of `worktree <path>` / `HEAD <sha>` / `branch refs/heads/<name>`
  * (or `detached`/`bare` — no branch). Only the path and the heads/-stripped
- * branch are read; blocks without a worktree line are ignored.
+ * branch, HEAD and prunable status are read; blocks without a worktree line are ignored.
  */
 const parseWorktreeList = (text: string): PorcelainWorktree[] => {
   const out: PorcelainWorktree[] = [];
@@ -385,15 +226,21 @@ const parseWorktreeList = (text: string): PorcelainWorktree[] => {
     if (lines.length === 0) continue;
     let path: string | null = null;
     let branch: string | null = null;
+    let head: string | null = null;
+    let prunable = false;
     for (const line of lines) {
       if (line.startsWith('worktree ')) {
         path = line.slice('worktree '.length);
+      } else if (line.startsWith('HEAD ')) {
+        head = line.slice('HEAD '.length);
+      } else if (line === 'prunable' || line.startsWith('prunable ')) {
+        prunable = true;
       } else if (line.startsWith('branch refs/heads/')) {
         branch = line.slice('branch refs/heads/'.length);
       }
     }
     if (path !== null) {
-      out.push({ path, branch });
+      out.push({ path, branch, head, prunable });
     }
   }
   return out;
@@ -600,7 +447,13 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPh
     // here: the prune is the successful re-registration at the end (the
     // overwrite) — pruning up-front would destroy the machine-readable
     // pointer precisely when the run is about to wedge on a refused add.
-    const entry = metadata?.state === 'bound' ? { path: metadata.checkoutPath } : undefined;
+    const legacy = metadata?.state === 'bound' ? undefined : opts.registry.legacyHint?.(opts.pr);
+    if (
+      legacy &&
+      (legacy.branch !== reviewBranch || !(await isInsideRoot(legacy.path, worktreeRoot)))
+    )
+      throw new Error(`foreign legacy review registry hint: ${legacy.path}`);
+    const entry = metadata?.state === 'bound' ? { path: metadata.checkoutPath } : legacy;
     if (entry !== undefined) {
       const valid =
         (await directoryExists(entry.path)) &&
@@ -614,6 +467,21 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPh
           const branch = await opts.run(branchArgs);
           if (branch.code !== 0 || branch.stdout.trim() !== `refs/heads/${reviewBranch}`) {
             return false;
+          }
+          if (legacy) {
+            const candidateCommon = await opts.run([
+              '-C',
+              entry.path,
+              'rev-parse',
+              '--path-format=absolute',
+              '--git-common-dir',
+            ]);
+            if (
+              candidateCommon.code !== 0 ||
+              (await realpath(candidateCommon.stdout.trim())) !==
+                (await realpath(gitDir.stdout.trim()))
+            )
+              throw new Error(`foreign legacy review checkout identity: ${entry.path}`);
           }
           // The first label read only rejects bad hints. Positive identity
           // and all safety probes must be observed under checkout exclusion.
@@ -629,6 +497,14 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPh
         await bindCheckout(opts, entry.path, true, phase);
         await assertCleanCheckout(opts, entry.path);
         return { path: entry.path, reused: true, branch: reviewBranch, foreign: [] };
+      }
+      if (legacy) {
+        const existing = await lstat(legacy.path).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') return undefined;
+          throw error;
+        });
+        if (existing)
+          throw new Error(`legacy review checkout identity or head mismatch: ${legacy.path}`);
       }
     }
 
@@ -679,6 +555,51 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPh
         )
           foreign.push({ path: candidate.path, branch: candidate.branch });
         continue;
+      }
+      if (candidate.prunable) {
+        const absent = await lstat(candidate.path).then(
+          () => false,
+          (error: unknown) => {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+            throw error;
+          },
+        );
+        if (absent) {
+          // The PR slot excludes competing resolvers. Remove only this missing
+          // registration; a global prune could touch foreign worktrees. Its
+          // branch may still hold unpushed commits even though its files vanished.
+          if (!candidate.head || !/^[a-f0-9]{40,64}$/.test(candidate.head))
+            throw new Error('missing worktree HEAD unavailable; registration preserved');
+          const aheadArgs = [
+            '-C',
+            repoRoot,
+            'rev-list',
+            '--count',
+            `${expectedSha}..${candidate.head}`,
+          ];
+          const ahead = await opts.run(aheadArgs);
+          if (ahead.code !== 0 || !/^0\s*$/.test(ahead.stdout))
+            throw gitFail(
+              'missing worktree may hold unpushed work; registration preserved',
+              ahead.code || 1,
+              ahead.stderr,
+              aheadArgs,
+            );
+          phase.checkoutMutation = true;
+          checkoutWriterContext()!.markCheckoutMutation();
+          const removeArgs = ['-C', repoRoot, 'worktree', 'remove', candidate.path];
+          const remove = await opts.run(removeArgs);
+          if (remove.code !== 0)
+            throw gitFail(
+              'missing worktree registration removal failed',
+              remove.code,
+              remove.stderr,
+              removeArgs,
+            );
+          await checkoutWriterContext()!.removed(candidate.path);
+          await opts.registry.update(opts.pr, { version: 1, state: 'unbound', incomplete: true });
+          continue;
+        }
       }
       await bindCheckout(opts, candidate.path, false, phase);
       const branch = await opts.run(['-C', candidate.path, 'symbolic-ref', 'HEAD']);
@@ -793,6 +714,11 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPh
  * THE OWNERSHIP BOUNDARY: only trees STRICTLY INSIDE worktreeRoot may be
  * removed — a path outside the root is refused before git runs (review ops
  * removes only trees it created under its own root), registry untouched.
+ * The caller's path is RESOLVED FIRST (absolute, then canonical) and that
+ * ONE location drives the boundary check, the git argv and the registry
+ * compare: a relative spelling must not mean one tree to the check and
+ * another to git (which resolves `-C <repoRoot> worktree remove <path>` from
+ * inside repoRoot, with suffix matching) or to the prune.
  * The registry entry is pruned ONLY after git actually removed the tree,
  * and ONLY when it points at THE removed path — an entry pointing elsewhere
  * (a re-created tree at a new location, or another PR's path under a shared
@@ -829,28 +755,43 @@ async function removeLockedPrWorktree(
     }
     worktreeRoot = join(gitDir.stdout.trim(), 'cq-review-worktrees');
   }
-  if (!(await isInsideRoot(opts.path, worktreeRoot))) {
+  // ONE location, settled BEFORE the ownership check and the git call: a
+  // relative opts.path is resolved against repoRoot — exactly where
+  // `git -C <repoRoot> worktree remove <path>` resolves it — so the boundary
+  // check can never pass for a location other than the one git acts on (git
+  // additionally matches worktrees by path suffix, so the check must see the
+  // final absolute location, not a spelling).
+  const requestedPath = pathResolve(repoRoot, opts.path);
+  if (!(await isInsideRoot(requestedPath, worktreeRoot))) {
     throw new Error(
       `removePrWorktree: refusing to remove ${JSON.stringify(opts.path)} — it is outside the review worktreeRoot ${JSON.stringify(worktreeRoot)}; review ops removes only trees it created under its own root`,
     );
   }
-  const canonicalPath = await realpath(opts.path);
+  const canonicalPath = await realpath(requestedPath);
   await bindCheckout(opts, canonicalPath, false, phase);
+  // Read (and canonicalize) the registry entry BEFORE removal: an entry
+  // spelled through a terminal symlink still names THIS tree, but git leaves
+  // the out-of-tree symlink dangling, so comparing afterwards would miss it.
+  // The UPDATE still happens only after git actually removed the tree.
+  const metadata = await opts.registry.read(opts.pr);
+  const entryPath = metadata?.state === 'bound' ? metadata.checkoutPath : undefined;
+  const entryMatches = entryPath !== undefined && (await canonicalize(entryPath)) === canonicalPath;
   phase.checkoutMutation = true;
   checkoutWriterContext()!.markCheckoutMutation();
-  const removeArgs = ['-C', repoRoot, 'worktree', 'remove', opts.path];
+  const removeArgs = ['-C', repoRoot, 'worktree', 'remove', requestedPath];
   const result = await opts.run(removeArgs);
   if (result.code !== 0) {
     throw gitFail(
-      `worktree remove ${opts.path} failed (dirty or locked trees are left in place — the caller decides)`,
+      `worktree remove ${requestedPath} failed (dirty or locked trees are left in place — the caller decides)`,
       result.code,
       result.stderr,
       removeArgs,
     );
   }
   await checkoutWriterContext()!.removed(canonicalPath);
-  const metadata = await opts.registry.read(opts.pr);
-  if (metadata?.state === 'bound' && metadata.checkoutPath === canonicalPath) {
+  // Only an entry that named THE removed tree is pruned; an entry pointing
+  // anywhere else describes a different tree and survives.
+  if (entryMatches) {
     await opts.registry.update(opts.pr, { version: 1, state: 'unbound', incomplete: true });
   }
 }

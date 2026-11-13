@@ -1,4 +1,4 @@
-import { readFile, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { realTmpDir } from '../../helpers/tmp-dir.js';
@@ -413,6 +413,46 @@ console.error('deterministic baseline unavailable'); process.exitCode = 1;`,
       // verified head initialize() admitted.
       expect(fix.failure).toBeUndefined();
       expect(fix.observedHead).toBe(protectedHead);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  // #1194 follow-up: invoke() builds the edit allowlist from the finding
+  // path, so `*` and `?` — the two characters compilePathPatterns treats as
+  // wildcards — must refuse before any dispatch; brackets stay literal.
+  test.each(['src/a?.ts', 'src/a*.ts'] as const)(
+    'a finding with an edit-allowlist wildcard refuses before dispatch: %s',
+    async (file) => {
+      const f = await fixture();
+      try {
+        const fix = await f.engine.fix(finding(file), 1);
+        expect(fix.finding.status).toBe('deferred');
+        expect(fix.reason).toContain('edit-allowlist wildcards');
+        expect(f.calls()).toBe(0);
+        expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('a finding on a bracketed name dispatches and fixes like an ordinary file', async () => {
+    const f = await fixture(async (input) => {
+      if (input.outputSchema?.name === 'review.address.closure/v1')
+        return { closed: true, reason: 'candidate fixed' };
+      await mkdir(join(input.workspace!.path, 'pages'), { recursive: true });
+      await writeFile(join(input.workspace!.path, 'pages/[id].tsx'), 'GOOD\n');
+      return { disposition: 'fixed', reason: 'fixed', evidence: [] };
+    });
+    try {
+      await f.repo.write('pages/[id].tsx', 'BAD\n');
+      f.repo.commitAll('bracketed finding fixture');
+      const fix = await f.engine.fix(finding('pages/[id].tsx'), 1);
+      // Dispatch reached the worker: safeFile admitted the bracketed name
+      // (refusals above show 0 calls; a full fix runs edit, closure and any
+      // reviewer round through this driver).
+      expect(f.calls()).toBeGreaterThan(0);
+      expect(fix.finding.status, fix.reason).toBe('fixed');
+      expect(fix.commit).toBeDefined();
     } finally {
       await f.cleanup();
     }

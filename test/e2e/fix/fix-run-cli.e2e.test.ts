@@ -232,7 +232,7 @@ test.each([
     } else if (mode === 'rescue-tainted-patch') {
       expect(report.tasks[0]?.attempts.every((attempt) => attempt.tier === 'worker')).toBe(true);
       expect(report.tasks[0]?.reason).toContain('upload refused');
-      expect(report.tasks[0]?.failedAttempt).toBeDefined();
+      expect(report.tasks[0]?.failedAttempt).toBeUndefined();
     } else {
       expect(report.tasks.flatMap((task) => task.commits)).toEqual([]);
       expect(report.usage.input + report.usage.output).toBe(6);

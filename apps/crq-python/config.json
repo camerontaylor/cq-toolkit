@@ -31,6 +31,7 @@
   "timeout_bin": "timeout",
   "paseo_hosts": [],
   "repair": {
+    "max_concurrent_items": 1,
     "enabled": true,
     "spend_authorization": "owner 2026-11-08: cq fixers and judges; Z.ai with OpenCode Go and DeepSeek fallback",
     "fallback_models": ["opencode-go/deepseek-v4.1-flash", "deepseek/deepseek-flash"],

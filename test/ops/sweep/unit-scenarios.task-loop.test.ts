@@ -60,10 +60,13 @@ describe('optional per-task loop', () => {
     ['moved-ref', 'no longer matches its recorded ordinal'],
     ['merge-parent', 'invalid parentage'],
     ['wrong-object', 'invalid parentage'],
-    ['oversize-patch', 'patch exceeds the feedback cap'],
+    ['oversize-patch', undefined],
+    ['oversize-file', undefined],
+    ['binary-file', undefined],
+    ['replacement-character', undefined],
     ['scoped-secret', 'worker upload refused'],
   ] as const)(
-    'rescue feedback preserves provenance and refuses %s evidence',
+    'rescue feedback preserves provenance and omits unreadable %s evidence',
     async (fault, refusal) => {
       const world = await makeWorld([{ failing: true }, { failing: false }]);
       const underlying = world.gitFactory();
@@ -107,11 +110,20 @@ describe('optional per-task loop', () => {
                 stdout: 'M\0src/a.js\0D\0src/deleted.js\0A\0src/new.js\0',
                 stderr: '',
               };
+            if (fault === 'oversize-file' && args.includes('cat-file') && args.includes('-s'))
+              return { code: 0, stdout: String(4 * 1024 * 1024 + 1), stderr: '' };
             if (args.includes('show') && !args.includes('-s')) {
               const object = String(args.at(-1));
               return {
                 code: 0,
-                stdout: object.startsWith(parent) ? 'old value' : 'rejected value',
+                stdout:
+                  fault === 'binary-file'
+                    ? 'binary\0content'
+                    : fault === 'replacement-character'
+                      ? 'bad\uFFFDtext'
+                      : object.startsWith(parent)
+                        ? 'old value'
+                        : 'rejected value',
                 stderr: '',
               };
             }
@@ -163,8 +175,13 @@ describe('optional per-task loop', () => {
           expect(task?.outcome).toBe('fixed');
           expect(task?.commits).toHaveLength(1);
           expect(prompts).toHaveLength(3);
-          expect(prompts[1]).toContain(patch.trim());
-          expect(feedbackContents).toHaveLength(2);
+          if (fault === 'clean') {
+            expect(prompts[1]).toContain(patch.trim());
+            expect(feedbackContents).toHaveLength(2);
+          } else {
+            expect(prompts[1]).not.toContain('Prior failed-attempt patch');
+            expect(feedbackContents).toEqual([]);
+          }
           for (const contents of feedbackContents)
             expect(contents).toEqual([
               { path: 'src/a.js', text: 'old value' },
@@ -185,6 +202,39 @@ describe('optional per-task loop', () => {
       }
     },
   );
+
+  test('an unchanged failed attempt has no commit, ref, or publishable artifact', async () => {
+    const world = await makeWorld([{ failing: true }]);
+    const underlying = world.gitFactory();
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { pushFailed: true },
+        git: async (args) =>
+          args.includes('--cached') && args.includes('--name-only')
+            ? { code: 0, stdout: '', stderr: '' }
+            : underlying(args),
+        driver: {
+          run: async () => ({
+            stopReason: 'error',
+            denials: [],
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          }),
+        },
+      });
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') return;
+      const task = result.value.tasks?.[0];
+      expect(task?.outcome).toBe('unfixed');
+      expect(task?.failedAttempt).toBeUndefined();
+      expect(task?.rounds?.[0]?.failedAttempt).toBeUndefined();
+      expect(
+        world.gitCalls.some((args) => args.includes('commit-tree') || args.includes('update-ref')),
+      ).toBe(false);
+      expect(world.pushCalls).toEqual([]);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
 
   test.each([
     {

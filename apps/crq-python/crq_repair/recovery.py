@@ -1,4 +1,5 @@
 """Explicit recovery of one failed worker using retained evidence and existing preparation."""
+import datetime as dt
 import json
 import hashlib
 from pathlib import Path
@@ -9,6 +10,15 @@ from runtime_target import DEFAULT_REF
 
 MAX_EVIDENCE = 100_000
 ANCHOR_REFUSAL = 'current anchor could not be verified'
+# A peak-hour pause is a clock condition, not a judge retry: hold the attempt
+# budget while the window is open, but never past a bounded wait.
+BLACKOUT_WAIT = dt.timedelta(hours=12)
+
+
+def blackout_deferral(report):
+    """Typed blackout stop, never inferred from the judge's reason prose."""
+    return (isinstance(report, dict) and report.get('stop') == 'configuration'
+            and report.get('errorClass') == 'blackout')
 
 
 def recover(root, config, job_id, scan, judge, prepare):
@@ -101,8 +111,10 @@ def recover(root, config, job_id, scan, judge, prepare):
     artifact = directory / 'recovery.json'
     attempts = 0
     replay = False
+    blackout_since = None
     if artifact.exists():
         saved = json.loads(artifact.read_text())
+        blackout_since = saved.get('blackout_since')
         old_binding = saved.get('binding')
         replay = (saved.get('state') == 'complete' and saved.get('disposition') == 'unresolved'
                   and saved.get('reason') == ANCHOR_REFUSAL
@@ -139,13 +151,31 @@ def recover(root, config, job_id, scan, judge, prepare):
         if not scan(context, directory / 'recovery-secret-scan.json'):
             return {'state': 'unresolved', 'reason': 'recovery evidence secret scan rejected'}
         atomic(directory / 'recovery-evidence.json', context)
-        attempts += 1
         atomic(artifact, {'binding': binding, 'state': 'dispatching', 'attempts': attempts})
         report = judge(job, context, directory)
         if not isinstance(report, dict):
             report = {'stop': 'error', 'reason': 'invalid recovery judge output'}
+        if not blackout_deferral(report):
+            attempts += 1
         saved = {'binding': binding, 'state': 'judged', 'report': report, 'attempts': attempts}
+        if blackout_deferral(report):
+            saved['blackout_since'] = blackout_since or dt.datetime.now(dt.timezone.utc).isoformat()
         atomic(artifact, saved)
+        blackout_since = saved.get('blackout_since')
+    if blackout_deferral(report):
+        # No model call happened, so the attempt budget is untouched; only the
+        # wait itself is bounded, so a paused window cannot end recovery.
+        saved['blackout_since'] = blackout_since or dt.datetime.now(dt.timezone.utc).isoformat()
+        waited = dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(saved['blackout_since'])
+        if waited < BLACKOUT_WAIT:
+            saved.update(state='deferred', reason=report.get('reason') or 'blackout')
+            atomic(artifact, saved)
+            return saved
+        saved.update(state='complete', disposition='unresolved',
+                     reason='recovery judge deferred by the peak blackout for over '
+                            + str(BLACKOUT_WAIT) + '; inspection required')
+        atomic(artifact, saved)
+        return saved
     if report.get('stop') in ('rate-limit', 'configuration') and attempts < 3:
         saved.update(state='deferred', reason=report.get('reason') or report.get('stop'))
         atomic(artifact, saved)

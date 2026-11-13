@@ -17,7 +17,7 @@ import {
   sha256,
 } from '../../../src/ops/review/internal/queueEvidence.js';
 import type { QueueTransport } from '../../../src/ops/review/internal/queueProtocol.js';
-import { registry } from '../../../src/ops/review/registry.js';
+import { makeQueueOps } from '../../../src/ops/review/queue.js';
 import { cleanupQueueDirs, directory, fixture, ref } from './queue.helpers.js';
 
 afterEach(async () => {
@@ -132,8 +132,7 @@ describe('complete immutable queue result consumption', () => {
     const f = fixture();
     vi.stubEnv('CQ_QUEUE_SSH_ALIAS', 'fixture');
     vi.spyOn(queueClient, 'sshQueueTransport').mockReturnValue(f.transport);
-    const entry = registry.find((e) => e.name === 'review.enqueue')!;
-    const op = await entry.importer();
+    const op = makeQueueOps().enqueue;
     expect(await op(ref)).toMatchObject({
       status: 'ok',
       value: { state: 'terminal-with-findings' },
@@ -167,7 +166,7 @@ describe('complete immutable queue result consumption', () => {
       ).toString('utf8');
     vi.stubEnv('CQ_QUEUE_SSH_ALIAS', 'fixture');
     vi.spyOn(queueClient, 'sshQueueTransport').mockReturnValue(transport);
-    const enqueue = await registry.find((entry) => entry.name === 'review.enqueue')!.importer();
+    const enqueue = makeQueueOps().enqueue;
     expect(await enqueue(ref)).toMatchObject({
       status: 'ok',
       value: { state: 'pending', reviewed: false },
@@ -175,7 +174,7 @@ describe('complete immutable queue result consumption', () => {
     expect(await enqueue(ref)).toMatchObject({ status: 'ok', value: { state: 'pending' } });
     await writeFile(join(root, 'fixture-document.json'), JSON.stringify(f.document));
     await transport('fixture-tick');
-    const report = await registry.find((entry) => entry.name === 'review.report')!.importer();
+    const report = makeQueueOps().report;
     expect(await report({ ...ref, evidenceDir: store })).toMatchObject({
       status: 'ok',
       value: {
@@ -188,7 +187,7 @@ describe('complete immutable queue result consumption', () => {
         },
       },
     });
-    const status = await registry.find((entry) => entry.name === 'review.queueStatus')!.importer();
+    const status = makeQueueOps().queueStatus;
     expect(await status(ref)).toMatchObject({
       status: 'ok',
       value: { consumed: true, reviewed: true, fixed: false },

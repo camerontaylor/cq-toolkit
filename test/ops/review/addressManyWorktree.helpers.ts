@@ -2,30 +2,12 @@ import { slotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegi
 import type { ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { lstat, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { expect } from 'vitest';
 import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import { resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import { makeTestRepo, type TestRepo } from '../dev/repo.js';
 import type { ReviewAddressReport } from '../../../src/ops/review/address.js';
-
-export const authorityStore = (guardPath: string) =>
-  join(dirname(guardPath), 'cq-review-address-ownership.store');
-export async function authorityState(guardPath: string): Promise<{ state: string; epoch: string }> {
-  const anchor = JSON.parse(await readFile(guardPath, 'utf8')) as {
-    version: number;
-    state: string;
-    epoch: string;
-  };
-  if (anchor.version !== 3) return anchor; // Deliberately foreign damage fixture.
-  const store = authorityStore(guardPath);
-  const names = (await readdir(store)).filter((name) => /^[0-9]{6}\.json$/.test(name)).sort();
-  return JSON.parse(await readFile(join(store, names.at(-1)!), 'utf8')) as {
-    state: string;
-    epoch: string;
-  };
-}
 
 export const NOW = 1_793_145_600_000;
 
@@ -92,26 +74,6 @@ export function deferred() {
     resolve = done;
   });
   return { promise, resolve };
-}
-export const FOREIGN_GUARD = '{"version":1,"epoch":"foreign","state":"active","resources":[]}\n';
-export async function damageGuard(guardPath: string, damage: 'replace' | 'remove' | 'rewrite') {
-  if (damage === 'remove') await unlink(guardPath);
-  else if (damage === 'rewrite') await writeFile(guardPath, FOREIGN_GUARD);
-  else {
-    const foreign = `${guardPath}.foreign`;
-    await writeFile(foreign, FOREIGN_GUARD);
-    await rename(foreign, guardPath);
-  }
-}
-export async function preservedDamage(guardPath: string, damage: 'replace' | 'remove' | 'rewrite') {
-  if (damage === 'remove') await expect(lstat(guardPath)).rejects.toMatchObject({ code: 'ENOENT' });
-  else expect(await readFile(guardPath, 'utf8')).toBe(FOREIGN_GUARD);
-}
-export function errorChain(error: unknown): string {
-  const messages: string[] = [];
-  for (let current = error; current instanceof Error; current = current.cause)
-    messages.push(current.message);
-  return messages.join(' / ');
 }
 export function terminalReport(path: string): ReviewAddressReport {
   return {

@@ -431,12 +431,21 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       throw new AddressRefusal('upload refused: diagnostic provenance unavailable');
   };
   const safeFile = async (cwd: string, path: string) => {
+    // Bracket/brace characters in a real file name (a Next.js route such as
+    // `pages/[id].tsx`) stay literal: every Git pathspec this path reaches
+    // runs under the hardened --literal-pathspecs prefix, and the harness
+    // allowlist compiler escapes them literally (literalChar). `*` and `?`
+    // stay refused: compilePathPatterns interprets them as wildcards
+    // (segmentToSource maps `*` to `[^/]*` and `?` to `[^/]`), and invoke()
+    // builds the edit allowlist from the finding path itself, so a wildcard
+    // here would authorize edits to files beyond this one finding.
+    if (/[*?]/.test(path))
+      throw new Error('finding must not name a file with edit-allowlist wildcards');
     if (
       !path ||
       path.startsWith('-') ||
       isAbsolute(path) ||
-      path.split(/[\\/]/).some((part) => part === '..') ||
-      /[*?\[\]{}]/.test(path)
+      path.split(/[\\/]/).some((part) => part === '..')
     )
       throw new Error('finding must name one literal repository-relative file');
     const full = resolve(cwd, path);
