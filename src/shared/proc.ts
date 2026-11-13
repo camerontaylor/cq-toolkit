@@ -372,6 +372,8 @@ interface StreamCollector {
   /** Bytes dropped off the HEAD once the retention cap was hit. */
   readonly droppedBytes: number;
   readonly oversizedLine: boolean;
+  /** The first line-listener throw contained by collection, if any. */
+  readonly listenerError?: unknown;
 }
 
 /**
@@ -396,12 +398,16 @@ function createCollector(
   // `fireRung`): a driver-supplied listener that throws must neither abort
   // collection of the remaining lines nor escape the 'close' handler — a
   // throw from `flush()` there would skip `settleClose` and hang `close`.
+  // The throw is CONTAINED here, not lost: the first one is kept on the
+  // collector so `spawnManaged`'s close handler can report it once as a
+  // process warning (one warning per stream, never one per line).
+  let listenerError: unknown;
   const emit = (line: string): void => {
     for (const listener of listeners) {
       try {
         listener(line);
-      } catch {
-        // deliberately swallowed — a listener throw must not break collection
+      } catch (error) {
+        listenerError ??= error;
       }
     }
   };
@@ -477,6 +483,9 @@ function createCollector(
     get oversizedLine(): boolean {
       return oversizedLine;
     },
+    get listenerError(): unknown {
+      return listenerError;
+    },
   };
 }
 
@@ -547,7 +556,9 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
     // nor leave `close` pending nor escape this handler as an uncaught
     // exception: both flushes are attempted, the settle always runs, and a
     // listener failure is reported as a process warning (contract at
-    // `ManagedChild.close`).
+    // `ManagedChild.close`). Collection contains line-listener throws, so the
+    // warning reads the first one it kept as well as anything `flush` threw
+    // before it could be contained.
     let flushError: unknown;
     for (const stream of [stdout, stderr]) {
       try {
@@ -556,6 +567,7 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
         flushError ??= error;
       }
     }
+    flushError ??= stdout.listenerError ?? stderr.listenerError;
     settleClose({
       code,
       signal,
@@ -567,7 +579,7 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
     });
     if (flushError !== undefined) {
       process.emitWarning(
-        `spawnManaged: a stdout/stderr listener threw during the final flush: ${String(flushError)}`,
+        `spawnManaged: a stdout/stderr listener threw while collecting lines: ${String(flushError)}`,
       );
     }
   });
