@@ -138,6 +138,7 @@
         "src/driver/claude-code/routing.ts",
         "src/driver/sessions-dir.ts",
         "src/ops/fix/runFix.ts",
+        "src/ops/review/addressMany.ts",
         "src/ops/review/internal/addressEvidence.ts",
         "src/sandbox/launcher.ts",
         "src/selfhost/observe-prs.ts",

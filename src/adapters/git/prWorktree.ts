@@ -714,6 +714,11 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPh
  * THE OWNERSHIP BOUNDARY: only trees STRICTLY INSIDE worktreeRoot may be
  * removed — a path outside the root is refused before git runs (review ops
  * removes only trees it created under its own root), registry untouched.
+ * The caller's path is RESOLVED FIRST (absolute, then canonical) and that
+ * ONE location drives the boundary check, the git argv and the registry
+ * compare: a relative spelling must not mean one tree to the check and
+ * another to git (which resolves `-C <repoRoot> worktree remove <path>` from
+ * inside repoRoot, with suffix matching) or to the prune.
  * The registry entry is pruned ONLY after git actually removed the tree,
  * and ONLY when it points at THE removed path — an entry pointing elsewhere
  * (a re-created tree at a new location, or another PR's path under a shared
@@ -750,28 +755,43 @@ async function removeLockedPrWorktree(
     }
     worktreeRoot = join(gitDir.stdout.trim(), 'cq-review-worktrees');
   }
-  if (!(await isInsideRoot(opts.path, worktreeRoot))) {
+  // ONE location, settled BEFORE the ownership check and the git call: a
+  // relative opts.path is resolved against repoRoot — exactly where
+  // `git -C <repoRoot> worktree remove <path>` resolves it — so the boundary
+  // check can never pass for a location other than the one git acts on (git
+  // additionally matches worktrees by path suffix, so the check must see the
+  // final absolute location, not a spelling).
+  const requestedPath = pathResolve(repoRoot, opts.path);
+  if (!(await isInsideRoot(requestedPath, worktreeRoot))) {
     throw new Error(
       `removePrWorktree: refusing to remove ${JSON.stringify(opts.path)} — it is outside the review worktreeRoot ${JSON.stringify(worktreeRoot)}; review ops removes only trees it created under its own root`,
     );
   }
-  const canonicalPath = await realpath(opts.path);
+  const canonicalPath = await realpath(requestedPath);
   await bindCheckout(opts, canonicalPath, false, phase);
+  // Read (and canonicalize) the registry entry BEFORE removal: an entry
+  // spelled through a terminal symlink still names THIS tree, but git leaves
+  // the out-of-tree symlink dangling, so comparing afterwards would miss it.
+  // The UPDATE still happens only after git actually removed the tree.
+  const metadata = await opts.registry.read(opts.pr);
+  const entryPath = metadata?.state === 'bound' ? metadata.checkoutPath : undefined;
+  const entryMatches = entryPath !== undefined && (await canonicalize(entryPath)) === canonicalPath;
   phase.checkoutMutation = true;
   checkoutWriterContext()!.markCheckoutMutation();
-  const removeArgs = ['-C', repoRoot, 'worktree', 'remove', opts.path];
+  const removeArgs = ['-C', repoRoot, 'worktree', 'remove', requestedPath];
   const result = await opts.run(removeArgs);
   if (result.code !== 0) {
     throw gitFail(
-      `worktree remove ${opts.path} failed (dirty or locked trees are left in place — the caller decides)`,
+      `worktree remove ${requestedPath} failed (dirty or locked trees are left in place — the caller decides)`,
       result.code,
       result.stderr,
       removeArgs,
     );
   }
   await checkoutWriterContext()!.removed(canonicalPath);
-  const metadata = await opts.registry.read(opts.pr);
-  if (metadata?.state === 'bound' && metadata.checkoutPath === canonicalPath) {
+  // Only an entry that named THE removed tree is pruned; an entry pointing
+  // anywhere else describes a different tree and survives.
+  if (entryMatches) {
     await opts.registry.update(opts.pr, { version: 1, state: 'unbound', incomplete: true });
   }
 }

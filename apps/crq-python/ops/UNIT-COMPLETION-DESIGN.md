@@ -69,9 +69,9 @@ timestamp to precede `ExecMainExitTimestampMonotonic`.
 `systemd.exec(5)` says `$INVOCATION_ID` is a new 128-bit ID assigned when a unit
 changes from inactive to activating or active. `org.freedesktop.systemd1(5)`
 exposes `InvocationID` as a read-only property but does not document retention
-across unload, `daemon-reload` or `mask`. The provider captures the first ID
-immediately after `start()` and does not rely on a completed ID surviving a mask
-or reload.
+across unload, `daemon-reload` or `mask`. The provider does not rely on a
+completed ID surviving a mask or reload. Capturing the first ID immediately
+after `start()` is a proposed adapter change (see below), not current behavior.
 
 `org.freedesktop.systemd1(5)` defines `ExecMainExitTimestampMonotonic` as a
 `CLOCK_MONOTONIC` microsecond timestamp. `systemd.journal-fields(7)` defines
@@ -102,9 +102,10 @@ The following are deliberately not claimed:
   consistency, not historical bytes. A replace-and-restore between observations
   is not excluded. `systemctl show` exposes no unit file digest and the journal
   does not record unit file bytes.
-* That journald is a complete invocation ledger. The provider refuses a current
-  invocation that differs from the captured start invocation, but it cannot
-  prove no intermediate invocation occurred. It does not claim skip detection.
+* That journald is a complete invocation ledger. Refusing a current invocation
+  that differs from a captured start invocation is a proposed adapter change
+  (see below), not current behavior; it cannot prove no intermediate invocation
+  occurred. The provider does not claim skip detection.
 
 ## Source interface
 

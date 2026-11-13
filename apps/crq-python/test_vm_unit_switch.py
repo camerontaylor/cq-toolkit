@@ -1848,6 +1848,31 @@ class SourceCommitTests(unittest.TestCase):
                 harness.source_commit_check(pathlib.Path("/repo"), SOURCE_COMMIT)
 
 
+class CommittedBlobTests(unittest.TestCase):
+    """Uploads are bound to the validated commit's exact bytes."""
+
+    def test_a_blob_is_read_from_the_validated_commit(self):
+        calls = []
+
+        def fake(argv, **kwargs):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, b"print('proof')\n", b"")
+
+        with mock.patch.object(harness.subprocess, "run", side_effect=fake):
+            self.assertEqual(harness.committed_blob(SOURCE_COMMIT, "unit-switch.py"),
+                             b"print('proof')\n")
+        self.assertEqual(calls[0][:4], ["git", "-C", str(harness.REPO), "cat-file"])
+        self.assertEqual(calls[0][4:], ["blob", SOURCE_COMMIT + ":apps/crq-python/ops/unit-switch.py"])
+
+    def test_a_missing_blob_refuses_instead_of_uploading(self):
+        def fake(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 128, b"", b"fatal: bad object")
+
+        with mock.patch.object(harness.subprocess, "run", side_effect=fake):
+            with self.assertRaisesRegex(RuntimeError, "could not read unit-switch.py"):
+                harness.committed_blob(SOURCE_COMMIT, "unit-switch.py")
+
+
 class RunnerSourceArchiveTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="crq-runner-source-")

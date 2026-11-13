@@ -247,13 +247,45 @@ class CliTests(ControllerFixture):
         self.assertIn("usage: health wait intervals must be nonnegative",
                       result.stderr)
 
-    def test_unparsed_usage_error_names_no_subcommand(self):
-        # parse_args failed before a namespace existed: no operation is known.
+    def test_subparser_usage_error_names_its_operation(self):
+        # The subparser knows which operation it is parsing, so a missing
+        # required option still names it in the artifact.
         result = self.run_cli("health")
         self.assertEqual(result.returncode, 2)
         error = json.loads(result.stdout)["error"]
         self.assertEqual(error["kind"], "usage")
-        self.assertEqual(error["subcommand"], "")
+        self.assertEqual(error["subcommand"], "health")
+        self.assertEqual(error["exitCode"], 2)
+
+    def test_main_parser_usage_error_names_no_subcommand(self):
+        # The main parser fails before any subcommand is selected: no
+        # operation exists to name.
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 2)
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["kind"], "usage")
+        self.assertIsNone(error["subcommand"])
+        self.assertIn("operation", error["message"])
+        self.assertEqual(error["exitCode"], 2)
+
+    def test_json_usage_error_keeps_stderr_empty(self):
+        # I1 machine mode: one usage artifact on stdout, no narration at all.
+        result = self.run_cli("--json", "health", "--interval-seconds", "-1")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, "")
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["kind"], "usage")
+        self.assertEqual(error["subcommand"], "health")
+        self.assertEqual(error["exitCode"], 2)
+
+    def test_json_refusal_keeps_stderr_empty(self):
+        result = self.run_cli("--json", "switch", "--sha", "nothex",
+                              "--tag", self.tag)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, "")
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["kind"], "refused")
+        self.assertEqual(error["subcommand"], "switch")
         self.assertEqual(error["exitCode"], 2)
 
 

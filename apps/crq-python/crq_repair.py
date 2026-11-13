@@ -667,6 +667,10 @@ def triage_phase(config, dry_run=False):
         bounded_config = copy.deepcopy(config)
         bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
         selected = options.get('escalation_role', config['repair']['roles']['judge_critical']) if row.get('_escalate') else role
+        if blocked(config['repair']):
+            # The blackout can start during drain()'s tick-lock wait or this pass;
+            # phase() keeps deferred rows pending for the next pass.
+            return {'stop': 'deferred', 'errorClass': 'blackout', 'reason': 'GLM peak blackout; triage judge deferred'}
         return dispatch(bounded_config, selected, job, config['clone'],
                         state / 'repair/triage' / row['finding']['id'], judge=True)
     def transport(key, request):
@@ -930,6 +934,11 @@ def recover_job(config, job_id):
     if not c.ran_locked(check_owner):
         raise RuntimeError('tick busy; recovery deferred')
     def judge(old, context, directory):
+        if blocked(config['repair']):
+            # The blackout can start during the tick-lock wait above; recover()
+            # holds the attempt budget and defers the judgment, never a model call.
+            return {'stop': 'configuration', 'errorClass': 'blackout',
+                    'reason': 'GLM peak blackout; recovery judge deferred'}
         request = {'job': old['job'], 'run': old['run'], 'triage_context': context}
         return dispatch(config, config['repair']['roles']['judge_critical'], request,
                         config['clone'], directory / 'recovery-judge', judge=True)

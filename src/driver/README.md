@@ -19,7 +19,8 @@ without it cannot be stopped. Source of truth: `src/driver/types.ts`
 - `toolPolicy: ToolPolicy` — `{ allow: readonly string[]; mode?: 'allowlist' | 'unrestricted' | 'none' }`
 - `sandboxPolicy: SandboxPolicy` — `{ level: 'none' | 'workspace-write' | 'read-only' }`
 - `sessionRef?: string` — opaque session handle for multi-turn continuation
-- `budget: Budget` — `{ maxUsd?, maxTokens?, maxSteps?, maxOutputTokens?, maxContextTokens?, wallClockMs?, maxAttempts? }`
+- `budget: Budget` — `{ maxUsd?, maxTokens?, maxSteps?, maxOutputTokens?, maxContextTokens?, wallClockMs?, maxAttempts?, strictTokenBudget? }`
+- `outputSchema?: OutputSchema` — structured-output request (`{ name, schema }`; see the `ai-sdk` section)
 
 `WorkerResult` — the plain-data outcome:
 
@@ -90,8 +91,9 @@ edit inside a later goal.
 
 `src/driver/types.ts` sits INSIDE the vendor-import ban (eslint rule
 `cq/no-vendor-sdk-in-kernel`, same scope as `src/kernel/**`). The three
-driver implementations under `src/driver/ai-sdk/`, `src/driver/claude-code/` and
-`src/driver/acp/` adopt vendors deliberately and are NOT covered.
+driver implementations live in `src/driver/ai-sdk/` (in-process SDK),
+`src/driver/claude-code/` (the Claude Code CLI/SDK transports) and
+`src/driver/acp/` (ACP); they adopt vendors deliberately and are NOT covered.
 
 ## First-party driver: `ai-sdk` (T1.4)
 

@@ -387,9 +387,13 @@ class ProductionUnitAdapter:
                  error_type=RuntimeError, drain_timeout=30.0,
                  completion_timeout=DEFAULT_COMPLETION_WINDOW,
                  max_completion_window=DEFAULT_COMPLETION_WINDOW,
+                 expected_render=None,
                  clock=time.monotonic, sleep=time.sleep):
         if systemd is None or identity is None or capability is None:
             raise TypeError("systemd, identity and capability ports are required")
+        if expected_render is not None \
+                and not isinstance(expected_render, dict):
+            raise TypeError("expected render identity must be an object")
         if (not isinstance(completion_timeout, (int, float))
                 or isinstance(completion_timeout, bool)
                 or completion_timeout <= 0
@@ -416,6 +420,7 @@ class ProductionUnitAdapter:
         self.sleep = sleep
         self._declared = None
         self._rendered = {}
+        self._expected_render = expected_render
         self._requested_runtime = None
         self._snapshot = None
         self._snapshot_unit = None
@@ -917,6 +922,11 @@ class ProductionUnitAdapter:
         if command not in commands:
             self.refuse("runtime does not implement the unit command: " + command)
         rendered = self._render(unit, runtime)
+        if self._expected_render is not None:
+            for key, value in self._expected_render.items():
+                if rendered.get(key) != value:
+                    self.refuse("preflight render differs from the selected "
+                                "identity: " + key)
         if runtime == "python":
             self._check_python_entry(rendered)
         self._rendered[(unit, runtime)] = rendered
