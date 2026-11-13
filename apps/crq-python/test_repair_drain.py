@@ -199,10 +199,19 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(report['stop'], 'rate-limit')
 
     def test_reap_aggregates_success_and_crash_before_replacement(self):
-        active = {100: 'successful', 101: 'crashed'}
+        fds = []
+        active = {}
+        for pid, item in ((100, 'successful'), (101, 'crashed')):
+            rfd, wfd = os.pipe()
+            fds.append((rfd, wfd))
+            active[pid] = (item, rfd)
         with mock.patch.object(service.os, 'waitpid', side_effect=[(100, 0), (101, 9)]):
             self.assertTrue(service.reap_item(active))
         self.assertEqual(active, {})
+        for rfd, wfd in fds:
+            os.close(wfd)
+            with self.assertRaises(OSError):
+                os.close(rfd)  # reap_completed closed the read end
 
     def test_admission_checks_exited_workers_even_below_capacity(self):
         self.config['repair']['max_concurrent_items'] = 10
@@ -948,6 +957,39 @@ class RepairDrainTest(unittest.TestCase):
             snapshot.assert_not_called()
             provider.assert_not_called()
 
+    def test_child_refusal_stops_the_pass_before_the_child_exits(self):
+        # The reviewer's interleaving: child A refuses, the marker is removed
+        # before A exits, and item B must still not be admitted in this pass.
+        # The child publishes its gate result before doing any work, and the
+        # coordinator blocks on that byte, so the exit status is not the signal.
+        self.config['repair']['max_concurrent_items'] = 2
+        parent = os.getpid()
+        forked = []
+        real_fork = os.fork
+        real_drain_item = service.drain_item
+
+        def fork_and_record():
+            forked.append(1)
+            return real_fork()
+
+        def drain_then_delay(config, item, jobs, on_refusal=None):
+            outcome = real_drain_item(config, item, jobs, on_refusal=on_refusal)
+            if outcome == service.RUNNER_DISABLED_OUTCOME:
+                time.sleep(0.4)  # refusal already published; exit delayed
+            return outcome
+
+        stderr = io.StringIO()
+        with mock.patch.object(service.os, 'fork', side_effect=fork_and_record), \
+             mock.patch.object(service, 'runner_disabled',
+                               side_effect=lambda: os.getpid() != parent), \
+             mock.patch.object(service, 'drain_item', side_effect=drain_then_delay), \
+             mock.patch.object(service, 'process_item') as process_item, \
+             contextlib.redirect_stderr(stderr):
+            service.drain_items(self.config, {'a': ['crq-run1-F1'], 'b': ['crq-run2-F1']},
+                                ['a', 'b'])
+        self.assertEqual(len(forked), 1)
+        process_item.assert_not_called()
+
     def test_marker_mid_item_stops_the_remaining_jobs(self):
         # The plan's slice 5 acceptance is per job: the in-flight job finishes
         # and the next does not start. A marker seen between serial jobs of one
@@ -1655,7 +1697,7 @@ class RepairDrainTest(unittest.TestCase):
              contextlib.redirect_stderr(stderr):
             service.drain_items(self.config, {'a': ['crq-run1-F1'], 'b': ['crq-run2-F1'],
                                               'c': ['crq-run3-F1']}, ['a', 'b', 'c'])
-        self.assertEqual(set(active_seen.values()), {'a', 'b'})
+        self.assertEqual({item for item, _fd in active_seen.values()}, {'a', 'b'})
         self.assertIn('pass stopped before c', stderr.getvalue())
 
     def test_process_item_starts_no_finding_inside_blackout(self):

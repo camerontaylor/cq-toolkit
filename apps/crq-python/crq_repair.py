@@ -44,6 +44,21 @@ RUNNER_DISABLED = 'runner disabled for host handover (state/runner-disabled)'
 RUNNER_DISABLED_OUTCOME = 'runner-disabled'
 
 
+# Set only inside a forked child: the gate publishes a refusal here the instant
+# it decides, so the coordinator learns it without waiting for the exit status.
+_REFUSAL_CHANNEL = None
+
+
+def publish_refusal():
+    fd = _REFUSAL_CHANNEL
+    if fd is None:
+        return
+    try:
+        os.write(fd, b'x')
+    except OSError:
+        pass
+
+
 def runner_disabled():
     """True while a host handover holds the runner inert.
 
@@ -828,9 +843,12 @@ def drain(config):
 
 def drain_item(config, item, job_ids):
     # A marker that appeared during the pass stops the next admission; the
-    # item already running is never interrupted.
+    # item already running is never interrupted. The refusal is published the
+    # moment it is decided: a forked child's exit status alone reaches the
+    # coordinator too late to stop the next admission.
     if runner_disabled():
         narrate(RUNNER_DISABLED + ': item ' + str(item) + ' not admitted')
+        publish_refusal()
         return RUNNER_DISABLED_OUTCOME
     if blocked(config['repair']) or dispatch_paused(config):
         return 'rate-limit'
@@ -883,6 +901,7 @@ def drain_items(config, groups, order):
             while len(active) >= limit:
                 stopped = reap_item(active) or stopped
             stopped = reap_completed(active)[0] or stopped
+            stopped = refusal_published(active) or stopped
             # One coordinator admission check, after any capacity wait and before
             # the next item: it covers a marker that was already present when the
             # item's turn arrived and one written while this pass waited at the
@@ -898,10 +917,16 @@ def drain_items(config, groups, order):
                 if drain_item(config, item, groups[item]) in ('rate-limit', RUNNER_DISABLED_OUTCOME):
                     break
                 continue
+            # A child publishes a refusal on a private pipe at the moment it
+            # decides, so the coordinator stops admitting without waiting for
+            # the exit status. The pipe is IPC, not persisted state.
+            refused_r, refused_w = os.pipe()
             # Linearize admission against provider pause writes under the same
             # existing lock. Neither parent nor child retains it during work.
             with cooldown_write():
                 if dispatch_paused(config):
+                    os.close(refused_r)
+                    os.close(refused_w)
                     break
                 # Fork duplicates this parent's stdout/stderr buffers; the child
                 # flushes its copy, so flush here or buffered parent lines (such
@@ -911,9 +936,31 @@ def drain_items(config, groups, order):
                 pid = os.fork()
             if pid == 0:
                 try:
-                    outcome = drain_item(config, item, groups[item])
-                    code = (2 if outcome == 'rate-limit'
-                            else 3 if outcome == RUNNER_DISABLED_OUTCOME else 0)
+                    global _REFUSAL_CHANNEL
+                    os.close(refused_r)
+                    for _pid, (_item, _rfd) in list(active.items()):
+                        os.close(_rfd)  # never hold another child's pipe
+
+                    def publish(byte):
+                        try:
+                            os.write(refused_w, byte)
+                        except OSError:
+                            pass
+
+                    # The child decides at the same gate its parent sampled, and
+                    # publishes the result before doing anything else: the
+                    # coordinator blocks on this byte, so a refusal cannot be
+                    # overtaken by the next admission.
+                    if runner_disabled():
+                        narrate(RUNNER_DISABLED + ': item ' + str(item) + ' not admitted')
+                        publish(b'x')
+                        code = 3
+                    else:
+                        publish(b'a')
+                        _REFUSAL_CHANNEL = refused_w
+                        outcome = drain_item(config, item, groups[item])
+                        code = (2 if outcome == 'rate-limit'
+                                else 3 if outcome == RUNNER_DISABLED_OUTCOME else 0)
                 except BaseException:
                     code = 1
                 # Do not run the coordinator's finally/atexit handlers in a child.
@@ -922,7 +969,18 @@ def drain_items(config, groups, order):
                     sys.stderr.flush()
                 finally:
                     os._exit(code)
-            active[pid] = item
+            os.close(refused_w)
+            # Barrier: the child publishes its item-gate result before any work.
+            # Accepted means the child passed the gate; refused or a dead child
+            # (EOF) latches the coordinator stop.
+            try:
+                admitted = os.read(refused_r, 1) == b'a'
+            except OSError:
+                admitted = False
+            os.set_blocking(refused_r, False)
+            active[pid] = (item, refused_r)
+            if not admitted:
+                stopped = True
     finally:
         while active:
             try:
@@ -931,13 +989,35 @@ def drain_items(config, groups, order):
                 continue  # keep ownership until every admitted child has exited
 
 
+def refusal_published(active):
+    """True once an admitted child has published a refusal.
+
+    A child writes one byte on its private pipe at the instant it refuses,
+    before it exits, so the coordinator's stop does not depend on process
+    scheduling: an exit status alone can arrive after the next admission."""
+    for _pid, (_item, rfd) in list(active.items()):
+        try:
+            data = os.read(rfd, 1)
+        except (BlockingIOError, InterruptedError):
+            continue
+        except OSError:
+            continue
+        if data:
+            return True
+    return False
+
+
 def reap_completed(active):
     """Collect every currently completed owned child before new admission."""
     failed, reaped = False, False
-    for pid, item in list(active.items()):
+    for pid, (item, rfd) in list(active.items()):
         found, status = os.waitpid(pid, os.WNOHANG)
         if found:
             del active[pid]
+            try:
+                os.close(rfd)
+            except OSError:
+                pass
             reaped = True
             if status:
                 code = os.waitstatus_to_exitcode(status)
@@ -970,6 +1050,7 @@ def process_item(config, jobs):
         # between serial jobs of one item stops the rest of that item too.
         if runner_disabled():
             narrate(RUNNER_DISABLED + ': job ' + str(job['job']) + ' not admitted')
+            publish_refusal()
             return RUNNER_DISABLED_OUTCOME
         if blocked(config['repair']):
             break  # never start a new finding inside the GLM peak window
