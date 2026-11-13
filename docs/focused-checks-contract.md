@@ -214,3 +214,5 @@ unittest and discovery are prohibited; full Python discovery runs only in CI
 on Python 3.14, the production minor reported by the owner.
 
 <!-- scratch: prose-only changed-files verification (retargeted), never merged -->
+
+Scratch prose-only verification note for the shard-split acceptance check.
