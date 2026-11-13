@@ -172,6 +172,30 @@ class HistoryTest(unittest.TestCase):
         self.assertTrue(any(value["event_type"] == "review" for value in generated))
         ledger.validate_sequence(generated)
 
+    def test_interrupted_agent_review_import_retries_without_minting_a_second_review(self):
+        # An import interrupted after spooling the github-agent-review but
+        # before its disposition retries at a later timestamp: the retained
+        # review is reused unchanged (same id, same retained artifact) so the
+        # retry mints only the missing disposition and the sequence stays
+        # valid (no source-evidence conflict blocking publication).
+        catalog = [{"class": "github-agent-review", "id": "rev-9", "raw": b"review body",
+                    "envelope": {"review": {"id": "rev-9", "body": "x", "authorLogin": "u"}}}]
+        LATER = "2026-10-30T06:00:00Z"
+        first, _ = history.import_catalog(self.f.repo, self.f.store, catalog, AT, [])
+        reviews = [v for v in first if v["event_type"] == "review"]
+        self.assertEqual(len(reviews), 1)
+        interrupted = reviews + [v for v in first if v["event_type"] != "review"][:0]
+        retry, _ = history.import_catalog(self.f.repo, self.f.store, catalog, LATER, interrupted)
+        self.assertEqual([v["event_type"] for v in retry], ["import-result"])
+        self.assertEqual(len(retry), 1)
+        sequence = interrupted + retry
+        ledger.validate_sequence(sequence)
+        self.assertEqual([v for v in sequence if v["event_type"] == "review"], reviews)
+        self.assertEqual(retry[0]["payload"]["review_id"], reviews[0]["id"])
+        self.assertIn("already recorded", retry[0]["payload"]["reason"])
+        for ref in retry[0]["payload"]["artifacts"]:
+            self.f.store.verify(ref)
+
     def test_collectors_retain_all_classes_and_paginated_api_bytes_without_credit(self):
         state = Path(self.tmp.name) / "state"
         (state / "receipts").mkdir(parents=True)

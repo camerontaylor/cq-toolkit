@@ -114,7 +114,9 @@ def normalize_record(submitted, at):
             raise RecordRefused("claimed scope rows need a path")
     expanded = 0
     for row in claimed_scope or ():
-        intervals = row.get("intervals") or ()
+        intervals = row.get("intervals")
+        if intervals is None:
+            intervals = []
         if not isinstance(intervals, list):
             raise RecordRefused("claimed scope intervals must be a list of start/end pairs")
         for pair in intervals:

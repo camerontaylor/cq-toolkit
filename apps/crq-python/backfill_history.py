@@ -152,6 +152,7 @@ def import_source(repo, store, source_class, source_id, raw, envelope, at, exist
         if previous:
             return [], previous
         review = None
+        retained = None
         reason = "github review collected as uncredited report"
         try:
             submitted = review_record.normalize_github_review(
@@ -159,12 +160,23 @@ def import_source(repo, store, source_class, source_id, raw, envelope, at, exist
                 pr=envelope.get("pr"), at=at)
             submitted["report_bytes"] = raw
             review, _ = review_record.normalize_record(submitted, at)
-            # The placeholder reference (imported-report:<digest>) has no
-            # durable backing; the collector's store reference is the retained
-            # artifact the outbox can verify, so it replaces the placeholder.
-            review["payload"]["artifacts"] = [dict(reference, kind="report")]
-            review["id"] = ledger.digest({k: v for k, v in review.items() if k != "id"})
-            ledger.validate(review)
+            # An interrupted import may have spooled the review but not its
+            # disposition; the retained outbox passed as `existing` still
+            # holds the review under its source_key. Reuse it unchanged (no
+            # rehash, no artifact replacement) so a retry at a later
+            # timestamp cannot mint a colliding second review.
+            retained = next((v for v in existing
+                             if v["event_type"] == "review" and v["source_key"] == review["source_key"]), None)
+            if retained:
+                review = None
+                reason = "github review already recorded as uncredited report"
+            else:
+                # The placeholder reference (imported-report:<digest>) has no
+                # durable backing; the collector's store reference is the retained
+                # artifact the outbox can verify, so it replaces the placeholder.
+                review["payload"]["artifacts"] = [dict(reference, kind="report")]
+                review["id"] = ledger.digest({k: v for k, v in review.items() if k != "id"})
+                ledger.validate(review)
         except (review_record.RecordRefused, ledger.IntegrityError) as exc:
             reason = "github review normalization refused: " + str(exc)
         disposition = ledger.event("import-result", result_key, at, {
@@ -173,7 +185,8 @@ def import_source(repo, store, source_class, source_id, raw, envelope, at, exist
                        "authenticated": False},
             "source_digest": source_digest,
             "result": "unverified", "reason": reason,
-            "review_id": review["id"] if review else None, "duplicate_id": None,
+            "review_id": review["id"] if review else (retained["id"] if retained else None),
+            "duplicate_id": None,
             "artifacts": [reference, proof]})
         return ([review] if review else []) + [disposition], disposition
     producer = "coderabbitai[bot]" if source_class == "github-app-review" else "crq-runner-app"

@@ -333,6 +333,18 @@ class ImportIdempotencyTests(unittest.TestCase):
             self.assertTrue(action.startswith("quarantined:"), shape)
             ledger.validate_sequence(events)
 
+    def test_empty_interval_list_is_a_valid_claimed_scope_row(self):
+        # An empty interval list is a valid scope row (wire schemas and
+        # ledger.scope() both allow it); the falsy-default collapse must not
+        # refuse it as a non-list container.
+        events, action = review_record.import_record(
+            submission(claimed_scope=[{"path": "a", "blob": "b" * 64,
+                                       "intervals": []}]), AT, [])
+        self.assertTrue(action.startswith("record:"))
+        ledger.validate_sequence(events)
+        record = next(v for v in events if v["event_type"] == "review")
+        self.assertEqual(record["payload"]["provenance"]["scope_confidence"], "claimed")
+
 
 class HistoricalAdapterTests(unittest.TestCase):
     def a22_receipt(self):
