@@ -127,8 +127,11 @@ export const gitSubprocess = (
   // whitespace but never a bounding quote: shell quoting stays balanced and
   // the rewritten command remains valid for shell execution.
   const enforceBatchMode = (command: string): string => {
-    const stripped = command.replace(/(?<=^|[\s"'])-o\s*batchmode=\S*?(?=$|[\s"'])\s*/gi, ' ');
-    return `${stripped.trim()} -oBatchMode=yes`;
+    const stripped = command
+      .replace(/(?<=^|[\s"'])-o\s*batchmode=\S*?(?=$|[\s"'])\s*/gi, ' ')
+      .trim()
+      .replace(/\s+/g, ' ');
+    return `${stripped} -oBatchMode=yes`;
   };
   if (env['GIT_SSH'] === undefined && env['GIT_SSH_COMMAND'] === undefined) {
     const base = configuredSshCommand?.trim() || 'ssh';
