@@ -1,5 +1,4 @@
 import type { SlotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegistry.js';
-import type { SlotMetadata } from '../../../src/adapters/lock/slotLock.js';
 import { REPO } from './prWorktree.helpers.js';
 // Split provenance: test/ops/review/prWorktree.test.ts was split into
 // prWorktree.helpers.ts (shared fixtures) and prWorktree.fetchFirst.test.ts,
@@ -11,15 +10,11 @@ import { REPO } from './prWorktree.helpers.js';
 // Shared fixtures and the fake git model (with the full pinned-behavior
 // header) live in prWorktree.helpers.ts.
 import { describe, expect, test } from 'vitest';
-import { mkdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, rm, symlink } from 'node:fs/promises';
+import { join, relative } from 'node:path';
 import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { removePrWorktree, resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
-import type {
-  RegistryMap,
-  WorktreeRegistry,
-  WorktreeRegistryEntry,
-} from '../../../src/adapters/git/prWorktree.js';
+import type { RegistryMap } from './legacyRegistryTypes.js';
 import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
 import {
   NOW,
@@ -166,6 +161,53 @@ describe('removePrWorktree', () => {
     expect(registry.calls).toEqual(['load']);
   });
 
+  test('a registry entry spelled through a terminal symlink is pruned — compared before the tree goes', async () => {
+    const calls: string[][] = [];
+    const tree = `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`;
+    await mkdir(tree, { recursive: true });
+    // The entry records an out-of-tree SYMLINK to the checkout. Git removes
+    // the target, leaving the symlink dangling; a comparison made afterwards
+    // would resolve the dangling spelling to itself and miss the entry.
+    const alias = join(REPO, 'pr-7-alias');
+    await rm(alias, { force: true });
+    await symlink(tree, alias);
+    const registry = memRegistry({ '7': { path: alias, branch: LABEL, createdAt: NOW - 1000 } });
+    const model = mkModel([{ path: tree, branch: LABEL, head: SHA_B }]);
+    try {
+      await removePrWorktree({
+        ...baseOpts(model, registry, { run: fakeGit(model, calls) }),
+        path: tree,
+      });
+      expect(calls[calls.length - 1]).toEqual(['-C', REPO, 'worktree', 'remove', tree]);
+      expect(model.worktrees).toEqual([]);
+      expect(registry.current()).toEqual({});
+    } finally {
+      await rm(alias, { force: true });
+      await rm(tree, { recursive: true, force: true });
+    }
+  });
+
+  test('a repoRoot-relative path is RESOLVED before the boundary check and git — the same location decides all three', async () => {
+    const calls: string[][] = [];
+    const target = `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`;
+    const registry = memRegistry({ '7': { path: target, branch: LABEL, createdAt: NOW - 1000 } });
+    const model = mkModel([{ path: target, branch: LABEL, head: SHA_B }]);
+    // Resolved against the PROCESS CWD this spelling would name nothing under
+    // the root; resolved against repoRoot (as `git -C <repoRoot>` does) it
+    // names exactly the owned tree. The boundary check, the git argv and the
+    // registry prune must all agree on that ONE location.
+    const relativePath = relative(REPO, target);
+    expect(relativePath).not.toBe(target);
+    await removePrWorktree({
+      ...baseOpts(model, registry, { run: fakeGit(model, calls) }),
+      path: relativePath,
+    });
+    expect(calls[calls.length - 1]).toEqual(['-C', REPO, 'worktree', 'remove', target]);
+    expect(model.worktrees).toEqual([]);
+    // Pruned: the entry names the SAME (now removed) location.
+    expect(registry.current()).toEqual({});
+  });
+
   test('a path OUTSIDE the worktreeRoot is refused before any destructive git runs — the registry and the foreign tree are untouched', async () => {
     const calls: string[][] = [];
     const registry = memRegistry({
@@ -220,7 +262,7 @@ const deferredGate = (): { reached: Promise<void>; release: () => void } => {
 const mutexRegistry = (
   initial: RegistryMap = {},
 ): {
-  registry: WorktreeRegistry & SlotWorktreeRegistry;
+  registry: SlotWorktreeRegistry;
   calls: string[];
   current: () => RegistryMap;
   pauseNextSave: () => { reached: Promise<void>; release: () => void };
@@ -230,25 +272,10 @@ const mutexRegistry = (
   let queue: Promise<unknown> = Promise.resolve();
   let depth = 0;
   let hooked: { reached: () => void; gate: Promise<void> } | null = null;
-  const registry: WorktreeRegistry & SlotWorktreeRegistry = {
-    load: async () => {
-      calls.push(`load@${String(depth)}`);
-      return { ...stored };
-    },
-    save: async (map: RegistryMap) => {
-      if (hooked !== null) {
-        const hook = hooked;
-        hooked = null;
-        calls.push('save:paused');
-        hook.reached();
-        await hook.gate;
-      }
-      calls.push('save');
-      stored = { ...map };
-    },
+  const registry: SlotWorktreeRegistry = {
     read: async (pr) => {
-      const map = await registry.load();
-      const entry = map[String(pr)];
+      calls.push(`load@${String(depth)}`);
+      const entry = stored[String(pr)];
       return entry
         ? {
             version: 1,
@@ -259,24 +286,7 @@ const mutexRegistry = (
           }
         : undefined;
     },
-    withPrLock: async (_pr, action) => registry.withLock(action),
-    update: async (key: string | number, value: WorktreeRegistryEntry | SlotMetadata | null) => {
-      const entry =
-        value && 'state' in value
-          ? value.state === 'bound'
-            ? { path: value.checkoutPath, branch: LABEL, createdAt: NOW }
-            : null
-          : value;
-      calls.push(`${entry === null ? `update:${key}:null` : `update:${key}`}@${String(depth)}`);
-      const merged: RegistryMap = { ...stored };
-      if (entry === null) {
-        delete merged[key];
-      } else {
-        merged[key] = { ...entry };
-      }
-      await registry.save(merged);
-    },
-    withLock: <T>(fn: () => Promise<T>): Promise<T> => {
+    withPrLock: <T>(_pr: number, fn: () => Promise<T>): Promise<T> => {
       const run = queue.then(async () => {
         depth += 1;
         try {
@@ -290,6 +300,23 @@ const mutexRegistry = (
         () => undefined,
       );
       return run;
+    },
+    update: async (key, value) => {
+      const entry =
+        value.state === 'bound'
+          ? { path: value.checkoutPath, branch: LABEL, createdAt: NOW }
+          : null;
+      calls.push(`${entry === null ? `update:${key}:null` : `update:${key}`}@${String(depth)}`);
+      if (hooked !== null) {
+        const hook = hooked;
+        hooked = null;
+        calls.push('save:paused');
+        hook.reached();
+        await hook.gate;
+      }
+      calls.push('save');
+      if (entry === null) delete stored[key];
+      else stored[key] = entry;
     },
   };
   return {

@@ -43,7 +43,21 @@ export function createEscalationState(initialFixedFailures = 0): EscalationState
   };
 }
 
+function boundedInteger(value: number, name: string, min: number): void {
+  if (!Number.isSafeInteger(value) || value < min)
+    throw new Error(`escalation ${name} must be a safe integer of at least ${min}`);
+}
+
+/** Injected configs bypass schema validation, so a malformed policy must fail loudly instead of disabling a pool. */
+function assertEscalationPolicy(policy: EscalationPolicy): void {
+  boundedInteger(policy.workerAttempts, 'workerAttempts', 0);
+  boundedInteger(policy.rescueBase, 'rescueBase', 0);
+  boundedInteger(policy.rescuePerFixed, 'rescuePerFixed', 1);
+  boundedInteger(policy.rescuePerPackageCap, 'rescuePerPackageCap', 0);
+}
+
 export function rescueAllocation(state: EscalationState, policy: EscalationPolicy): number {
+  assertEscalationPolicy(policy);
   return (
     Math.max(policy.rescueBase, Math.floor(state.initialFixedFailures / policy.rescuePerFixed)) +
     Math.floor(state.fixedFingerprints.length / policy.rescuePerFixed)
@@ -76,6 +90,7 @@ export function nextEscalation(
   policy: EscalationPolicy,
   request: EscalationRequest,
 ): { state: EscalationState; decision: EscalationDecision } {
+  assertEscalationPolicy(policy);
   const packageUsed = Object.hasOwn(state.perPackageUsed, request.package)
     ? state.perPackageUsed[request.package]!
     : 0;

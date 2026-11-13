@@ -2,5 +2,7 @@
 Description=CRQ heartbeat watchdog
 [Service]
 Type=oneshot
+# The 90s alert send plus local state I/O fit well inside this bound.
+TimeoutStartSec=5min
 Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/env python3 @CRQ_ROOT@/ops/crq-watchdog.py

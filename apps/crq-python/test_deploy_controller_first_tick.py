@@ -133,3 +133,21 @@ class PreservationTests(ControllerFixture):
                   "preserved/heartbeat.json": "2" * 64}
         with self.assertRaisesRegex(dc.Refused, "queue.json, heartbeat.json"):
             dc.preservation_check(self.effects, before)
+
+    def test_completion_heartbeat_is_hashed_where_the_runner_writes_it(self):
+        # The preserved heartbeat is the completion heartbeat the runner
+        # actually replaces (WATCHDOG_HOME/heartbeat.json, isolated here),
+        # never a state-directory copy nothing writes.
+        self.write_state("queue.json", {"items": []})
+        path = self.effects.completion_heartbeat_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"last_tick": "2026-10-28T00:00:00Z"}\n')
+        before = dc.captured_state(self.effects)
+        self.assertEqual(before["preserved/heartbeat.json"], dc._sha256(path))
+        # A state-directory heartbeat copy is not the runner surface.
+        self.write_state("heartbeat.json", {"last_tick": "2026-01-01T00:00:00Z"})
+        self.assertNotEqual(dc.captured_state(self.effects)["preserved/heartbeat.json"],
+                            dc._sha256(self.runner / "state/heartbeat.json"))
+        path.write_text('{"last_tick": "2026-10-28T00:05:00Z"}\n')
+        with self.assertRaisesRegex(dc.Refused, "heartbeat.json"):
+            dc.preservation_check(self.effects, before)

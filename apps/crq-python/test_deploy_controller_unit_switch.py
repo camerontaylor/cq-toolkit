@@ -1,5 +1,10 @@
 """Per-unit transaction tests: all host operations are controlled fakes."""
+import contextlib
+import fcntl
+import io
 import json
+import os
+from types import SimpleNamespace
 from unittest import mock
 
 from test_deploy_controller_fixtures import ControllerFixture, dc
@@ -16,11 +21,13 @@ class Adapter:
         return {"runtime": self.runtime}
 
     def snapshot(self, unit):
-        return self.runtime, self.running
+        return {"runtime": self.runtime, "running": self.running}
 
     def validate_snapshot(self, unit, snapshot):
-        if (not isinstance(snapshot, (list, tuple)) or len(snapshot) != 2
-                or not dc._unit_runtime(snapshot[0]) or type(snapshot[1]) is not bool):
+        if (not isinstance(snapshot, dict)
+                or set(snapshot) != {"runtime", "running"}
+                or not dc._unit_runtime(snapshot.get("runtime"))
+                or type(snapshot.get("running")) is not bool):
             raise dc.Refused("invalid snapshot")
 
     def stop_and_drain(self, unit):
@@ -41,13 +48,58 @@ class Adapter:
                 "success": True, "sequence": self.sequence_number}
 
     def restore(self, unit, snapshot):
-        self.runtime = snapshot[0]
+        self.runtime = snapshot["runtime"]
 
     def restore_activation(self, unit, snapshot):
-        self.running = snapshot[1]
+        self.running = snapshot["running"]
+
+
+def pending_unit_switch():
+    return {
+        "schema_version": dc.JOURNAL_SCHEMA,
+        "transaction_id": "a" * 32,
+        "operation": "unit_switch",
+        "unit": "crq-slot.service",
+        "runtime": "node:" + "b" * 40,
+        "prior_runtime": "python",
+        "outcome": "pending",
+        "at": "2026-10-27T00:00:00Z",
+        "snapshot": {},
+        "state": None,
+        "phase": "snapshot",
+    }
+
+
+def pending_checkout(operation):
+    return {
+        "schema_version": dc.JOURNAL_SCHEMA,
+        "transaction_id": "b" * 32,
+        "operation": operation,
+        "outcome": "pending",
+        "at": "2026-10-27T00:00:00Z",
+        "intended_operation": ("rollback" if operation.startswith("rollback")
+                               else "deploy"),
+        "prior_state": {},
+        "prior_head": "a" * 40,
+        "prior_config_sha256": None,
+        "prior_tag": None,
+        "target": "c" * 40,
+        "tag": "crq-runner/20261027-1",
+        "helper_sha256": "ab" * 32,
+        "automatic_rollback_permitted": False,
+        "rollback_compatibility": {},
+    }
 
 
 class UnitSwitchTests(ControllerFixture):
+    def setUp(self):
+        super().setUp()
+        # Unit transactions now refuse before mutation when recorded queue
+        # ownership cannot be observed; the fixture's queue is genuinely empty.
+        self.write_state("queue.json", {"items": [], "starts": []})
+        self.write_state("heartbeat.json",
+                         {"last_tick": "2026-01-01T00:00:00Z"})
+
     def test_preservation_baseline_is_captured_after_drain(self):
         self.write_state("queue.json", {"version": "before"})
         fixture = self
@@ -132,6 +184,40 @@ class UnitSwitchTests(ControllerFixture):
             dc.recover_unit(self.effects, adapter, path)
         self.assertFalse(adapter.running)
 
+    def test_rollback_release_follows_restore_activation_journal(self):
+        fixture = self
+
+        class JournalingAdapter(Adapter):
+            def __init__(self):
+                super().__init__("python")
+                self.phases = []
+
+            def _phase(self):
+                records = [json.loads(candidate.read_text())
+                           for candidate in fixture.record_dir.glob("controller-*.json")]
+                return records[0]["phase"]
+
+            def install(self, unit, runtime):
+                raise RuntimeError("install failed")
+
+            def restore(self, unit, snapshot):
+                self.phases.append(("restore", self._phase()))
+                super().restore(unit, snapshot)
+
+            def restore_activation(self, unit, snapshot):
+                self.phases.append(("release", self._phase()))
+                super().restore_activation(unit, snapshot)
+
+        adapter = JournalingAdapter()
+        with self.assertRaises(dc.RecoveryRequired):
+            dc.switch_unit(self.effects, adapter, "crq-tick.service",
+                           "node:" + "a" * 40)
+        self.assertEqual(adapter.phases, [
+            ("restore", "drained"),
+            ("release", "restore_activation_pending"),
+        ])
+        self.assertTrue(adapter.running)
+
     def test_recovery_final_journal_failure_retains_ambiguous_intent(self):
         class Crash(BaseException):
             pass
@@ -161,14 +247,14 @@ class UnitSwitchTests(ControllerFixture):
             dc.recover_unit(self.effects, adapter, path)
 
     def test_pending_unit_intent_blocks_deploy_and_rollback(self):
-        self.effects.journal_append({"operation": "unit_switch", "outcome": "pending"})
+        self.effects.journal_append(pending_unit_switch())
         with self.assertRaisesRegex(dc.Refused, "unfinished unit switch"):
             dc.deploy_plan(self.effects, None, "", "", self.overlay_path)
         with self.assertRaisesRegex(dc.Refused, "unfinished unit switch"):
             dc.rollback_plan(self.effects, None, {}, self.overlay_path)
 
     def test_resolution_prose_cannot_clear_pending_unit_intent(self):
-        path = self.effects.journal_append({"operation": "unit_switch", "outcome": "pending"})
+        path = self.effects.journal_append(pending_unit_switch())
         note = self.record_dir / "OPERATOR-RESOLUTION.md"
         for contents in ("Resolution for controller-foreign.json: done.\n",
                          path.name + "\n"):
@@ -177,21 +263,22 @@ class UnitSwitchTests(ControllerFixture):
                 dc.switch_unit(self.effects, Adapter("python"), "crq-slot.service",
                                "node:" + "b" * 40)
 
-    def test_historical_checkout_recovery_and_resolution_remain_untouched(self):
-        path = self.effects.journal_append({"operation": "recovery_required",
+    def test_historical_checkout_recovery_without_identity_refuses_untouched(self):
+        path = self.effects.journal_append({"schema_version": dc.JOURNAL_SCHEMA,
+                                            "operation": "recovery_required",
                                             "outcome": "recovery_required"})
         original = path.read_bytes()
         note = self.record_dir / "OPERATOR-RESOLUTION.md"
         note.write_text("Legacy operator resolution: no deployment change was made.\n")
         note_before = note.read_bytes()
         adapter = Adapter("python")
-        result = dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
-        self.assertEqual(result["outcome"], "completed")
+        with self.assertRaisesRegex(dc.Refused, "unsupported legacy checkout recovery"):
+            dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
         self.assertTrue(adapter.running)
         self.assertEqual(path.read_bytes(), original)
         self.assertEqual(note.read_bytes(), note_before)
 
-    def test_unit_recovery_does_not_interpret_checkout_history(self):
+    def test_unit_recovery_refuses_other_checkout_history_without_interpreting_it(self):
         class Crash(BaseException):
             pass
 
@@ -203,12 +290,17 @@ class UnitSwitchTests(ControllerFixture):
             dc.switch_unit(self.effects, InterruptedAdapter("python"), "crq-tick.service",
                            "node:" + "a" * 40)
         path = next(self.record_dir.glob("controller-*.json"))
-        retained = self.effects.journal_append({"operation": "rollback_pending", "outcome": "pending"})
+        retained = self.effects.journal_append(pending_checkout("rollback_pending"))
         retained_before = retained.read_bytes()
         adapter = Adapter("python")
-        self.assertEqual(dc.recover_unit(self.effects, adapter, path)["outcome"], "rolled_back")
+        with self.assertRaisesRegex(dc.Refused, "unfinished checkout switch"):
+            dc.recover_unit(self.effects, adapter, path)
         self.assertTrue(adapter.running)
         self.assertEqual(retained.read_bytes(), retained_before)
+        retained.unlink()
+        self.assertEqual(dc.recover_unit(self.effects, adapter, path)["outcome"],
+                         "rolled_back")
+        self.assertTrue(adapter.running)
 
     def test_crash_during_initial_drain_recovers_without_stale_baseline(self):
         class Crash(BaseException):
@@ -292,6 +384,85 @@ class UnitSwitchTests(ControllerFixture):
             dc.switch_unit(self.effects, None, "crq-tick.service", "node:" + "a" * 40)
         self.assertEqual(list(self.record_dir.iterdir()), [])
 
+    def test_switch_refuses_live_queue_before_adapter_or_journal(self):
+        run_id = "a" * 32
+        item = {"id": "pr1", "state": "reviewing",
+                "run": {"run_id": run_id, "pid": 4242}}
+        self.write_state("queue.json", {"items": [item]})
+        queue_before = (self.runner / "state/queue.json").read_bytes()
+        adapter = Adapter("python")
+        calls = []
+
+        def preflight(*args):
+            calls.append("preflight")
+            return {"runtime": "python"}
+
+        with mock.patch.object(dc, "_runner_liveness",
+                               return_value=lambda *args: "alive"), \
+                mock.patch.object(adapter, "preflight", side_effect=preflight):
+            with self.assertRaises(dc.QueueDrainRefused) as error:
+                dc.switch_unit(self.effects, adapter, "crq-tick.service",
+                               "node:" + "b" * 40)
+        self.assertEqual(error.exception.drain, {
+            "drained": False,
+            "blocked": [{"item": "pr1", "state": "alive", "run": run_id}]})
+        self.assertEqual(calls, [])
+        self.assertTrue(adapter.running)
+        self.assertEqual((self.runner / "state/queue.json").read_bytes(),
+                         queue_before)
+        self.assertEqual(list(self.record_dir.glob("controller-*.json")), [])
+
+    def test_switch_refuses_ambiguous_queue_before_mutation(self):
+        run_id = "b" * 32
+        self.write_state("queue.json", {"items": [
+            {"id": "pr2", "run": {"run_id": run_id}}]})
+        adapter = Adapter("python")
+        with mock.patch.object(dc, "_runner_liveness",
+                               return_value=lambda *args: "ambiguous"):
+            with self.assertRaises(dc.QueueDrainRefused) as error:
+                dc.switch_unit(self.effects, adapter, "crq-tick.service",
+                               "node:" + "b" * 40)
+        self.assertEqual(error.exception.drain["blocked"], [
+            {"item": "pr2", "state": "ambiguous", "run": run_id}])
+        self.assertEqual(list(self.record_dir.glob("controller-*.json")), [])
+
+    def test_unreadable_queue_refuses_before_adapter(self):
+        (self.runner / "state/queue.json").write_text("not json\n")
+        adapter = Adapter("python")
+        with self.assertRaisesRegex(dc.Refused, "queue unreadable"):
+            dc.switch_unit(self.effects, adapter, "crq-tick.service",
+                           "node:" + "b" * 40)
+        self.assertEqual(list(self.record_dir.glob("controller-*.json")), [])
+
+    def test_recovery_independently_refuses_live_owned_work(self):
+        record = {
+            "schema_version": dc.JOURNAL_SCHEMA,
+            "transaction_id": "c" * 32,
+            "operation": "unit_switch",
+            "unit": "crq-tick.service",
+            "runtime": "node:" + "b" * 40,
+            "prior_runtime": "python",
+            "outcome": "pending",
+            "at": "2026-01-01T00:00:00Z",
+            "snapshot": {"runtime": "python", "running": True},
+            "state": None,
+            "phase": "snapshot",
+        }
+        path = self.effects.journal_append(record)
+        before = path.read_bytes()
+        run_id = "d" * 32
+        self.write_state("queue.json", {"items": [
+            {"id": "pr3", "run": {"run_id": run_id, "pid": 5252}}]})
+        adapter = Adapter("python")
+        with mock.patch.object(dc, "_runner_liveness",
+                               return_value=lambda *args: "alive"):
+            with self.assertRaises(dc.QueueDrainRefused) as error:
+                dc.recover_unit(self.effects, adapter, path)
+        self.assertEqual(error.exception.drain["blocked"], [
+            {"item": "pr3", "state": "alive", "run": run_id}])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue(adapter.running)
+
     def test_recovery_failure_keeps_pending_record_and_reports_recovery(self):
         class Crash(BaseException):
             pass
@@ -335,13 +506,320 @@ class UnitSwitchTests(ControllerFixture):
         self.assertTrue(adapter.running)
         self.assertEqual(adapter.runtime, "node:" + "a" * 40)
         record["state"]["preserved/heartbeat.json"] = None
-        record["snapshot"] = {"path": "../../elsewhere"}
+        record["snapshot"] = {"runtime": "python", "path": "../../elsewhere"}
         path.write_text(json.dumps(record))
         with self.assertRaisesRegex(dc.Refused, "invalid snapshot"):
             dc.recover_unit(self.effects, adapter, path)
         self.assertTrue(adapter.running)
         record["outcome"] = ["unexpected"]
         path.write_text(json.dumps(record))
-        with self.assertRaisesRegex(dc.Refused, "unfinished unit switch"):
+        with self.assertRaisesRegex(dc.Refused, "invalid unit switch outcome"):
             dc.switch_unit(self.effects, Adapter("python"), "crq-slot.service",
                            "node:" + "b" * 40)
+
+
+class RecoverFactoryTests(ControllerFixture):
+    """Recovery composition comes from the one record the controller validated.
+
+    The controller keeps sole ownership of the lock, record validation, the
+    unfinished-transaction guard, the drain gate, restoration order and journal
+    writes. ``adapter_factory`` is a composition callback invoked under that
+    lock with the record's own unit and prior runtime, before any snapshot
+    validation or unit mutation.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.write_state("queue.json", {"items": [], "starts": []})
+        self.write_state("heartbeat.json",
+                         {"last_tick": "2026-01-01T00:00:00Z"})
+
+    def pending_record(self, **overrides):
+        record = {
+            "schema_version": dc.JOURNAL_SCHEMA,
+            "transaction_id": "c" * 32,
+            "operation": "unit_switch",
+            "unit": "crq-slot.service",
+            "runtime": "node:" + "b" * 40,
+            "prior_runtime": "python",
+            "outcome": "pending",
+            "at": "2026-11-12T00:00:00Z",
+            "snapshot": {"runtime": "python", "running": True},
+            "state": dc.captured_state(self.effects),
+            "phase": "drained",
+        }
+        record.update(overrides)
+        return self.effects.journal_append(record)
+
+    def refusing_factory(self):
+        return mock.Mock(
+            side_effect=AssertionError("recover constructed an adapter"))
+
+    def run_recover_cli(self, record, loader):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        argv = ["--root", str(self.root), "--overlay", str(self.overlay_path),
+                "--record-dir", str(self.record_dir),
+                "recover", "--record", str(record)]
+        with mock.patch.object(dc, "_load_live_binding", loader), \
+                contextlib.redirect_stdout(stdout), \
+                contextlib.redirect_stderr(stderr):
+            code = dc.main(argv)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_recover_composes_the_adapter_from_the_validated_record(self):
+        events = []
+        calls = []
+        path = self.pending_record()
+
+        class RecordingAdapter(Adapter):
+            def validate_snapshot(self, unit, snapshot):
+                events.append("validate_snapshot")
+                super().validate_snapshot(unit, snapshot)
+
+        def factory(unit, prior_runtime):
+            events.append("factory")
+            calls.append((unit, prior_runtime))
+            self.assertNotIn("validate_snapshot", events)
+            return RecordingAdapter(prior_runtime)
+
+        record = dc.recover_unit(self.effects, None, path,
+                                 adapter_factory=factory)
+        self.assertEqual(calls, [("crq-slot.service", "python")])
+        self.assertEqual(events, ["factory", "validate_snapshot"])
+        self.assertEqual(record["outcome"], "rolled_back")
+
+    def test_recover_composition_does_not_require_the_abandoned_target(self):
+        path = self.pending_record(runtime="node:" + "d" * 40)
+        calls = []
+        adapters = []
+
+        def factory(unit, prior_runtime):
+            calls.append((unit, prior_runtime))
+            adapter = Adapter(prior_runtime)
+            adapters.append(adapter)
+            return adapter
+
+        record = dc.recover_unit(self.effects, None, path,
+                                 adapter_factory=factory)
+        self.assertEqual(calls, [("crq-slot.service", "python")])
+        self.assertEqual(adapters[0].runtime, "python")
+        self.assertTrue(adapters[0].running)
+        self.assertEqual(record["outcome"], "rolled_back")
+
+    def test_recover_rejects_an_incoherent_snapshot_runtime(self):
+        path = self.pending_record(
+            snapshot={"runtime": "node:" + "e" * 40, "running": True})
+        before = path.read_bytes()
+        factory = self.refusing_factory()
+        with self.assertRaisesRegex(dc.Refused, "invalid unit recovery record"):
+            dc.recover_unit(self.effects, None, path, adapter_factory=factory)
+        factory.assert_not_called()
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_recover_factory_runs_under_the_controller_lock(self):
+        path = self.pending_record()
+        lock = self.runner / "state" / dc.LOCK_NAME
+        observed = []
+
+        def factory(unit, prior_runtime):
+            descriptor = os.open(lock, os.O_RDONLY)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                observed.append("blocked")
+            finally:
+                os.close(descriptor)
+            return Adapter(prior_runtime)
+
+        record = dc.recover_unit(self.effects, None, path,
+                                 adapter_factory=factory)
+        self.assertEqual(observed, ["blocked"])
+        self.assertEqual(record["outcome"], "rolled_back")
+
+    def test_recover_factory_is_not_called_for_an_invalid_record(self):
+        factory = self.refusing_factory()
+        malformed = self.record_dir / "controller-malformed.json"
+        malformed.write_text("not json\n")
+        before = malformed.read_bytes()
+        with self.assertRaisesRegex(dc.Refused,
+                                    "unreadable unit recovery record"):
+            dc.recover_unit(self.effects, None, malformed,
+                            adapter_factory=factory)
+        self.assertEqual(malformed.read_bytes(), before)
+        malformed.unlink()
+
+        wrong_schema = self.pending_record(schema_version=99)
+        before = wrong_schema.read_bytes()
+        with self.assertRaisesRegex(dc.Refused, "invalid unit recovery record"):
+            dc.recover_unit(self.effects, None, wrong_schema,
+                            adapter_factory=factory)
+        self.assertEqual(wrong_schema.read_bytes(), before)
+        wrong_schema.unlink()
+
+        path = self.pending_record()
+        legacy = self.effects.journal_append({
+            "schema_version": dc.JOURNAL_SCHEMA,
+            "operation": "recovery_required",
+            "outcome": "recovery_required"})
+        before = legacy.read_bytes()
+        with self.assertRaisesRegex(
+                dc.Refused, "unsupported legacy checkout recovery record"):
+            dc.recover_unit(self.effects, None, path,
+                            adapter_factory=factory)
+        factory.assert_not_called()
+        self.assertEqual(legacy.read_bytes(), before)
+
+    def test_recover_factory_is_not_called_when_another_record_blocks(self):
+        factory = self.refusing_factory()
+        path = self.pending_record()
+        unit_original = path.read_bytes()
+        other = self.effects.journal_append(pending_unit_switch())
+        other_original = other.read_bytes()
+        with self.assertRaisesRegex(dc.Refused, "unfinished unit switch"):
+            dc.recover_unit(self.effects, None, path, adapter_factory=factory)
+        self.assertEqual(path.read_bytes(), unit_original)
+        self.assertEqual(other.read_bytes(), other_original)
+        other.unlink()
+
+        checkout = self.effects.journal_append(
+            pending_checkout("deploy_pending"))
+        checkout_original = checkout.read_bytes()
+        with self.assertRaisesRegex(dc.Refused, "unfinished checkout switch"):
+            dc.recover_unit(self.effects, None, path, adapter_factory=factory)
+        factory.assert_not_called()
+        self.assertEqual(path.read_bytes(), unit_original)
+        self.assertEqual(checkout.read_bytes(), checkout_original)
+
+    def test_recover_factory_is_not_called_when_the_queue_is_live(self):
+        for state, transaction in (("alive", "d"), ("ambiguous", "e")):
+            with self.subTest(state=state):
+                path = self.pending_record(transaction_id=transaction * 32)
+                before = path.read_bytes()
+                self.write_state("queue.json", {"items": [
+                    {"id": "pr9",
+                     "run": {"run_id": "f" * 32, "pid": 6100}}]})
+                factory = self.refusing_factory()
+                with mock.patch.object(
+                        dc, "_runner_liveness",
+                        return_value=lambda *args: state):
+                    with self.assertRaises(dc.QueueDrainRefused):
+                        dc.recover_unit(self.effects, None, path,
+                                        adapter_factory=factory)
+                factory.assert_not_called()
+                self.assertEqual(path.read_bytes(), before)
+                path.unlink()
+
+    def test_recover_factory_error_is_a_refusal(self):
+        path = self.pending_record()
+        before = path.read_bytes()
+        for name in ("LiveBindingRefused", "FactoryRefused", "CompletionError"):
+            with self.subTest(error=name):
+                error = type(name, (RuntimeError,), {})
+                binding = SimpleNamespace(
+                    LiveBindingRefused=error,
+                    factory=SimpleNamespace(FactoryRefused=error),
+                    completion=SimpleNamespace(CompletionError=error),
+                    production_adapter=mock.Mock(
+                        side_effect=error("compose failed")))
+                code, stdout, stderr = self.run_recover_cli(
+                    path, mock.Mock(return_value=binding))
+                self.assertEqual(code, 2)
+                artifact = json.loads(stdout)["error"]
+                self.assertEqual(artifact["kind"], "refused")
+                self.assertEqual(artifact["subcommand"], "recover")
+                self.assertIn("compose failed", artifact["message"])
+                self.assertIn("refused:", stderr)
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_recover_factory_path_drains_before_an_activation_refusal(self):
+        path = self.pending_record(phase="activation_pending")
+        before = path.read_bytes()
+
+        class OwnedWorkAdapter(Adapter):
+            def __init__(self):
+                super().__init__("python")
+                self.owned = ["work-launched-after-activation"]
+                self.drains = 0
+
+            def stop_and_drain(self, unit):
+                self.drains += 1
+                self.owned.clear()
+                super().stop_and_drain(unit)
+
+        adapters = []
+
+        def factory(unit, prior_runtime):
+            adapter = OwnedWorkAdapter()
+            adapters.append(adapter)
+            return adapter
+
+        with self.assertRaises(dc.RecoveryRequired) as failure:
+            dc.recover_unit(self.effects, None, path, adapter_factory=factory)
+        self.assertIn("activation may have occurred", str(failure.exception))
+        self.assertEqual(len(adapters), 1)
+        self.assertEqual(adapters[0].drains, 1)
+        self.assertEqual(adapters[0].owned, [])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(json.loads(path.read_text())["phase"],
+                         "activation_pending")
+
+
+class ControllerLockModeTests(ControllerFixture):
+    """The controller lock's mode never depends on the ambient umask."""
+
+    def lock_path(self):
+        return self.runner / "state" / dc.LOCK_NAME
+
+    @staticmethod
+    def mode_of(path):
+        return path.stat().st_mode & 0o777
+
+    def test_lock_is_created_0600_under_a_permissive_umask(self):
+        path = self.lock_path()
+        self.assertFalse(path.exists())
+        previous = os.umask(0o002)
+        try:
+            with self.effects.controller_lock():
+                self.assertEqual(self.mode_of(path), 0o600)
+        finally:
+            os.umask(previous)
+        # The guest proof saw an 0664 lock from exactly this umask.
+        self.assertEqual(self.mode_of(path), 0o600)
+
+    def test_a_preexisting_group_readable_lock_is_normalised_to_0600(self):
+        path = self.lock_path()
+        path.parent.mkdir(parents=True)
+        path.write_text("")
+        path.chmod(0o664)
+        with self.effects.controller_lock():
+            self.assertEqual(self.mode_of(path), 0o600)
+        self.assertEqual(self.mode_of(path), 0o600)
+
+    def test_a_second_acquisition_is_refused_with_the_busy_lock_text(self):
+        with self.effects.controller_lock():
+            with self.assertRaisesRegex(dc.Refused, "controller lock busy"):
+                with self.effects.controller_lock():
+                    self.fail("a second acquisition must be refused")
+
+    def test_context_manager_contract_is_unchanged(self):
+        path = self.lock_path()
+        path.parent.mkdir(parents=True)
+        path.write_text("retained\n")
+        path.chmod(0o600)
+        with self.assertRaises(RuntimeError):
+            with self.effects.controller_lock():
+                descriptor = os.open(path, os.O_RDONLY)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(descriptor)
+                raise RuntimeError("block failed")
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+        self.assertEqual(path.read_text(), "retained\n")
+        self.assertEqual(self.mode_of(path), 0o600)

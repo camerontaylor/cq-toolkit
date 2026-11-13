@@ -1,5 +1,7 @@
 // W1.9 — the CQ_MERGE_PROTECTED_PATHS posture resolver (P7/P8, Annex B §B.1).
 import { trustedOptIn } from '../../../src/config/optin.js';
+import { readCqEnv } from '../../../src/config/env.js';
+import { runWithCqEnv } from '../../../src/config/run-env.js';
 import { describe, expect, test } from 'vitest';
 import {
   PROTECTED_PATHS_ENV,
@@ -118,7 +120,7 @@ describe('resolveProtectedPathsConfig', () => {
     ).toBe(true);
   });
 
-  test('defaults env to process.env', () => {
+  test('no injection defaults to the ambient snapshot (one fresh read outside a run)', () => {
     const saved = process.env[PROTECTED_PATHS_ENV];
     try {
       process.env[PROTECTED_PATHS_ENV] = 'diff-check';
@@ -158,6 +160,75 @@ describe('resolveProtectedPathsConfig with a CqEnv snapshot', () => {
     // An error for an unrelated key does not affect this resolver.
     expect(resolveProtectedPathsConfig({ cqEnv: readCqEnv({ CQ_SANDBOX: 'of' }) }).layer).toBe(
       'default',
+    );
+  });
+});
+
+describe('resolveProtectedPathsConfig entry-time snapshot and injection precedence (#1185)', () => {
+  /** Run `fn` with `CQ_MERGE_PROTECTED_PATHS` ambiently set to `value`, then restore. */
+  const withAmbient = <T>(value: string | undefined, fn: () => T): T => {
+    const saved = process.env[PROTECTED_PATHS_ENV];
+    if (value === undefined) delete process.env[PROTECTED_PATHS_ENV];
+    else process.env[PROTECTED_PATHS_ENV] = value;
+    try {
+      return fn();
+    } finally {
+      if (saved === undefined) delete process.env[PROTECTED_PATHS_ENV];
+      else process.env[PROTECTED_PATHS_ENV] = saved;
+    }
+  };
+
+  test('no injection reads the enclosing run snapshot, not a later ambient change', () => {
+    withAmbient('human', () =>
+      runWithCqEnv(readCqEnv({ CQ_MERGE_PROTECTED_PATHS: 'advisory' }), () => {
+        // Ambient drift after the run resolved its snapshot: a call-time
+        // process.env read would answer 'human'/'default' here.
+        process.env[PROTECTED_PATHS_ENV] = 'human';
+        expect(resolveProtectedPathsConfig()).toEqual({ posture: 'advisory', layer: 'env' });
+      }),
+    );
+  });
+
+  test('a blank run snapshot is the conservative default even when the ambient env is set', () => {
+    withAmbient('diff-check', () =>
+      runWithCqEnv(readCqEnv({}), () => {
+        expect(resolveProtectedPathsConfig()).toEqual({ posture: 'human', layer: 'default' });
+      }),
+    );
+  });
+
+  test('an explicit raw env record still wins over the run snapshot', () => {
+    withAmbient('advisory', () =>
+      runWithCqEnv(readCqEnv({ CQ_MERGE_PROTECTED_PATHS: 'advisory' }), () => {
+        expect(
+          resolveProtectedPathsConfig({ env: { CQ_MERGE_PROTECTED_PATHS: 'diff-check' } }),
+        ).toEqual({ posture: 'diff-check', layer: 'env' });
+        // A blank explicit record is unset, not a fallback to the run snapshot.
+        expect(resolveProtectedPathsConfig({ env: {} })).toEqual({
+          posture: 'human',
+          layer: 'default',
+        });
+      }),
+    );
+  });
+
+  test('a call opt-in wins over the run snapshot', () => {
+    withAmbient('human', () =>
+      runWithCqEnv(readCqEnv({ CQ_MERGE_PROTECTED_PATHS: 'human' }), () => {
+        expect(
+          resolveProtectedPathsConfig({
+            optIn: trustedOptIn({ 'merge.protectedPaths': 'advisory' }),
+          }),
+        ).toEqual({ posture: 'advisory', layer: 'call' });
+      }),
+    );
+  });
+
+  test('an invalid run snapshot value is refused by name, never defaulted', () => {
+    withAmbient(undefined, () =>
+      runWithCqEnv(readCqEnv({ CQ_MERGE_PROTECTED_PATHS: 'bogus' }), () => {
+        expect(() => resolveProtectedPathsConfig()).toThrow(/CQ_MERGE_PROTECTED_PATHS/);
+      }),
     );
   });
 });

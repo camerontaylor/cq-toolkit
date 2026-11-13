@@ -68,7 +68,12 @@ import type {
 } from '../../driver/types.js';
 import { correlationInvocation } from '../../driver/correlationInvocation.js';
 import { currentJobContext } from '../../kernel/governor.js';
-import type { Op } from '../../kernel/types.js';
+import type { OpResult } from '../../kernel/types.js';
+import {
+  createKnownUsageLedger,
+  normalizeUsageObservation,
+  type KnownUsageSummary,
+} from '../../shared/knownUsage.js';
 import type { Cluster } from './clusterErrors.js';
 
 /**
@@ -188,6 +193,21 @@ export function agenticRemediationPrompt(input: AgenticRemediationInput): string
 }
 
 /**
+ * The op's result on every terminal verdict, plus the typed usage envelope:
+ * the SAME `usageSummary` carrier the ok-result artifact contract already
+ * accepts (I1), attached on EVERY driver-served exit so a standalone caller
+ * — direct dispatch (the CLI op path) or a library embedder, neither of
+ * which has a governed job context — sees the invocation's known spend
+ * (#1195). Under the governed runner the envelope rides the artifact beside
+ * the `reportResult` channel unchanged (the ledger never reads it, so there
+ * is no double-count); the pre-dispatch refusals and throw mappings return
+ * no envelope — no driver ran, so no spend was observed.
+ */
+export type AgenticRemediationResult = OpResult<WorkerResult> & {
+  usageSummary?: KnownUsageSummary;
+};
+
+/**
  * Build the `analyze.agenticRemediation` op over ONE injected driver
  * factory. Per call: assemble the frozen OpInvocation from the cluster
  * context and the input's plain-data policies, resolve the
@@ -198,8 +218,8 @@ export function agenticRemediationPrompt(input: AgenticRemediationInput): string
  */
 export function makeAgenticRemediation(
   drivers: DriverFactory | undefined,
-): Op<AgenticRemediationInput, WorkerResult> {
-  return async (input) => {
+): (input: AgenticRemediationInput) => Promise<AgenticRemediationResult> {
+  return async (input): Promise<AgenticRemediationResult> => {
     // The id must name THE cluster it travels with — a mismatch would put
     // one cluster's evidence under another cluster's identity in the prompt.
     if (input.clusterId !== input.cluster.id) {
@@ -308,9 +328,28 @@ export function makeAgenticRemediation(
       usage: result.usage,
       ...(result.costUSD !== undefined ? { costUSD: result.costUSD } : {}),
     });
+    // Spend lands on the RESULT too (#1195): the governed channel above feeds
+    // the runner's ledger, but a standalone caller has no job context (the
+    // optional chain above is a no-op there) and the terminal error/budget/
+    // aborted verdicts give the runner's own fold nothing — without this
+    // envelope the invocation's settled usage vanished on every non-governed
+    // exit. One driver observation, sanitized field-by-field through the
+    // shared normalize (#1189's rule — a lying measurement contributes
+    // nothing and counts as unknown), folded through the same ledger the
+    // governed runs use, so the counts and sums cannot drift from the house
+    // semantics: exactly one known-or-unknown usage, priced-or-unpriced cost.
+    const ledger = createKnownUsageLedger();
+    ledger.record(
+      'analyze.agenticRemediation',
+      normalizeUsageObservation({
+        usage: result.usage,
+        ...(result.costUSD !== undefined ? { costUSD: result.costUSD } : {}),
+      }),
+    );
+    const usageSummary = ledger.snapshot();
     switch (result.stopReason) {
       case 'complete':
-        return { status: 'ok', value: result };
+        return { status: 'ok', value: result, usageSummary };
       case 'error':
         // ADR-0002 §2.9: EVERY error verdict → 'failed', with the
         // structured class named in the text (errorClass=<x>) for humans
@@ -321,16 +360,19 @@ export function makeAgenticRemediation(
           error: `agentic remediation: the driver reported a run error (model ${input.modelSpec.model})${
             result.errorClass === undefined ? '' : ` (errorClass=${result.errorClass})`
           }`,
+          usageSummary,
         };
       case 'budget':
         // The honest stop: the invocation halted on a locally-enforced cap.
-        // Observed spend has already been reported; the caller sees the stop.
-        return { status: 'budget-exhausted' };
+        // Observed spend has already been reported; the caller sees the stop —
+        // and now the spend itself (#1195).
+        return { status: 'budget-exhausted', usageSummary };
       case 'aborted':
         return {
           status: 'indeterminate',
           detail:
             'agentic remediation: the run was aborted before completion — no verdict on partial work',
+          usageSummary,
         };
     }
   };

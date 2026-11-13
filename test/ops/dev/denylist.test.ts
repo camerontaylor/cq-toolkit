@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import {
+  addedLineComponents,
   checkScannerFor,
   composeScanners,
   decodePolicyUtf8,
@@ -248,21 +249,29 @@ describe('makeGitleaksDefaultsScanner', () => {
     { component: 'staged', text: 'single line\n', path: 'b.txt' },
   ];
 
-  function gitleaksEffects(exitCode: number, report: unknown, reportUnreadable = false) {
+  function gitleaksEffects(
+    exitCode: number | null,
+    report: unknown,
+    reportUnreadable = false,
+    opts: { writeReport?: boolean; timedOut?: boolean } = {},
+  ) {
     const dirs: string[] = [];
     const removed: string[] = [];
+    const { writeReport = true, timedOut = false } = opts;
     return {
       dirs,
       removed,
       runCommand: async (_command: string, args: readonly string[]) => {
-        const reportPath = args[args.indexOf('--report-path') + 1];
-        const { writeFile } = await import('node:fs/promises');
-        await writeFile(
-          String(reportPath),
-          reportUnreadable ? 'not json' : JSON.stringify(report),
-          'utf8',
-        );
-        return { exitCode, stdout: '', stderr: '', timedOut: false };
+        if (writeReport) {
+          const reportPath = args[args.indexOf('--report-path') + 1];
+          const { writeFile } = await import('node:fs/promises');
+          await writeFile(
+            String(reportPath),
+            reportUnreadable ? 'not json' : JSON.stringify(report),
+            'utf8',
+          );
+        }
+        return { exitCode, stdout: '', stderr: '', timedOut };
       },
       makeScratchDir: async (prefix: string) => {
         const { mkdtemp } = await import('node:fs/promises');
@@ -326,15 +335,94 @@ describe('makeGitleaksDefaultsScanner', () => {
       { RuleID: 'x', File: '/somewhere/unknown.txt', StartLine: 3 },
     ]);
     await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
-      /no mappable rows/,
+      /unmappable File/,
     );
+  });
+
+  test('exit 0 with a non-empty unmappable report is a fault too', async () => {
+    const effects = gitleaksEffects(0, [
+      { RuleID: 'x', File: '/somewhere/unknown.txt', StartLine: 3 },
+    ]);
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
+      /unmappable File/,
+    );
+  });
+
+  test('a non-object report row is a fault, not a skipped finding', async () => {
+    const effects = gitleaksEffects(0, [null]);
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
+      /non-object row/,
+    );
+  });
+
+  test('a malformed component filename is a fault', async () => {
+    const effects = gitleaksEffects(0, [
+      { RuleID: 'x', File: '/tmp/component-.txt', StartLine: 1 },
+    ]);
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
+      /unmappable File/,
+    );
+  });
+
+  test('a report row without a mappable StartLine is a fault', async () => {
+    const effects = gitleaksEffects(0, [{ RuleID: 'x', File: '/tmp/component-0.txt' }]);
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
+      /unmappable StartLine/,
+    );
+  });
+
+  test('a report row without a mappable RuleID is a fault', async () => {
+    const effects = gitleaksEffects(0, [{ File: '/tmp/component-0.txt', StartLine: 1 }]);
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
+      /unmappable RuleID/,
+    );
+  });
+
+  test('exit 0 with mapped findings reports hits, never clean', async () => {
+    const effects = gitleaksEffects(0, [
+      { RuleID: 'x', File: '/tmp/component-0.txt', StartLine: 1 },
+    ]);
+    const scan = await makeGitleaksDefaultsScanner(effects)(components);
+    expect(scan[0]?.hits).toEqual([{ ruleId: 'x', lines: [1] }]);
   });
 
   test('exit 1 with an unreadable report is a fault (a claim without evidence cannot gate)', async () => {
     const effects = gitleaksEffects(1, [], true);
     await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
-      /unreadable report/,
+      /no readable report/,
     );
+  });
+
+  test('exit 0 with a MISSING report is a fault — a clean verdict without evidence cannot gate (#1187)', async () => {
+    const effects = gitleaksEffects(0, [], false, { writeReport: false });
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
+      /no readable report.*exit 0/,
+    );
+  });
+
+  test('exit 0 with an UNPARSEABLE report is a fault, never clean (#1187)', async () => {
+    const effects = gitleaksEffects(0, [], true);
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(
+      /no readable report/,
+    );
+  });
+
+  test('a TIMEOUT with exit 0 and a clean report is a fault — the scan did not complete (#1187)', async () => {
+    const effects = gitleaksEffects(0, [], false, { timedOut: true });
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(/timed out/);
+  });
+
+  test('a REAL timeout (exit null, killed) names the timeout, not the exit guard (#1562 P3)', async () => {
+    const effects = gitleaksEffects(null, [], false, { timedOut: true });
+    let message = '';
+    await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(/./);
+    try {
+      await makeGitleaksDefaultsScanner(effects)(components);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/gitleaks timed out after/);
+    expect(message).not.toMatch(/failed to run/);
   });
 
   test('any other exit code is a run fault (never uploaded unscanned)', async () => {
@@ -366,7 +454,14 @@ describe('makeGitleaksDefaultsScanner', () => {
 
 describe('checkScannerFor', () => {
   const effects = {
-    runCommand: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+    // A real clean gitleaks run always writes its (empty) report: the stub
+    // does the same, so the fail-closed report check sees a legitimate clean.
+    runCommand: async (_command: string, args: readonly string[]) => {
+      const reportPath = args[args.indexOf('--report-path') + 1];
+      const { writeFile } = await import('node:fs/promises');
+      await writeFile(String(reportPath), '[]', 'utf8');
+      return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+    },
     makeScratchDir: async () => mkdtempSync(join(tmpdir(), 'fake-check-scanner-')),
     removeScratchDir: async () => undefined,
   };
@@ -374,7 +469,10 @@ describe('checkScannerFor', () => {
     (cq: string | null, pkg = '{}') =>
     async (path: string) => {
       if (path.endsWith('/cq.json')) {
-        if (cq === null) throw new Error('ENOENT');
+        if (cq === null)
+          throw Object.assign(new Error(`ENOENT: no such file, open '${path}'`), {
+            code: 'ENOENT',
+          });
         return cq;
       }
       if (path.endsWith('/package.json')) return pkg;
@@ -398,6 +496,16 @@ describe('checkScannerFor', () => {
     const scanner = await checkScannerFor('/repo', effects, files(checksConfig));
     expect(scanner).toBeDefined();
     expect(await scanner!([{ component: 'a', text: 'clean\n', path: 'a.txt' }])).toHaveLength(1);
+  });
+
+  test('an unreadable cq.json (EACCES) binds a scanner that faults, never defaults-only', async () => {
+    const scanner = await checkScannerFor('/repo', effects, async (): Promise<string> => {
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    });
+    expect(scanner).toBeDefined();
+    await expect(scanner!([{ component: 'a', text: 'clean\n', path: 'a.txt' }])).rejects.toThrow(
+      /review config unreadable: cq\.json could not be read \(EACCES\)/,
+    );
   });
 });
 
@@ -500,5 +608,268 @@ describe('makeRepoDiffScanner reads the policy as STRICT UTF-8 (fail closed)', (
     } finally {
       cleanup();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// addedLineComponents (issue #1193) — the publication gate's patch parser
+// ---------------------------------------------------------------------------
+
+describe('addedLineComponents — one component per changed path of ADDED lines', () => {
+  const PATCH = [
+    'diff --git a/src/keep.ts b/src/keep.ts',
+    '--- a/src/keep.ts',
+    '+++ b/src/keep.ts',
+    '@@ -2,3 +2,3 @@',
+    ' context line (not published)',
+    '-const removed = "leaves the forge";',
+    '+const added = "enters the forge";',
+    'diff --git a/docs/new.md b/docs/new.md',
+    '--- /dev/null',
+    '+++ b/docs/new.md',
+    '@@ -0,0 +1,2 @@',
+    '+first line',
+    '+second line',
+  ].join('\n');
+
+  test('added lines per path, in diff order; removed and context lines are skipped', () => {
+    expect(addedLineComponents(PATCH, 'gate')).toEqual([
+      { component: 'src/keep.ts', text: 'const added = "enters the forge";', path: 'src/keep.ts' },
+      { component: 'path src/keep.ts', text: 'src/keep.ts', path: 'src/keep.ts' },
+      {
+        component: 'docs/new.md',
+        text: 'first line\nsecond line',
+        path: 'docs/new.md',
+      },
+      { component: 'path docs/new.md', text: 'docs/new.md', path: 'docs/new.md' },
+    ]);
+  });
+
+  test('a DELETED file (/dev/null on the + side) yields no component — deletions publish nothing', () => {
+    const patch = [
+      'diff --git a/src/gone.ts b/src/gone.ts',
+      '--- a/src/gone.ts',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-const secret = "was here";',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([]);
+  });
+
+  test('a path with spaces survives the git trailing TAB marker; CRLF terminators strip', () => {
+    const patch = [
+      'diff --git a/docs/my file.md b/docs/my file.md',
+      '--- a/docs/my file.md',
+      '+++ b/docs/my file.md\t',
+      '@@ -1 +1 @@',
+      '+added with crlf\r',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([
+      { component: 'docs/my file.md', text: 'added with crlf', path: 'docs/my file.md' },
+      { component: 'path docs/my file.md', text: 'docs/my file.md', path: 'docs/my file.md' },
+    ]);
+  });
+
+  test('an EMPTY added file is still a component: the path is published and scanned', () => {
+    // Git emits NO ---/+++ headers for a header-only empty new file.
+    const patch = [
+      'diff --git a/ghp_abcdefghijklmnopqrs b/ghp_abcdefghijklmnopqrs',
+      'new file mode 100644',
+      'index 0000000..e69de29',
+    ].join('\n');
+    const components = addedLineComponents(patch, 'gate');
+    expect(components).toEqual([
+      { component: 'ghp_abcdefghijklmnopqrs', text: '', path: 'ghp_abcdefghijklmnopqrs' },
+      {
+        component: 'path ghp_abcdefghijklmnopqrs',
+        text: 'ghp_abcdefghijklmnopqrs',
+        path: 'ghp_abcdefghijklmnopqrs',
+      },
+    ]);
+    const scans = scanComponents(components, [
+      { id: 'github-pat', description: 'd', regex: 'ghp_[A-Za-z0-9]{16,}' },
+    ]);
+    expect(scans[1]?.hits).toEqual([{ ruleId: 'github-pat', lines: [1] }]);
+  });
+
+  test('an empty added file with a SPACE in its name registers from the header (git does not quote spaces)', () => {
+    const patch = [
+      'diff --git a/my file.md b/my file.md',
+      'new file mode 100644',
+      'index 0000000..e69de29',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([
+      { component: 'my file.md', text: '', path: 'my file.md' },
+      { component: 'path my file.md', text: 'my file.md', path: 'my file.md' },
+    ]);
+  });
+
+  test('a NONEMPTY new file with a SPACE in its name is not refused (new file mode precedes ---/+++)', () => {
+    const patch = [
+      'diff --git a/new file.txt b/new file.txt',
+      'new file mode 100644',
+      'index 0000000..ce01362',
+      '--- /dev/null',
+      '+++ b/new file.txt',
+      '@@ -0,0 +1 @@',
+      '+hello',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([
+      { component: 'new file.txt', text: 'hello', path: 'new file.txt' },
+      { component: 'path new file.txt', text: 'new file.txt', path: 'new file.txt' },
+    ]);
+  });
+
+  test('a pathname containing b/ is not truncated — the separator is the matching a/b pair (review P2 uDtO)', () => {
+    const patch = [
+      'diff --git a/GH_FOR_FA b/clean b/GH_FOR_FA b/clean',
+      'new file mode 100644',
+      'index 0000000..e69de29',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([
+      { component: 'GH_FOR_FA b/clean', text: '', path: 'GH_FOR_FA b/clean' },
+      {
+        component: 'path GH_FOR_FA b/clean',
+        text: 'GH_FOR_FA b/clean',
+        path: 'GH_FOR_FA b/clean',
+      },
+    ]);
+  });
+
+  test('a C-quoted pathname with an internal b/ after a quote is not refused (review P2 vEcm)', () => {
+    // Real git header: the a-side slice before the first ` b/` ends inside
+    // an escape (\" b/bar), so decoding that speculative separator throws;
+    // the true split is the ` "b/` between the two quoted tokens.
+    const patch = [
+      'diff --git "a/foo\\" b/bar" "b/foo\\" b/bar"',
+      'new file mode 100644',
+      'index 0000000..e69de29',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate').map((entry) => entry.component)).toContain(
+      'path foo" b/bar',
+    );
+  });
+
+  test('an empty patch yields zero components (nothing to scan is clean)', () => {
+    expect(addedLineComponents('', 'gate')).toEqual([]);
+  });
+
+  test('FAULT-CLOSED: a body + line with no attributed path throws — unscannable never passes silently', () => {
+    const patch = ['@@ -1 +1 @@', '+orphan line'].join('\n');
+    expect(() => addedLineComponents(patch, 'gate')).toThrow(/no attributed path/);
+  });
+
+  test('a + line BEFORE any diff header throws the same way', () => {
+    expect(() => addedLineComponents('+early line', 'gate')).toThrow(/no attributed path/);
+  });
+});
+
+describe('addedLineComponents — git C-quoted pathnames (core.quotePath, review P2 PR #1628)', () => {
+  // A non-ASCII path as git renders it under the default core.quotePath:
+  // the WHOLE b/-prefixed path is wrapped in quotes and the é is \303\251.
+  const QUOTED_PATCH = [
+    'diff --git "a/config/s\\303\\251cret.txt" "b/config/s\\303\\251cret.txt"',
+    '--- "a/config/s\\303\\251cret.txt"',
+    '+++ "b/config/s\\303\\251cret.txt"',
+    '@@ -0,0 +1,1 @@',
+    '+const token = "sk-live-quoted";',
+  ].join('\n');
+
+  test('a quoted non-ASCII path DECODES, so a ^config/ path-scoped rule hits it', () => {
+    const components = addedLineComponents(QUOTED_PATCH, 'gate');
+    expect(components).toEqual([
+      {
+        component: 'config/sécret.txt',
+        text: 'const token = "sk-live-quoted";',
+        path: 'config/sécret.txt',
+      },
+      { component: 'path config/sécret.txt', text: 'config/sécret.txt', path: 'config/sécret.txt' },
+    ]);
+    // The end-to-end point of the decode: a rule scoped to ^config/ —
+    // which MISSES the raw quoted string — fires on the decoded path.
+    const rules = [{ id: 'config-token', description: 'd', regex: 'sk-live-', path: '^config/' }];
+    expect(scanComponents(components, rules)).toEqual([
+      {
+        component: 'config/sécret.txt',
+        hits: [{ ruleId: 'config-token', lines: [1] }],
+      },
+      {
+        component: 'path config/sécret.txt',
+        hits: [],
+      },
+    ]);
+  });
+
+  test('git letter escapes decode (\\t as \\09 in octal form and the C letters)', () => {
+    // git escapes tab as \011 octal in quoted paths, backslash as \\.
+    const patch = [
+      'diff --git "a/config/we\\151rd\\\\name.md" "b/config/we\\151rd\\\\name.md"',
+      '--- "a/config/we\\151rd\\\\name.md"',
+      '+++ "b/config/we\\151rd\\\\name.md"',
+      '@@ -0,0 +1,1 @@',
+      '+body',
+    ].join('\n');
+    expect(addedLineComponents(patch, 'gate')).toEqual([
+      { component: 'config/weird\\name.md', text: 'body', path: 'config/weird\\name.md' },
+      {
+        component: 'path config/weird\\name.md',
+        text: 'config/weird\\name.md',
+        path: 'config/weird\\name.md',
+      },
+    ]);
+  });
+
+  test('FAULT-CLOSED: an unknown escape sequence throws — the component is refused, never mangled', () => {
+    const patch = [
+      'diff --git a/config/x b/config/x',
+      '--- a/config/x',
+      '+++ "b/config/\\qbad.txt"',
+      '@@ -0,0 +1,1 @@',
+      '+body',
+    ].join('\n');
+    expect(() => addedLineComponents(patch, 'gate')).toThrow(/undecodable git pathname escape/);
+  });
+
+  test('FAULT-CLOSED: octal bytes that are not valid UTF-8 throw', () => {
+    const patch = [
+      'diff --git a/config/x "b/config/bad\\377\\376.txt"',
+      '--- a/config/x',
+      '+++ "b/config/bad\\377\\376.txt"',
+      '@@ -0,0 +1,1 @@',
+      '+body',
+    ].join('\n');
+    expect(() => addedLineComponents(patch, 'gate')).toThrow(/not valid UTF-8/);
+  });
+});
+
+describe('addedLineComponents — literal UTF-8 inside quoted paths (quotePath=false form, review P2 p52p)', () => {
+  test('a quoted path with a literal é and an escaped quote decodes — no false refusal', () => {
+    // git C-quotes for the `"` even with core.quotePath=false, leaving
+    // non-ASCII raw: "b/config/café\"note.txt"
+    const patch = [
+      'diff --git "a/config/café\\"note.txt" "b/config/café\\"note.txt"',
+      '--- "a/config/café\\"note.txt"',
+      '+++ "b/config/café\\"note.txt"',
+      '@@ -0,0 +1,1 @@',
+      '+const token = "sk-live-cafe";',
+    ].join('\n');
+    const components = addedLineComponents(patch, 'gate');
+    expect(components).toEqual([
+      {
+        component: 'config/café"note.txt',
+        text: 'const token = "sk-live-cafe";',
+        path: 'config/café"note.txt',
+      },
+      {
+        component: 'path config/café"note.txt',
+        text: 'config/café"note.txt',
+        path: 'config/café"note.txt',
+      },
+    ]);
+    // And a path-scoped rule fires on the decoded name.
+    const scans = scanComponents(components, [
+      { id: 'config-token', description: 'd', regex: 'sk-live-', path: '^config/' },
+    ]);
+    expect(scans[0]?.hits).toEqual([{ ruleId: 'config-token', lines: [1] }]);
   });
 });

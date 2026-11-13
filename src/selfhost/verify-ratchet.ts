@@ -11,7 +11,6 @@ import {
 } from '../ops/ratchet/verifyRatchet.js';
 import { ghNameOk } from '../adapters/forge-github/gh.js';
 import { EntryUsageError, parseEntryArgs, runEntry } from './trusted-entry.js';
-import { processEnv } from '../config/process-env.js';
 
 /** The verifier's own input, as the CLI schema has it, plus the repository identity. */
 const ArgsSchema = z
@@ -68,25 +67,34 @@ export async function verifySubject(
 }
 
 export interface VerifyMainDeps extends VerifyDeps {
+  /** Explicit entry environment (tests and callers); the entry snapshot is read from it. */
   env?: Readonly<Record<string, string | undefined>>;
+  /** Seam for tests; production uses the real factory. */
+  create?: typeof createVerifyRatchet;
   write: (line: string) => void;
+  /** Seam for tests; production writes entry diagnostics to stderr. */
+  stderr?: (text: string) => void;
 }
 
 /** Parse, verify, write ONE JSON line; return the I1 exit code (./trusted-entry.ts). */
 export function mainWith(argv: readonly string[], deps: VerifyMainDeps): Promise<number> {
-  // `_cqEnv` is deliberately unused: the posture comes from `deps.env` (the explicit
-  // seam), and no other CQ_* name is read by this entry.
-  return runEntry<VerifyRatchetOutcome>((_cqEnv: CqEnv) => {
-    const args = parseVerifyArgs(argv);
-    return verifySubject(
-      {
-        verify:
-          deps.verify ??
-          createVerifyRatchet(resolveProtectedPathsConfig({ env: deps.env ?? processEnv() })),
-      },
-      args,
-    );
-  }, deps.write);
+  return runEntry<VerifyRatchetOutcome>(
+    (cqEnv: CqEnv) => {
+      const args = parseVerifyArgs(argv);
+      // The entry snapshot (from deps.env when injected, else the process env)
+      // is the only posture source; a later ambient read cannot change it.
+      const create = deps.create ?? createVerifyRatchet;
+      return verifySubject(
+        { verify: deps.verify ?? create(resolveProtectedPathsConfig({ cqEnv })) },
+        args,
+      );
+    },
+    deps.write,
+    {
+      ...(deps.env === undefined ? {} : { env: deps.env }),
+      ...(deps.stderr === undefined ? {} : { stderr: deps.stderr }),
+    },
+  );
 }
 
 const invokedDirectly =

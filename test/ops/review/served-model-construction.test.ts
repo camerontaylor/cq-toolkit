@@ -35,10 +35,14 @@ const FIX_CONTRACT = {
   evidence: [{ path: 'src/a.ts', line: 3 }],
 };
 
-async function fixture(): Promise<string> {
+async function fixture(): Promise<{ root: string; sessionsDir: string }> {
   const root = await mkdtemp(join(tmpdir(), 'review-served-construction-'));
   temporary.push(root);
-  return root;
+  // The session binding file lives OUTSIDE the model-editable worktree
+  // (Annex A, issue #1197); the sibling is cleaned with the root.
+  const sessionsDir = `${root}-sessions`;
+  temporary.push(sessionsDir);
+  return { root, sessionsDir };
 }
 
 afterEach(async () => {
@@ -73,7 +77,7 @@ describe('S4b review.fixItem served-model construction', () => {
   test.each(['CONTROL', 'TREATMENT'] as const)(
     'a factory-resolved fixer worker %s: dispatch succeeds only for the requested model',
     async (variant) => {
-      const root = await fixture();
+      const { root, sessionsDir } = await fixture();
       const binary = [
         'env',
         'FAKE_AGENT_MODE=structured-ok',
@@ -89,7 +93,7 @@ describe('S4b review.fixItem served-model construction', () => {
           lanes: {
             claudeCode: {
               binary,
-              sessionsDir: join(root, 'sessions'),
+              sessionsDir,
               routingTable: {
                 endpoints: {
                   construction: {

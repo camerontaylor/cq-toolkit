@@ -146,6 +146,100 @@ describe('hackDetector: Python skip/xfail markers (#774)', () => {
     ).toEqual([]);
   });
 
+  test('a multi-line def signature keeps the test body visible to importorskip', async () => {
+    expect(
+      await markersOf(
+        pyDiff(['def test_x(', '    fixture_a,', '):', '    pytest.importorskip("numpy")']),
+      ),
+    ).toEqual(['pytest.importorskip']);
+    // A signature may continue at any indentation: parameters may sit at
+    // column 0 (the F1 case), so continuation cannot be inferred from indent.
+    expect(
+      await markersOf(
+        pyDiff(['def test_x(', 'fixture_a,', '):', '    pytest.importorskip("numpy")']),
+      ),
+    ).toEqual(['pytest.importorskip']);
+    // The same for a return-annotated signature and for a method in a class.
+    expect(
+      await markersOf(
+        pyDiff([
+          'def test_x(',
+          '    fixture_a: int,',
+          ') -> None:',
+          '    pytest.importorskip("numpy")',
+        ]),
+      ),
+    ).toEqual(['pytest.importorskip']);
+    expect(
+      await markersOf(
+        pyDiff([
+          'class TestX:',
+          '    def test_x(',
+          '        self,',
+          '        fixture_a,',
+          '    ):',
+          '        pytest.importorskip("numpy")',
+        ]),
+      ),
+    ).toEqual(['pytest.importorskip']);
+    // A signature CLOSES: the next def is tracked again, and a dedent out of
+    // the test body ends it, so a module-level dependency guard stays quiet.
+    expect(
+      await markersOf(
+        pyDiff([
+          'def helper(',
+          '    value,',
+          '):',
+          '    return value',
+          'def test_x():',
+          '    pytest.importorskip("numpy")',
+        ]),
+      ),
+    ).toEqual(['pytest.importorskip']);
+    expect(
+      await markersOf(
+        pyDiff([
+          'def test_x(',
+          '    value,',
+          '):',
+          '    return value',
+          'pytest.importorskip("numpy")',
+        ]),
+      ),
+    ).toEqual([]);
+    // A triple-quoted default closes the signature on a line whose prefix is
+    // string, so only the suffix after the delimiter can close the counter.
+    expect(
+      await markersOf(
+        pyDiff([
+          'def helper(value="""text',
+          '"""):',
+          '    return value',
+          'def test_x():',
+          '    pytest.importorskip("numpy")',
+        ]),
+      ),
+    ).toEqual(['pytest.importorskip']);
+  });
+
+  test('a signature left open at a hunk boundary does not leak into the next hunk', async () => {
+    const diff = [
+      `diff --git a/${PY} b/${PY}`,
+      'index 1111111..2222222 100644',
+      `--- a/${PY}`,
+      `+++ b/${PY}`,
+      '@@ -1,2 +1,3 @@',
+      ' def helper(',
+      '+    value,',
+      '@@ -20,2 +21,3 @@',
+      '+def test_x():',
+      '+    pytest.importorskip("numpy")',
+    ].join('\n');
+    // Hunk 1 ends inside the signature (its closer is omitted), so only the
+    // per-hunk reset lets hunk 2 register `test_x` and flag the guard.
+    expect(await markersOf(diff)).toEqual(['pytest.importorskip']);
+  });
+
   test.each([
     ['# @pytest.mark.skip until fixed'],
     ['x = 1  # pytest.skip("later")'],

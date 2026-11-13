@@ -1,0 +1,608 @@
+{
+  "schema": "cq.crq-a1-status-vector/v1",
+  "family": "passthrough-receipt",
+  "note": "real receipt bytes and numeric identity",
+  "cases": [
+    {
+      "name": "float-path-bytes-verified",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included",
+                    "bytes": 5.0
+                  }
+                ],
+                "scope_digest": "ea20906864cea4291cd6040712e56ef87525d039548a326fc65794aba23acfff",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "434f0cf2b1e65a31095300fe24e9fd4d44f699070fe69d835b8b1662f99188d5"
+              },
+              "receipt_id": "8dfd8f879550c8badaf7ba2b2123f1404e50bf1459dcfc39d8c640ec430d5f2e"
+            }
+          ]
+        },
+        "receipt_bytes": {
+          "8dfd8f879550c8badaf7ba2b2123f1404e50bf1459dcfc39d8c640ec430d5f2e": "eyJjYXB0dXJlIjp7ImVxdWl2YWxlbmNlIjoiNDM0ZjBjZjJiMWU2NWEzMTA5NTMwMGZlMjRlOWZkNGQ0NGY2OTkwNzBmZTY5ZDgzNWI4YjE2NjJmOTkxODhkNSIsInBhdGhzIjpbeyJieXRlcyI6NS4wLCJkaXNwb3NpdGlvbiI6ImluY2x1ZGVkIiwicGF0aCI6IngucHkifV0sInBvbGljeSI6ImFmZmVjdGVkLWN1cnJlbnQtYWRkaXRpb25zLXYxIiwicHJvamVjdGlvbiI6ImN1cnJlbnQtYWZmZWN0ZWQtZmlsZXMvZnVsbC1maWxlLWFkZGl0aW9uLXByb2plY3Rpb24iLCJyZXZpZXdlciI6ImNvZGVyYWJiaXQtcmV2aWV3LWFnZW50LWNvbW1pdHRlZC12MSIsInJldmlld2VyX3ZlcnNpb24iOiJmaXh0dXJlIiwic2NvcGVfZGlnZXN0IjoiZWEyMDkwNjg2NGNlYTQyOTFjZDYwNDA3MTJlNTZlZjg3NTI1ZDAzOTU0OGEzMjZmYzY1Nzk0YWJhMjNhY2ZmZiIsInRhcmdldCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJ0cmVlIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiJ9LCJjbGFzc2lmaWNhdGlvbiI6eyJjb3VudGVkIjp0cnVlLCJvdXRjb21lIjoiY29tcGxldGVkIn0sImNvdW50ZWQiOnRydWUsIm91dGNvbWUiOiJ0ZXJtaW5hbC13aXRoLWZpbmRpbmdzIiwic291cmNlIjp7InByIjoxLCJyZXBvIjoib3duZXIvcmVwbyJ9LCJ2ZXJzaW9uIjoxfQ=="
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 1,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        },
+        "bytes": "{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":1,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false}"
+      }
+    },
+    {
+      "name": "bigint-path-bytes-verified",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included",
+                    "bytes": 9007199254740993
+                  }
+                ],
+                "scope_digest": "859bd8fbfdd6d307d2dabb83f5fcb21055e7f7352e1d7d6cf85542345912d41a",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "ca14a2cd4f41aaf1c95232531e1ddf2dffd4eb980c0307e6e01afc1607cdf0ee"
+              },
+              "receipt_id": "f780fef79ad32afe5898844d99f3d89382bf389b7e87e4b78e65792cd4a041be"
+            }
+          ]
+        },
+        "receipt_bytes": {
+          "f780fef79ad32afe5898844d99f3d89382bf389b7e87e4b78e65792cd4a041be": "eyJjYXB0dXJlIjp7ImVxdWl2YWxlbmNlIjoiY2ExNGEyY2Q0ZjQxYWFmMWM5NTIzMjUzMWUxZGRmMmRmZmQ0ZWI5ODBjMDMwN2U2ZTAxYWZjMTYwN2NkZjBlZSIsInBhdGhzIjpbeyJieXRlcyI6OTAwNzE5OTI1NDc0MDk5MywiZGlzcG9zaXRpb24iOiJpbmNsdWRlZCIsInBhdGgiOiJ4LnB5In1dLCJwb2xpY3kiOiJhZmZlY3RlZC1jdXJyZW50LWFkZGl0aW9ucy12MSIsInByb2plY3Rpb24iOiJjdXJyZW50LWFmZmVjdGVkLWZpbGVzL2Z1bGwtZmlsZS1hZGRpdGlvbi1wcm9qZWN0aW9uIiwicmV2aWV3ZXIiOiJjb2RlcmFiYml0LXJldmlldy1hZ2VudC1jb21taXR0ZWQtdjEiLCJyZXZpZXdlcl92ZXJzaW9uIjoiZml4dHVyZSIsInNjb3BlX2RpZ2VzdCI6Ijg1OWJkOGZiZmRkNmQzMDdkMmRhYmI4M2Y1ZmNiMjEwNTVlN2Y3MzUyZTFkN2Q2Y2Y4NTU0MjM0NTkxMmQ0MWEiLCJ0YXJnZXQiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwidHJlZSI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIifSwiY2xhc3NpZmljYXRpb24iOnsiY291bnRlZCI6dHJ1ZSwib3V0Y29tZSI6ImNvbXBsZXRlZCJ9LCJjb3VudGVkIjp0cnVlLCJvdXRjb21lIjoidGVybWluYWwtd2l0aC1maW5kaW5ncyIsInNvdXJjZSI6eyJwciI6MSwicmVwbyI6Im93bmVyL3JlcG8ifSwidmVyc2lvbiI6MX0="
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 1,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        },
+        "bytes": "{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":1,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false}"
+      }
+    },
+    {
+      "name": "extra-float-equal-verified",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included",
+                    "bytes": 5.0
+                  }
+                ],
+                "scope_digest": "ea20906864cea4291cd6040712e56ef87525d039548a326fc65794aba23acfff",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "extra": 1.0,
+                "equivalence": "434f0cf2b1e65a31095300fe24e9fd4d44f699070fe69d835b8b1662f99188d5"
+              },
+              "receipt_id": "839794833971e60ce9abe41960d0d9975f6a041742bb6daa1d2f63d72218528e"
+            }
+          ]
+        },
+        "receipt_bytes": {
+          "839794833971e60ce9abe41960d0d9975f6a041742bb6daa1d2f63d72218528e": "eyJjYXB0dXJlIjp7ImVxdWl2YWxlbmNlIjoiNDM0ZjBjZjJiMWU2NWEzMTA5NTMwMGZlMjRlOWZkNGQ0NGY2OTkwNzBmZTY5ZDgzNWI4YjE2NjJmOTkxODhkNSIsImV4dHJhIjoxLjAsInBhdGhzIjpbeyJieXRlcyI6NS4wLCJkaXNwb3NpdGlvbiI6ImluY2x1ZGVkIiwicGF0aCI6IngucHkifV0sInBvbGljeSI6ImFmZmVjdGVkLWN1cnJlbnQtYWRkaXRpb25zLXYxIiwicHJvamVjdGlvbiI6ImN1cnJlbnQtYWZmZWN0ZWQtZmlsZXMvZnVsbC1maWxlLWFkZGl0aW9uLXByb2plY3Rpb24iLCJyZXZpZXdlciI6ImNvZGVyYWJiaXQtcmV2aWV3LWFnZW50LWNvbW1pdHRlZC12MSIsInJldmlld2VyX3ZlcnNpb24iOiJmaXh0dXJlIiwic2NvcGVfZGlnZXN0IjoiZWEyMDkwNjg2NGNlYTQyOTFjZDYwNDA3MTJlNTZlZjg3NTI1ZDAzOTU0OGEzMjZmYzY1Nzk0YWJhMjNhY2ZmZiIsInRhcmdldCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJ0cmVlIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiJ9LCJjbGFzc2lmaWNhdGlvbiI6eyJjb3VudGVkIjp0cnVlLCJvdXRjb21lIjoiY29tcGxldGVkIn0sImNvdW50ZWQiOnRydWUsIm91dGNvbWUiOiJ0ZXJtaW5hbC13aXRoLWZpbmRpbmdzIiwic291cmNlIjp7InByIjoxLCJyZXBvIjoib3duZXIvcmVwbyJ9LCJ2ZXJzaW9uIjoxfQ=="
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 1,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        },
+        "bytes": "{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":1,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false}"
+      }
+    },
+    {
+      "name": "extra-adjacent-bigints-unverified",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included",
+                    "bytes": 5.0
+                  }
+                ],
+                "scope_digest": "ea20906864cea4291cd6040712e56ef87525d039548a326fc65794aba23acfff",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "extra": 9007199254740993,
+                "equivalence": "434f0cf2b1e65a31095300fe24e9fd4d44f699070fe69d835b8b1662f99188d5"
+              },
+              "receipt_id": "de47ecc6be9ff283f383852c0e6eeee5abf0386914edaa3f651c0a4cb7503c2a"
+            }
+          ]
+        },
+        "receipt_bytes": {
+          "de47ecc6be9ff283f383852c0e6eeee5abf0386914edaa3f651c0a4cb7503c2a": "eyJjYXB0dXJlIjp7ImVxdWl2YWxlbmNlIjoiNDM0ZjBjZjJiMWU2NWEzMTA5NTMwMGZlMjRlOWZkNGQ0NGY2OTkwNzBmZTY5ZDgzNWI4YjE2NjJmOTkxODhkNSIsImV4dHJhIjo5MDA3MTk5MjU0NzQwOTkyLCJwYXRocyI6W3siYnl0ZXMiOjUuMCwiZGlzcG9zaXRpb24iOiJpbmNsdWRlZCIsInBhdGgiOiJ4LnB5In1dLCJwb2xpY3kiOiJhZmZlY3RlZC1jdXJyZW50LWFkZGl0aW9ucy12MSIsInByb2plY3Rpb24iOiJjdXJyZW50LWFmZmVjdGVkLWZpbGVzL2Z1bGwtZmlsZS1hZGRpdGlvbi1wcm9qZWN0aW9uIiwicmV2aWV3ZXIiOiJjb2RlcmFiYml0LXJldmlldy1hZ2VudC1jb21taXR0ZWQtdjEiLCJyZXZpZXdlcl92ZXJzaW9uIjoiZml4dHVyZSIsInNjb3BlX2RpZ2VzdCI6ImVhMjA5MDY4NjRjZWE0MjkxY2Q2MDQwNzEyZTU2ZWY4NzUyNWQwMzk1NDhhMzI2ZmM2NTc5NGFiYTIzYWNmZmYiLCJ0YXJnZXQiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwidHJlZSI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIifSwiY2xhc3NpZmljYXRpb24iOnsiY291bnRlZCI6dHJ1ZSwib3V0Y29tZSI6ImNvbXBsZXRlZCJ9LCJjb3VudGVkIjp0cnVlLCJvdXRjb21lIjoidGVybWluYWwtd2l0aC1maW5kaW5ncyIsInNvdXJjZSI6eyJwciI6MSwicmVwbyI6Im93bmVyL3JlcG8ifSwidmVyc2lvbiI6MX0="
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 1,
+            "proven_terminal": 0,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        },
+        "bytes": "{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":1,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false}"
+      }
+    },
+    {
+      "name": "queue-path-lexeme-differs-unverified",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included",
+                    "bytes": 5
+                  }
+                ],
+                "scope_digest": "a71cf45b60cf856c2780d48bd8542adffda0550ebfc6695dacf007126823ac3f",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "b43f0f511c4a584593d7d372d3d0cfe1b9933beb02275eee17db55f5abe6550b"
+              },
+              "receipt_id": "8dfd8f879550c8badaf7ba2b2123f1404e50bf1459dcfc39d8c640ec430d5f2e"
+            }
+          ]
+        },
+        "receipt_bytes": {
+          "8dfd8f879550c8badaf7ba2b2123f1404e50bf1459dcfc39d8c640ec430d5f2e": "eyJjYXB0dXJlIjp7ImVxdWl2YWxlbmNlIjoiNDM0ZjBjZjJiMWU2NWEzMTA5NTMwMGZlMjRlOWZkNGQ0NGY2OTkwNzBmZTY5ZDgzNWI4YjE2NjJmOTkxODhkNSIsInBhdGhzIjpbeyJieXRlcyI6NS4wLCJkaXNwb3NpdGlvbiI6ImluY2x1ZGVkIiwicGF0aCI6IngucHkifV0sInBvbGljeSI6ImFmZmVjdGVkLWN1cnJlbnQtYWRkaXRpb25zLXYxIiwicHJvamVjdGlvbiI6ImN1cnJlbnQtYWZmZWN0ZWQtZmlsZXMvZnVsbC1maWxlLWFkZGl0aW9uLXByb2plY3Rpb24iLCJyZXZpZXdlciI6ImNvZGVyYWJiaXQtcmV2aWV3LWFnZW50LWNvbW1pdHRlZC12MSIsInJldmlld2VyX3ZlcnNpb24iOiJmaXh0dXJlIiwic2NvcGVfZGlnZXN0IjoiZWEyMDkwNjg2NGNlYTQyOTFjZDYwNDA3MTJlNTZlZjg3NTI1ZDAzOTU0OGEzMjZmYzY1Nzk0YWJhMjNhY2ZmZiIsInRhcmdldCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJ0cmVlIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiJ9LCJjbGFzc2lmaWNhdGlvbiI6eyJjb3VudGVkIjp0cnVlLCJvdXRjb21lIjoiY29tcGxldGVkIn0sImNvdW50ZWQiOnRydWUsIm91dGNvbWUiOiJ0ZXJtaW5hbC13aXRoLWZpbmRpbmdzIiwic291cmNlIjp7InByIjoxLCJyZXBvIjoib3duZXIvcmVwbyJ9LCJ2ZXJzaW9uIjoxfQ=="
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 1,
+            "proven_terminal": 0,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        },
+        "bytes": "{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":1,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false}"
+      }
+    },
+    {
+      "name": "version-float-is-equal-verified",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included",
+                    "bytes": 5.0
+                  }
+                ],
+                "scope_digest": "ea20906864cea4291cd6040712e56ef87525d039548a326fc65794aba23acfff",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "434f0cf2b1e65a31095300fe24e9fd4d44f699070fe69d835b8b1662f99188d5"
+              },
+              "receipt_id": "cce6b0d6bac872aec1d4883b95a92b5d1d9ed77d96bbc5847f8c329db1944d83"
+            }
+          ]
+        },
+        "receipt_bytes": {
+          "cce6b0d6bac872aec1d4883b95a92b5d1d9ed77d96bbc5847f8c329db1944d83": "eyJjYXB0dXJlIjp7ImVxdWl2YWxlbmNlIjoiNDM0ZjBjZjJiMWU2NWEzMTA5NTMwMGZlMjRlOWZkNGQ0NGY2OTkwNzBmZTY5ZDgzNWI4YjE2NjJmOTkxODhkNSIsInBhdGhzIjpbeyJieXRlcyI6NS4wLCJkaXNwb3NpdGlvbiI6ImluY2x1ZGVkIiwicGF0aCI6IngucHkifV0sInBvbGljeSI6ImFmZmVjdGVkLWN1cnJlbnQtYWRkaXRpb25zLXYxIiwicHJvamVjdGlvbiI6ImN1cnJlbnQtYWZmZWN0ZWQtZmlsZXMvZnVsbC1maWxlLWFkZGl0aW9uLXByb2plY3Rpb24iLCJyZXZpZXdlciI6ImNvZGVyYWJiaXQtcmV2aWV3LWFnZW50LWNvbW1pdHRlZC12MSIsInJldmlld2VyX3ZlcnNpb24iOiJmaXh0dXJlIiwic2NvcGVfZGlnZXN0IjoiZWEyMDkwNjg2NGNlYTQyOTFjZDYwNDA3MTJlNTZlZjg3NTI1ZDAzOTU0OGEzMjZmYzY1Nzk0YWJhMjNhY2ZmZiIsInRhcmdldCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJ0cmVlIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiJ9LCJjbGFzc2lmaWNhdGlvbiI6eyJjb3VudGVkIjp0cnVlLCJvdXRjb21lIjoiY29tcGxldGVkIn0sImNvdW50ZWQiOnRydWUsIm91dGNvbWUiOiJ0ZXJtaW5hbC13aXRoLWZpbmRpbmdzIiwic291cmNlIjp7InByIjoxLCJyZXBvIjoib3duZXIvcmVwbyJ9LCJ2ZXJzaW9uIjoxLjB9"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 1,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        },
+        "bytes": "{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":1,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false}"
+      }
+    },
+    {
+      "name": "version-bool-is-equal-verified",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included",
+                    "bytes": 5.0
+                  }
+                ],
+                "scope_digest": "ea20906864cea4291cd6040712e56ef87525d039548a326fc65794aba23acfff",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "434f0cf2b1e65a31095300fe24e9fd4d44f699070fe69d835b8b1662f99188d5"
+              },
+              "receipt_id": "c301531c4745a0e6a31bd8f30100a9a8aaec545176f9c4a9439e1a9e0c670049"
+            }
+          ]
+        },
+        "receipt_bytes": {
+          "c301531c4745a0e6a31bd8f30100a9a8aaec545176f9c4a9439e1a9e0c670049": "eyJjYXB0dXJlIjp7ImVxdWl2YWxlbmNlIjoiNDM0ZjBjZjJiMWU2NWEzMTA5NTMwMGZlMjRlOWZkNGQ0NGY2OTkwNzBmZTY5ZDgzNWI4YjE2NjJmOTkxODhkNSIsInBhdGhzIjpbeyJieXRlcyI6NS4wLCJkaXNwb3NpdGlvbiI6ImluY2x1ZGVkIiwicGF0aCI6IngucHkifV0sInBvbGljeSI6ImFmZmVjdGVkLWN1cnJlbnQtYWRkaXRpb25zLXYxIiwicHJvamVjdGlvbiI6ImN1cnJlbnQtYWZmZWN0ZWQtZmlsZXMvZnVsbC1maWxlLWFkZGl0aW9uLXByb2plY3Rpb24iLCJyZXZpZXdlciI6ImNvZGVyYWJiaXQtcmV2aWV3LWFnZW50LWNvbW1pdHRlZC12MSIsInJldmlld2VyX3ZlcnNpb24iOiJmaXh0dXJlIiwic2NvcGVfZGlnZXN0IjoiZWEyMDkwNjg2NGNlYTQyOTFjZDYwNDA3MTJlNTZlZjg3NTI1ZDAzOTU0OGEzMjZmYzY1Nzk0YWJhMjNhY2ZmZiIsInRhcmdldCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJ0cmVlIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiJ9LCJjbGFzc2lmaWNhdGlvbiI6eyJjb3VudGVkIjp0cnVlLCJvdXRjb21lIjoiY29tcGxldGVkIn0sImNvdW50ZWQiOnRydWUsIm91dGNvbWUiOiJ0ZXJtaW5hbC13aXRoLWZpbmRpbmdzIiwic291cmNlIjp7InByIjoxLCJyZXBvIjoib3duZXIvcmVwbyJ9LCJ2ZXJzaW9uIjp0cnVlfQ=="
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 0,
+            "proven_terminal": 1,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        },
+        "bytes": "{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":1,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false}"
+      }
+    },
+    {
+      "name": "version-string-is-unverified",
+      "source": "status_summary.merged_current",
+      "input": {
+        "queue": {
+          "items": [
+            {
+              "kind": "merged-current",
+              "state": "done",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 1
+              },
+              "capture": {
+                "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "paths": [
+                  {
+                    "path": "x.py",
+                    "disposition": "included",
+                    "bytes": 5.0
+                  }
+                ],
+                "scope_digest": "ea20906864cea4291cd6040712e56ef87525d039548a326fc65794aba23acfff",
+                "policy": "affected-current-additions-v1",
+                "projection": "current-affected-files/full-file-addition-projection",
+                "reviewer": "coderabbit-review-agent-committed-v1",
+                "reviewer_version": "fixture",
+                "equivalence": "434f0cf2b1e65a31095300fe24e9fd4d44f699070fe69d835b8b1662f99188d5"
+              },
+              "receipt_id": "5967ae911961d7cf98577cbd02dfe4279619aa67871a9f7fb3164ad63fcd1e8c"
+            }
+          ]
+        },
+        "receipt_bytes": {
+          "5967ae911961d7cf98577cbd02dfe4279619aa67871a9f7fb3164ad63fcd1e8c": "eyJjYXB0dXJlIjp7ImVxdWl2YWxlbmNlIjoiNDM0ZjBjZjJiMWU2NWEzMTA5NTMwMGZlMjRlOWZkNGQ0NGY2OTkwNzBmZTY5ZDgzNWI4YjE2NjJmOTkxODhkNSIsInBhdGhzIjpbeyJieXRlcyI6NS4wLCJkaXNwb3NpdGlvbiI6ImluY2x1ZGVkIiwicGF0aCI6IngucHkifV0sInBvbGljeSI6ImFmZmVjdGVkLWN1cnJlbnQtYWRkaXRpb25zLXYxIiwicHJvamVjdGlvbiI6ImN1cnJlbnQtYWZmZWN0ZWQtZmlsZXMvZnVsbC1maWxlLWFkZGl0aW9uLXByb2plY3Rpb24iLCJyZXZpZXdlciI6ImNvZGVyYWJiaXQtcmV2aWV3LWFnZW50LWNvbW1pdHRlZC12MSIsInJldmlld2VyX3ZlcnNpb24iOiJmaXh0dXJlIiwic2NvcGVfZGlnZXN0IjoiZWEyMDkwNjg2NGNlYTQyOTFjZDYwNDA3MTJlNTZlZjg3NTI1ZDAzOTU0OGEzMjZmYzY1Nzk0YWJhMjNhY2ZmZiIsInRhcmdldCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJ0cmVlIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiJ9LCJjbGFzc2lmaWNhdGlvbiI6eyJjb3VudGVkIjp0cnVlLCJvdXRjb21lIjoiY29tcGxldGVkIn0sImNvdW50ZWQiOnRydWUsIm91dGNvbWUiOiJ0ZXJtaW5hbC13aXRoLWZpbmRpbmdzIiwic291cmNlIjp7InByIjoxLCJyZXBvIjoib3duZXIvcmVwbyJ9LCJ2ZXJzaW9uIjoiMSJ9"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "natural_discovery": {},
+          "discovery": {},
+          "watermark": null,
+          "receipts": {
+            "pending": 0,
+            "reviewing": 0,
+            "blocked": 0,
+            "unverified": 1,
+            "proven_terminal": 0,
+            "no_current_code": 0,
+            "partial_scope": 0,
+            "unsupported": 0
+          },
+          "path_exclusions": {},
+          "captured_targets": [],
+          "additional_captured_targets": 0,
+          "coverage_at_today_target": "unverified",
+          "legacy_done_is_review_proof": false
+        },
+        "bytes": "{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":1,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false}"
+      }
+    },
+    {
+      "name": "current-equivalence-float-digest",
+      "source": "review_receipt.current_equivalence",
+      "input": {
+        "capture": {
+          "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "paths": [
+            {
+              "path": "x.py",
+              "disposition": "included",
+              "bytes": 5.0
+            }
+          ],
+          "scope_digest": "ea20906864cea4291cd6040712e56ef87525d039548a326fc65794aba23acfff",
+          "policy": "affected-current-additions-v1",
+          "projection": "current-affected-files/full-file-addition-projection",
+          "reviewer": "coderabbit-review-agent-committed-v1",
+          "reviewer_version": "fixture",
+          "equivalence": "434f0cf2b1e65a31095300fe24e9fd4d44f699070fe69d835b8b1662f99188d5"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "digest": "434f0cf2b1e65a31095300fe24e9fd4d44f699070fe69d835b8b1662f99188d5"
+        }
+      }
+    },
+    {
+      "name": "current-equivalence-bigint-digest",
+      "source": "review_receipt.current_equivalence",
+      "input": {
+        "capture": {
+          "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "paths": [
+            {
+              "path": "x.py",
+              "disposition": "included",
+              "bytes": 9007199254740993
+            }
+          ],
+          "scope_digest": "859bd8fbfdd6d307d2dabb83f5fcb21055e7f7352e1d7d6cf85542345912d41a",
+          "policy": "affected-current-additions-v1",
+          "projection": "current-affected-files/full-file-addition-projection",
+          "reviewer": "coderabbit-review-agent-committed-v1",
+          "reviewer_version": "fixture",
+          "equivalence": "ca14a2cd4f41aaf1c95232531e1ddf2dffd4eb980c0307e6e01afc1607cdf0ee"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "digest": "ca14a2cd4f41aaf1c95232531e1ddf2dffd4eb980c0307e6e01afc1607cdf0ee"
+        }
+      }
+    },
+    {
+      "name": "path-digests-distinguish-int-and-float",
+      "source": "review_receipt.digest",
+      "input": {
+        "float_paths": [
+          {
+            "path": "x.py",
+            "disposition": "included",
+            "bytes": 5.0
+          }
+        ],
+        "bigint_paths": [
+          {
+            "path": "x.py",
+            "disposition": "included",
+            "bytes": 9007199254740993
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "float": "ea20906864cea4291cd6040712e56ef87525d039548a326fc65794aba23acfff",
+          "bigint": "859bd8fbfdd6d307d2dabb83f5fcb21055e7f7352e1d7d6cf85542345912d41a"
+        }
+      }
+    }
+  ]
+}

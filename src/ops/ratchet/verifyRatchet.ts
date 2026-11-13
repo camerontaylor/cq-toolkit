@@ -336,12 +336,18 @@ async function judgeRatchet(
   );
   if ('reason' in subjectRead) return fail(subjectRead.reason);
   const trustValue = trustRead.value;
-  if (
-    input.subjectKind === 'pr' &&
-    def.evidence === 'recompute' &&
-    def.metric === 'typecheck-count' &&
-    input.typecheckSkipped?.trim()
-  ) {
+  const typecheckRecompute =
+    input.subjectKind === 'pr' && def.evidence === 'recompute' && def.metric === 'typecheck-count';
+  // A supplied count and a supplied skip reason conflict: preferring the skip
+  // would discard the count, and a dependency change would then excuse the
+  // skip, so a supplied regression could still pass. Conflicting evidence is
+  // malformed input (I5) — fail, never pick a winning side.
+  if (typecheckRecompute && input.typecheckCount !== undefined && input.typecheckSkipped?.trim()) {
+    return fail(
+      'conflicting typecheck evidence: both a recompute count and a skip reason were supplied',
+    );
+  }
+  if (typecheckRecompute && input.typecheckSkipped?.trim()) {
     return {
       ...base,
       baseline: trustValue,
@@ -424,12 +430,14 @@ export const createVerifyRatchet =
 
     // Match the promotion gate's privileged-path decision using only the trust ref.
     let ordinaryAdvisory = false;
+    let requiresDefinitionAuthorization = (_path: string): boolean => true;
     if (config.posture === 'advisory') {
       try {
         const text = await gitReadBlob(input.repo, trust, POLICY_LIST_PATH);
         if (text === null) throw new Error(`missing trusted ${POLICY_LIST_PATH}`);
         const policy = parsePolicyList(text);
-        ordinaryAdvisory = !changed.some(privilegedPathPredicate(policy));
+        requiresDefinitionAuthorization = privilegedPathPredicate(policy);
+        ordinaryAdvisory = !changed.some(requiresDefinitionAuthorization);
       } catch (err) {
         return { status: 'failed', error: `ratchet verify: ${messageOf(err)}` };
       }
@@ -444,19 +452,27 @@ export const createVerifyRatchet =
     const guard = checkDiffMonotonicity(normalizeBaselineDiffValues(diff, COVERAGE_BASELINE_PATH));
     const measured = await readMeasurement(input.measurementPath);
     const results: RatchetResult[] = [];
+    // The pinned subject SHA: canonical-baseline reads inside judgeRatchet
+    // must use the guarded commit, never re-resolve the caller's ref (a
+    // branch that moves between gitRevParse above and the read below would
+    // otherwise mix the guarded commit with another commit's baseline).
+    const pinned = { ...input, subject };
     for (const def of manifest.ratchets) {
-      results.push(await judgeRatchet(def, input, trust, measured));
+      results.push(await judgeRatchet(def, pinned, trust, measured));
     }
 
     const reasons: string[] = [];
+    const authorizationPaths = definitionChanges.filter(requiresDefinitionAuthorization);
+    const advisoryPaths = definitionChanges.filter(
+      (path) => !requiresDefinitionAuthorization(path),
+    );
     const d11 =
-      definitionChanges.length > 0 && input.authorization !== undefined
-        ? authorizePaths(input.authorization, definitionChanges)
+      authorizationPaths.length > 0 && input.authorization !== undefined
+        ? authorizePaths(input.authorization, authorizationPaths)
         : undefined;
-    const unauthorized =
-      !ordinaryAdvisory && definitionChanges.length > 0 && d11?.authorized !== true;
-    if (ordinaryAdvisory && definitionChanges.length > 0) {
-      reasons.push(`advisory (D11): definition changes — ${definitionChanges.join(', ')}`);
+    const unauthorized = authorizationPaths.length > 0 && d11?.authorized !== true;
+    if (advisoryPaths.length > 0) {
+      reasons.push(`advisory (D11): definition changes — ${advisoryPaths.join(', ')}`);
     }
     // A trusted old dependency tree cannot judge a candidate's new imports.
     // The promotion gate still requires successful static CI on the exact candidate.
@@ -470,7 +486,7 @@ export const createVerifyRatchet =
       r.value !== null;
     if (unauthorized) {
       reasons.push(
-        `needs-human (D11): the subject changes ratchet definitions — ${definitionChanges.join(', ')}`,
+        `needs-human (D11): the subject changes ratchet definitions — ${authorizationPaths.join(', ')}`,
       );
     }
     if (d11 !== undefined) reasons.push(...d11.lines);

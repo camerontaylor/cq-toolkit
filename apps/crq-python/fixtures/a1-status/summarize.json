@@ -1,0 +1,3061 @@
+{
+  "schema": "cq.crq-a1-status-vector/v1",
+  "family": "summarize",
+  "note": "cases beyond the shared group-p summary vectors",
+  "cases": [
+    {
+      "name": "local-review-aging-before-deadline",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "1970-01-01T01:00:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "repeat",
+              "kind": "local-review",
+              "generation": 1,
+              "repeat_requested": true,
+              "created_at": "1970-01-01T00:00:00Z",
+              "state": "pending",
+              "wait_reason": "capacity",
+              "order": 1
+            },
+            {
+              "id": "first",
+              "kind": "local-review",
+              "generation": 1,
+              "state": "pending",
+              "order": 2
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [],
+        "now": 3599.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "local-review",
+              "band": "interactive",
+              "generation": 1,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            },
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "local-review",
+              "band": "interactive",
+              "generation": 1,
+              "aging_deadline": 3600.0,
+              "reason": "capacity",
+              "approximate_position": 2
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "1970-01-01T01:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "local-review-aging-at-deadline",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "1970-01-01T01:00:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "repeat",
+              "kind": "local-review",
+              "generation": 1,
+              "repeat_requested": true,
+              "created_at": "1970-01-01T00:00:00Z",
+              "state": "pending",
+              "wait_reason": "capacity",
+              "order": 1
+            },
+            {
+              "id": "first",
+              "kind": "local-review",
+              "generation": 1,
+              "state": "pending",
+              "order": 2
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [],
+        "now": 3600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "local-review",
+              "band": "interactive",
+              "generation": 1,
+              "aging_deadline": 3600.0,
+              "reason": "capacity",
+              "approximate_position": 1
+            },
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "local-review",
+              "band": "interactive",
+              "generation": 1,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 2
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "1970-01-01T01:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "local-review-aging-minutes-from-config",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "1970-01-01T00:30:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "repeat",
+              "kind": "local-review",
+              "generation": 1,
+              "repeat_requested": true,
+              "created_at": "1970-01-01T00:00:00Z",
+              "state": "pending",
+              "wait_reason": "capacity",
+              "order": 1
+            },
+            {
+              "id": "first",
+              "kind": "local-review",
+              "generation": 1,
+              "state": "pending",
+              "order": 2
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8,
+          "local_review_aging_minutes": 30
+        },
+        "events": [],
+        "now": 1800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "local-review",
+              "band": "interactive",
+              "generation": 1,
+              "aging_deadline": 1800.0,
+              "reason": "capacity",
+              "approximate_position": 1
+            },
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "local-review",
+              "band": "interactive",
+              "generation": 1,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 2
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "1970-01-01T00:30:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "invalid-local-review-age-does-not-break-preview",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "1970-01-01T01:00:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "kind": "local-review",
+              "generation": 2,
+              "created_at": "invalid",
+              "state": "pending",
+              "order": 1
+            },
+            {
+              "kind": "local-review",
+              "generation": 1,
+              "state": "pending",
+              "order": 2
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [],
+        "now": 3600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "local-review",
+              "band": "interactive",
+              "generation": 1,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            },
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "local-review",
+              "band": "interactive",
+              "generation": 2,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 2
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "1970-01-01T01:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "foreign-open-pr-before-repository-rank",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "1970-01-01T00:00:02Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "foreign",
+              "repo": "owner/foreign",
+              "kind": "open",
+              "state": "pending",
+              "order": 0
+            },
+            {
+              "id": "primary",
+              "kind": "merged-current",
+              "state": "pending",
+              "order": 1
+            },
+            {
+              "id": "push",
+              "repo": "owner/foreign",
+              "kind": "push-current",
+              "state": "pending",
+              "order": 2
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/primary",
+          "max_starts_per_hour": 8,
+          "repos": [
+            {
+              "repo": "owner/foreign",
+              "rank_tier": 3
+            }
+          ]
+        },
+        "events": [],
+        "now": 2.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/foreign",
+              "pr": null,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            },
+            {
+              "repo": "owner/primary",
+              "pr": null,
+              "title": null,
+              "kind": "merged-current",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 2
+            },
+            {
+              "repo": "owner/foreign",
+              "pr": null,
+              "title": null,
+              "kind": "push-current",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 3
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 1,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "1970-01-01T00:00:02Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 1,
+            "backfill": 0
+          },
+          "repos": {
+            "owner/foreign": {
+              "pending": 2,
+              "reviewing": 0,
+              "blocked": 0,
+              "other": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "completion-groups-and-bounded-preview",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "1970-01-01T00:00:02Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "0",
+              "kind": "open",
+              "state": "pending",
+              "pr": 1,
+              "order": 0
+            },
+            {
+              "id": "1",
+              "kind": "delta",
+              "state": "pending",
+              "pr": 2,
+              "order": 1
+            },
+            {
+              "id": "2",
+              "kind": "merged-current",
+              "state": "pending",
+              "pr": 3,
+              "order": 2
+            },
+            {
+              "id": "3",
+              "kind": "merged",
+              "state": "pending",
+              "pr": 4,
+              "order": 3
+            },
+            {
+              "id": "4",
+              "kind": "coverage",
+              "state": "pending",
+              "pr": 5,
+              "order": 4
+            },
+            {
+              "id": "5",
+              "kind": "backfill",
+              "state": "pending",
+              "pr": 6,
+              "order": 5
+            },
+            {
+              "id": "6",
+              "kind": "backfill",
+              "state": "pending"
+            },
+            {
+              "id": "7",
+              "kind": "backfill",
+              "state": "pending"
+            },
+            {
+              "id": "8",
+              "kind": "backfill",
+              "state": "pending"
+            },
+            {
+              "id": "9",
+              "kind": "backfill",
+              "state": "pending"
+            },
+            {
+              "id": "10",
+              "kind": "backfill",
+              "state": "pending"
+            },
+            {
+              "id": "11",
+              "kind": "backfill",
+              "state": "pending"
+            },
+            {
+              "id": "12",
+              "kind": "backfill",
+              "state": "pending"
+            },
+            {
+              "id": "13",
+              "kind": "backfill",
+              "state": "pending"
+            },
+            {
+              "id": "14",
+              "kind": "backfill",
+              "state": "pending"
+            },
+            {
+              "id": "15",
+              "kind": "backfill",
+              "state": "pending"
+            },
+            {
+              "id": "16",
+              "kind": "backfill",
+              "state": "pending"
+            },
+            {
+              "id": "17",
+              "kind": "backfill",
+              "state": "pending"
+            },
+            {
+              "id": "18",
+              "kind": "backfill",
+              "state": "pending"
+            },
+            {
+              "id": "19",
+              "kind": "backfill",
+              "state": "pending"
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [
+          {
+            "event": "review_finished",
+            "item": "0",
+            "outcome": "completed",
+            "at": "1970-01-01T00:00:01Z"
+          },
+          {
+            "event": "review_finished",
+            "item": "1",
+            "outcome": "completed",
+            "at": "1970-01-01T00:00:01Z"
+          },
+          {
+            "event": "review_finished",
+            "item": "2",
+            "outcome": "completed",
+            "at": "1970-01-01T00:00:01Z"
+          },
+          {
+            "event": "review_finished",
+            "item": "3",
+            "outcome": "completed",
+            "at": "1970-01-01T00:00:01Z"
+          },
+          {
+            "event": "review_finished",
+            "item": "4",
+            "outcome": "completed",
+            "at": "1970-01-01T00:00:01Z"
+          },
+          {
+            "event": "review_finished",
+            "item": "5",
+            "outcome": "completed",
+            "at": "1970-01-01T00:00:01Z"
+          }
+        ],
+        "now": 2.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 2,
+            "recent_merge": 1,
+            "backfill": 3,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": 1,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 2,
+              "title": null,
+              "kind": "delta",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 2
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 3,
+              "title": null,
+              "kind": "merged-current",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 3
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 4,
+              "title": null,
+              "kind": "merged",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 4
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 5,
+              "title": null,
+              "kind": "coverage",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 5
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 6,
+              "title": null,
+              "kind": "backfill",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 6
+            },
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "backfill",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 7
+            },
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "backfill",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 8
+            },
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "backfill",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 9
+            },
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "backfill",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 10
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 1,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "1970-01-01T00:00:02Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 6,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 1,
+            "delta": 1,
+            "merged": 1,
+            "coverage": 1,
+            "merged-current": 1,
+            "backfill": 15
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "operator-priority-precedes-ordinary-items",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-09T11:55:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "n0",
+              "kind": "open",
+              "state": "pending",
+              "pr": 1,
+              "order": 0
+            },
+            {
+              "id": "n1",
+              "kind": "open",
+              "state": "pending",
+              "pr": 2,
+              "order": 1
+            },
+            {
+              "id": "n2",
+              "kind": "open",
+              "state": "pending",
+              "pr": 3,
+              "order": 2
+            },
+            {
+              "id": "n3",
+              "kind": "open",
+              "state": "pending",
+              "pr": 4,
+              "order": 3
+            },
+            {
+              "id": "n4",
+              "kind": "open",
+              "state": "pending",
+              "pr": 5,
+              "order": 4
+            },
+            {
+              "id": "n5",
+              "kind": "open",
+              "state": "pending",
+              "pr": 6,
+              "order": 5
+            },
+            {
+              "id": "n6",
+              "kind": "open",
+              "state": "pending",
+              "pr": 7,
+              "order": 6
+            },
+            {
+              "id": "n7",
+              "kind": "open",
+              "state": "pending",
+              "pr": 8,
+              "order": 7
+            },
+            {
+              "id": "n8",
+              "kind": "open",
+              "state": "pending",
+              "pr": 9,
+              "order": 8
+            },
+            {
+              "id": "n9",
+              "kind": "open",
+              "state": "pending",
+              "pr": 10,
+              "order": 9
+            },
+            {
+              "id": "n10",
+              "kind": "open",
+              "state": "pending",
+              "pr": 11,
+              "order": 10
+            },
+            {
+              "id": "priority",
+              "kind": "open",
+              "state": "pending",
+              "pr": 99,
+              "operator_priority": true,
+              "order": 99
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [],
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": 99,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 1,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 2
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 2,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 3
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 3,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 4
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 4,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 5
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 5,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 6
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 6,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 7
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 7,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 8
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 8,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 9
+            },
+            {
+              "repo": "owner/repo",
+              "pr": 9,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 10
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-09T11:55:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 12,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "account-limit-overrides-fallback-cap",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 8
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 5
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-zero-falls-back",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 0
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 5
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-bool-falls-back",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": true
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 5
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-string-falls-back",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": "8"
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 5
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-remaining-only-falls-back",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "remaining": 2
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 5
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-missing-falls-back",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": []
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 5
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-int-three-is-kept",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 3
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 10
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 3,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-integral-float-falls-back",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 3.0
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 10
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 10,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-safe-neighbor-is-kept",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 9007199254740991
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 10
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 9007199254740991,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-large-negative-falls-back",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": -9007199254740993
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 10
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 10,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-large-exact-int-is-kept",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 9007199254740992
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 10
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 9007199254740992,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-large-unrepresentable-int-is-kept",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 9007199254740993
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 10
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 9007199254740993,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-large-exact-float-falls-back",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 9007199254740992.0
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 10
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 10,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "usage-limit-large-integral-float-falls-back",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 9007199254740992.0
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 10
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 10,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "local-review-generation-bool-is-one",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "1970-01-01T01:00:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "generation-bool",
+              "kind": "local-review",
+              "generation": true,
+              "state": "pending",
+              "order": 1
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [],
+        "now": 3600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "local-review",
+              "band": "interactive",
+              "generation": true,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "1970-01-01T01:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "optional-open-cycles-are-not-review-debt",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-28T00:00:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "kind": "open",
+              "state": "pending",
+              "cycles": [
+                {}
+              ]
+            },
+            {
+              "kind": "open",
+              "state": "pending",
+              "prior_cycles": 1,
+              "prior_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "kind": "open",
+              "state": "pending",
+              "cycles": []
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 5
+        },
+        "events": [],
+        "now": 1793145600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": null,
+              "pr": null,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            },
+            {
+              "repo": null,
+              "pr": null,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 2
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-28T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 2,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "reharvested-run-counts-once",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-06T01:00:00Z"
+        },
+        "queue": {
+          "items": []
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 5
+        },
+        "events": [
+          {
+            "event": "review_finished",
+            "at": "2026-11-06T00:00:00Z",
+            "run": "r1",
+            "outcome": "error"
+          },
+          {
+            "event": "review_finished",
+            "at": "2026-11-06T00:01:00Z",
+            "run": "r1",
+            "outcome": "completed"
+          },
+          {
+            "event": "review_finished",
+            "at": "2026-11-06T00:02:00Z",
+            "run": "r1",
+            "outcome": "completed"
+          },
+          {
+            "event": "review_finished",
+            "at": "2026-11-06T00:03:00Z",
+            "run": "r2",
+            "outcome": "interrupted"
+          },
+          {
+            "event": "review_finished",
+            "at": "2026-11-06T00:04:00Z",
+            "outcome": "completed"
+          },
+          {
+            "event": "review_finished",
+            "at": "2026-11-06T00:05:00Z",
+            "outcome": "completed"
+          }
+        ],
+        "now": 1793926800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 3
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-06T01:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 3,
+            "interrupted": 1,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "review-finished-garbage-timestamp-refused",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-06T01:00:00Z"
+        },
+        "queue": {
+          "items": []
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 5
+        },
+        "events": [
+          {
+            "event": "review_finished",
+            "outcome": "completed",
+            "at": "garbage"
+          }
+        ],
+        "now": 1793926800.0
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "invalid review_finished timestamp"
+      }
+    },
+    {
+      "name": "review-finished-missing-timestamp-accepted",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-06T01:00:00Z"
+        },
+        "queue": {
+          "items": []
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 5
+        },
+        "events": [
+          {
+            "event": "review_finished",
+            "outcome": "completed"
+          }
+        ],
+        "now": 1793926800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-06T01:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "review-finished-empty-timestamp-accepted",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-06T01:00:00Z"
+        },
+        "queue": {
+          "items": []
+        },
+        "heartbeat": {},
+        "config": {
+          "max_starts_per_hour": 5
+        },
+        "events": [
+          {
+            "event": "review_finished",
+            "outcome": "completed",
+            "at": ""
+          }
+        ],
+        "now": 1793926800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-06T01:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "starts-window-includes-both-boundaries",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:30:00Z",
+            "2026-11-09T12:00:00Z",
+            "2026-11-09T12:00:01Z"
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [],
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 3,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        }
+      }
+    },
+    {
+      "name": "in-flight-is-global-across-repos",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-03T00:00:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "kind": "open",
+              "state": "reviewing",
+              "repo": "owner/repo"
+            },
+            {
+              "kind": "push-current",
+              "state": "reviewing",
+              "repo": "owner/other"
+            },
+            {
+              "kind": "open",
+              "state": "pending",
+              "repo": "owner/repo",
+              "cycles": []
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 5
+        },
+        "events": [],
+        "now": 1793664000.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-03T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 5,
+          "in_flight": 2,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 1,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {
+            "owner/other": {
+              "pending": 0,
+              "reviewing": 1,
+              "blocked": 0,
+              "other": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "repos-configured-stay-visible-before-first-item",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-03T00:00:00Z"
+        },
+        "queue": {
+          "items": []
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/primary",
+          "max_starts_per_hour": 5,
+          "repos": [
+            {
+              "repo": "owner/dotfiles"
+            },
+            {
+              "repo": "owner/encoding"
+            }
+          ]
+        },
+        "events": [],
+        "now": 1793664000.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-03T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {
+            "owner/dotfiles": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "other": 0
+            },
+            "owner/encoding": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "other": 0
+            }
+          }
+        }
+      }
+    }
+  ]
+}

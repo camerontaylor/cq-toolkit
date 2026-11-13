@@ -9,10 +9,10 @@
 // test/ops/gates/protectedPaths.closure.test.ts holds all of it to
 // policy/protected-paths.json.
 //
-// POSTURE: resolved from the project env exactly as the `gates.policyDiff`
-// registry importer does (src/ops/gates/registry.ts): no per-call opt-in,
-// never from argv, so a subject cannot relax its own check. An invalid
-// value is a failed result, never a fallback.
+// POSTURE: resolved from the entry's CqEnv snapshot exactly as the
+// `gates.policyDiff` registry importer does (src/ops/gates/registry.ts): no
+// per-call opt-in, never from argv, so a subject cannot relax its own check.
+// An invalid value fails at the entry, never falls back.
 //
 // INPUT: the op's own schema (../ops/gates/policyDiffInput.ts, which the
 // registry shares), so it carries no promotion `authorization`. It deliberately does
@@ -32,7 +32,6 @@ import {
 import { PolicyDiffInputObject as OpSchema } from '../ops/gates/policyDiffInput.js';
 import { decimalFlag, parseEntryArgs, runEntry } from './trusted-entry.js';
 import { SETTLE_STATE_PATH } from './config.js';
-import { processEnv } from '../config/process-env.js';
 
 /** `gates.policyDiff`'s own input schema, as `--name=value` flags. */
 export const PolicyDiffArgsSchema = OpSchema.extend({
@@ -46,34 +45,39 @@ export function parsePolicyDiffArgs(argv: readonly string[]): PolicyDiffInput {
 }
 
 export interface PolicyDiffMainDeps {
-  env: Readonly<Record<string, string | undefined>>;
+  /** Explicit entry environment (tests and callers); the entry snapshot is read from it. */
+  env?: Readonly<Record<string, string | undefined>>;
   /** Seam for tests; production uses the real factory. */
   create?: typeof createPolicyDiff;
   write: (line: string) => void;
+  /** Seam for tests; production writes entry diagnostics to stderr. */
+  stderr?: (text: string) => void;
 }
 
 /** Parse, judge, write ONE JSON line; return the I1 exit code. */
 export function mainWith(argv: readonly string[], deps: PolicyDiffMainDeps): Promise<number> {
-  // `_cqEnv` is deliberately unused: the posture comes from `deps.env` (the explicit
-  // seam), and no other CQ_* name is read by this entry.
-  return runEntry<PolicyDiffOutcome>(async (_cqEnv: CqEnv) => {
-    const input = parsePolicyDiffArgs(argv);
-    let config;
-    try {
-      config = resolveProtectedPathsConfig({ env: deps.env });
-    } catch (error) {
-      // The registry importer's mapping: an invalid posture is failed (1).
-      return { status: 'failed', error: error instanceof Error ? error.message : String(error) };
-    }
-    return (deps.create ?? createPolicyDiff)(config, { settleStatePath: SETTLE_STATE_PATH })(input);
-  }, deps.write);
+  return runEntry<PolicyDiffOutcome>(
+    async (cqEnv: CqEnv) => {
+      const input = parsePolicyDiffArgs(argv);
+      // The entry snapshot (from deps.env when injected, else the process env)
+      // is the only posture source; a later ambient read cannot change it.
+      const config = resolveProtectedPathsConfig({ cqEnv });
+      return (deps.create ?? createPolicyDiff)(config, { settleStatePath: SETTLE_STATE_PATH })(
+        input,
+      );
+    },
+    deps.write,
+    {
+      ...(deps.env === undefined ? {} : { env: deps.env }),
+      ...(deps.stderr === undefined ? {} : { stderr: deps.stderr }),
+    },
+  );
 }
 
 const invokedDirectly =
   process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (invokedDirectly) {
   const code = await mainWith(process.argv.slice(2), {
-    env: processEnv(),
     write: (line) => process.stdout.write(line),
   });
   if (code !== 0) process.exitCode = code;

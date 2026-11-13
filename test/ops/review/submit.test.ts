@@ -21,7 +21,7 @@ const caps = {
   v: 1,
   command: 'review-v1',
   operations: ['capabilities', 'submit', 'status', 'result', 'cancel'],
-  features: ['original-commit-snapshot-v1', 'chunked-result-v1'],
+  features: ['original-commit-snapshot-v1', 'chunked-result-v1', 'repeat-generations-v1'],
   limits: {
     max_request_bytes: 6291456,
     max_snapshot_bytes: 5242880,
@@ -597,4 +597,21 @@ test('target branch and tag collision is refused even when commits coincide', as
     error: expect.stringContaining('ambiguous') as unknown,
   });
   expect(wires).toHaveLength(0);
+});
+
+test('repeat refuses unsupported runners without sending a mutation', async () => {
+  await writeFile(join(cwd, 'file'), 'head');
+  await git('add', 'file');
+  await git('commit', '-qm', 'head');
+  const mutations: unknown[] = [];
+  const result = await makeSubmit(async (raw) => {
+    const wire = JSON.parse(raw) as { op: string };
+    if (wire.op === 'capabilities')
+      return JSON.stringify({ ...caps, features: ['chunked-result-v1'] });
+    mutations.push(wire);
+    throw new Error('unexpected mutation');
+  })({ cwd, repo: 'owner/repo', target: 'target', reachable: true, repeat: true });
+  expect(result).toMatchObject({ status: 'ok', value: { state: 'unsupported' } });
+  expect(JSON.stringify(result)).toContain('repeat-generations-v1');
+  expect(mutations).toEqual([]);
 });

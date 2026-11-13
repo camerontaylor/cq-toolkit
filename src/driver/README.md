@@ -19,7 +19,8 @@ without it cannot be stopped. Source of truth: `src/driver/types.ts`
 - `toolPolicy: ToolPolicy` — `{ allow: readonly string[]; mode?: 'allowlist' | 'unrestricted' | 'none' }`
 - `sandboxPolicy: SandboxPolicy` — `{ level: 'none' | 'workspace-write' | 'read-only' }`
 - `sessionRef?: string` — opaque session handle for multi-turn continuation
-- `budget: Budget` — `{ maxUsd?, maxTokens?, maxSteps?, maxOutputTokens?, maxContextTokens?, wallClockMs?, maxAttempts? }`
+- `budget: Budget` — `{ maxUsd?, maxTokens?, maxSteps?, maxOutputTokens?, maxContextTokens?, wallClockMs?, maxAttempts?, strictTokenBudget? }`
+- `outputSchema?: OutputSchema` — structured-output request (`{ name, schema }`; see the `ai-sdk` section)
 
 `WorkerResult` — the plain-data outcome:
 
@@ -90,8 +91,9 @@ edit inside a later goal.
 
 `src/driver/types.ts` sits INSIDE the vendor-import ban (eslint rule
 `cq/no-vendor-sdk-in-kernel`, same scope as `src/kernel/**`). The three
-driver implementations under `src/driver/drivers/` (in-process SDK,
-the Claude Code CLI/SDK transports, ACP) adopt vendors deliberately and are NOT covered.
+driver implementations live in `src/driver/ai-sdk/` (in-process SDK),
+`src/driver/claude-code/` (the Claude Code CLI/SDK transports) and
+`src/driver/acp/` (ACP); they adopt vendors deliberately and are NOT covered.
 
 ## First-party driver: `ai-sdk` (T1.4)
 
@@ -527,7 +529,7 @@ cost figure would bypass the derived-only rule.
 
 ## First-party driver: `acp` (T1.8)
 
-`src/driver/acp/` — the FOURTH lane: speak the Agent Client Protocol
+`src/driver/acp/` — the THIRD lane: speak the Agent Client Protocol
 (newline-delimited JSON-RPC 2.0 over stdio) to a vendor HARNESS binary
 (`zcode-acp-server` by default; `dsh-acp` as the fast-follow endpoint) as
 a governed worker on the frozen seam. One spawn per run, no daemon, no
