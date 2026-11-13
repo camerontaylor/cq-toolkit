@@ -579,6 +579,24 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertIn("marker is present", json.loads(
             output.getvalue())["refusal"])
 
+    def test_main_reports_an_interrupt_as_one_json_document(self):
+        class Interrupted:
+            def __init__(self, args):
+                self.args = args
+
+            def run(self):
+                raise KeyboardInterrupt
+
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            code = rb.main(
+                ["deploy", "--root", str(self.root),
+                 "--overlay", str(self.overlay_path),
+                 "--record-dir", str(self.record_dir)],
+                run_factory=Interrupted)
+        self.assertEqual(code, 130)
+        document = json.loads(output.getvalue())
+        self.assertEqual(document["error"]["kind"], "interrupted")
+
     def test_argument_errors_are_one_json_document(self):
         with contextlib.redirect_stdout(io.StringIO()) as output, \
                 contextlib.redirect_stderr(io.StringIO()):

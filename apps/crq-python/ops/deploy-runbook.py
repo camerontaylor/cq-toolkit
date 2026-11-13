@@ -1169,6 +1169,13 @@ def main(argv=None, run_factory=Run) -> int:
                                     "message": str(exc)[:400]}},
                          indent=2, sort_keys=True))
         return 2
+    except KeyboardInterrupt:
+        print(json.dumps({"error": {"kind": "interrupted",
+                                    "operation": args.operation,
+                                    "message": "interrupted; recovery ran if "
+                                               "a deploy was in progress"}},
+                         indent=2, sort_keys=True))
+        return 130
     except (OSError, subprocess.CalledProcessError, ValueError) as exc:
         print(json.dumps({"error": {"kind": "refused",
                                     "operation": args.operation,
