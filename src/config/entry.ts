@@ -27,12 +27,15 @@ export interface EntryEnvCheck {
 
 /** Snapshot the environment and render its diagnostics. */
 export function checkEntryEnv(env: EntryEnv = process.env): EntryEnvCheck {
-  const cqEnv = readCqEnv(env);
+  // One capture: copy FIRST, then read the snapshot FROM the frozen copy. A
+  // caller's record can be a live view (getters over `process.env`), so two
+  // reads could observe different values; the record handed down must be the
+  // one the snapshot was taken from, and it is read exactly once.
+  const pinned = Object.freeze({ ...env });
+  const cqEnv = readCqEnv(pinned);
   return {
     cqEnv,
-    // The entry's ONE capture: frozen, so the importer wiring and the run
-    // context hand down the same immutable record.
-    env: Object.freeze({ ...env }),
+    env: pinned,
     errorLines: formatCqEnvDiagnostics({ warnings: [], errors: cqEnv.errors }),
     warningLines: formatCqEnvDiagnostics({ warnings: cqEnv.warnings, errors: [] }),
     warnings: cqEnv.warnings,
