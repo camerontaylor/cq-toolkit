@@ -52,6 +52,13 @@ M8a bundle. Each rclone call runs with a five-minute timeout.
    returns `state: "local"` with the reason "the archived commit marker could
    not be verified".
 
+Exit codes follow invariant I1: 0 when the bundle is archived, 2 for a CLI
+argument error (a missing or invalid `--bundle`, `--target` or `--host`, where
+the result also carries `usage: true`; an invalid `--bundle` includes a path
+that does not name a directory), and 1 for every other failure, so an
+operator can tell a misconfigured invocation from an archive or transport
+failure.
+
 `<target>` is the same configured target the crq session archive uses
 (`session-archive:session-log-archive/crq` in the queue-host runbook).
 `<host>` defaults to `os.hostname()`, so hosts never collide. Result layout:
