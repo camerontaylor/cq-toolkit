@@ -5128,69 +5128,13 @@
                 "findings": [],
                 "supersedes": "1d592f6767668788219866d0e319e36ddbbca9eefa619bbd353a206225cea253"
               },
-              "id": "9d2d376f4abec3996ae56bd79a560e5d177092eab4d7d148f34b260c19e34a15"
+              "id": "1d592f6767668788219866d0e319e36ddbbca9eefa619bbd353a206225cea253"
             }
           },
           "expect": {
-            "ok": true,
-            "value": {
-              "schema": "cq.review-ledger/v1",
-              "event_type": "review",
-              "source_key": "camerontaylor/cq-toolkit:agent:import-1:dddddddddddddddd",
-              "occurred_at": "2026-10-30T00:00:00Z",
-              "payload": {
-                "repo": "camerontaylor/cq-toolkit",
-                "subject_id": "subject",
-                "job_id": "record:agent:import-1",
-                "attempt_id": "record:dddddddddddddddd",
-                "source": {
-                  "repo": "camerontaylor/cq-toolkit",
-                  "producer": "agent",
-                  "type": "agent",
-                  "id": "import-1:dddddddddddddddd",
-                  "authenticated": false
-                },
-                "provenance": {
-                  "authenticated_submitter": "queue-client",
-                  "claimed_reviewer": "helper-agent",
-                  "forge_evidence": "off-forge-import",
-                  "completion_evidence": null,
-                  "scope_confidence": "unknown",
-                  "independence": "agent lane: separate session, unverified"
-                },
-                "base": "0000000000000000000000000000000000000000",
-                "head": "0000000000000000000000000000000000000000",
-                "head_tree": "0000000000000000000000000000000000000000",
-                "target": "0000000000000000000000000000000000000000",
-                "target_tree": "0000000000000000000000000000000000000000",
-                "policy_digest": "ab371734a88229a8390c3db403f8436b1682f2fd9e236b5fb7bc7dae45468645",
-                "scope_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-                "paths": [],
-                "requested_scope": [],
-                "input_scope": [],
-                "reviewed_scope": [],
-                "completion": {
-                  "terminal": false,
-                  "skipped": false,
-                  "scope_verified": false,
-                  "exit_code": -1,
-                  "errors": [
-                    "no verifiable completion evidence"
-                  ]
-                },
-                "outcome": "unverified",
-                "artifacts": [
-                  {
-                    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-                    "location": "/fixtures/artifacts/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-                    "kind": "report"
-                  }
-                ],
-                "findings": [],
-                "supersedes": "1d592f6767668788219866d0e319e36ddbbca9eefa619bbd353a206225cea253"
-              },
-              "id": "9d2d376f4abec3996ae56bd79a560e5d177092eab4d7d148f34b260c19e34a15"
-            }
+            "ok": false,
+            "error": "IntegrityError",
+            "message": "event hash mismatch"
           }
         },
         {

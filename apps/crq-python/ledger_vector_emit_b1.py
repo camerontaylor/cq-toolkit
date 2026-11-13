@@ -524,7 +524,12 @@ def validate_vectors() -> Dict[str, Any]:
          _regenerated(record, lambda v: v["payload"]["provenance"].__setitem__(
              "forge_evidence", "someone-said-so"))),
         ("record-supersedes-self",
-         _regenerated(record, lambda v: v["payload"].__setitem__("supersedes", v["id"]))),
+         # Not _regenerated: rehashing would recompute the id and the
+         # supersedes pointer would no longer name the event's own id, so the
+         # semantic defect would vanish and the vector would validate as ok.
+         # The stale hash is intentional here; the identity check runs after
+         # provenance, so the self-supersede refusal is the observed failure.
+         _changed(record, lambda v: v["payload"].__setitem__("supersedes", v["id"]))),
         ("record-supersedes-on-vendor-run",
          _regenerated(review, lambda v: v["payload"].__setitem__("supersedes", "e" * 64))),
         ("record-completed-without-evidence",

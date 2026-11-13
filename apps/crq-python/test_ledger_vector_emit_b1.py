@@ -126,13 +126,28 @@ class LedgerVectorTest(unittest.TestCase):
         # A rehash silently repaired the original tampered-id case. Every other
         # validate case must keep a consistent id so the named mutation is the
         # only defect. float-in-integer is exempt because canonical() refuses
-        # floats, so its prior id cannot be regenerated.
+        # floats, so its prior id cannot be regenerated. record-supersedes-self
+        # is exempt because rehashing repairs the defect it names: after a
+        # rehash the supersedes pointer would no longer name the event's own
+        # id, and the self-supersede refusal would become unreachable.
         for case in _family("validate")["cases"]:
-            if case["name"] in ("tampered-id", "float-in-integer"):
+            if case["name"] in ("tampered-id", "float-in-integer",
+                                "record-supersedes-self"):
                 continue
             value = case["input"]["value"]
             self.assertEqual(value["id"], ledger.digest(
                 {key: item for key, item in value.items() if key != "id"}), case["name"])
+
+    def test_record_supersedes_self_names_its_own_id(self):
+        # The supersedes-self vector must preserve the semantic defect: the
+        # supersedes pointer names the event's own id and validation refuses
+        # it (the hash mismatch fires first, same as at runtime).
+        case = next(c for c in _family("validate")["cases"]
+                    if c["name"] == "record-supersedes-self")
+        value = case["input"]["value"]
+        self.assertEqual(value["payload"]["supersedes"], value["id"])
+        with self.assertRaises(ledger.IntegrityError):
+            ledger.validate(value)
 
     def test_scope_exceedance_vectors_reach_the_named_validation(self):
         cases = {case["name"]: case for case in _family("validate")["cases"]}
