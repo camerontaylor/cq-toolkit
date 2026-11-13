@@ -197,15 +197,15 @@ jobs:
     # waits for the four unit shards: this job id is the required context, so
     # the aggregation must happen here and nowhere else.
     needs: [changes, unit]
-    # Fail-closed. A cancelled shard never yields a passing static on a pull
-    # request, schedule or manual run; on a default-branch push a cancelled
-    # shard is a superseded commit (slice 3), so static is skipped there and
-    # claims nothing. A failed shard is caught by the first step below, which
-    # turns static red instead of skipping it.
-    if: ${{ always() && !cancelled() && (needs.unit.result != 'cancelled' || github.event_name == 'push') && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
+    # Fail-closed. A skipped job counts as a SUCCESS for GitHub's required
+    # checks, so `static` must never be skipped on a pull request: when a
+    # shard is cancelled here, static runs and the first step below fails it.
+    # Only a default-branch push may skip static, and only when its shards
+    # were cancelled as superseded (slice 3), so that commit claims nothing.
+    if: ${{ always() && !cancelled() && (needs.unit.result != 'cancelled' || github.event_name == 'pull_request') && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
     steps:
       - name: Unit shards passed
-        if: ${{ needs.unit.result == 'failure' || (github.event_name != 'push' && needs.unit.result == 'cancelled') || needs.changes.result == 'cancelled' }}
+        if: ${{ needs.unit.result == 'failure' || (github.event_name == 'pull_request' && needs.unit.result == 'cancelled') || needs.changes.result == 'cancelled' }}
         shell: bash
         run: exit 1
       - name: Check out the repo
