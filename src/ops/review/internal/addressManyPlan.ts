@@ -665,6 +665,7 @@ export interface AddressManyRow {
   reason?: string;
   /** Counted only from a head-attributed report; the original value stays in `result`. */
   fixesPerRun: number;
+  /** `absent` only from a trusted report that records none; otherwise `unknown`. */
   deferredVendorDebt: 'absent' | 'present' | 'unknown';
   /** No structured publication producer exists; never derived from fixes or prose. */
   publication: 'unknown';
@@ -856,7 +857,10 @@ export function aggregateAddressMany(input: {
         attribution: 'absent',
         reason: outcome.notAdmitted,
         fixesPerRun: 0,
-        deferredVendorDebt: 'absent',
+        // A not-admitted leg can still have run far enough to leave durable
+        // author debt (addressMany skips candidates without reading their
+        // existing debt); with no report there is no evidence either way.
+        deferredVendorDebt: 'unknown',
       });
       continue;
     }

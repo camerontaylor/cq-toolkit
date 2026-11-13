@@ -87,6 +87,9 @@ describe('aggregateAddressMany truth', () => {
       attribution: 'absent',
       deferredVendorDebt: 'unknown',
     });
+    expect(reportless.aggregate.reasons.join(' ')).toContain(
+      '#5 returned no report; debt state unknowable',
+    );
   });
 
   test('consumes the value-only report a real successful result carries', () => {
