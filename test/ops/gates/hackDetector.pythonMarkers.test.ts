@@ -207,6 +207,19 @@ describe('hackDetector: Python skip/xfail markers (#774)', () => {
         ]),
       ),
     ).toEqual([]);
+    // A triple-quoted default closes the signature on a line whose prefix is
+    // string, so only the suffix after the delimiter can close the counter.
+    expect(
+      await markersOf(
+        pyDiff([
+          'def helper(value="""text',
+          '"""):',
+          '    return value',
+          'def test_x():',
+          '    pytest.importorskip("numpy")',
+        ]),
+      ),
+    ).toEqual(['pytest.importorskip']);
   });
 
   test('a signature left open at a hunk boundary does not leak into the next hunk', async () => {
