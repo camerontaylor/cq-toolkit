@@ -634,7 +634,9 @@ class LayoutTests(ControllerFixture):
         other_root = self.base / "other-root"
         state = other_root / "apps/crq-python/state"
         state.mkdir(parents=True)
-        (state / dc.LOCK_NAME).write_text("")
+        lock = state / dc.LOCK_NAME
+        lock.write_text("")
+        lock.chmod(0o600)
         other = live.HostLayout(
             root=other_root, unit_dir=self.units_home,
             record_dir=self.overlay_records, overlay=self.overlay)
