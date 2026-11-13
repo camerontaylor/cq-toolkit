@@ -162,6 +162,12 @@ def _live_case(
         if canonical
         else None
     )
+    def run_git(argv, **kwargs):
+        done = subprocess.run(argv, capture_output=True, text=True, check=False, **kwargs)
+        if done.returncode != 0:
+            raise RuntimeError(f"git failed: {' '.join(argv)}: {done.stderr.strip()}")
+        return done
+
     service = _Root(
         root,
         trace=SimpleNamespace(record=lambda entry: None),
@@ -172,6 +178,8 @@ def _live_case(
     )
     service.CONFIG["clone"] = str(repo)
     service.CONFIG["repair"]["max_rounds_per_pin"] = 2
+    service.CLONE = repo
+    service.run = run_git
 
     def inbox_factory(_root: Path):
         return _inbox(root)
