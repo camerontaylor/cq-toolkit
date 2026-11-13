@@ -134,7 +134,12 @@ export const gitSubprocess = (
   // preserved exactly.
   const enforceBatchMode = (command: string): string => {
     const stripped = command.replace(/(?<=^|\s)(["']?)-o\s*batchmode=\S*?\1(?=$|\s)\s*/gi, '');
-    return `${stripped} -oBatchMode=yes`;
+    // The removal leaves the leading delimiter in place, so a trailing match
+    // leaves trailing whitespace that would otherwise double when the
+    // enforcement option is appended. Trimming the end only cannot reach
+    // interior or quoted whitespace: a command ending in a quoted argument
+    // ends in the quote, not in a space.
+    return `${stripped.trimEnd()} -oBatchMode=yes`;
   };
   if (env['GIT_SSH'] === undefined && env['GIT_SSH_COMMAND'] === undefined) {
     const base = configuredSshCommand?.trim() || 'ssh';
