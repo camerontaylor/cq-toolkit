@@ -31,20 +31,6 @@ class RecordRefused(ValueError):
     """A malformed import: quarantine this record only, with a readable reason."""
 
 
-def quarantine(payload, source, source_digest, reason, at):
-    """One unverified import-result for the refused record; nothing credited."""
-    value = ledger.event("import-result", "record:" + source_digest[:24] + ":quarantine",
-                         at, {
-        "source": {**source, "authenticated": False},
-        "source_digest": source_digest,
-        "result": "unverified",
-        "reason": reason[:500],
-        "review_id": None, "duplicate_id": None,
-        "artifacts": [_artifact(payload["report_bytes"], source_digest)],
-    })
-    return value
-
-
 def _artifact(report_bytes, digest_hex):
     return {"sha256": digest_hex, "location": "imported-report:" + digest_hex,
             "kind": "report"}
