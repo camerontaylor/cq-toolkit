@@ -856,6 +856,10 @@ class Run:
         require(not changed,
                 "shared queue state changed during rollback: "
                 + ", ".join(changed))
+        # The checkout switch does not restore an external runtime entry. The
+        # entry that failed the forward check is still the entry these
+        # triggers would execute, so re-verify it before starting anything.
+        self.runtime_pointer_check()
         active = sorted(unit for unit, state in self.original.items()
                         if state == "active")
         self.units.start(active)
@@ -885,6 +889,7 @@ class Run:
             "tag": self.args.tag,
             "run_dir": str(self.run_dir) if self.run_dir else None,
             "cq_bin": self.cq_bin,
+            "original_triggers": self.original,
             "final_triggers": self.final_triggers,
             "rollback": self.rollback,
             **extra,
@@ -909,7 +914,8 @@ class Run:
         record["written_at"] = now_iso()
         if self.run_dir is not None:
             durable_write(Path(self.run_dir) / "deploy.json", record)
-            self.phase("recovery_required", reason=str(reason)[:400])
+            self.phase("recovery_required", reason=str(reason)[:400],
+                       triggers=self.original)
         raise RecoveryRequired(str(reason), record)
 
     def restore_before_switch(self, reason):
@@ -984,6 +990,12 @@ class Run:
             if outcome == "rolled_back":
                 return self.document("rolled_back", reason=str(exc)[:400])
             raise Refused(str(exc)) from exc
+        except KeyboardInterrupt:
+            # BaseException is not caught by the branch above, but an
+            # interrupted health window still owns a switched checkout and a
+            # released admission marker. Recover, then surface the interrupt.
+            self.recover(Refused("interrupted by the operator"))
+            raise
         except Exception as exc:
             # Any host or helper failure must reach the safe terminal state,
             # not escape with the hold, units or checkout half-moved. A

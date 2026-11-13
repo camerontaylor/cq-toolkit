@@ -284,7 +284,9 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertTrue(all(self.units.state(unit) in ("inactive", "failed")
                             for unit in TRIGGERS))
         self.assertEqual(self.head(), self.prior)
-        self.assertEqual(self.record(run)["outcome"], "recovery_required")
+        record = self.record(run)
+        self.assertEqual(record["outcome"], "recovery_required")
+        self.assertEqual(record["original_triggers"], self.original)
 
     def test_incompatible_queue_refuses_before_hold(self):
         state = self.runner / "state/queue.json"
@@ -462,6 +464,48 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertTrue(all(self.units.state(unit) in ("inactive", "failed")
                             for unit in TRIGGERS))
         self.assertEqual(self.record(run)["outcome"], "recovery_required")
+
+    def test_rollback_refuses_restart_when_runtime_entry_is_not_restored(self):
+        real_switch = host.switch
+        calls = {"n": 0}
+
+        def replacing_switch(root, overlay, raw, target, tag=None):
+            result = real_switch(root, overlay, raw, target, tag)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                (self.runtime / "dist/cli.js").write_text("// replaced\n")
+            return result
+
+        helper = mock.Mock(wraps=None)
+        helper.load_overlay = host.load_overlay
+        helper.root_check = host.root_check
+        helper.verify_target = host.verify_target
+        helper.switch = replacing_switch
+        run = self.build(helper=helper)
+        with self.assertRaisesRegex(rb.RecoveryRequired,
+                                    "automatic rollback failed"):
+            run.run()
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.head(), self.prior)
+        self.assertTrue(all(self.units.state(unit) in ("inactive", "failed")
+                            for unit in TRIGGERS))
+        self.assertEqual(self.record(run)["outcome"], "recovery_required")
+
+    def test_keyboard_interrupt_after_release_rolls_back_and_unlocks(self):
+        def interrupted():
+            raise KeyboardInterrupt
+
+        run = self.build(health=interrupted)
+        with self.assertRaises(KeyboardInterrupt):
+            run.run()
+        self.assertEqual(self.head(), self.prior)
+        self.assertFalse(self.marker().exists())
+        self.assertEqual({unit: self.units.state(unit)
+                          for unit in TRIGGERS}, self.original)
+        self.assertEqual(self.record(run)["outcome"], "rolled_back")
+        probe = rb.DeployLock(self.root)
+        probe.acquire()
+        probe.release()
 
     def test_switch_failure_before_head_moves_restores_and_releases(self):
         class BrokenSwitch:

@@ -475,12 +475,13 @@ The sequence:
 7. **Roll back automatically on failure after the switch.** Hold, stop,
    drain, switch back to the measured prior SHA, require the live config
    bytes to equal the pre-deploy bytes (the `cq_bin` pointer included) and
-   the queue bytes to be unchanged, restart the original triggers, and exit
-   1. A failure inside the released health window may follow a completed
-   tick, so rollback re-measures the queue and heartbeat after its own drain
-   and requires the rollback switch to preserve those bytes. If the queue no
-   longer grants rollback or the rollback itself fails, keep the hold and
-   exit 3 (recovery required).
+   the queue bytes to be unchanged, re-verify the measured runtime entry (a
+   checkout switch cannot restore an external file), restart the original
+   triggers, and exit 1. A failure inside the released health window may
+   follow a completed tick, so rollback re-measures the queue and heartbeat
+   after its own drain and requires the rollback switch to preserve those
+   bytes. If the queue no longer grants rollback or the rollback itself
+   fails, keep the hold and exit 3 (recovery required).
 
 A failure before the switch restarts what this run stopped and releases only
 its own marker (exit 2). A foreign marker is never removed.
@@ -488,7 +489,11 @@ its own marker (exit 2). A foreign marker is never removed.
 Exit codes: 0 completed, 1 failed but rolled back cleanly, 2 refused with the
 host unchanged, 3 recovery required. The run directory under `--record-dir`
 holds `deploy.json` (the result), `phase.json` (the last phase), `drain.json`,
-`health.json` and the target helper/controller it executed.
+`health.json`, `rollback-drain.json` after a rollback, and the target
+helper/controller it executed. `deploy.json` carries `original_triggers` as
+well as `final_triggers`, so a recovery record still names the measured
+pre-deploy map; an interrupted run is routed through recovery (rollback or
+restore) before the deployment lock is released.
 
 `status` answers whether the host still matches a run's record:
 
