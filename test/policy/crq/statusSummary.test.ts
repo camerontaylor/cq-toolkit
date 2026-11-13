@@ -264,12 +264,24 @@ function assertOutcome(vector: VectorCase, outcome: Outcome): void {
   expect(outcome.pythonError, label).toBe(vector.expect.error);
 }
 
-/** Remove ONLY the additive #1420 keys; everything else compares exactly. */
-function withoutAdditiveKeys(view: StatusSummaryView): unknown {
-  const clone = plain(view) as { pending_items: RecordValue[] };
+/** Remove ONLY the additive keys from both sides of the comparison.
+ *
+ * `label`/`repair_origin` are additive #1420 keys. The top-level
+ * `review_metrics` block is additive S3c (Python-only, no TS port yet): the
+ * TS summary-core deliberately does not produce it, so the group-P
+ * differential strips it from the produced view and from the fixture
+ * expectation until it is ported (the a1-status fixtures project it out at
+ * emit time instead).
+ */
+function withoutAdditiveKeys(view: StatusSummaryView, expected: unknown): unknown {
+  const clone = plain(view) as { pending_items: RecordValue[] } & RecordValue;
   for (const item of clone.pending_items) {
     delete item.label;
     delete item.repair_origin;
+  }
+  delete clone.review_metrics;
+  if (expected !== null && typeof expected === 'object') {
+    delete (expected as RecordValue).review_metrics;
   }
   return clone;
 }
@@ -428,7 +440,11 @@ function runLosslessA1Vector(vector: LosslessVectorCase): unknown {
   }
 }
 
-/** Remove only the two additive #1420 keys without materialising JsonNumber. */
+/** Remove only the additive keys without materialising JsonNumber.
+ *
+ * `label`/`repair_origin` are additive #1420; `review_metrics` is additive
+ * S3c (Python-only, stripped until the TS summary-core ports it).
+ */
 function withoutAdditiveLossless(view: StatusSummaryView): unknown {
   const pending = view.pending_items.map((item) => {
     const copy: RecordValue = { ...item };
@@ -436,7 +452,9 @@ function withoutAdditiveLossless(view: StatusSummaryView): unknown {
     delete copy.repair_origin;
     return copy;
   });
-  return { ...(view as unknown as RecordValue), pending_items: pending };
+  const rest = { ...(view as unknown as RecordValue) };
+  delete rest.review_metrics;
+  return { ...rest, pending_items: pending };
 }
 
 describe.each(loadFamily(GROUP_P, 'summary'))('group-p summary/$name', (vector) => {
@@ -446,7 +464,9 @@ describe.each(loadFamily(GROUP_P, 'summary'))('group-p summary/$name', (vector) 
       assertOutcome(vector, outcome);
       return;
     }
-    expect(withoutAdditiveKeys(outcome.value as StatusSummaryView)).toEqual(vector.expect.value);
+    expect(withoutAdditiveKeys(outcome.value as StatusSummaryView, vector.expect.value)).toEqual(
+      vector.expect.value,
+    );
   });
 });
 
@@ -475,7 +495,9 @@ describe.each(loadFamily(A1, 'summarize'))('a1 summarize/$name', (vector) => {
       assertOutcome(vector, outcome);
       return;
     }
-    expect(withoutAdditiveKeys(outcome.value as StatusSummaryView)).toEqual(vector.expect.value);
+    expect(withoutAdditiveKeys(outcome.value as StatusSummaryView, vector.expect.value)).toEqual(
+      vector.expect.value,
+    );
   });
 });
 
@@ -577,7 +599,9 @@ describe('existing group-P families stay the foundation', () => {
     if (vector === undefined) throw new Error('summary vectors are empty');
     const outcome = capture(() => runSummarize(vector.input));
     if (!outcome.ok) throw new Error('fixture case unexpectedly failed');
-    const altered = plain(withoutAdditiveKeys(outcome.value as StatusSummaryView)) as RecordValue;
+    const altered = plain(
+      withoutAdditiveKeys(outcome.value as StatusSummaryView, vector.expect.value),
+    ) as RecordValue;
     altered.starts_cap = numberOf(altered.starts_cap, 'starts_cap') + 1;
     expect(altered).not.toEqual(vector.expect.value);
   });

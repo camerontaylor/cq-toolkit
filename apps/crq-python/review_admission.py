@@ -104,6 +104,9 @@ def admit(q, *, request_id, inputs, resolved, profile, at, repeat=False,
         if resolved["base_tree"] == resolved["head_tree"]:
             item.update(state="done", outcome="no-changes")
     binding["item"] = item["id"]
+    # Retain the admission decision so metrics never re-derive create/join/
+    # reuse/observed from timestamps (a same-second create ties its item).
+    binding["admission_action"] = action
     operation.validate("request", binding)
     q.setdefault("review_requests", {})[request_id] = binding
     if item["state"] in ACTIVE:

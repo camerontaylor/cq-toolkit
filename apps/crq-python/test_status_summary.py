@@ -380,6 +380,61 @@ class MergedCurrentSummaryTest(unittest.TestCase):
                     self.assertEqual(result["receipts"]["unverified"], 1)
                     self.assertEqual(result["receipts"]["proven_terminal"], 1)
 
+    def test_recent_events_bounds_memory_and_keeps_failure_visibility(self):
+        """Old history never reaches summarize; corrupt records still raise."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            now = adapter.timestamp("2026-11-07T00:00:00Z")
+            lines = [
+                json.dumps({"event": "review_finished", "at": "2026-11-01T00:00:00Z",
+                            "outcome": "completed"}),
+                json.dumps({"event": "review_started", "at": "2026-11-06T23:00:00Z"}),
+                json.dumps({"event": "review_finished", "at": "2026-11-06T23:30:00Z",
+                            "outcome": "completed"}),
+                "{corrupt",
+            ]
+            path.write_text("\n".join(lines) + "\n")
+            # The window keeps only the two in-window events; the generator
+            # stops at the corrupt tail only when pulled past the valid ones.
+            stream = adapter.recent_events(path, now)
+            kept = [next(stream), next(stream)]
+            self.assertEqual([e["event"] for e in kept],
+                             ["review_started", "review_finished"])
+            # An OLD truthy unparsable review_finished still fails visibly.
+            path.write_text(json.dumps({"event": "review_finished", "at": "garbage",
+                                        "outcome": "completed"}) + "\n")
+            with self.assertRaises(ValueError):
+                list(adapter.recent_events(path, now))
+            # A complete corrupt line still raises (read_events semantics).
+            path.write_text("{corrupt\n")
+            with self.assertRaises(json.JSONDecodeError):
+                list(adapter.recent_events(path, now))
+
+    def test_publish_streams_events_and_skips_old_history(self):
+        """publish reads the log once through the windowed helper."""
+        queue = {"items": [], "last_tick": "2026-11-07T00:00:00Z",
+                 "review_requests": {}, "review_notify_outbox": {}}
+        config = {"repo": "owner/repo", "max_starts_per_hour": 8}
+        now = adapter.timestamp("2026-11-07T00:00:00Z")
+        events = [{"event": "review_started", "at": "2026-11-01T00:00:00Z"},
+                  {"event": "review_started", "at": "2026-11-06T23:00:00Z"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "state").mkdir()
+            (root / "state/events.jsonl").write_text(
+                "\n".join(json.dumps(e) for e in events) + "\n")
+            with mock.patch.object(adapter, "read_events",
+                                   wraps=adapter.read_events) as spy, \
+                    mock.patch.object(adapter, "systemd_activity",
+                                      return_value=([], [])):
+                data = adapter.publish(root, queue, config,
+                                       {"status": "systemd"}, home=root, now=now)
+            # The helper saw the whole log, but summarize never did: only the
+            # in-window event is counted, and the log was streamed exactly once.
+            self.assertEqual(data["review_metrics"]["operation_events_24h"],
+                             {"review_started": 1, "spawn_failed": 0})
+            self.assertEqual(spy.call_count, 1)
+
 
 class ReposSummaryTests(unittest.TestCase):
     """Additive per-repo counts for non-primary repos (docs/multi-repo.md)."""
@@ -430,6 +485,241 @@ class ReposSummaryTests(unittest.TestCase):
                                  {"max_starts_per_hour": 5}, [], 0)
         self.assertEqual(data["repos"], {})
         self.assertEqual(data["backlog"]["open"], 1)
+
+    def test_review_metrics_fixture(self):
+        """One fixture queue covering the S3c block, including unknowns."""
+        item = dict(id="lr-first", kind="local-review", repo="owner/repo",
+                    pr=11, generation=1, state="done", scope_adequate=True,
+                    receipt_id="r1", created_at="2026-11-06T00:00:00Z",
+                    completed_at="2026-11-06T00:00:45Z",
+                    attempts=[dict(run_id="run1", band="interactive",
+                                   started_at="2026-11-06T00:00:05Z",
+                                   outcome="completed", counted=True)])
+        repeat = dict(id="lr-repeat", kind="local-review", repo="owner/repo",
+                      generation=2, state="done", scope_adequate=True,
+                      created_at="2026-11-06T01:00:00Z",
+                      completed_at="2026-11-06T01:40:00Z",
+                      attempts=[dict(run_id="run2a", band="interactive",
+                                     started_at="2026-11-06T01:30:00Z",
+                                     outcome="rate_limited", counted=False),
+                                dict(run_id="run2b", band="background",
+                                     started_at="2026-11-06T01:31:00Z",
+                                     outcome="error", counted=False)],
+                      failures=1)
+        in_flight = dict(id="lr-live", kind="local-review", generation=1,
+                         state="reviewing", created_at="2026-11-06T02:00:00Z",
+                         run={"run_id": "run3", "band": "interactive",
+                              "started_at": "2026-11-06T02:00:00Z"},
+                         attempts=[])
+        app_item = dict(id="app1", kind="open", state="reviewing",
+                        pr_review_request={"run_id": "pr1", "pr": 7},
+                        pr_review_attempts=2)
+        queue = {"items": [item, repeat, in_flight, app_item],
+                 "usage": {"limit": 10, "remaining": 4},
+                 "cooldown_until": "2026-11-06T03:00:00Z",
+                 "review_requests": {
+                     "req-create": {"item": "lr-first", "created_at": "2026-11-06T00:00:00Z",
+                                    "predecessor": None, "admission_action": "created"},
+                     "req-reuse": {"item": "lr-first", "created_at": "2026-11-06T00:05:00Z",
+                                   "supersedes": "req-old", "admission_action": "reused"},
+                     "req-join": {"item": "lr-live", "created_at": "2026-11-06T02:01:00Z",
+                                  "admission_action": "joined"},
+                     "req-pr": {"item": "lr-first", "created_at": "2026-11-06T01:00:00Z",
+                                "admission_action": "reused"}},
+                 "review_pr_links": {"owner/repo#11": {"item": "lr-first", "pr": 11,
+                                                      "repo": "owner/repo"}},
+                 "review_notify_outbox": {
+                     "n1": {"state": "sent", "attempts": 1},
+                     "n2": {"state": "pending", "attempts": 3},
+                     "n3": {"state": "error", "attempts": 4}}}
+        events = [{"event": "review_started", "at": "2026-11-06T00:00:01Z"},
+                  {"event": "review_started", "at": "2026-11-05T23:00:00Z"},  # outside 24h window
+                  {"event": "spawn_failed", "at": "2026-11-06T02:30:00Z", "item": "lr-live"}]
+        now = adapter.timestamp("2026-11-07T00:00:00Z")
+        data = adapter.summarize({"generated_at": "2026-11-07T00:00:00Z"}, queue, {},
+                                 {"repo": "owner/repo", "max_starts_per_hour": 8},
+                                 events, now)
+        m = data["review_metrics"]
+        # requests: retained admission actions classify every binding
+        self.assertEqual(m["requests"], {"total": 4, "created": 1, "joined": 1,
+                                         "reused": 2, "observed": 0, "unknown_action": 0})
+        self.assertEqual(m["dedup"]["requests_without_new_item"], 3)
+        self.assertEqual(m["dedup"]["on_completed_items"], 2)
+        self.assertEqual(m["dedup"]["monetary_saving"]["state"], "unknown")
+        # vendor starts: launch-evidence attempts (3) + in-flight live run (1);
+        # PR-associated: lr-first attempt (1) — repeat/live have no PR link
+        self.assertEqual(m["vendor_starts"], 4)
+        self.assertEqual(m["operation_events_24h"], {"review_started": 1, "spawn_failed": 1})
+        # wait: 5s interactive (first), 30min interactive + 31min background
+        # (repeat); the in-flight live run adds a 0s interactive observation
+        self.assertEqual(m["queue_wait"]["interactive"],
+                         {"count": 3, "buckets": {"lt_60s": 2, "lt_600s": 0, "lt_3600s": 1, "gte_3600s": 0}})
+        self.assertEqual(m["queue_wait"]["background"],
+                         {"count": 1, "buckets": {"lt_60s": 0, "lt_600s": 0, "lt_3600s": 1, "gte_3600s": 0}})
+        self.assertEqual(m["queue_wait"]["first"]["count"], 2)
+        self.assertEqual(m["queue_wait"]["repeat"]["count"], 2)
+        # completion latency: 45s interactive first; 40min background repeat
+        # (terminal attempt's own band, not a majority vote)
+        self.assertEqual(m["completion"]["interactive"]["buckets"]["lt_60s"], 1)
+        self.assertEqual(m["completion"]["background"]["buckets"]["lt_3600s"], 1)
+        self.assertEqual(m["completion"]["first"]["count"], 1)
+        self.assertEqual(m["completion"]["repeat"]["count"], 1)
+        self.assertEqual(m["completion"]["unknown_band"],
+                         {"count": 0, "buckets": {"lt_60s": 0, "lt_600s": 0, "lt_3600s": 0, "gte_3600s": 0}})
+        self.assertEqual(m["repeats"], {"repeat_items": 1, "completed_repeats": 1})
+        self.assertEqual(m["predecessor"], {"linked_requests": 0, "superseding_requests": 1,
+                                            "change_statistics": m["predecessor"]["change_statistics"]})
+        self.assertEqual(m["predecessor"]["change_statistics"]["state"], "unknown")
+        self.assertEqual(m["cooldown"], {"state": "expired",
+                                         "until": "2026-11-06T03:00:00Z",
+                                         "seconds_remaining": 0})  # past cooldown relative to now
+        self.assertEqual(m["attempts"], {"failed": 2, "unknown": 0, "no_review": 0})
+        self.assertEqual(m["quota"], {"state": "known", "limit": 10, "remaining": 4})
+        self.assertEqual(m["notifications"], {"sent": 1, "error": 1, "pending": 1,
+                                              "withdrawn": 0, "retries": 5,
+                                              "delivery_lag": m["notifications"]["delivery_lag"],
+                                              "consumption_lag": m["notifications"]["consumption_lag"]})
+        self.assertEqual(m["notifications"]["delivery_lag"]["state"], "unknown")
+        self.assertEqual(m["notifications"]["consumption_lag"]["state"], "unknown")
+        self.assertEqual(m["pr_associated"], {"items": 1, "reuse_requests": 2,
+                                              "additional_starts": 1})
+        self.assertEqual(m["app_reviews"], {"items": 1, "attempts": 2})
+        self.assertEqual(m["records"]["ingestion_lag"]["state"], "unknown")
+        self.assertEqual(m["records"]["unknown_scope_rate"]["state"], "unknown")
+        self.assertEqual(m["records"]["projection_failures"]["state"], "unknown")
+
+    def test_review_metrics_unknown_quota_and_no_cooldown(self):
+        """No usage observation stays unknown; absent cooldown stays none."""
+        queue = {"items": [], "review_requests": {},
+                 "review_notify_outbox": {}, "usage": {"remaining": 2}}
+        data = adapter.summarize({"generated_at": "2026-11-07T00:00:00Z"}, queue, {},
+                                 {"repo": "owner/repo", "max_starts_per_hour": 8}, [], 0)
+        m = data["review_metrics"]
+        # A limit-free balance is still a known observation; only the absent
+        # limit itself is unknown.
+        self.assertEqual(m["quota"], {"state": "known",
+                                      "limit": {"state": "unknown", "reason":
+                                                "vendor observation carries no review limit"},
+                                      "remaining": 2})
+        self.assertEqual(m["cooldown"], {"state": "none"})
+        self.assertEqual(m["requests"], {"total": 0, "created": 0, "joined": 0,
+                                         "reused": 0, "observed": 0, "unknown_action": 0})
+        self.assertEqual(m["vendor_starts"], 0)
+
+    def test_review_metrics_vendor_starts_need_launch_evidence(self):
+        """Regression: reuse run ids and spawn-failed runs are not vendor starts.
+
+        A receipt-only reuse attempt retains the source run id but started_at
+        is null (nothing launched for this request). A retained spawn-failed
+        run (crq.py keeps `run` with spawn_failed_at as a consumed
+        reservation) never launched the CLI; the spawn_failed event counter
+        covers it. Outcome rule follows the classifier's own vocabulary
+        (crq.classify): skipped (no fresh review) and too_large (oversize,
+        no review performed) mean the vendor never reviewed, so they count
+        under attempts.no_review, not failed and not unknown.
+        """
+        reuse_attempt = dict(id="lr-reuse", kind="local-review", generation=1,
+                             state="pending", created_at="2026-11-06T00:00:00Z",
+                             attempts=[dict(run_id="r-old", outcome="completed",
+                                            counted=True, band="background",
+                                            started_at=None)])
+        spawn_failed = dict(id="lr-spawn", kind="local-review", generation=1,
+                            state="failed", created_at="2026-11-06T01:00:00Z",
+                            run={"run_id": "r-new",
+                                 "started_at": "2026-11-06T01:00:00Z",
+                                 "spawn_failed_at": "2026-11-06T01:00:01Z"},
+                            attempts=[])
+        skipped = dict(id="lr-skip", kind="local-review", generation=1,
+                       state="done", scope_adequate=False,
+                       created_at="2026-11-06T02:00:00Z",
+                       attempts=[dict(run_id="r-skip", band="background",
+                                      started_at="2026-11-06T02:00:00Z",
+                                      outcome="skipped", counted=False)])
+        too_large = dict(id="lr-big", kind="local-review", generation=1,
+                         state="blocked", created_at="2026-11-06T03:00:00Z",
+                         attempts=[dict(run_id="r-big", band="background",
+                                        started_at="2026-11-06T03:00:00Z",
+                                        outcome="too_large", counted=False)])
+        queue = {"items": [reuse_attempt, spawn_failed, skipped, too_large],
+                 "review_requests": {}, "review_notify_outbox": {}}
+        data = adapter.summarize({"generated_at": "2026-11-07T00:00:00Z"}, queue, {},
+                                 {"repo": "owner/repo", "max_starts_per_hour": 8}, [], 0)
+        m = data["review_metrics"]
+        # The reuse attempt and the spawn-failed run launched nothing.
+        self.assertEqual(m["vendor_starts"], 2)  # only skipped + too_large attempts
+        # The reuse attempt (started_at null: bookkeeping, not a launch) is
+        # unknown; skipped/too_large are no-review outcomes, not failures.
+        self.assertEqual(m["attempts"], {"failed": 0, "unknown": 1, "no_review": 2})
+
+    def test_review_metrics_active_run_counts_in_queue_wait(self):
+        """A started-but-unharvested run is a queue-wait observation."""
+        running = dict(id="lr-live", kind="local-review", generation=1,
+                       state="reviewing", created_at="2026-11-06T02:00:00Z",
+                       run={"run_id": "run3", "band": "interactive",
+                            "started_at": "2026-11-06T02:02:00Z"},
+                       attempts=[])
+        queue = {"items": [running], "review_requests": {}, "review_notify_outbox": {}}
+        data = adapter.summarize({"generated_at": "2026-11-07T00:00:00Z"}, queue, {},
+                                 {"repo": "owner/repo", "max_starts_per_hour": 8}, [], 0)
+        m = data["review_metrics"]
+        self.assertEqual(m["queue_wait"]["interactive"],
+                         {"count": 1, "buckets": {"lt_60s": 0, "lt_600s": 1, "lt_3600s": 0, "gte_3600s": 0}})
+
+    def test_review_metrics_terminal_band_and_unknown_attempt_rules(self):
+        """Regression: unknown counted once; only the terminal attempt's band.
+
+        - An attempt with no started_at and no outcome increments
+          attempts.unknown once, not once per check.
+        - Completion band uses only the terminal attempt: an earlier
+          interactive band must not win when the terminal attempt has no
+          valid band; the item still lands in completion.first/repeat and
+          in unknown_band.
+        - pr_associated.items uses the same retained-link predicate as
+          reuse/starts: an association via review_pr_links alone counts.
+        """
+        double_unknown = dict(id="lr-u", kind="local-review", generation=1,
+                              state="pending", created_at="2026-11-06T00:00:00Z",
+                              attempts=[dict(outcome=None, started_at=None)])
+        bandless_terminal = dict(id="lr-b", kind="local-review", generation=1,
+                                 state="done", scope_adequate=True,
+                                 created_at="2026-11-06T01:00:00Z",
+                                 completed_at="2026-11-06T01:10:00Z",
+                                 attempts=[dict(run_id="r1", band="interactive",
+                                                started_at="2026-11-06T01:01:00Z",
+                                                outcome="error", counted=False),
+                                           dict(run_id="r2", outcome="completed",
+                                                counted=True)])
+        link_only = dict(id="lr-link", kind="local-review", generation=1,
+                         state="done", scope_adequate=True,
+                         created_at="2026-11-06T02:00:00Z",
+                         completed_at="2026-11-06T02:05:00Z",
+                         attempts=[dict(run_id="r3", band="background",
+                                        started_at="2026-11-06T02:00:30Z",
+                                        outcome="completed", counted=True)])
+        queue = {"items": [double_unknown, bandless_terminal, link_only],
+                 "review_requests": {},
+                 "review_pr_links": {"owner/other#9": {"item": "lr-link", "pr": 9,
+                                                       "repo": "owner/other"}},
+                 "review_notify_outbox": {}}
+        data = adapter.summarize({"generated_at": "2026-11-07T00:00:00Z"}, queue, {},
+                                 {"repo": "owner/repo", "max_starts_per_hour": 8}, [], 0)
+        m = data["review_metrics"]
+        # One unknown flag per attempt, even when both checks would fire:
+        # the no-evidence attempt (lr-u) and the bandless terminal attempt
+        # r2 (outcome completed, no started_at) each count exactly once.
+        self.assertEqual(m["attempts"], {"failed": 1, "unknown": 2, "no_review": 0})
+        # Terminal attempt has no valid band: the earlier interactive band
+        # must not win; both completed items are first-class, one under
+        # unknown_band and one under background (the link-only item).
+        self.assertEqual(m["completion"]["interactive"],
+                         {"count": 0, "buckets": {"lt_60s": 0, "lt_600s": 0, "lt_3600s": 0, "gte_3600s": 0}})
+        self.assertEqual(m["completion"]["first"]["count"], 2)
+        self.assertEqual(m["completion"]["background"]["buckets"]["lt_600s"], 1)
+        self.assertEqual(m["completion"]["unknown_band"],
+                         {"count": 1, "buckets": {"lt_60s": 0, "lt_600s": 0, "lt_3600s": 1, "gte_3600s": 0}})
+        # Association via review_pr_links alone counts in items (and starts).
+        self.assertEqual(m["pr_associated"], {"items": 1, "reuse_requests": 0,
+                                              "additional_starts": 1})
 
 
 if __name__ == "__main__":
