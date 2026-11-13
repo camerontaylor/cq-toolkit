@@ -297,6 +297,20 @@ def _dispatch(config, role, job, wt, directory, judge=False):
     raise ValueError('unsupported role driver')
 
 
+def resume_worktree(result, wt):
+    """Resume states record the rung's worktree (A2 is a suffixed checkout),
+    but process_item passes the original worktree on restart. Validate the
+    recorded tree and restore it before handling either resume state so
+    interrupted retention and deferred judging use the tree the result names."""
+    recorded = result.get('worktree')
+    if not recorded:
+        return wt
+    recorded = Path(recorded).resolve()
+    if recorded != Path(wt).resolve() and recorded.is_dir() and (recorded / '.git').exists():
+        return recorded
+    return wt
+
+
 def process(config, job, wt):
     repair = config['repair']
     directory = ROOT / 'state/repair' / job['job']
@@ -316,8 +330,22 @@ def process(config, job, wt):
         result = json.loads(result_path.read_text())
         result.pop('retry_after', None)
     progress_path = directory / 'progress.json'
-    if progress_path.exists() and (not result_path.exists() or progress_path.stat().st_mtime_ns > result_path.stat().st_mtime_ns):
+    resume_progress = progress_path.exists() and (not result_path.exists() or progress_path.stat().st_mtime_ns > result_path.stat().st_mtime_ns)
+    if resume_progress:
         result = json.loads(progress_path.read_text())
+    if result.get('dispatch_pending') or result.get('pending_judge'):
+        wt = resume_worktree(result, wt)
+    if (result.get('pending_judge') and result.get('worktree')
+            and Path(result['worktree']).resolve() != Path(wt).resolve()):
+        # The A2 tree the deferred judge must inspect is gone: judging the
+        # base tree would record a verdict and snapshot for the wrong checkout.
+        result.update(verdict='FAILED',
+                      reason='pending judge worktree unavailable; needs human',
+                      finished_at=utc())
+        result.pop('pending_judge', None)
+        atomic(result_path, result)
+        return result
+    if resume_progress:
         if result.get('dispatch_pending'):
             saved_wt = Path(result.get('worktree', '')).resolve()
             if saved_wt == Path(wt).resolve():
@@ -639,6 +667,10 @@ def triage_phase(config, dry_run=False):
         bounded_config = copy.deepcopy(config)
         bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
         selected = options.get('escalation_role', config['repair']['roles']['judge_critical']) if row.get('_escalate') else role
+        if blocked(config['repair']):
+            # The blackout can start during drain()'s tick-lock wait or this pass;
+            # phase() keeps deferred rows pending for the next pass.
+            return {'stop': 'deferred', 'errorClass': 'blackout', 'reason': 'GLM peak blackout; triage judge deferred'}
         return dispatch(bounded_config, selected, job, config['clone'],
                         state / 'repair/triage' / row['finding']['id'], judge=True)
     def transport(key, request):
@@ -902,6 +934,11 @@ def recover_job(config, job_id):
     if not c.ran_locked(check_owner):
         raise RuntimeError('tick busy; recovery deferred')
     def judge(old, context, directory):
+        if blocked(config['repair']):
+            # The blackout can start during the tick-lock wait above; recover()
+            # holds the attempt budget and defers the judgment, never a model call.
+            return {'stop': 'configuration', 'errorClass': 'blackout',
+                    'reason': 'GLM peak blackout; recovery judge deferred'}
         request = {'job': old['job'], 'run': old['run'], 'triage_context': context}
         return dispatch(config, config['repair']['roles']['judge_critical'], request,
                         config['clone'], directory / 'recovery-judge', judge=True)

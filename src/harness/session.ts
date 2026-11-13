@@ -447,10 +447,19 @@ export class SessionStore {
    */
   async remove(sessionId: string): Promise<void> {
     assertSafeSessionId(sessionId);
-    await Promise.all([
-      rm(this.pathFor(sessionId), { force: true }),
-      rm(join(this.sessionsDir, `${sessionId}.cq-cli-session`), { force: true }),
-    ]);
+    // Removal runs ON the write chain (same discipline as appendLine): run
+    // outside it, an `rm` could land after an in-flight append's existence
+    // check and the append would recreate a headerless file that `load`
+    // cannot read.
+    const remove = async (): Promise<void> => {
+      await Promise.all([
+        rm(this.pathFor(sessionId), { force: true }),
+        rm(join(this.sessionsDir, `${sessionId}.cq-cli-session`), { force: true }),
+      ]);
+    };
+    const next = this.tail.then(remove, remove);
+    this.tail = next.catch(() => undefined);
+    await next;
   }
 }
 

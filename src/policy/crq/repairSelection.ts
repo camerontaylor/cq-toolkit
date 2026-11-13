@@ -31,7 +31,7 @@
  * - `selectedJobId` is returned only when every check passes. A refusal never
  *   carries a selected job id.
  */
-import { JsonNumber, JsonObject, type JsonValue } from './jsonValue.js';
+import { JsonObject, pythonNumbersEqual, type JsonValue } from './jsonValue.js';
 import {
   checkSha,
   findingDigest,
@@ -240,7 +240,9 @@ function pythonContains(container: JsonValue, item: string): boolean {
  * `next((i.get('repair_runs', {}).get(job['run']) for i in queue['items']
  * if i['id'] == job['item']), None)`: only the FIRST queue item whose id
  * matches is inspected. `drain_job` reads `i.get('id')` while `select_job`
- * reads `i['id']`; the policy keeps that difference.
+ * reads `i['id']`; the policy keeps that difference. The id comparison is
+ * Python `==`, so `1`, `1.0` and `true` name the same id (see
+ * {@link pythonEqual}).
  */
 function queueRecord(
   queue: JsonValue,
@@ -258,7 +260,7 @@ function queueRecord(
     }
     // Python compares `i.get('id') == job.get('item')`, where a missing key
     // and an explicit JSON null are both None.
-    if ((item.has('id') ? item.get('id') : null) !== (itemId ?? null)) continue;
+    if (!pythonEqual(item.has('id') ? item.get('id') : null, itemId ?? null)) continue;
     const runs = getOr(item, 'repair_runs', new JsonObject([]));
     if (!(runs instanceof JsonObject)) throw new ShapeError('repair_runs');
     if (Array.isArray(run) || run instanceof JsonObject) throw new ShapeError('run');
@@ -434,33 +436,46 @@ function mergeBinding(
 }
 
 /**
- * Python `==` between two decoded JSON values: structural, not instance
- * identity. The canonical text is hashed with the same digest used for
- * findings and receipts, so two equal documents parsed independently compare
- * equal. Missing keys read as `None`, as `.get` does.
+ * Python `==` between two decoded JSON values.
  *
- * A non-finite number anywhere in either value is never equal. Python's
- * `nan != nan`, and Python's JSON reader accepts the non-standard `NaN`
- * constant, so canonical text alone would make two NaNs match. Infinities are
- * refused with them rather than adding a numeric layer; that can only refuse
- * a pair Python would select, never select one Python would refuse.
+ * This is the module's one value-equality primitive, shared by the queue item
+ * id comparison (`i['id'] == job['item']`) and the revalidation lineage
+ * comparison (`record['origin_job'] != job['origin_job']`). It compares by
+ * Python value, not by canonical text and not by instance identity:
+ *
+ * - integers and floats compare numerically (`1 == 1.0`) without rounding an
+ *   exact integer; `NaN` is equal to nothing while `±Infinity` equals itself,
+ *   as in Python;
+ * - booleans compare as Python's `int` subclass (`True == 1`, `False == 0`),
+ *   so a boolean never equals a string and does equal its numeric peer;
+ * - strings compare by value and never equal a number or a boolean;
+ * - lists compare elementwise, recursively, and only with lists; dicts compare
+ *   by key set and value, ignoring key order, and only with dicts;
+ * - `null` (Python `None`) equals only `null`, and a missing key reads as
+ *   `None`, as `.get` does.
+ *
+ * Python `bool` is an `int` subclass, so reproducing this can select a pair a
+ * stricter type check would refuse. Fidelity is this module's contract and the
+ * state schema refuses such documents upstream; the oracle's non-string id and
+ * boolean/numeric lineage cases are generated from Python for exactly this
+ * reason. Python `Decimal` and other custom `__eq__` types cannot arise: the
+ * port holds JSON values only.
  */
-function pythonEqual(a: JsonValue | undefined, b: JsonValue | undefined): boolean {
-  const left = a ?? null;
-  const right = b ?? null;
-  if (containsNonFinite(left) || containsNonFinite(right)) return false;
-  return findingDigest(left) === findingDigest(right);
-}
-
-function containsNonFinite(value: JsonValue): boolean {
-  if (value instanceof JsonNumber) {
-    return value.kind === 'float' && !Number.isFinite(value.float as number);
+function pythonEqual(left: JsonValue | undefined, right: JsonValue | undefined): boolean {
+  const a = left ?? null;
+  const b = right ?? null;
+  const numbers = pythonNumbersEqual(a, b);
+  if (numbers !== null) return numbers;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((entry, index) => pythonEqual(entry, b[index]));
   }
-  if (Array.isArray(value)) return value.some(containsNonFinite);
-  if (value instanceof JsonObject) {
-    return value.entries.some(([, entry]) => containsNonFinite(entry));
+  if (a instanceof JsonObject || b instanceof JsonObject) {
+    if (!(a instanceof JsonObject) || !(b instanceof JsonObject)) return false;
+    if (a.entries.length !== b.entries.length) return false;
+    return a.entries.every(([key, value]) => b.has(key) && pythonEqual(value, b.get(key)));
   }
-  return false;
+  return a === b;
 }
 
 /**

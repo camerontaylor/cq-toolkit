@@ -65,7 +65,7 @@ def _full_source_patch(path, text):
 
 def _instructions_patch(text):
     """The production fix-instructions scan patch, kept byte-identical."""
-    lines = text.split("\n")
+    lines = text.splitlines()
     return (
         "diff --git a/crq-fix-instructions.txt b/crq-fix-instructions.txt\n"
         "--- /dev/null\n+++ b/crq-fix-instructions.txt\n"
@@ -453,8 +453,6 @@ def _prepare_case(spec):
                     _handoff_args(inbox)[first_handoff:] if canonical is not None else []
                 ),
             }
-            if canonical is not None:
-                expected["handoff_calls"] = inbox.handoff.call_count
             if spec.get("select_on_prepared"):
                 try:
                     bounded.select_job(

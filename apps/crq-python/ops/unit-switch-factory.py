@@ -136,8 +136,10 @@ def _verify_selection(selection):
 def select(*, root, unit, runtime, source_sha, artifact_root=None) -> Selection:
     """Render and bind the selected target identity. Read-only.
 
-    This is the only render the factory performs. The adapter re-renders the
-    same unit at preflight and install and refuses if its fresh values differ.
+    This is the only render the factory performs. The adapter is pinned to
+    this render: it re-renders the same unit at preflight and install, refuses
+    if a fresh value differs from the selected render, and refuses if its
+    preflight and install values differ.
     """
     root = Path(root)
     if not root.is_absolute() or not root.is_dir():
@@ -240,6 +242,11 @@ def build(
         "queue_drain": queue_drain,
         "error_type": error_type,
         "drain_timeout": drain_timeout,
+        "expected_render": {
+            "sha256": selection.render["sha256"],
+            "source_sha": selection.render["source_sha"],
+            "template_blob_oid": selection.render["template_blob_oid"],
+        },
         "clock": clock,
         "sleep": sleep,
     }

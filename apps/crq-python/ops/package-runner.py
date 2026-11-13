@@ -674,8 +674,37 @@ def verify_archive(archive, expected_sha256=None, lockfile=None, smoke=True,
             manager.cleanup()
 
 
+def _machine_error(kind, subcommand, message, exit_code):
+    """One JSON error artifact on stdout; stderr stays empty (doctrine I1)."""
+    artifact = {'error': {'kind': kind, 'subcommand': subcommand,
+                          'message': message, 'exitCode': exit_code}}
+    sys.stdout.write(json.dumps(artifact, sort_keys=True, indent=2) + '\n')
+    raise SystemExit(exit_code)
+
+
+class _MachineArgumentParser(argparse.ArgumentParser):
+    """Argument parser whose usage errors honor machine mode (doctrine I1).
+
+    `--json` is detected in argv before parsing; in machine mode an argparse
+    usage error writes one JSON error artifact to stdout, keeps stderr empty
+    and exits 2 instead of narrating on stderr.
+    """
+
+    def __init__(self, *args, machine=False, subcommand=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._machine = machine
+        self._subcommand = subcommand
+
+    def error(self, message):
+        if self._machine:
+            _machine_error('usage', self._subcommand, message, 2)
+        super().error(message)
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    machine = '--json' in sys.argv[1:]
+    parser = _MachineArgumentParser(description=__doc__, machine=machine,
+                                    subcommand='package-runner')
     parser.add_argument('command', nargs='?', choices=('package', 'verify'),
                         default='package')
     parser.add_argument('--staging', type=Path)
@@ -721,7 +750,10 @@ def main():
                           + report['runner']['detail'], file=sys.stderr)
                 if args.keep:
                     print('extracted tree ' + report['root'], file=sys.stderr)
-    except (ArtifactError, OSError, ValueError) as exc:
+    except (ArtifactError, OSError, ValueError, subprocess.TimeoutExpired,
+            tarfile.TarError) as exc:
+        if machine:
+            _machine_error('thrown', 'package-runner', str(exc), 1)
         parser.exit(1, 'package-runner: ' + str(exc) + '\n')
 
 

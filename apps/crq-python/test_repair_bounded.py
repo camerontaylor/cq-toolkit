@@ -160,12 +160,17 @@ class BoundedRepairTest(unittest.TestCase):
             self.prepare()
         self.assertEqual(len(self.queue['items'][0]['repair_runs']), 1)
 
-    def test_shared_instruction_scan_preserves_line_content(self):
+    def test_shared_instruction_scan_uses_scanner_line_boundaries(self):
+        # The scan representation is split exactly like secret_scan_diff's
+        # splitlines(), so text after a lone \r or \x85 gets a '+' prefix.
         text = 'first\r\nsecond\u0085third\n'
         repair_tick.scan_fix_instructions(self.c, text, SOURCE, self.root / 'instructions-scan.json')
         patch = self.c.secret_scan_diff.call_args.args[0]
         encoded = patch.split('@@ -0,0 +1,3 @@\n', 1)[1]
-        self.assertEqual('\n'.join(line[1:] for line in encoded[:-1].split('\n')), text)
+        self.assertEqual('\n'.join(line[1:] for line in encoded[:-1].split('\n')),
+                         '\n'.join(text.splitlines()))
+        repair_tick.scan_fix_instructions(self.c, 'fix it\rSECRET', SOURCE, self.root / 'instructions-scan.json')
+        self.assertIn('@@ -0,0 +1,2 @@\n+fix it\n+SECRET\n', self.c.secret_scan_diff.call_args.args[0])
 
     def test_preparation_scans_full_source_at_real_path(self):
         self.prepare()

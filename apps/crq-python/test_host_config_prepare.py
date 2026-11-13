@@ -53,8 +53,10 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
             if argv[:3] == ['systemctl', '--user', 'daemon-reload']:
                 return ''
             return self.stopped(argv)
+        self.command('tag', '-a', 'crq-runner/20261016-7', self.before, '-m', 'owner fixture approval')
         with mock.patch.object(host, 'run', side_effect=stopped):
-            host.prepare(self.root, self.overlay, self.raw, self.base / 'installed')
+            host.prepare(self.root, self.overlay, self.raw, self.base / 'installed',
+                         'crq-runner/20261016-7')
         self.assertTrue((self.runner / 'state/runner-disabled').is_file())
         self.assertTrue((self.base / 'installed/crq-tick.service').is_file())
         self.assertIn(['systemctl', '--user', 'daemon-reload'], calls)

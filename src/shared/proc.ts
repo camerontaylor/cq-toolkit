@@ -529,8 +529,20 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
     // A late leader can exit during signal grace while its background children
     // survive. Keep its process-group identity for the executable's final sweep.
     if (!processSignalCleanupStarted()) activeChildren.delete(child);
-    stdout.flush();
-    stderr.flush();
+    // `flush` re-delivers the final unterminated line to the driver's
+    // listeners. A listener THROW must neither skip the other stream's flush
+    // nor leave `close` pending nor escape this handler as an uncaught
+    // exception: both flushes are attempted, the settle always runs, and a
+    // listener failure is reported as a process warning (contract at
+    // `ManagedChild.close`).
+    let flushError: unknown;
+    for (const stream of [stdout, stderr]) {
+      try {
+        stream.flush();
+      } catch (error) {
+        flushError ??= error;
+      }
+    }
     settleClose({
       code,
       signal,
@@ -540,6 +552,11 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
       droppedBytes: stdout.droppedBytes + stderr.droppedBytes,
       ...(stdout.oversizedLine || stderr.oversizedLine ? { oversizedLine: true } : {}),
     });
+    if (flushError !== undefined) {
+      process.emitWarning(
+        `spawnManaged: a stdout/stderr listener threw during the final flush: ${String(flushError)}`,
+      );
+    }
   });
 
   // A dead child's full stdin pipe surfaces as EPIPE — a write into a

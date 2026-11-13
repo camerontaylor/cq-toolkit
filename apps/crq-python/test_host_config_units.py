@@ -41,6 +41,7 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
 
     def test_obsolete_installed_and_loaded_units_block_mutation(self):
         self.rendered()
+        self.command('tag', '-a', 'crq-runner/20261016-8', self.before, '-m', 'prepare fixture')
         for listing in ('list-unit-files', 'list-units'):
             for state in ('active', 'activating', 'reloading', 'deactivating', 'unknown'):
                 for operation in ('prepare', 'switch'):
@@ -58,7 +59,8 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
                         with mock.patch.object(host, 'run', side_effect=systemctl):
                             with self.assertRaisesRegex(ValueError, 'crq-obsolete.service'):
                                 if operation == 'prepare':
-                                    host.prepare(self.root, self.overlay, self.raw, self.base / 'installed')
+                                    host.prepare(self.root, self.overlay, self.raw,
+                                                 self.base / 'installed', 'crq-runner/20261016-8')
                                 else:
                                     host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
                         self.assertTrue(any(argv[2] == listing for argv in calls if argv[0] == 'systemctl'))

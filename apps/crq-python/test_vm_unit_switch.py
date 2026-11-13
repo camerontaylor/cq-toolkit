@@ -178,7 +178,8 @@ def phases():
                    "process": {"pid": 4001, "alive": True,
                                "starttime": "100"}},
         "queue": {"before_sha256": "1" * 64, "after_sha256": "1" * 64,
-                  "baseline_sha256": "0" * 64, "restored_sha256": "0" * 64},
+                  "baseline_sha256": STATE["queue.json"],
+                  "restored_sha256": STATE["queue.json"]},
         "records_before": [HISTORY_PATH],
         "records_after": [HISTORY_PATH],
         "completions_before": 4, "completions_after": 4,
@@ -211,7 +212,8 @@ def phases():
                                     "after": {"pid": 4003, "alive": True,
                                               "starttime": "102"}}},
         "queue": {"before_sha256": "2" * 64, "after_sha256": "2" * 64,
-                  "baseline_sha256": "0" * 64, "restored_sha256": "0" * 64},
+                  "baseline_sha256": STATE["queue.json"],
+                  "restored_sha256": STATE["queue.json"]},
         "before": observation(NODE), "after": observation(NODE),
     }
     harvest_node = _record("harvest-node", {
@@ -712,6 +714,30 @@ class HarnessCheckTests(unittest.TestCase):
                 checks, problems = harness.build_checks(value)
                 self.assertFalse(checks["drain_alive_refused"])
                 self.assertTrue(problems)
+
+    def test_drain_refusal_binds_queue_digests_to_prepared_baseline(self):
+        # The verifier binds to the prepared baseline, never the post-seed
+        # before-snapshot: the guest seeds the queue before before_cli = snapshot().
+        for name, check in (("drain-alive", "drain_alive_refused"),
+                            ("drain-ambiguous", "drain_ambiguous_refused")):
+            for label, digest in (("baseline-mismatch", "9" * 64),
+                                  ("unbound-pair", "0" * 64)):
+                with self.subTest(phase=name, case=label):
+                    value = phases()
+                    value[name]["queue"]["baseline_sha256"] = digest
+                    if label == "unbound-pair":
+                        value[name]["queue"]["restored_sha256"] = digest
+                    checks, problems = harness.build_checks(value)
+                    self.assertFalse(checks[check])
+                    self.assertTrue(problems)
+            with self.subTest(phase=name, case="seeded-before-snapshot"):
+                value = phases()
+                # In a real guest run both snapshots see the seeded digest;
+                # the baseline binding must not depend on either of them.
+                for key in ("before", "after"):
+                    value[name][key]["state"]["queue.json"] = "8" * 64
+                checks, _ = harness.build_checks(value)
+                self.assertTrue(checks[check])
 
     def test_harvest_and_recovery_reject_absent_preservation_fields(self):
         for label, mutate in (
@@ -1820,6 +1846,31 @@ class SourceCommitTests(unittest.TestCase):
         with mock.patch.object(harness.subprocess, "run", side_effect=fake):
             with self.assertRaisesRegex(ValueError, "runner source"):
                 harness.source_commit_check(pathlib.Path("/repo"), SOURCE_COMMIT)
+
+
+class CommittedBlobTests(unittest.TestCase):
+    """Uploads are bound to the validated commit's exact bytes."""
+
+    def test_a_blob_is_read_from_the_validated_commit(self):
+        calls = []
+
+        def fake(argv, **kwargs):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, b"print('proof')\n", b"")
+
+        with mock.patch.object(harness.subprocess, "run", side_effect=fake):
+            self.assertEqual(harness.committed_blob(SOURCE_COMMIT, "unit-switch.py"),
+                             b"print('proof')\n")
+        self.assertEqual(calls[0][:4], ["git", "-C", str(harness.REPO), "cat-file"])
+        self.assertEqual(calls[0][4:], ["blob", SOURCE_COMMIT + ":apps/crq-python/ops/unit-switch.py"])
+
+    def test_a_missing_blob_refuses_instead_of_uploading(self):
+        def fake(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 128, b"", b"fatal: bad object")
+
+        with mock.patch.object(harness.subprocess, "run", side_effect=fake):
+            with self.assertRaisesRegex(RuntimeError, "could not read unit-switch.py"):
+                harness.committed_blob(SOURCE_COMMIT, "unit-switch.py")
 
 
 class RunnerSourceArchiveTests(unittest.TestCase):

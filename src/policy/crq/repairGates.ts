@@ -78,9 +78,9 @@ export function fullSourceScanPatch(path: string, sourceText: string): string {
   );
 }
 
-/** `scan_fix_instructions`' patch, exact bytes (`split('\n')`, trailing empty kept). */
+/** `scan_fix_instructions`' patch, exact bytes (Python `splitlines()` boundaries). */
 export function fixInstructionsScanPatch(instructions: string): string {
-  const lines = instructions.split('\n');
+  const lines = pythonSplitlines(instructions);
   return (
     'diff --git a/' +
     INSTRUCTIONS_PATCH_PATH +
