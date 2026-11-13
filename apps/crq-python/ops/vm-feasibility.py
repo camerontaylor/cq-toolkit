@@ -962,14 +962,22 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
             and (reboot.get("after_phase") or {}).get("dependency", {}).get("rc")
             not in (0, None)),
         "manager_restarted": (
-            (manager.get("before") or {}).get("manager", {}).get("pid")
+            (((manager.get("before") or {}).get("manager") or {})
+             .get("pid") or 0) > 0
+            and (((manager.get("after") or {}).get("manager") or {})
+                 .get("pid") or 0) > 0
+            and (manager.get("before") or {}).get("manager", {}).get("pid")
             != (manager.get("after") or {}).get("manager", {}).get("pid")
-            and (manager.get("after") or {}).get("manager", {}).get("pid", 0) > 0
+            and bool(((manager.get("before") or {}).get("manager") or {})
+                     .get("invocation_id"))
+            and bool(((manager.get("after") or {}).get("manager") or {})
+                     .get("invocation_id"))
             and (manager.get("before") or {}).get("manager", {}).get("invocation_id")
             != (manager.get("after") or {}).get("manager", {}).get("invocation_id")),
         "boot_id_changed": (
-            reboot.get("boot_id_before") != reboot.get("boot_id_after")
-            and bool(reboot.get("boot_id_after"))),
+            bool(reboot.get("boot_id_before"))
+            and bool(reboot.get("boot_id_after"))
+            and reboot.get("boot_id_before") != reboot.get("boot_id_after")),
         "metadata_equal": not restore_changes,
         "metadata_changes": restore_changes,
         "mask_metadata_equal": not reboot_changes,
