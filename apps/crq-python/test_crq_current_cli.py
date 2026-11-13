@@ -116,6 +116,37 @@ class CurrentTest(CurrentFixture, unittest.TestCase):
                 crq.main()
         self.assertEqual(crq.QUEUE.read_text(), "{not json")
 
+    def test_reconcile_gets_its_own_forge_budget_when_the_shard_budget_is_spent(self):
+        """Reconciliation must not inherit an exhausted tick budget and fail silently.
+
+        Regression for 2026-11-13: reconcile_fix_prs ran last inside the tick's shared
+        24-request, 30-second window and swallowed RefreshExhausted per run, so a
+        starving tick projected nothing for six hours while eleven merged repairs sat
+        stuck at the delivered canonical row, with no log line to say so.
+        """
+        seen = {}
+        shard = crq.ForgeBudget(requests=0)
+        own = crq.ForgeBudget(requests=80, seconds=60)
+        made = []
+
+        def factory(*args, **kwargs):
+            budget = shard if not made else own
+            made.append(budget)
+            return budget
+
+        def capture(*args, **kwargs):
+            seen['budget'] = crq._FORGE_BUDGET
+
+        with mock.patch.object(crq, 'ForgeBudget', side_effect=factory), \
+             mock.patch.object(crq, 'fetch'), mock.patch.object(crq, 'write_status'), \
+             mock.patch.object(crq, 'write_heartbeat'), mock.patch.object(crq, 'notify_owner'), \
+             mock.patch.object(crq, 'enroll', return_value=[]), \
+             mock.patch.object(crq, 'discover_merged', return_value=[]), \
+             mock.patch.object(crq.repair_tick, 'reconcile_fix_prs', side_effect=capture):
+            crq.tick()
+        self.assertIs(seen['budget'], own)
+        self.assertTrue(seen['budget'].available())
+
     def test_selective_start_refuses_and_caps_prevent_capture(self):
         item = self.enroll()
         with mock.patch.object(crq, "fetch"), mock.patch.object(crq, "enroll", return_value=[]), \

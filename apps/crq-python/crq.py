@@ -3432,7 +3432,11 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         log += deliver_pending_review_refreshes(q)
         repair_tick.backfill(sys.modules[__name__], q)
         repair_tick.archive_legacy(sys.modules[__name__], q)
-        with forge_window(budget):
+        # Reconciliation runs last and inherits a spent budget: the tick shard budget
+        # (24 requests, 30 s from the first read) is consumed by deferred refresh,
+        # discovery, review delivery and backfill before this point, and reconcile
+        # swallows the resulting exhaustion per run, so a starved pass is silent.
+        with forge_window(ForgeBudget(requests=80, seconds=60)):
             repair_tick.reconcile_fix_prs(sys.modules[__name__], q)
     prev = parse_iso(q.get("last_tick"))
     stale_min = CONFIG.get("stale_alarm_min", 36)
