@@ -117,11 +117,13 @@ export const gitSubprocess = (
   // variant that does not know BatchMode would only fail earlier, which the
   // timeout below bounds anyway. With no env vars set, the caller's resolved
   // core.sshCommand stays the base command so its options survive; plain ssh
-  // applies only when nothing is configured. Any existing BatchMode value is
-  // dropped first: OpenSSH honors the first occurrence of an option, so a
-  // configured `-oBatchMode=no` would win over an appended `-oBatchMode=yes`.
+  // applies only when nothing is configured. Any existing BatchMode option is
+  // dropped first, in both its attached (`-oBatchMode=no`) and separated
+  // (`-o BatchMode=no`) forms: OpenSSH honors the first occurrence of an
+  // option, so a configured `BatchMode=no` would win over an appended
+  // `-oBatchMode=yes`.
   const enforceBatchMode = (command: string): string =>
-    `${command.replace(/(^|[\s"'])-oBatchMode=\S+([\s"']|$)/gi, '$1').trim()} -oBatchMode=yes`;
+    `${command.replace(/(^|[\s"'])-o\s*batchmode=\S+([\s"']|$)/gi, '$1').trim()} -oBatchMode=yes`;
   if (env['GIT_SSH'] === undefined && env['GIT_SSH_COMMAND'] === undefined) {
     const base = configuredSshCommand?.trim() || 'ssh';
     env['GIT_SSH_COMMAND'] = enforceBatchMode(base);

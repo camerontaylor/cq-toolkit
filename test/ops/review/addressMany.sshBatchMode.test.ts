@@ -1,7 +1,9 @@
 // Focused unit tests for gitSubprocess batch-mode enforcement in addressMany.
 // Regression coverage for the CodeRabbit/Codex finding: OpenSSH honors the
 // first occurrence of an option, so appending `-oBatchMode=yes` after a
-// configured `-oBatchMode=no` left interactive prompts enabled.
+// configured `-oBatchMode=no` left interactive prompts enabled. Both the
+// attached (`-oBatchMode=no`) and separated (`-o BatchMode=no`) forms must be
+// normalized before the enforcement option is appended.
 import { expect, test } from 'vitest';
 import { gitSubprocess } from '../../../src/ops/review/addressMany.js';
 
@@ -36,4 +38,17 @@ test('conflicting BatchMode in the middle is replaced, other options survive', (
 
 test('case-insensitive match replaces -oBatchMode=No', () => {
   expect(sshCommand('ssh -oBatchMode=No')).toBe('ssh -oBatchMode=yes');
+});
+
+test('separated -o BatchMode=no is replaced when both SSH env vars are unset', () => {
+  const previousGitSsh = process.env['GIT_SSH'];
+  const previousGitSshCommand = process.env['GIT_SSH_COMMAND'];
+  delete process.env['GIT_SSH'];
+  delete process.env['GIT_SSH_COMMAND'];
+  try {
+    expect(sshCommand('ssh -o BatchMode=no -p 2222')).toBe('ssh -p 2222 -oBatchMode=yes');
+  } finally {
+    if (previousGitSsh !== undefined) process.env['GIT_SSH'] = previousGitSsh;
+    if (previousGitSshCommand !== undefined) process.env['GIT_SSH_COMMAND'] = previousGitSshCommand;
+  }
 });
