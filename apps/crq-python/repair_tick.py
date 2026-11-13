@@ -305,15 +305,17 @@ def record_terminal_failure(c, q, item, record, verdicts, expected, job_id, exc)
         item['last_error'] = 'repair_failed; needs human'
     c.save_queue(q)  # terminal identity before authoritative write-back
     mark_finding_outcome(c, expected, failure)
-    record_unpublished_siblings(c, record, job_id)
+    record_unpublished_siblings(c, record, {job_id})
 
 
-def record_unpublished_siblings(c, record, job_id):
+def record_unpublished_siblings(c, record, handled):
     """A failed run can never publish. A FIXED sibling records no outcome of
-    its own (only publication fixes a finding), so give each verified sibling
-    an explicit decision instead of leaving it bound to a dead run."""
+    its own (only publication fixes a finding), so give each verified sibling an
+    explicit decision instead of leaving it bound to a dead run. `handled` are
+    the jobs whose own outcome the caller records. Idempotent, so the terminal
+    replay path can repeat it after a failed ledger write."""
     for other in record['jobs']:
-        if other == job_id:
+        if other in handled:
             continue
         try:
             result = json.loads((c.STATE / 'repair' / other / 'result.json').read_text())
@@ -337,6 +339,7 @@ def harvest(c, q, item, dry=False):
             # A terminal local failure can outlive a failed ledger write. Replay
             # retained FAILED outcomes through the ledger's idempotent event chain.
             if not dry and record['state'] == 'failed':
+                handled = set()
                 for result in record.get('verdicts', []):
                     if (result.get('verdict') != 'FAILED'
                             or not result.get('reason', '').startswith('invalid repair result: ')):
@@ -346,9 +349,13 @@ def harvest(c, q, item, dry=False):
                     expected = json.loads((c.STATE / 'repair/inbox' / (result['job'] + '.json')).read_text())
                     if expected.get('job') != result['job'] or expected.get('item') != item['id']:
                         raise ValueError('terminal repair job identity mismatch')
+                    handled.add(result['job'])
                     if expected.get('canonical_finding_id'):
                         c.save_queue(q)  # also retry any prior failed terminal save
                         mark_finding_outcome(c, expected, result)
+                # A write-back that failed before the sibling decision is replayed
+                # here; every sibling decision is idempotent.
+                record_unpublished_siblings(c, record, handled)
             if not dry and record.get('verdicts') and hasattr(c, 'WT_ROOT') and hasattr(c, 'CLONE'):
                 from crq_repair.retain import cleanup_harvested
                 for result in record['verdicts']:
