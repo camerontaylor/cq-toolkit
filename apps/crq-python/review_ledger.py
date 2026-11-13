@@ -398,19 +398,21 @@ class ArtifactStore:
             raise IntegrityError("missing or corrupt retained artifact")
 
     def put_file(self, filename):
+        directory = self.root / "sha256"
+        directory.mkdir(parents=True, exist_ok=True)
         hasher = hashlib.sha256()
-        with Path(filename).open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                hasher.update(chunk)
+        with tempfile.NamedTemporaryFile(dir=directory, delete=False) as stream:
+            with Path(filename).open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+                    stream.write(chunk)
+            stream.flush(); os.fsync(stream.fileno()); temporary = stream.name
         ident = hasher.hexdigest()
-        destination = self.root / "sha256" / ident
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if not destination.exists():
-            with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
-                with Path(filename).open("rb") as source:
-                    shutil.copyfileobj(source, stream)
-                stream.flush(); os.fsync(stream.fileno()); temporary = stream.name
-            os.replace(temporary, destination); fsync_dir(destination.parent)
+        destination = directory / ident
+        if destination.exists():
+            os.unlink(temporary)
+        else:
+            os.replace(temporary, destination); fsync_dir(directory)
         reference = {"sha256": ident, "location": str(destination)}
         self.verify(reference)
         return reference
