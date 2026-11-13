@@ -18,6 +18,7 @@ ancestry modes through the fixture rehearsal at the pinned revision.
 import hashlib
 import importlib.util
 import json
+import pathlib
 import os
 from pathlib import Path
 import shutil
@@ -757,6 +758,55 @@ class PreflightSplitTests(RunbookFixture):
         self.assertEqual(phase["phase"], "recovery_required")
         self.assertFalse(phase["pre_hold_restored"])
         self.assertIn("start failed", phase["restore_error"])
+
+    def test_settle_timeout_after_the_split_restores_and_releases(self):
+        # F4, settle case: the one-hour wait runs after the split, so a
+        # timeout still has this run's own stop intent to undo. It is a
+        # pre-preflight failure: every unit in stopped_pre is inactive, so
+        # the run restores them and releases its own hold.
+        units = FakeUnits(self.marker_path)
+        run = self.run_runbook(self.args(), units)
+        with mock.patch.object(
+                run, "wait_services_settle",
+                side_effect=TimeoutError("long services did not settle")):
+            with self.assertRaisesRegex(TimeoutError, "did not settle"):
+                run.run()
+        stopped = ["crq-backfill.timer", "crq-repair.path", "crq-repair.timer"]
+        self.assertEqual(sorted(run.stopped_pre), stopped)
+        self.assertEqual(units.started, stopped, "every unit this run stopped")
+        self.assertTrue(run.pre_hold_restored)
+        self.assertIsNone(run.pre_hold_restore_error)
+        self.assertFalse(self.marker_path.exists(), "own hold released")
+        phase = rb.load_json(run.output_dir / "phase.json")
+        self.assertEqual(phase["phase"], "refused_released")
+        self.assertEqual(phase["stopped_pre"], stopped)
+
+    def test_partial_split_stop_keeps_the_hold_and_names_the_units(self):
+        # F4, partial-stop case: stop is one multi-unit call, so a failure can
+        # leave a subset stopped. The restore refuses to guess which units
+        # this run owns while an intended stop is still active: it keeps the
+        # hold, records recovery_required, and names the units it would not
+        # act on. Owner recovery, never a half-restored host.
+        units = FakeUnits(self.marker_path)
+        real_stop = units.stop
+
+        def partial_stop(intended):
+            real_stop(intended[:1])
+            raise RuntimeError("systemctl stop failed")
+
+        run = self.run_runbook(self.args(), units)
+        with mock.patch.object(units, "stop", side_effect=partial_stop):
+            with self.assertRaisesRegex(RuntimeError, "stop failed"):
+                run.run()
+        self.assertEqual(units.stopped, ["crq-backfill.timer"])
+        self.assertEqual(units.started, [], "no half restore")
+        self.assertTrue(self.marker_path.exists(), "hold retained")
+        self.assertFalse(run.pre_hold_restored)
+        phase = rb.load_json(run.output_dir / "phase.json")
+        self.assertEqual(phase["phase"], "recovery_required")
+        self.assertFalse(phase["released"])
+        self.assertIn("refusing to act on them", phase["restore_error"])
+        self.assertIn("crq-repair.path", phase["restore_error"])
 
     def test_observation_and_split_happen_under_this_runs_hold(self):
         # Ordering: the marker is claimed before the first inventory read, so
