@@ -1691,6 +1691,31 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(second['next_rung'], 0)
         dispatch_mock.assert_not_called()
 
+    def test_mismatched_pending_mechanical_rung_fails_closed(self):
+        # A pending_mechanical naming a rung whose attempt record is absent or
+        # mismatched must never reach FIXED: no verification attempt exists,
+        # so the resume fails closed instead.
+        job, wt, dispatch = self.changed_fixer_job('crq-run1-F1')
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', side_effect=dispatch), \
+             mock.patch.object(service, 'mechanical',
+                               side_effect=service.DetectorUnavailable('detector offline')):
+            first = service.process(self.config, job, wt)
+        self.assertIn('pending_mechanical', first)
+        self.past(job['job'])
+        # Corrupt the binding: point pending_mechanical at a different rung.
+        path = self.root / 'state/repair' / job['job'] / 'result.json'
+        progress = json.loads(path.read_text())
+        progress['pending_mechanical']['rung'] = 1
+        atomic(path, progress)
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch') as dispatch_mock, \
+             mock.patch.object(service, 'mechanical', return_value={'verify': 'ok'}):
+            second = service.process(self.config, job, wt)
+        self.assertNotEqual(second['verdict'], 'FIXED')
+        self.assertIn('rung does not match', second['reason'])
+        dispatch_mock.assert_not_called()
+
     def test_deterministic_rejection_clears_pending_and_advances_rung(self):
         # 4. A DetectorRejection on resume is deterministic: the pending state
         # is cleared and the rung advances to the next fixer instead of

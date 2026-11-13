@@ -403,10 +403,14 @@ def process(config, job, wt):
                 # is only set (and later popped) before any judge step runs.
                 pending_mechanical = result['pending_mechanical']
                 reason = pending_mechanical['fixer_reason']
-                if (result.get('attempts') and
-                        result['attempts'][-1].get('rung') == 'A' + str(pending_mechanical['rung'])):
-                    result['attempts'][-1]['mechanical'] = mechanical(
-                        config, wt, base, pending_mechanical['commits'], job['job'], attempt_dir)
+                if (not result.get('attempts') or
+                        result['attempts'][-1].get('rung') != 'A' + str(pending_mechanical['rung'])):
+                    # FIXED must never be reachable without a verification
+                    # attempt: a progress/result file naming a rung whose
+                    # attempt record is absent or mismatched fails closed.
+                    raise ValueError('pending_mechanical rung does not match the last attempt; needs revalidation')
+                result['attempts'][-1]['mechanical'] = mechanical(
+                    config, wt, base, pending_mechanical['commits'], job['job'], attempt_dir)
                 result.pop('pending_mechanical', None)
                 result.update(verdict='FIXED', reason=reason, commits=pending_mechanical['commits'])
                 break
@@ -561,6 +565,12 @@ def process(config, job, wt):
             if result.get('pending_judge'):
                 result.pop('pending_judge', None)
                 result['reason'] = 'judge outcome unavailable; needs human'
+                break
+            if isinstance(exc, ValueError) and 'pending_mechanical rung does not match' in str(exc):
+                # A corrupted progress/result binding must fail the job closed,
+                # not advance to a fresh fixer rung as if nothing was pending.
+                result.pop('pending_mechanical', None)
+                result.update(verdict='FAILED', failure_class='evidence')
                 break
             if isinstance(exc, DetectorUnavailable) and result.get('pending_mechanical'):
                 # The detector outage hit this rung's committed candidate:
