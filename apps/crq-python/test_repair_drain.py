@@ -401,7 +401,7 @@ class RepairDrainTest(unittest.TestCase):
             mark.assert_not_called()
         self.assertNotIn('fix_merged', record)
 
-    def test_review_descendant_requires_unchanged_repaired_source_blobs(self):
+    def test_review_descendant_requires_published_changes_to_survive(self):
         def commit_files(base, files):
             self.git('checkout', '-q', '--detach', base)
             for name, text in files.items():
@@ -503,7 +503,7 @@ class RepairDrainTest(unittest.TestCase):
         c.git.assert_not_called()
         c.is_ancestor.assert_not_called()
 
-    def commit_files(self, base, files, message):
+    def commit_files(self, base, files, message, chmod=None):
         self.git('checkout', '-q', '--detach', base)
         for name, text in files.items():
             path = self.clone / name
@@ -513,6 +513,9 @@ class RepairDrainTest(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(text)
         self.git('add', '-A')
+        for name in files if chmod else ():
+            self.git('update-index', '--chmod=' + chmod, name)
+            os.chmod(self.clone / name, 0o755 if chmod == '+x' else 0o644)
         self.git('commit', '-qm', message)
         return self.git('rev-parse', 'HEAD')
 
@@ -527,7 +530,6 @@ class RepairDrainTest(unittest.TestCase):
 
     def containment_client(self):
         return SimpleNamespace(STATE=self.root / 'state', iso=lambda: 'now', git=self.git,
-                               git_raw=self.git_raw,
                                is_ancestor=lambda a, b: subprocess.run(
                                    ['git', '-C', str(self.clone), 'merge-base', '--is-ancestor', a, b],
                                    capture_output=True).returncode == 0)
@@ -590,11 +592,26 @@ class RepairDrainTest(unittest.TestCase):
             'checked = second', 'checked = first')}, 'alter the fix')
         reverted = self.commit_files(published, {'src/app.ts': SOURCE_TEXT}, 'remove the fix')
         deleted = self.commit_files(published, {'src/app.ts': None}, 'delete the anchor')
+        first_line = self.commit_files(base, {'src/app.ts': SOURCE_TEXT.replace(
+            'line one\n', '', 1)}, 'delete the first line')
+        restored_first = self.commit_files(first_line, {'src/app.ts': SOURCE_TEXT}, 'restore the first line')
+        last_line = self.commit_files(base, {'src/app.ts': SOURCE_TEXT.replace(
+            'line sixteen\n', '', 1)}, 'delete the last line')
+        restored_last = self.commit_files(last_line, {'src/app.ts': SOURCE_TEXT}, 'restore the last line')
+        executable = self.commit_files(base, {'src/app.ts': SOURCE_TEXT}, 'make the source executable', chmod='+x')
+        plain = self.commit_files(executable, {'src/app.ts': SOURCE_TEXT}, 'drop the executable bit', chmod='-x')
+        helper = self.commit_files(base, {'src/helper.ts': 'export const checked = 1\n'}, 'fix in the helper')
+        anchor_gone = self.commit_files(helper, {'src/app.ts': None}, 'delete the untouched anchor')
         c = self.containment_client()
         record = self.containment_record('crq-run1-F1', published)
         for head in (altered, reverted, deleted):
             with self.subTest(head=head), self.assertRaisesRegex(ValueError, 'source changed'):
                 repair_tick.merge_head_evidence(c, record, head)
+        for published_head, head in ((first_line, restored_first), (last_line, restored_last),
+                                     (executable, plain), (helper, anchor_gone)):
+            with (self.subTest(published=published_head, head=head),
+                  self.assertRaisesRegex(ValueError, 'source changed')):
+                repair_tick.merge_head_evidence(c, self.containment_record('crq-run1-F1', published_head), head)
         outside = self.commit_files(base, {'src/other.ts': 'unrelated\n'}, 'unrelated branch')
         with self.assertRaisesRegex(ValueError, 'not a descendant'):
             repair_tick.merge_head_evidence(c, record, outside)
@@ -611,10 +628,37 @@ class RepairDrainTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'repository-relative'):
             repair_tick.merge_head_evidence(c, record, formatted)
 
+    def test_merge_head_proof_reads_raw_changed_lines_and_published_modes(self):
+        # Trailing whitespace: the head removes a spaced line the publication
+        # never touched; a stripped patch would read it as the published line.
+        spaced = 'keep\nmarker \ntail\n'
+        base = self.commit_files(self.tip, {'src/app.ts': spaced}, 'review evidence fixture')
+        published = self.commit_files(base, {'src/app.ts': spaced + 'marker\n'}, 'fix app')
+        head = self.commit_files(published, {'src/app.ts': 'keep\ntail\nmarker\n'}, 'drop the spaced marker')
+        proof = repair_tick.merge_head_evidence(
+            self.containment_client(), self.containment_record('crq-run1-F1', published), head)
+        result = proof['containment']['src/app.ts']
+        self.assertEqual(result['status'], 'contained')
+        self.assertIn('-marker \n', result['extra_patch'])
+        # A published mode change that survives an edit is contained, not lost.
+        executable = self.commit_files(base, {'src/app.ts': spaced}, 'make app executable', chmod='+x')
+        kept = self.commit_files(executable, {'src/app.ts': spaced + 'extra\n'}, 'keep the mode')
+        proof = repair_tick.merge_head_evidence(
+            self.containment_client(), self.containment_record('crq-run1-F1', executable), kept)
+        result = proof['containment']['src/app.ts']
+        self.assertEqual(result['status'], 'contained')
+        self.assertTrue(result['mode_checked'])
+        # A published creation with no lines is proved by its presence and mode.
+        created = self.commit_files(base, {'src/empty.ts': ''}, 'create an empty module')
+        gained = self.commit_files(created, {'src/empty.ts': 'export {}\n',
+                                             'src/other.ts': 'unrelated\n'}, 'fill the module')
+        proof = repair_tick.merge_head_evidence(
+            self.containment_client(), self.containment_record('crq-run1-F1', created), gained)
+        self.assertEqual(proof['containment']['src/empty.ts']['status'], 'contained')
+
     def test_merged_fix_reverted_boundary_deletion_is_refused(self):
         # Codex P1: a descendant that restores lines deleted at a file boundary
-        # passes the reverse check (the restored copy sits beside the insert
-        # position); the forward applicability check must refuse it.
+        # passed a pure reverse-apply check; the published lines are compared.
         base = self.commit_files(self.tip, {'src/app.ts': SOURCE_TEXT}, 'review evidence fixture')
         published = self.commit_files(base, {'src/app.ts': 'line one (edited)\n' + SOURCE_TEXT[
             len('line one\n'):].replace('    return second\n', '    return second + 0\n')}, 'boundary fix')
@@ -650,15 +694,13 @@ class RepairDrainTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'source changed'):
             repair_tick.merge_head_evidence(self.containment_client(), record, reverted)
 
-    def test_merged_fix_patch_captured_unstripped_survives_blank_context(self):
-        # Codex P2: the stripping git wrapper deletes a blank final context
-        # line and corrupts the patch against its hunk header; the containment
-        # patch is captured unstripped.
+    def test_merged_fix_blank_context_survives_later_whitespace_edit(self):
+        # Codex P2: a stripped patch loses blank and trailing-whitespace lines.
+        # The containment patches are captured raw, so this stays accepted.
         source = SOURCE_TEXT.replace('line fifteen\n', '\n')
         fixed = source.replace('    second = first\n', '    second = first + 1\n')
         base = self.commit_files(self.tip, {'src/app.ts': source}, 'review evidence fixture')
         published = self.commit_files(base, {'src/app.ts': fixed}, 'fix app')
-        # A later whitespace-only edit keeps the blank final context line.
         descendant = self.commit_files(published, {'src/app.ts': fixed + ' \n'}, 'trailing whitespace edit')
         record = self.containment_record('crq-run1-F1', published)
         proof = repair_tick.merge_head_evidence(self.containment_client(), record, descendant)
@@ -1321,13 +1363,9 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(record['state'], 'stale')
         self.assertEqual(result.read_bytes(), before)
 
-    def git(self, *args, env=None):
+    def git(self, *args):
         return subprocess.run(['git', '-C', str(self.clone), *args], check=True,
-                              capture_output=True, text=True, env=env).stdout.strip()
-
-    def git_raw(self, *args, env=None):
-        return subprocess.run(['git', '-C', str(self.clone), *args], check=True,
-                              capture_output=True, text=True, env=env).stdout
+                              capture_output=True, text=True).stdout.strip()
 
     def item(self, item_id, run, jobs, open_pr, state='queued'):
         return {'id': item_id, 'pr': 1, 'kind': 'open' if open_pr else 'merged', 'state': 'repairing',
@@ -2002,16 +2040,8 @@ class CanonicalFixedProjectionTest(unittest.TestCase):
         ledger.validate_sequence([self.review, confirmed, delivered, self.fixed])
         self.info = {'number': 99, 'state': 'MERGED', 'headRefOid': self.actual,
                      'mergeCommit': {'oid': self.merge}}
-        def git_with_env(*args, env=None):
-            return subprocess.run(['git', '-C', str(self.f.root), *args], check=True,
-                                  capture_output=True, text=True, env=env).stdout.strip()
-
-        def git_raw_with_env(*args, env=None):
-            return subprocess.run(['git', '-C', str(self.f.root), *args], check=True,
-                                  capture_output=True, text=True, env=env).stdout
         self.c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: self.at,
-                                 pr_info=lambda _: self.info, git=git_with_env,
-                                 git_raw=git_raw_with_env,
+                                 pr_info=lambda _: self.info, git=self.f.git,
                                  is_ancestor=lambda a, b: subprocess.run(
                                      ['git', '-C', str(self.f.root), 'merge-base', '--is-ancestor', a, b],
                                      capture_output=True).returncode == 0)

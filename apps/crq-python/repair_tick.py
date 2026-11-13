@@ -5,7 +5,6 @@ import review_receipt
 import copy
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import tempfile
@@ -881,51 +880,52 @@ def published_change_base(c, first):
     return lineage[1] if len(lineage) > 1 else None
 
 
-def git_raw(c, *args, env=None):
-    """Unstripped git stdout; falls back to the stripping wrapper (fail closed)."""
-    raw = getattr(c, 'git_raw', None)
-    if raw is not None:
-        return raw(*args, env=env)
-    return c.git(*args, env=env)
+def diff_changed_lines(patch):
+    """Added and removed lines of a -U0 diff, without file or hunk headers."""
+    added, removed, in_hunk = [], [], False
+    for line in patch.splitlines():
+        if line.startswith('diff --git '):
+            in_hunk = False
+        elif line.startswith('@@'):
+            in_hunk = True
+        elif in_hunk and line.startswith('+'):
+            added.append(line[1:])
+        elif in_hunk and line.startswith('-'):
+            removed.append(line[1:])
+    return added, removed
 
 
-def published_change_patch(c, first, parent, published, path):
-    """Full-context diff of the published span for exactly one path.
+def path_diff(c, tmp, name, args):
+    """Write a diff through --output so trailing whitespace is not stripped."""
+    target = Path(tmp) / name
+    args = list(args)
+    args.insert(args.index('--'), '--output=' + str(target))
+    c.git(*args)
+    return target.stat().st_size, target.read_text(encoding='utf-8', errors='surrogateescape')
 
-    The output is captured unstripped: the production git wrapper strips
-    stdout, which would delete a blank final context line from the patch and
-    corrupt it against the hunk header's line counts.
-    """
-    options = ['--no-color', '--no-ext-diff', '--no-textconv', '--binary', '--no-renames', '-U3']
+
+def published_change_patch(c, tmp, name, first, parent, published, path):
+    """Zero-context diff of the published span for exactly one path."""
+    options = ['--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', '-U0']
     if parent:
-        return git_raw(c, 'diff', *options, parent, published, '--', path)
-    return git_raw(c, 'diff-tree', '-p', '--root', '--no-commit-id', *options, first, '--', path)
+        args = ['diff', *options, parent, published, '--', path]
+    else:
+        args = ['diff-tree', '-p', '--root', '--no-commit-id', *options, first, '--', path]
+    return path_diff(c, tmp, name, args)
 
 
-def published_change_contained(c, patch_file, env):
-    """Reverse the published change against the head index; clean means contained.
+def head_change_patch(c, tmp, name, published, actual_head, path):
+    """Zero-context diff of the commits added between publication and the head."""
+    options = ['--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', '-U0']
+    return path_diff(c, tmp, name, ['diff', *options, published, actual_head, '--', path])
 
-    Two checks, both required. The reverse check must apply cleanly (the
-    published post-image is still present at the head). The forward check must
-    fail (the change cannot be applied again). A descendant that restored the
-    deleted lines of a boundary hunk passes the reverse check -- the restored
-    copy sits beside the hunk's insert position -- but passes the forward check
-    too, because the published pre-image is back; forward applicability proves
-    the change was lost, so that case is refused.
-    """
-    try:
-        c.git('apply', '--cached', '--reverse', '--check', '--unidiff-zero',
-              '--whitespace=nowarn', str(patch_file), env=env)
-    except Exception:
-        # Any apply failure is a refusal, never an acceptance (fail closed).
-        return False
-    try:
-        c.git('apply', '--cached', '--check', '--unidiff-zero',
-              '--whitespace=nowarn', str(patch_file), env=env)
-    except Exception:
-        return True
-    # The published change still applies: the head lost it (or never had it).
-    return False
+
+def change_undone(published, head):
+    """Lines the head diff undoes relative to the published changed lines."""
+    published_added, published_removed = published
+    head_added, head_removed = head
+    return (sorted(set(published_added) & set(head_removed)) +
+            sorted(set(published_removed) & set(head_added)))
 
 
 def extra_commits(c, published, actual_head):
@@ -974,12 +974,11 @@ def merge_head_evidence(c, record, actual_head):
     total_bytes = 0
     published_parent = published_change_base(c, commits[0])
     with tempfile.TemporaryDirectory(prefix='cq-repair-containment-') as tmp:
-        env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / 'index'))
-        c.git('read-tree', actual_head, env=env)
         for index, path in enumerate(sorted(paths)):
             source_path({'path': path})
             before = repair_source_entry(c, published, path)
             after = repair_source_entry(c, actual_head, path)
+            parent_entry = repair_source_entry(c, published_parent, path) if published_parent else None
             evidence['source_blobs'][path] = before[1] if before else None
             evidence['source_modes'][path] = before[0] if before else None
             result = {'published': before, 'actual': after}
@@ -988,36 +987,56 @@ def merge_head_evidence(c, record, actual_head):
                 result['status'] = 'identical'
                 continue
             if before is not None and after is None:
+                # A live compared path is gone at the head, published span or not.
                 raise ValueError('merged repair source changed; needs revalidation: ' + path)
-            if after is not None and before is not None and after[0] != before[0]:
-                # The publication's mode change was undone at the head (for
-                # example the executable bit restored); git apply does not
-                # catch a reverted mode on its own.
-                raise ValueError('merged repair source changed; needs revalidation: ' + path)
-            patch = published_change_patch(c, commits[0], published_parent, published, path)
-            if not patch.strip():
+            published_size, published_patch = published_change_patch(
+                c, tmp, 'published-' + str(index) + '.diff',
+                commits[0], published_parent, published, path)
+            total_bytes += published_size
+            if published_size > MAX_CONTAINMENT_PATCH_BYTES or total_bytes > MAX_CONTAINMENT_TOTAL_BYTES:
+                raise ValueError('published repair change too large to verify; needs revalidation: ' + path)
+            if not published_patch.strip():
                 # The published span never changed this path (for example an
                 # anchor with its fix in a helper): there is no change to lose.
                 result.update(status='unchanged-by-publication', published_parent=published_parent)
                 continue
-            size = len(patch.encode('utf-8', 'surrogateescape'))
-            total_bytes += size
-            if size > MAX_CONTAINMENT_PATCH_BYTES or total_bytes > MAX_CONTAINMENT_TOTAL_BYTES:
+            if before is None and after is not None:
+                # The published span deleted the path and the head brought it back.
+                raise ValueError('merged repair source changed; needs revalidation: ' + path)
+            if any(line.startswith('Binary files ') or line.startswith('GIT binary patch')
+                   for line in published_patch.splitlines()):
+                raise ValueError('merged repair source changed; needs revalidation: ' + path)
+            published_lines = diff_changed_lines(published_patch)
+            created = before is not None and parent_entry is None
+            mode_changed = created or (parent_entry is not None and parent_entry[0] != before[0])
+            if not (published_lines[0] or published_lines[1] or mode_changed):
+                raise ValueError('merged repair source changed; needs revalidation: ' + path)
+            head_size, head_patch = head_change_patch(
+                c, tmp, 'head-' + str(index) + '.diff', published, actual_head, path)
+            total_bytes += head_size
+            if head_size > MAX_CONTAINMENT_PATCH_BYTES or total_bytes > MAX_CONTAINMENT_TOTAL_BYTES:
                 raise ValueError('published repair change too large to verify; needs revalidation: ' + path)
-            patch_file = Path(tmp) / ('published-' + str(index) + '.patch')
-            patch_file.write_text(patch.rstrip('\n') + '\n', encoding='utf-8')
-            if not published_change_contained(c, patch_file, env):
+            undone = change_undone(published_lines, diff_changed_lines(head_patch))
+            if undone or (mode_changed and after[0] != before[0]):
                 raise ValueError('merged repair source changed; needs revalidation: ' + path)
             result.update(status='contained', published_parent=published_parent,
-                          patch_sha256=hashlib.sha256(patch.encode('utf-8', 'surrogateescape')).hexdigest(),
-                          patch_bytes=size, patch_truncated=False, patch_omitted=False)
-            kept = min(MAX_RECORDED_PATCH_BYTES, patch_budget)
-            if kept > 0:
-                result['patch'] = patch[:kept]
-                result['patch_truncated'] = len(patch) > kept
-                patch_budget -= min(kept, len(patch))
-            else:
-                result['patch_omitted'] = True
+                          mode_checked=mode_changed,
+                          changed_added=len(published_lines[0]),
+                          changed_removed=len(published_lines[1]),
+                          patch_sha256=hashlib.sha256(
+                              published_patch.encode('utf-8', 'surrogateescape')).hexdigest(),
+                          patch_bytes=published_size,
+                          extra_patch_sha256=hashlib.sha256(
+                              head_patch.encode('utf-8', 'surrogateescape')).hexdigest(),
+                          extra_patch_bytes=head_size)
+            for key, text in (('patch', published_patch), ('extra_patch', head_patch)):
+                kept = min(MAX_RECORDED_PATCH_BYTES, patch_budget)
+                if kept > 0:
+                    result[key] = text[:kept]
+                    result[key + '_truncated'] = len(text) > kept
+                    patch_budget -= min(kept, len(text))
+                else:
+                    result[key + '_omitted'] = True
     return evidence
 
 
