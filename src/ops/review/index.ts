@@ -95,6 +95,22 @@ export type {
 } from './fixReviewItem.js';
 export { makeFixReviewItem } from './fixReviewItem.js';
 export { defaultFixPrompt } from './prompts/defaultFixPrompt.js';
+// C1 finding-fix op: the typed-disposition / typed-failure-class sibling of
+// review.fixItem. The binding is carried and echoed, never verified here.
+export type {
+  FixFindingBinding,
+  FixFindingDeps,
+  FixFindingFailureClass,
+  FixFindingInput,
+  FixFindingOp,
+  FixFindingReport,
+  FixFindingResult,
+} from './fixFinding.js';
+export {
+  MAX_FIX_FINDING_INSTRUCTIONS_CHARS,
+  MAX_SERIALIZED_DISPATCH_CHARS,
+  makeFixFinding,
+} from './fixFinding.js';
 export { makeReviewAddress, addressBatches } from './address.js';
 export type {
   ReviewAddressInput,

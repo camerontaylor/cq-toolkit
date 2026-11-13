@@ -18,7 +18,7 @@
 //      boundary, and driverKeyEnv's provider → key-env map.
 //   4. parseSelfhostArgs overrides are honored and never touch the frozen
 //      defaults (parse returns fresh plain data).
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
   driverKeyEnv,
   driverRequiredEnv,
@@ -127,20 +127,33 @@ describe('SelfhostPeak + the peak-aware driver resolution', () => {
 
   test('resolveSelfhostDriver: peak honours the reserved headroom; off-peak the frozen default', () => {
     const at = (iso: string): number => Date.parse(iso);
+    // Explicit empty injection (issue 1185: no ambient default — the env is
+    // always passed): unset keys mean the frozen defaults for both windows.
+    const empty = {};
     // The headroom band selects the PEAK driver, so no Z.ai GLM dispatch can
     // be issued once the peak opens (a run's driver is fixed at its start).
-    expect(resolveSelfhostDriver(at('2026-10-12T05:39:59Z'))).toEqual(SelfhostDefaults.driver);
-    expect(resolveSelfhostDriver(at('2026-10-12T05:40:00Z'))).toEqual(SelfhostPeak.driver);
-    expect(resolveSelfhostDriver(at('2026-10-12T05:59:59Z'))).toEqual(SelfhostPeak.driver);
-    expect(resolveSelfhostDriver(at('2026-10-12T06:00:00Z'))).toEqual(SelfhostPeak.driver);
-    expect(resolveSelfhostDriver(at('2026-10-12T07:00:00Z'))).toEqual(SelfhostPeak.driver);
-    expect(resolveSelfhostDriver(at('2026-10-12T10:00:00Z'))).toEqual(SelfhostDefaults.driver);
-    expect(resolveSelfhostDriver(at('2026-10-12T12:00:00Z'))).toEqual(SelfhostDefaults.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T05:39:59Z'), empty)).toEqual(
+      SelfhostDefaults.driver,
+    );
+    expect(resolveSelfhostDriver(at('2026-10-12T05:40:00Z'), empty)).toEqual(SelfhostPeak.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T05:59:59Z'), empty)).toEqual(SelfhostPeak.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T06:00:00Z'), empty)).toEqual(SelfhostPeak.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T07:00:00Z'), empty)).toEqual(SelfhostPeak.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T10:00:00Z'), empty)).toEqual(
+      SelfhostDefaults.driver,
+    );
+    expect(resolveSelfhostDriver(at('2026-10-12T12:00:00Z'), empty)).toEqual(
+      SelfhostDefaults.driver,
+    );
     // Weekends: headroom and window both off.
-    expect(resolveSelfhostDriver(at('2026-10-17T05:45:00Z'))).toEqual(SelfhostDefaults.driver);
-    expect(resolveSelfhostDriver(at('2026-10-17T07:00:00Z'))).toEqual(SelfhostDefaults.driver);
+    expect(resolveSelfhostDriver(at('2026-10-17T05:45:00Z'), empty)).toEqual(
+      SelfhostDefaults.driver,
+    );
+    expect(resolveSelfhostDriver(at('2026-10-17T07:00:00Z'), empty)).toEqual(
+      SelfhostDefaults.driver,
+    );
     // The entry tests' fixture clock (Tue 2023-11-14T22:13:20Z) is off-peak.
-    expect(resolveSelfhostDriver(1_700_000_000_000)).toEqual(SelfhostDefaults.driver);
+    expect(resolveSelfhostDriver(1_700_000_000_000, empty)).toEqual(SelfhostDefaults.driver);
   });
 
   test('driverRequiredEnv includes the Go route and refuses unknown providers', () => {
@@ -264,5 +277,66 @@ describe('resolveSelfhostDrivers with an errored snapshot', () => {
     expect(() => resolveSelfhostDrivers(readCqEnv({ [SELFHOST_DRIVER_ENV]: 'no-slash' }))).toThrow(
       new RegExp(SELFHOST_DRIVER_ENV),
     );
+  });
+});
+
+describe('issue 1185: drivers resolve from the passed env, never ambient at call time', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  test('a snapshot governs both windows while hostile ambient says otherwise', async () => {
+    const { readCqEnv } = await import('../../src/config/env.js');
+    const cqEnv = readCqEnv({
+      [SELFHOST_DRIVER_ENV]: 'openai/gpt-snap',
+      [SELFHOST_PEAK_DRIVER_ENV]: 'deepseek/deepseek-snap',
+    });
+    // Hostile ambient: the opposite providers on both windows. The resolvers
+    // take an explicit env, so ambient cannot leak into the decision.
+    vi.stubEnv(SELFHOST_DRIVER_ENV, 'anthropic/claude-ambient');
+    vi.stubEnv(SELFHOST_PEAK_DRIVER_ENV, 'zai/glm-ambient');
+    expect(resolveSelfhostDrivers(cqEnv)).toEqual({
+      offPeak: { provider: 'openai', model: 'gpt-snap' },
+      peak: { provider: 'deepseek', model: 'deepseek-snap' },
+    });
+    // Monday 07:00Z is peak, noon off-peak — both follow the snapshot.
+    expect(resolveSelfhostDriver(Date.parse('2026-10-12T07:00:00Z'), cqEnv)).toEqual({
+      provider: 'deepseek',
+      model: 'deepseek-snap',
+    });
+    expect(resolveSelfhostDriver(Date.parse('2026-10-12T12:00:00Z'), cqEnv)).toEqual({
+      provider: 'openai',
+      model: 'gpt-snap',
+    });
+  });
+
+  test('an explicit raw record is read at call time — ambient included when injected', () => {
+    // Raw-record injection is the tests/library seam: the SAME record the
+    // caller passes is what the resolver reads, ambient or not. Passing the
+    // live process env explicitly keeps the old call-time behavior opt-in.
+    const ambient = { [SELFHOST_DRIVER_ENV]: 'openai/gpt-raw' };
+    expect(resolveSelfhostDrivers(ambient).offPeak).toEqual({
+      provider: 'openai',
+      model: 'gpt-raw',
+    });
+    vi.stubEnv(SELFHOST_DRIVER_ENV, 'anthropic/claude-ambient');
+    expect(resolveSelfhostDrivers({}).offPeak).toEqual(SelfhostDefaults.driver);
+    expect(resolveSelfhostDrivers({ ...process.env }).offPeak).toEqual({
+      provider: 'anthropic',
+      model: 'claude-ambient',
+    });
+  });
+
+  test('invalid snapshot values fail loud on both windows, naming the key', async () => {
+    const { readCqEnv } = await import('../../src/config/env.js');
+    expect(() =>
+      resolveSelfhostDrivers(readCqEnv({ [SELFHOST_PEAK_DRIVER_ENV]: 'no-slash-either' })),
+    ).toThrow(new RegExp(SELFHOST_PEAK_DRIVER_ENV));
+    expect(() =>
+      resolveSelfhostDriver(
+        Date.parse('2026-10-12T07:00:00Z'),
+        readCqEnv({ [SELFHOST_PEAK_DRIVER_ENV]: 'a/b/c' }),
+      ),
+    ).toThrow(`${SELFHOST_PEAK_DRIVER_ENV} must be '<provider>/<model>'`);
   });
 });

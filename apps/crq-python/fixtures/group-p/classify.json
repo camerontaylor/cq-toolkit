@@ -717,7 +717,7 @@
       }
     },
     {
-      "name": "sighup-exit-is-transient",
+      "name": "sighup-exit-is-not-transient",
       "source": "crq.classify",
       "input": {
         "ndjson": "",

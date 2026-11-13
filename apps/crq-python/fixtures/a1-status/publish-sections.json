@@ -1,0 +1,2406 @@
+{
+  "schema": "cq.crq-a1-status-vector/v1",
+  "family": "publish-sections",
+  "note": "status_summary.publish utilization/schedule sections and refusals",
+  "cases": [
+    {
+      "name": "utilization-and-schedule",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": {
+            "schema_version": 1,
+            "paths": {
+              "src/a.py": {
+                "review_count": 1,
+                "last_reviewed_at": null
+              },
+              "src/b.py": {
+                "review_count": 2,
+                "last_reviewed_at": null
+              }
+            },
+            "runs": {},
+            "observations": {
+              "2026-11-09T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": "paused"
+              },
+              "2026-11-09T11:12:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-09T11:24:00Z": {
+                "started": true,
+                "pending": false,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-08T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              }
+            }
+          }
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "status": "systemd"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 120,
+            "nominal_utilization": 0.016666666666666666,
+            "cooldown_minutes": 30.0,
+            "observed_ticks_24h": 3,
+            "available_start_opportunities_24h": 2,
+            "idle_while_pending_24h": 1,
+            "idle_with_coverage_candidate_24h": 1,
+            "coverage_reviewed_paths": 2
+          },
+          "schedule": {
+            "id": "crq-tick.timer",
+            "state": "systemd"
+          }
+        },
+        "bytes": "{\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}",
+        "full_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":\"2026-11-09T12:30:00Z\",\"starts_60m\":2,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}"
+      }
+    },
+    {
+      "name": "pending-item-title-lookup-stays-unresolved",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": 7,
+              "title": null,
+              "kind": "open",
+              "band": "interactive",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 1,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "open",
+              "kind": "open",
+              "state": "pending",
+              "pr": 7,
+              "order": 1
+            }
+          ],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": {
+            "schema_version": 1,
+            "paths": {
+              "src/a.py": {
+                "review_count": 1,
+                "last_reviewed_at": null
+              },
+              "src/b.py": {
+                "review_count": 2,
+                "last_reviewed_at": null
+              }
+            },
+            "runs": {},
+            "observations": {
+              "2026-11-09T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": "paused"
+              },
+              "2026-11-09T11:12:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-09T11:24:00Z": {
+                "started": true,
+                "pending": false,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-08T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              }
+            }
+          }
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "status": "systemd"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 120,
+            "nominal_utilization": 0.016666666666666666,
+            "cooldown_minutes": 30.0,
+            "observed_ticks_24h": 3,
+            "available_start_opportunities_24h": 2,
+            "idle_while_pending_24h": 1,
+            "idle_with_coverage_candidate_24h": 1,
+            "coverage_reviewed_paths": 2
+          },
+          "schedule": {
+            "id": "crq-tick.timer",
+            "state": "systemd"
+          }
+        },
+        "bytes": "{\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}",
+        "full_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":7,\"title\":null,\"kind\":\"open\",\"band\":\"interactive\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":\"2026-11-09T12:30:00Z\",\"starts_60m\":2,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":1,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}"
+      }
+    },
+    {
+      "name": "usage-limit-is-the-utilization-cap",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 3,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 3
+          },
+          "coverage": {
+            "schema_version": 1,
+            "paths": {
+              "src/a.py": {
+                "review_count": 1,
+                "last_reviewed_at": null
+              },
+              "src/b.py": {
+                "review_count": 2,
+                "last_reviewed_at": null
+              }
+            },
+            "runs": {},
+            "observations": {
+              "2026-11-09T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": "paused"
+              },
+              "2026-11-09T11:12:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-09T11:24:00Z": {
+                "started": true,
+                "pending": false,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-08T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              }
+            }
+          }
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "status": "systemd"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 72,
+            "nominal_utilization": 0.027777777777777776,
+            "cooldown_minutes": 30.0,
+            "observed_ticks_24h": 3,
+            "available_start_opportunities_24h": 2,
+            "idle_while_pending_24h": 1,
+            "idle_with_coverage_candidate_24h": 1,
+            "coverage_reviewed_paths": 2
+          },
+          "schedule": {
+            "id": "crq-tick.timer",
+            "state": "systemd"
+          }
+        },
+        "bytes": "{\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":72,\"nominal_utilization\":0.027777777777777776,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}",
+        "full_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":\"2026-11-09T12:30:00Z\",\"starts_60m\":2,\"starts_cap\":3,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":72,\"nominal_utilization\":0.027777777777777776,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}"
+      }
+    },
+    {
+      "name": "float-config-cap-keeps-float-tag",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5.0,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {},
+          "coverage": {
+            "schema_version": 1,
+            "paths": {
+              "src/a.py": {
+                "review_count": 1,
+                "last_reviewed_at": null
+              },
+              "src/b.py": {
+                "review_count": 2,
+                "last_reviewed_at": null
+              }
+            },
+            "runs": {},
+            "observations": {
+              "2026-11-09T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": "paused"
+              },
+              "2026-11-09T11:12:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-09T11:24:00Z": {
+                "started": true,
+                "pending": false,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-08T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              }
+            }
+          }
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 5.0
+        },
+        "schedule": {
+          "status": "systemd"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 120.0,
+            "nominal_utilization": 0.016666666666666666,
+            "cooldown_minutes": 30.0,
+            "observed_ticks_24h": 3,
+            "available_start_opportunities_24h": 2,
+            "idle_while_pending_24h": 1,
+            "idle_with_coverage_candidate_24h": 1,
+            "coverage_reviewed_paths": 2
+          },
+          "schedule": {
+            "id": "crq-tick.timer",
+            "state": "systemd"
+          }
+        },
+        "bytes": "{\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120.0,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}",
+        "full_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":\"2026-11-09T12:30:00Z\",\"starts_60m\":2,\"starts_cap\":5.0,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120.0,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}"
+      }
+    },
+    {
+      "name": "default-ledger-when-coverage-missing",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          }
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "status": "systemd"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 120,
+            "nominal_utilization": 0.016666666666666666,
+            "cooldown_minutes": 30.0,
+            "observed_ticks_24h": 0,
+            "available_start_opportunities_24h": 0,
+            "idle_while_pending_24h": null,
+            "idle_with_coverage_candidate_24h": null,
+            "coverage_reviewed_paths": 0
+          },
+          "schedule": {
+            "id": "crq-tick.timer",
+            "state": "systemd"
+          }
+        },
+        "bytes": "{\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":0,\"available_start_opportunities_24h\":0,\"idle_while_pending_24h\":null,\"idle_with_coverage_candidate_24h\":null,\"coverage_reviewed_paths\":0},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}",
+        "full_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":\"2026-11-09T12:30:00Z\",\"starts_60m\":2,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":0,\"available_start_opportunities_24h\":0,\"idle_while_pending_24h\":null,\"idle_with_coverage_candidate_24h\":null,\"coverage_reviewed_paths\":0},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}"
+      }
+    },
+    {
+      "name": "default-ledger-when-coverage-empty",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": {}
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "status": "systemd"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 120,
+            "nominal_utilization": 0.016666666666666666,
+            "cooldown_minutes": 30.0,
+            "observed_ticks_24h": 0,
+            "available_start_opportunities_24h": 0,
+            "idle_while_pending_24h": null,
+            "idle_with_coverage_candidate_24h": null,
+            "coverage_reviewed_paths": 0
+          },
+          "schedule": {
+            "id": "crq-tick.timer",
+            "state": "systemd"
+          }
+        },
+        "bytes": "{\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":0,\"available_start_opportunities_24h\":0,\"idle_while_pending_24h\":null,\"idle_with_coverage_candidate_24h\":null,\"coverage_reviewed_paths\":0},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}",
+        "full_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":\"2026-11-09T12:30:00Z\",\"starts_60m\":2,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":0,\"available_start_opportunities_24h\":0,\"idle_while_pending_24h\":null,\"idle_with_coverage_candidate_24h\":null,\"coverage_reviewed_paths\":0},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}"
+      }
+    },
+    {
+      "name": "default-ledger-when-coverage-null",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": null
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "status": "systemd"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 120,
+            "nominal_utilization": 0.016666666666666666,
+            "cooldown_minutes": 30.0,
+            "observed_ticks_24h": 0,
+            "available_start_opportunities_24h": 0,
+            "idle_while_pending_24h": null,
+            "idle_with_coverage_candidate_24h": null,
+            "coverage_reviewed_paths": 0
+          },
+          "schedule": {
+            "id": "crq-tick.timer",
+            "state": "systemd"
+          }
+        },
+        "bytes": "{\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":0,\"available_start_opportunities_24h\":0,\"idle_while_pending_24h\":null,\"idle_with_coverage_candidate_24h\":null,\"coverage_reviewed_paths\":0},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}",
+        "full_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":\"2026-11-09T12:30:00Z\",\"starts_60m\":2,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":0,\"available_start_opportunities_24h\":0,\"idle_while_pending_24h\":null,\"idle_with_coverage_candidate_24h\":null,\"coverage_reviewed_paths\":0},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}"
+      }
+    },
+    {
+      "name": "default-ledger-when-coverage-empty-list",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": []
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "status": "systemd"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 120,
+            "nominal_utilization": 0.016666666666666666,
+            "cooldown_minutes": 30.0,
+            "observed_ticks_24h": 0,
+            "available_start_opportunities_24h": 0,
+            "idle_while_pending_24h": null,
+            "idle_with_coverage_candidate_24h": null,
+            "coverage_reviewed_paths": 0
+          },
+          "schedule": {
+            "id": "crq-tick.timer",
+            "state": "systemd"
+          }
+        },
+        "bytes": "{\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":0,\"available_start_opportunities_24h\":0,\"idle_while_pending_24h\":null,\"idle_with_coverage_candidate_24h\":null,\"coverage_reviewed_paths\":0},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}",
+        "full_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":\"2026-11-09T12:30:00Z\",\"starts_60m\":2,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":0,\"available_start_opportunities_24h\":0,\"idle_while_pending_24h\":null,\"idle_with_coverage_candidate_24h\":null,\"coverage_reviewed_paths\":0},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}"
+      }
+    },
+    {
+      "name": "schedule-unknown-adds-error",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": {
+            "schema_version": 1,
+            "paths": {
+              "src/a.py": {
+                "review_count": 1,
+                "last_reviewed_at": null
+              },
+              "src/b.py": {
+                "review_count": 2,
+                "last_reviewed_at": null
+              }
+            },
+            "runs": {},
+            "observations": {
+              "2026-11-09T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": "paused"
+              },
+              "2026-11-09T11:12:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-09T11:24:00Z": {
+                "started": true,
+                "pending": false,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-08T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              }
+            }
+          }
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "status": "unknown",
+          "nextRunAt": "2026-11-09T12:12:00Z"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 120,
+            "nominal_utilization": 0.016666666666666666,
+            "cooldown_minutes": 30.0,
+            "observed_ticks_24h": 3,
+            "available_start_opportunities_24h": 2,
+            "idle_while_pending_24h": 1,
+            "idle_with_coverage_candidate_24h": 1,
+            "coverage_reviewed_paths": 2
+          },
+          "schedule": {
+            "id": "crq-tick.timer",
+            "state": "unknown",
+            "error": "schedule probe unavailable"
+          }
+        },
+        "bytes": "{\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"unknown\",\"error\":\"schedule probe unavailable\"}}",
+        "full_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":\"2026-11-09T12:30:00Z\",\"starts_60m\":2,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"unknown\",\"error\":\"schedule probe unavailable\"}}"
+      }
+    },
+    {
+      "name": "schedule-empty-status-falls-back",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": {
+            "schema_version": 1,
+            "paths": {
+              "src/a.py": {
+                "review_count": 1,
+                "last_reviewed_at": null
+              },
+              "src/b.py": {
+                "review_count": 2,
+                "last_reviewed_at": null
+              }
+            },
+            "runs": {},
+            "observations": {
+              "2026-11-09T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": "paused"
+              },
+              "2026-11-09T11:12:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-09T11:24:00Z": {
+                "started": true,
+                "pending": false,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-08T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              }
+            }
+          }
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "status": ""
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 120,
+            "nominal_utilization": 0.016666666666666666,
+            "cooldown_minutes": 30.0,
+            "observed_ticks_24h": 3,
+            "available_start_opportunities_24h": 2,
+            "idle_while_pending_24h": 1,
+            "idle_with_coverage_candidate_24h": 1,
+            "coverage_reviewed_paths": 2
+          },
+          "schedule": {
+            "id": "crq-tick.timer",
+            "state": "systemd"
+          }
+        },
+        "bytes": "{\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}",
+        "full_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":\"2026-11-09T12:30:00Z\",\"starts_60m\":2,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}"
+      }
+    },
+    {
+      "name": "schedule-null-status-falls-back",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": {
+            "schema_version": 1,
+            "paths": {
+              "src/a.py": {
+                "review_count": 1,
+                "last_reviewed_at": null
+              },
+              "src/b.py": {
+                "review_count": 2,
+                "last_reviewed_at": null
+              }
+            },
+            "runs": {},
+            "observations": {
+              "2026-11-09T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": "paused"
+              },
+              "2026-11-09T11:12:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-09T11:24:00Z": {
+                "started": true,
+                "pending": false,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-08T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              }
+            }
+          }
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "status": null
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 120,
+            "nominal_utilization": 0.016666666666666666,
+            "cooldown_minutes": 30.0,
+            "observed_ticks_24h": 3,
+            "available_start_opportunities_24h": 2,
+            "idle_while_pending_24h": 1,
+            "idle_with_coverage_candidate_24h": 1,
+            "coverage_reviewed_paths": 2
+          },
+          "schedule": {
+            "id": "crq-tick.timer",
+            "state": "systemd"
+          }
+        },
+        "bytes": "{\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}",
+        "full_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":\"2026-11-09T12:30:00Z\",\"starts_60m\":2,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}"
+      }
+    },
+    {
+      "name": "schedule-false-status-falls-back",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": {
+            "schema_version": 1,
+            "paths": {
+              "src/a.py": {
+                "review_count": 1,
+                "last_reviewed_at": null
+              },
+              "src/b.py": {
+                "review_count": 2,
+                "last_reviewed_at": null
+              }
+            },
+            "runs": {},
+            "observations": {
+              "2026-11-09T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": "paused"
+              },
+              "2026-11-09T11:12:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-09T11:24:00Z": {
+                "started": true,
+                "pending": false,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-08T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              }
+            }
+          }
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "status": false
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 120,
+            "nominal_utilization": 0.016666666666666666,
+            "cooldown_minutes": 30.0,
+            "observed_ticks_24h": 3,
+            "available_start_opportunities_24h": 2,
+            "idle_while_pending_24h": 1,
+            "idle_with_coverage_candidate_24h": 1,
+            "coverage_reviewed_paths": 2
+          },
+          "schedule": {
+            "id": "crq-tick.timer",
+            "state": "systemd"
+          }
+        },
+        "bytes": "{\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}",
+        "full_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":\"2026-11-09T12:30:00Z\",\"starts_60m\":2,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}"
+      }
+    },
+    {
+      "name": "schedule-missing-status-falls-back",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": {
+            "schema_version": 1,
+            "paths": {
+              "src/a.py": {
+                "review_count": 1,
+                "last_reviewed_at": null
+              },
+              "src/b.py": {
+                "review_count": 2,
+                "last_reviewed_at": null
+              }
+            },
+            "runs": {},
+            "observations": {
+              "2026-11-09T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": "paused"
+              },
+              "2026-11-09T11:12:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-09T11:24:00Z": {
+                "started": true,
+                "pending": false,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-08T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              }
+            }
+          }
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "nextRunAt": "2026-11-09T12:12:00Z"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 120,
+            "nominal_utilization": 0.016666666666666666,
+            "cooldown_minutes": 30.0,
+            "observed_ticks_24h": 3,
+            "available_start_opportunities_24h": 2,
+            "idle_while_pending_24h": 1,
+            "idle_with_coverage_candidate_24h": 1,
+            "coverage_reviewed_paths": 2
+          },
+          "schedule": {
+            "id": "crq-tick.timer",
+            "state": "systemd"
+          }
+        },
+        "bytes": "{\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}",
+        "full_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":\"2026-11-09T12:30:00Z\",\"starts_60m\":2,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"crq-tick.timer\",\"state\":\"systemd\"}}"
+      }
+    },
+    {
+      "name": "custom-schedule-id",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": {
+            "schema_version": 1,
+            "paths": {
+              "src/a.py": {
+                "review_count": 1,
+                "last_reviewed_at": null
+              },
+              "src/b.py": {
+                "review_count": 2,
+                "last_reviewed_at": null
+              }
+            },
+            "runs": {},
+            "observations": {
+              "2026-11-09T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": "paused"
+              },
+              "2026-11-09T11:12:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-09T11:24:00Z": {
+                "started": true,
+                "pending": false,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-08T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              }
+            }
+          }
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8,
+          "schedule_id": "other-tick.timer"
+        },
+        "schedule": {
+          "status": "systemd"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 120,
+            "nominal_utilization": 0.016666666666666666,
+            "cooldown_minutes": 30.0,
+            "observed_ticks_24h": 3,
+            "available_start_opportunities_24h": 2,
+            "idle_while_pending_24h": 1,
+            "idle_with_coverage_candidate_24h": 1,
+            "coverage_reviewed_paths": 2
+          },
+          "schedule": {
+            "id": "other-tick.timer",
+            "state": "systemd"
+          }
+        },
+        "bytes": "{\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"other-tick.timer\",\"state\":\"systemd\"}}",
+        "full_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":\"2026-11-09T12:30:00Z\",\"starts_60m\":2,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":\"other-tick.timer\",\"state\":\"systemd\"}}"
+      }
+    },
+    {
+      "name": "null-schedule-id-is-kept",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": {
+            "schema_version": 1,
+            "paths": {
+              "src/a.py": {
+                "review_count": 1,
+                "last_reviewed_at": null
+              },
+              "src/b.py": {
+                "review_count": 2,
+                "last_reviewed_at": null
+              }
+            },
+            "runs": {},
+            "observations": {
+              "2026-11-09T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": "paused"
+              },
+              "2026-11-09T11:12:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-09T11:24:00Z": {
+                "started": true,
+                "pending": false,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-08T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              }
+            }
+          }
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8,
+          "schedule_id": null
+        },
+        "schedule": {
+          "status": "systemd"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "utilization": {
+            "starts_24h": 2,
+            "nominal_cap_24h": 120,
+            "nominal_utilization": 0.016666666666666666,
+            "cooldown_minutes": 30.0,
+            "observed_ticks_24h": 3,
+            "available_start_opportunities_24h": 2,
+            "idle_while_pending_24h": 1,
+            "idle_with_coverage_candidate_24h": 1,
+            "coverage_reviewed_paths": 2
+          },
+          "schedule": {
+            "id": null,
+            "state": "systemd"
+          }
+        },
+        "bytes": "{\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":null,\"state\":\"systemd\"}}",
+        "full_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":\"2026-11-09T11:55:00Z\",\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":\"2026-11-09T12:30:00Z\",\"starts_60m\":2,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\",\"utilization\":{\"starts_24h\":2,\"nominal_cap_24h\":120,\"nominal_utilization\":0.016666666666666666,\"cooldown_minutes\":30.0,\"observed_ticks_24h\":3,\"available_start_opportunities_24h\":2,\"idle_while_pending_24h\":1,\"idle_with_coverage_candidate_24h\":1,\"coverage_reviewed_paths\":2},\"schedule\":{\"id\":null,\"state\":\"systemd\"}}"
+      }
+    },
+    {
+      "name": "truthy-string-coverage-is-refused",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": "x"
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "status": "systemd"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": false,
+        "error": "TypeError",
+        "message": "string indices must be integers, not 'str'"
+      }
+    },
+    {
+      "name": "truthy-list-coverage-is-refused",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": "2026-11-09T11:55:00Z",
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "last_tick": "2026-11-09T11:55:00Z",
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": [
+            1
+          ]
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "status": "systemd"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": false,
+        "error": "TypeError",
+        "message": "list indices must be integers or slices, not str"
+      }
+    },
+    {
+      "name": "no-completed-tick-is-refused",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": {
+            "schema_version": 1,
+            "paths": {
+              "src/a.py": {
+                "review_count": 1,
+                "last_reviewed_at": null
+              },
+              "src/b.py": {
+                "review_count": 2,
+                "last_reviewed_at": null
+              }
+            },
+            "runs": {},
+            "observations": {
+              "2026-11-09T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": "paused"
+              },
+              "2026-11-09T11:12:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-09T11:24:00Z": {
+                "started": true,
+                "pending": false,
+                "candidate_exists": true,
+                "blocked_reason": null
+              },
+              "2026-11-08T11:00:00Z": {
+                "started": false,
+                "pending": true,
+                "candidate_exists": true,
+                "blocked_reason": null
+              }
+            }
+          }
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "status": "systemd"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "no completed tick to publish"
+      }
+    },
+    {
+      "name": "no-completed-tick-precedes-ledger-errors",
+      "source": "status_summary.publish",
+      "input": {
+        "core": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-09T12:00:00Z",
+          "paused": false,
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "starts_60m": 2,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {},
+          "schema_version": 2,
+          "generated_at": "2026-11-09T12:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "starts": [
+            "2026-11-09T11:00:00Z",
+            "2026-11-09T11:10:00Z",
+            "2026-11-08T11:00:00Z"
+          ],
+          "cooldown_until": "2026-11-09T12:30:00Z",
+          "usage": {
+            "limit": 5
+          },
+          "coverage": [
+            1
+          ]
+        },
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "schedule": {
+          "status": "systemd"
+        },
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": false,
+        "error": "ValueError",
+        "message": "no completed tick to publish"
+      }
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
 import { repoEffects, makeTestRepo } from '../dev/repo.js';
@@ -17,6 +19,24 @@ describe('review.run', () => {
         reason: 'review.run: cq.json is required',
         usageSummary: { knownCount: 0, unknownCount: 0, unpricedCount: 0 },
       });
+      expect(drivers.resolve).not.toHaveBeenCalled();
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('maps an unreadable cq.json (EISDIR) to needs-human naming the errno', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await mkdir(join(repo.root, 'cq.json')); // present-but-unreadable; only ENOENT means "no config"
+      const drivers = scriptedDrivers();
+      const result = await makeReviewRun({
+        drivers,
+        effectsFactory: () => repoEffects(repo),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human')
+        expect(result.reason).toContain('review.run: cq.json could not be read (EISDIR)');
       expect(drivers.resolve).not.toHaveBeenCalled();
     } finally {
       await repo.cleanup();

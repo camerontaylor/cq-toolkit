@@ -86,8 +86,9 @@ describe('T29 round-trip', () => {
       expect(parsedLines).toEqual(events);
       // The fold resolves the link against the kernel v3 header, read from
       // the kernel's own journal file. The kernel RunLog's append stays
-      // v1/v2-only until T04, so the fixture header is written raw (the same
-      // route the T02 tests use for v3 headers).
+      // v1/v2-only (T04 landed the descriptor reader, not a v3 header
+      // writer), so the fixture header is written raw (the same route the
+      // T02 tests use for v3 headers).
       const kernelHeader = kernelV3Header();
       await writeFile(
         join(dir, `${KERNEL_RUN}.ndjson`),

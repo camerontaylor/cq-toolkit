@@ -206,6 +206,9 @@ describe('aggregateAddressMany truth', () => {
     expect(thrown.aggregate.rows[0]).toMatchObject({
       status: 'exception',
       reason: 'driver crashed',
+      // A dispatched leg that threw may have created durable author debt; with
+      // no report the state is unknown, not `absent`.
+      deferredVendorDebt: 'unknown',
     });
 
     const cancelled = aggregateAddressMany({

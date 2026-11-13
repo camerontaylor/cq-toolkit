@@ -182,7 +182,8 @@ const NOT_APPLICABLE: Readonly<Record<string, string>> = {
   'backfill-inventory': 'backfill inventory is a later group-P port',
   'backfill-report': 'backfill report is a later group-P port',
   backfill: 'backfill driver helpers are a later group-P port',
-  coverage: 'coverage policy is a later group-P port',
+  coverage:
+    'coverage.utilization_digest is replayed in coverageUtilization.test.ts; coverage_candidate/record_opportunity and the rest are a later group-P port',
   ledger:
     'ledger validators/interval/path/creditable functions are a later group-P port; review_ledger.canonical+digest cases live in canonical.json and ARE replayed above',
   'merged-reconcile': 'merged-interval math is a later group-P port',

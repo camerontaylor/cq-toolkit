@@ -28,6 +28,7 @@
 // the bin configurable per opts. No new dependencies.
 import { mkdir } from 'node:fs/promises';
 import { dirname, join, resolve as pathResolve } from 'node:path';
+import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 import type { GhFn, GhResult } from './gh.js';
 import { makeGhRunner } from './gh.js';
 
@@ -89,29 +90,48 @@ const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
  * the guard through however innocuous its tokens look. The eight shapes
  * (after the `-C <path>` prefix is stripped):
  *   rev-parse <flags/ref>…                    — ref resolution (≥1 arg)
- *   fetch <remote> <refspec>…                 — refspecs may carry the '+'
- *       in-place marker, but a ':'-refspec whose (+-stripped) DESTINATION
- *       names the protected branch is a forced update of that branch —
- *       refused; colon-less refspecs land in FETCH_HEAD only and cannot
- *       move a branch, so they need no destination check
+ *   fetch <remote> <refspec>…                 — FLAG-FREE and GLOB-FREE
+ *       (round 4: the documented shape carries neither, so `fetch origin
+ *       --upload-pack=<cmd>` — the remote slot included — and a glob
+ *       refspec whose '*' destination would hide the protected branch are
+ *       refused like any other undocumented token). Refspecs may carry the
+ *       '+' in-place marker, but a ':'-refspec whose (+-stripped)
+ *       DESTINATION names the protected branch is a forced update of that
+ *       branch — refused; colon-less refspecs land in FETCH_HEAD only and
+ *       cannot move a branch, so they need no destination check
  *   worktree add -B <label> <path> <ref>      — the exact prepare shape
  *   worktree list|remove <arg>…               — rough arity, FLAG-FREE
  *       (round 3: the documented shapes carry no flags, so `worktree
  *       remove --force <path>` is refused — the real impl deliberately
  *       omits --force)
- *   push <remote> <src:dst>                   — an EXPLICIT src:dst refspec
- *       is required with BOTH halves non-empty (round 3: `:dst` deletes a
- *       remote branch — refused), no '+' force marker (round 2 — I3
- *       forbids force, period), NO flags anywhere in the tail (round 3:
- *       the documented shape carries none, so `push origin --force
- *       feat:x` cannot ride a discarded-flag blind spot), and the
- *       destination must not be the protected branch
+ *   push --no-follow-tags <remote> <src:dst>  — the EXACT hardened shape
+ *       (review P1 p522, PR #1641): the flag pins push.followTags OFF (a
+ *       repo/user config could otherwise publish annotated tags — and a
+ *       credential in a tag annotation bypasses every scan), an EXPLICIT
+ *       src:dst refspec is required with BOTH halves non-empty (`:dst`
+ *       deletes a remote branch — refused), no '+' force marker (I3
+ *       forbids force, period), NO flag beyond the hardened prefix
+ *       (`--force` cannot follow it), and the destination must not be the
+ *       protected branch. The flag-less historical shape is refused.
  *   gh pr merge <n> --merge [--match-head-commit <sha>]  — the ONLY merge
  *       method (I3); the head-commit pin is allowed only as a 40-hex sha
  *       (review-debt #186)
  *   gh pr edit <n> --base <base>              — the retarget
  *   gh pr view <n> --json baseRefName         — the base-ref read
  *       (review-debt #193; the read-only forge-metadata probe)
+ *   diff <HARDENED_DIFF_FLAGS> --unified=0 <sha> <sha>
+ *                                             — the READ-ONLY patch read
+ *       (issue #1193: the conflict resolver's pre-push denylist scan).
+ *       The hardened flags (shared/gitHarden.ts) disable the
+ *       repository-configured diff drivers/textconv a hostile
+ *       .gitattributes could select to hide content (review P1, PR
+ *       #1628), force binary content to be diffed as text, and pin the
+ *       a/ b/ header prefixes. EXACT arity: the pinned flag list, then
+ *       both endpoints as FULL 40-hex commit shas — the gate derives
+ *       them from validateRef answers, never from plan or agent input,
+ *       so no refname or revision expression can ride this shape (a
+ *       short sha, a range, or any other flag is refused as an unknown
+ *       shape).
  * opts.protectedBranch (default 'main') names the branch pushes may never
  * land on, under either spelling.
  */
@@ -124,16 +144,49 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
   const unknown = (): UnsafeMergeArgsError =>
     new UnsafeMergeArgsError(
       args,
-      'refused: unknown argv shape — the merge family executes only its eight documented shapes (rev-parse, fetch, worktree add/list/remove, push, gh pr merge, gh pr edit, gh pr view)',
+      'refused: unknown argv shape — the merge family executes only its documented shapes (rev-parse, rev-list, merge-base, log, cat-file, fetch, worktree add/list/remove, push, gh pr merge, gh pr edit, gh pr view, diff)',
     );
   const sub = rest[0];
   switch (sub) {
     case 'rev-parse':
       if (rest.length < 2) throw unknown();
       return args;
+    case 'rev-list': {
+      // The topology read (review P1, PR #1628 round 2): the publication
+      // gate must prove the resolution is EXACTLY ONE commit whose sole
+      // parent is the validated baseline before the endpoint diff means
+      // anything. EXACT shape: `rev-list --parents -n 1 <40hex>` — the
+      // one queried sha is validateRef-derived, read-only, arity-pinned.
+      const tail = rest.slice(1);
+      if (
+        tail.length !== 4 ||
+        tail[0] !== '--parents' ||
+        tail[1] !== '-n' ||
+        tail[2] !== '1' ||
+        !/^[0-9a-f]{40}$/i.test(tail[3] ?? '')
+      ) {
+        throw unknown();
+      }
+      return args;
+    }
     case 'fetch': {
       const tail = rest.slice(1);
       if (tail.length < 2) throw unknown(); // remote + ≥1 refspec
+      // FLAG-FREE and GLOB-FREE (round 4), the same rule push and worktree
+      // already carry: the documented fetch shape carries no flags, and the
+      // remote slot is not exempt — `fetch origin --upload-pack=<cmd>` and
+      // `fetch --upload-pack=<cmd> origin x` are refused on sight. A glob in
+      // a refspec (`+refs/heads/*:refs/heads/*`) names no single destination,
+      // so the protected-branch check below could not see the forced update
+      // it authorizes — refused too.
+      for (const arg of tail) {
+        if (arg.startsWith('-') || /[*?[\\]/.test(arg)) {
+          throw new UnsafeMergeArgsError(
+            args,
+            `flags and globs are not part of the documented fetch shape — refused ${JSON.stringify(arg)}`,
+          );
+        }
+      }
       for (const refspec of tail.slice(1)) {
         if (refspec.includes(':')) {
           const dst = pushDestination(refspec.replace(/^\+/, ''));
@@ -172,24 +225,36 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
     }
     case 'push': {
       const tail = rest.slice(1);
-      // NO FLAGS IN THE TAIL (round 3 — the bypass is closed): the
-      // documented push shape carries none, and the previous filter
-      // silently DISCARDED flags before the checks — `push origin --force
-      // feat:refs/heads/feat` rode straight through. Any `-`-prefixed
-      // token (the remote slot included) is refused on sight.
-      for (const arg of tail) {
+      // EXACTLY TWO FLAGS, FIRST (review P1 p522 + P2 rw4S, PR #1641):
+      // the push must lead with --no-follow-tags AND
+      // --recurse-submodules=no. --no-follow-tags stops `push.followTags`
+      // publishing annotated tags alongside the explicit refspec;
+      // --recurse-submodules=no stops `push.recurseSubmodules=only` from
+      // exiting 0 with the superproject UNPUSHED and stops on-demand
+      // recursion publishing unscanned submodule commits. The flag-less
+      // historical shape is refused like any other undocumented one, and
+      // no THIRD flag can ride (the round-3 rule stands: any further
+      // `-`-prefixed token is refused on sight — `--force` cannot follow
+      // the hardened prefix).
+      if (tail[0] !== '--no-follow-tags' || tail[1] !== '--recurse-submodules=no') {
+        throw new UnsafeMergeArgsError(
+          args,
+          `the push shape must lead with --no-follow-tags and --recurse-submodules=no (followTags would publish unscanned tags; recurseSubmodules=only can exit 0 WITHOUT pushing the branch) — refused ${JSON.stringify(tail.slice(0, 2))}`,
+        );
+      }
+      for (const arg of tail.slice(2)) {
         if (arg.startsWith('-')) {
           throw new UnsafeMergeArgsError(
             args,
-            `flags are not part of the documented push shape — refused ${JSON.stringify(arg)}`,
+            `flags beyond --no-follow-tags and --recurse-submodules=no are not part of the documented push shape — refused ${JSON.stringify(arg)}`,
           );
         }
       }
-      // tail[0] is the REMOTE; the rest are the refspecs. Fewer than two
-      // tokens means NO explicit refspec (round 1): push.default would
-      // choose the destination — possibly the protected branch.
-      if (tail.length < 2) throw unknown();
-      for (const refspec of tail.slice(1)) {
+      // tail[2] is the REMOTE; the rest are the refspecs. Fewer than
+      // four tokens means NO explicit refspec (round 1): push.default
+      // would choose the destination — possibly the protected branch.
+      if (tail.length < 4) throw unknown();
+      for (const refspec of tail.slice(3)) {
         if (refspec.startsWith('+')) {
           // Force-marker bypass, closed (round 2): a '+'-marked PUSH
           // refspec is a force-push — I3 forbids force outright, whatever
@@ -216,6 +281,90 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
             `push with destination ${JSON.stringify(pushDestination(refspec))} — the protected branch ${JSON.stringify(protectedBranch)} is never pushed to`,
           );
         }
+      }
+      return args;
+    }
+    case 'diff': {
+      // The read-only patch read (issue #1193; review P1 on PR #1628): the
+      // EXACT shape is HARDENED_DIFF_FLAGS + --unified=0, then two full
+      // 40-hex shas, nothing else. The hardened flags are load-bearing for
+      // the gate: --no-ext-diff and --no-textconv disable the
+      // repository-configured diff PROGRAMS a hostile .gitattributes could
+      // select to substitute harmless text (or empty output) for the real
+      // bytes, --text forces binary content to be diffed as text, and the
+      // pinned a/ b/ prefixes pin the header shape the scanner's parser
+      // keys on. Both endpoints are validateRef-derived shas, so this
+      // shape admits no refname, no range expression, and no flag
+      // injection; anything else is an undocumented shape like any other.
+      const expected = [...HARDENED_DIFF_FLAGS, '--unified=0'];
+      const tail = rest.slice(1);
+      if (
+        tail.length !== expected.length + 2 ||
+        expected.some((flag, index) => tail[index] !== flag) ||
+        !/^[0-9a-f]{40}$/i.test(tail[expected.length] ?? '') ||
+        !/^[0-9a-f]{40}$/i.test(tail[expected.length + 1] ?? '')
+      ) {
+        throw unknown();
+      }
+      return args;
+    }
+    case 'log': {
+      // The commit-message read (review P2 ntJt, PR #1628): the gate scans
+      // the resolution commit's subject/body before publishing. EXACT
+      // shape: `log -1 --encoding=UTF-8 --format=%B <40hex>` — one commit,
+      // the raw message, the pinned encoding (review P1 q2-s, PR #1641: a
+      // repo's i18n.logOutputEncoding would otherwise emit UTF-16LE and
+      // hide an ASCII token from the UTF-8 decoder), one
+      // validateRef-derived sha.
+      const tail = rest.slice(1);
+      // Three shapes, all exact: the message read
+      // (`log -1 --encoding=UTF-8 --format=%B <40hex>`), the identity read
+      // (`log -1 --encoding=UTF-8 --format=%an <%ae>%n%cn <%ce> <40hex>`,
+      // review P2 vEcv — the pushed commit carries its author/committer
+      // headers, so they are scan input too) and the declared-encoding read
+      // (`log -1 --format=%e <40hex>`, review P1 sMLw — a non-UTF-8 commit
+      // encoding must be refused, not recoded).
+      if (
+        (tail.length === 4 &&
+          tail[0] === '-1' &&
+          tail[1] === '--encoding=UTF-8' &&
+          (tail[2] === '--format=%B' || tail[2] === '--format=%an <%ae>%n%cn <%ce>') &&
+          /^[0-9a-f]{40}$/i.test(tail[3] ?? '')) ||
+        (tail.length === 3 &&
+          tail[0] === '-1' &&
+          tail[1] === '--format=%e' &&
+          /^[0-9a-f]{40}$/i.test(tail[2] ?? ''))
+      ) {
+        return args;
+      }
+      throw unknown();
+    }
+    case 'cat-file': {
+      // The object-presence read (review P2 ntJj, PR #1628): before the
+      // ancestry read, the gate must know whether the forge's base tip is
+      // even LOCAL (the base may have advanced past what the repo has
+      // fetched). EXACT shape: `cat-file -e <40hex>`.
+      const tail = rest.slice(1);
+      if (tail.length !== 2 || tail[0] !== '-e' || !/^[0-9a-f]{40}$/i.test(tail[1] ?? '')) {
+        throw unknown();
+      }
+      return args;
+    }
+    case 'merge-base': {
+      // The ancestry read (review P1 round 3, PR #1628): the publication
+      // gate must decide whether a merge resolution's second parent is
+      // PUBLIC base history. EXACT shape: `merge-base --is-ancestor
+      // <40hex> <40hex>` — both endpoints are the validated merge parent
+      // and the forge-read base tip; exit 0 = ancestor, exit 1 = not,
+      // anything else = fault.
+      const tail = rest.slice(1);
+      if (
+        tail.length !== 3 ||
+        tail[0] !== '--is-ancestor' ||
+        !/^[0-9a-f]{40}$/i.test(tail[1] ?? '') ||
+        !/^[0-9a-f]{40}$/i.test(tail[2] ?? '')
+      ) {
+        throw unknown();
       }
       return args;
     }
@@ -269,7 +418,7 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
         typeof prNum === 'string' &&
         /^\d+$/.test(prNum) &&
         flag === '--json' &&
-        base === 'baseRefName'
+        base === 'baseRefName,baseRefOid'
       ) {
         return args;
       }
@@ -315,16 +464,21 @@ export interface MergeEffects {
   fetchRef(ref: string): Promise<GhResult>;
   /**
    * Re-read PR `pr`'s forge base ref — the branch it currently targets
-   * (`gh pr view <pr> --json baseRefName` in the real implementation;
-   * review-debt #193). executeMerges calls it before each MERGE action and
-   * compares the answer against the base the plan was built on: a retarget
-   * between plan and run moves the base WITHOUT touching the head, so the
-   * head-SHA pin alone cannot catch it. Resolves `{ ok: true, baseRefName }`
-   * when the forge answers with a non-empty ref; `{ ok: false }` when the
-   * read failed or the payload was unreadable — never throws for a failed
-   * read (each caller decides its own fail-closed policy).
+   * AND that branch's current tip commit (`gh pr view <pr> --json
+   * baseRefName,baseRefOid` in the real implementation; review-debt
+   * #193, tip added for the publication gate's topology proof — review
+   * P1 round 3). executeMerges calls it before each MERGE action and
+   * compares the answer against the base the plan was built on: a
+   * retarget between plan and run moves the base WITHOUT touching the
+   * head, so the head-SHA pin alone cannot catch it. Resolves
+   * `{ ok: true, baseRefName, baseTipSha? }` when the forge answers with
+   * a non-empty ref (`baseTipSha` present only when the forge answered a
+   * full 40-hex OID); `{ ok: false }` when the read failed or the
+   * payload was unreadable — never throws for a failed read (each caller
+   * decides its own fail-closed policy). The gate treats a missing
+   * baseTipSha as "the second parent cannot be verified" and refuses.
    */
-  readBaseRef(pr: number): Promise<{ ok: boolean; baseRefName?: string }>;
+  readBaseRef(pr: number): Promise<{ ok: boolean; baseRefName?: string; baseTipSha?: string }>;
   /** Prepare a throwaway worktree for the PR's merge flow, checked out at
    * `ref`. Resolves with the worktree path; throws when the worktree cannot
    * be created (a missing tree is not a merge outcome). */
@@ -356,9 +510,117 @@ export interface MergeEffects {
    * CONSUMER (round 1): NOT this executor — merge entries are server-side
    * and retargets ride retargetBase — but pushRef stays in the interface
    * as a frozen contract for the WS-I merge-prs wiring, its I3 guard
-   * pinned by the safeArgs push tests. */
+   * pinned by the safeArgs push tests. Issue #1193 makes the conflict
+   * RESOLVER the first op-level consumer: the publication push runs
+   * through this seam behind the scan gate, never from the worker. */
   pushRef(ref: string, fromPath: string): Promise<GhResult>;
+  /**
+   * The READ-ONLY zero-context unified patch between two FULL commit shas
+   * (issue #1193 — the resolver's pre-push scan input): `git -C <repoRoot>
+   * diff <HARDENED_DIFF_FLAGS> --unified=0 <from> <to>` (no external diff
+   * driver, no textconv — repository-configured diff programs cannot hide
+   * or substitute the bytes the gate must scan; review P1, PR #1628), the
+   * patch on stdout.
+   * Resolves with the exit code (GhResult shape); nonzero means the patch
+   * is UNAVAILABLE and the caller must treat the change as unscannable —
+   * never scan a partial patch, never push unscanned. Both endpoints are
+   * validateRef-derived shas by contract (the safeArgs shape refuses
+   * everything else), so no refname or range expression can reach git.
+   */
+  diffPatch(from: string, to: string): Promise<GhResult>;
+  /**
+   * The parent shas of one FULL commit sha (review P1, PR #1628 round 2 —
+   * the publication gate's topology proof): `git -C <repoRoot> rev-list
+   * --parents -n 1 <sha>`, the queried sha and its parents on stdout.
+   * Resolves `{ ok: true, parents }` (the QUERIED sha excluded) when git
+   * answered; `{ ok: false }` when the commit is unknown or the read
+   * failed — never throws for a failed read (the caller decides its own
+   * fail-closed policy). The gate requires exactly one parent equal to
+   * the pre-dispatch baseline: a merge commit, a stacked intermediate
+   * commit, or a root carries content the baseline..tip endpoint diff
+   * never shows.
+   */
+  commitParents(sha: string): Promise<{ ok: boolean; parents?: string[] }>;
+  /**
+   * Whether `ancestor` is an ancestor of `descendant` (review P1 round 3
+   * — the publication gate's public-history check): `git -C <repoRoot>
+   * merge-base --is-ancestor <sha> <sha>`, both endpoints full 40-hex
+   * shas behind the safeArgs-pinned shape. Resolves with the exit code:
+   * 0 = ancestor, 1 = not an ancestor (both are ANSWERS); any other exit
+   * is a fault the caller refuses on.
+   */
+  isAncestor(ancestor: string, descendant: string): Promise<GhResult>;
+  /**
+   * The RAW commit message (`git log -1 --encoding=UTF-8 --format=%B
+   * <sha>`, review P2 ntJt, encoding P1 q2-s) of one full 40-hex sha
+   * behind the safeArgs-pinned shape — the publication gate scans the
+   * subject/body with the same denylist rules as the file patch, because
+   * a credential in the message rides the push while absent from it. The
+   * encoding is PINNED because a repo's i18n.logOutputEncoding can
+   * otherwise make the output UTF-16LE and hide ASCII token text from
+   * the UTF-8 decoder. Deliberately UNTRUNCATED: a cap would hide a
+   * secret placed past it; the caller bounds only what it quotes in
+   * errors.
+   */
+  readCommitMessage(sha: string): Promise<GhResult>;
+  /**
+   * The commit's DECLARED message encoding header (`git log -1 --format=%e
+   * <sha>`, review P1 sMLw, PR #1641): empty when the commit stores UTF-8.
+   * --encoding only RE-CODES a message; a commit created under
+   * i18n.commitEncoding=UTF-16LE carries that header and its stored bytes
+   * may not survive a UTF-8 re-code (the pinned message read can come
+   * back empty), so the gate must refuse any declared non-UTF-8 encoding
+   * rather than trust the recoded text.
+   */
+  readCommitEncoding(sha: string): Promise<GhResult>;
+  /**
+   * The commit's IDENTITY headers (`git log -1 --encoding=UTF-8
+   * --format=%an <%ae>%n%cn <%ce> <sha>`, review P2 vEcv, PR #1641): the
+   * author and committer name/email ride the push in the commit object but
+   * appear in no patch line and not in %B, so a denylisted identity would
+   * otherwise publish unscanned. One line per role, raw as stored.
+   */
+  readCommitIdentity(sha: string): Promise<GhResult>;
+  /**
+   * Whether one full 40-hex object exists LOCALLY (`git cat-file -e
+   * <sha>`, review P2 ntJj): the ancestry read needs the forge's base tip
+   * in the local object store, and the base may have advanced past what
+   * the repo has fetched. Exit 0 = present; ANY nonzero exit is treated
+   * as absent-or-unreadable by the caller (which then fetches and
+   * re-checks, refusing if it still cannot read the object).
+   */
+  objectExists(sha: string): Promise<GhResult>;
+  /**
+   * Fetch one branch from origin (`git fetch origin <branch>`, a
+   * colon-less refspec that lands in FETCH_HEAD only — the existing
+   * safeArgs fetch shape already admits exactly this, and the branch name
+   * is the schema-gated conservative refname from the op input, never
+   * forge text). Used by the publication gate to bring a not-yet-local
+   * forge base tip into the object store before the ancestry read.
+   */
+  fetchBaseBranch(branch: string): Promise<GhResult>;
 }
+
+/**
+ * The merge family's per-pr worktree BRANCH LABEL (`worktree add -B`
+ * checks the prepared worktree out ON this branch, so after the conflict
+ * agent commits its resolution the branch — shared through the repo's
+ * common refs — names the resolution commit). {@link realMergeEffects}
+ * prepares with this label; {@link mergeWorktreeBranchFor} is its full-ref
+ * form for rev-parse and refspecs. One source for both, so they cannot
+ * drift (issue #1193).
+ */
+export const mergeWorktreeBranchLabel = (pr: number): string => `cq-merge/pr-${String(pr)}`;
+
+/**
+ * The full ref of the merge family's per-pr worktree branch (issue
+ * #1193): resolvable from the repo ROOT (the refs store is shared across
+ * linked worktrees), so the conflict resolver reads the resolved change
+ * and builds its publication refspec from a ref IT derived — never from
+ * agent output.
+ */
+export const mergeWorktreeBranchFor = (pr: number): string =>
+  `refs/heads/${mergeWorktreeBranchLabel(pr)}`;
 
 /**
  * THE WORKTREE LIFECYCLE HELPER (round 1, for F4's conflict resolver): the
@@ -452,10 +714,30 @@ export interface RealMergeEffectsOpts {
  *   - mergePr:      `gh pr merge <pr> --merge` (plus
  *                   `--match-head-commit <sha>` when the caller pins the head)
  *   - retargetBase: `gh pr edit <pr> --base <newBase>`
- *   - readBaseRef:  `gh pr view <pr> --json baseRefName` (the forge
- *                   base-ref read — review-debt #193)
- *   - pushRef:      `git -C <fromPath> push origin <src:dst>` (an explicit
- *                   refspec — round 2: bare/symbolic forms are refused)
+ *   - readBaseRef:  `gh pr view <pr> --json baseRefName,baseRefOid` (the
+ *                   forge base-ref read + the base tip — review-debt #193,
+ *                   tip for the gate's topology proof, review P1 round 3)
+ *   - pushRef:      `git -C <fromPath> push --no-follow-tags origin
+ *                   <src:dst>` (an explicit refspec — round 2: bare/
+ *                   symbolic forms are refused; the flag pins
+ *                   push.followTags off, review P1 p522)
+ *   - diffPatch:    `git -C <repoRoot> diff <HARDENED_DIFF_FLAGS>
+ *                   --unified=0 <from> <to>` (both full 40-hex shas — the
+ *                   hardened read-only patch read behind the resolver's
+ *                   pre-push scan, #1193)
+ *   - commitParents: `git -C <repoRoot> rev-list --parents -n 1 <sha>`
+ *                   (the gate's topology proof — one commit on the
+ *                   validated baseline, or a merge of it with public base
+ *                   history — review P1 rounds 2-3)
+ *   - isAncestor:    `git -C <repoRoot> merge-base --is-ancestor <sha>
+ *                   <sha>` (is the merge parent public base history?)
+ *   - readCommitMessage: `git -C <repoRoot> log -1 --encoding=UTF-8
+ *                   --format=%B <sha>` (the gate's message scan input,
+ *                   review P2 ntJt; encoding pinned P1 q2-s)
+ *   - objectExists:  `git -C <repoRoot> cat-file -e <sha>` (is the forge
+ *                   base tip local yet? review P2 ntJj)
+ *   - fetchBaseBranch: `git -C <repoRoot> fetch origin <branch>` (bring a
+ *                   not-yet-local base tip in; colon-less, FETCH_HEAD only)
  */
 export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   // Absolute everywhere (prWorktree doctrine): mkdir resolves from the
@@ -482,6 +764,28 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   const gitRunnerOpts = {
     ...(opts.gitBin !== undefined ? { bin: opts.gitBin } : {}),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    // OBJECT-GRAPH HARDENING (review P1 p528, PR #1641): every gate read
+    // — validate/parents/diff/message/ancestry/presence — and the push
+    // must see the TRUE objects, never attacker-chosen refs/replace
+    // substitutions (a worker can map a secret-bearing resolution to a
+    // clean replacement commit; without this the gate would read the
+    // clean twin). Also CONFIG-PINNED QUOTING (review P2 p52p):
+    // core.quotePath is forced on for this runner so the diff's header
+    // paths are always C-quoted deterministically (a repo setting
+    // quotePath=false would otherwise emit literal UTF-8 inside quotes
+    // the scanner must not have to guess about). The same layering
+    // src/ops/dev/internal/snapshot.ts uses, via makeGhRunner's env
+    // merge.
+    env: {
+      // Git treats GIT_NO_REPLACE_OBJECTS as PRESENCE-checked: any value,
+      // including 0, disables refs/replace. Setting it to 1 is therefore
+      // not a toggle — do not "optimize" this to `process.env.X ?? '1'`
+      // and expect 0 to re-enable replacements (crq F1, PR #1641).
+      GIT_NO_REPLACE_OBJECTS: '1',
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'core.quotePath',
+      GIT_CONFIG_VALUE_0: 'true',
+    },
   };
   const gh = safeRunner(opts.run ?? makeGhRunner(ghRunnerOpts), guardOpts);
   const git = safeRunner(
@@ -512,9 +816,11 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   // field is `{ ok: false }` — fail closed, never a guessed base. The
   // parsed ref is TRIMMED (a whitespace-padded value must not false-`stale`
   // at the consumer) and an empty-after-trim value is `{ ok: false }`.
-  const readBaseRef = async (pr: number): Promise<{ ok: boolean; baseRefName?: string }> => {
+  const readBaseRef = async (
+    pr: number,
+  ): Promise<{ ok: boolean; baseRefName?: string; baseTipSha?: string }> => {
     if (!Number.isInteger(pr) || pr <= 0) return { ok: false };
-    const result = await gh(['pr', 'view', String(pr), '--json', 'baseRefName']);
+    const result = await gh(['pr', 'view', String(pr), '--json', 'baseRefName,baseRefOid']);
     if (result.code !== 0) return { ok: false };
     let parsed: unknown;
     try {
@@ -522,15 +828,56 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     } catch {
       return { ok: false };
     }
-    const raw =
+    const record =
       typeof parsed === 'object' && parsed !== null
-        ? (parsed as { baseRefName?: unknown }).baseRefName
+        ? (parsed as { baseRefName?: unknown; baseRefOid?: unknown })
         : undefined;
+    const raw = record?.baseRefName;
     if (typeof raw !== 'string') return { ok: false };
     const baseRefName = raw.trim();
     if (baseRefName === '') return { ok: false };
-    return { ok: true, baseRefName };
+    // The base tip rides along when the forge answered a full 40-hex OID;
+    // anything else is omitted — the gate refuses to verify a second
+    // parent against an unshaped answer.
+    const rawTip = record?.baseRefOid;
+    const baseTipSha =
+      typeof rawTip === 'string' && /^[0-9a-f]{40}$/i.test(rawTip) ? rawTip : undefined;
+    return { ok: true, baseRefName, ...(baseTipSha !== undefined ? { baseTipSha } : {}) };
   };
+
+  // The ancestry read (review P1 round 3): the argv shape is pinned by
+  // safeArgs to --is-ancestor plus two 40-hex shas. Exit 0/1 are both
+  // ANSWERS (ancestor / not); any other exit is a fault.
+  const isAncestor = (ancestor: string, descendant: string): Promise<GhResult> =>
+    git(['-C', repoRoot, 'merge-base', '--is-ancestor', ancestor, descendant]);
+
+  // The message read (review P2 ntJt, encoding P1 q2-s): unpadded %B, the
+  // raw subject and body — never truncated (a cap would hide a secret
+  // placed past it). --encoding is pinned so a repo's
+  // i18n.logOutputEncoding cannot turn the bytes into UTF-16LE and hide
+  // ASCII token text from the UTF-8 decoder.
+  const readCommitMessage = (sha: string): Promise<GhResult> =>
+    git(['-C', repoRoot, 'log', '-1', '--encoding=UTF-8', '--format=%B', sha]);
+
+  // The encoding-header read (review P1 sMLw): the declared encoding, raw
+  // header value (empty when the commit stores UTF-8). The gate refuses
+  // non-UTF-8 declarations instead of trusting a re-code.
+  const readCommitEncoding = (sha: string): Promise<GhResult> =>
+    git(['-C', repoRoot, 'log', '-1', '--format=%e', sha]);
+
+  const readCommitIdentity = (sha: string): Promise<GhResult> =>
+    git(['-C', repoRoot, 'log', '-1', '--encoding=UTF-8', '--format=%an <%ae>%n%cn <%ce>', sha]);
+
+  // The object-presence read (review P2 ntJj): exit 0 = local, anything
+  // else = absent-or-unreadable (the caller fetches and re-checks).
+  const objectExists = (sha: string): Promise<GhResult> =>
+    git(['-C', repoRoot, 'cat-file', '-e', sha]);
+
+  // The base fetch (review P2 ntJj): the branch name is the op input's
+  // schema-gated conservative refname; the argv is a colon-less fetch
+  // refspec the existing safeArgs fetch shape already admits.
+  const fetchBaseBranch = (branch: string): Promise<GhResult> =>
+    git(['-C', repoRoot, 'fetch', 'origin', branch]);
 
   // The worktree root's base dir, derived LAZILY (first prepare, then
   // cached) from git's COMMON dir (round 2): a linked worktree's .git is a
@@ -548,7 +895,7 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     return gitCommonDir;
   };
 
-  const worktreeLabel = (pr: number): string => `cq-merge/pr-${pr}`;
+  const worktreeLabel = mergeWorktreeBranchLabel;
 
   const worktreePrepare = async (pr: number, ref: string): Promise<{ path: string }> => {
     const path = join(await commonDir(), 'cq-merge-worktrees', `pr-${String(pr)}`);
@@ -595,8 +942,37 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   const retargetBase = (pr: number, newBase: string): Promise<GhResult> =>
     gh(['pr', 'edit', String(pr), '--base', newBase]);
 
+  // The publication/executor push (review P1 p522, PR #1641): the argv is
+  // pinned by safeArgs to lead with --no-follow-tags AND
+  // --recurse-submodules=no. --no-follow-tags stops `push.followTags`
+  // publishing ANNOTATED TAGS; --recurse-submodules=no stops
+  // `push.recurseSubmodules=only` from exiting 0 with the superproject
+  // UNPUSHED (review P2 rw4S) and stops on-demand recursion publishing
+  // unscanned submodule commits (CodeRabbit sULU).
   const pushRef = (ref: string, fromPath: string): Promise<GhResult> =>
-    git(['-C', fromPath, 'push', 'origin', ref]);
+    git(['-C', fromPath, 'push', '--no-follow-tags', '--recurse-submodules=no', 'origin', ref]);
+
+  // The read-only patch read (issue #1193): the argv shape is pinned by
+  // safeArgs to HARDENED_DIFF_FLAGS + --unified=0 plus two 40-hex shas —
+  // the guard is the only reason this call is safe for endpoint arguments
+  // the op computed itself. The hardened flags keep a repo-controlled
+  // .gitattributes diff driver or textconv from substituting (or
+  // emptying) the patch text the gate scans (review P1, PR #1628).
+  const diffPatch = (from: string, to: string): Promise<GhResult> =>
+    git(['-C', repoRoot, 'diff', ...HARDENED_DIFF_FLAGS, '--unified=0', from, to]);
+
+  // The gate's topology read (review P1 round 2): the argv shape is
+  // pinned by safeArgs to `--parents -n 1` plus one 40-hex sha. Nonzero →
+  // { ok: false } — the caller refuses, it never guesses a topology.
+  const commitParents = async (sha: string): Promise<{ ok: boolean; parents?: string[] }> => {
+    const result = await git(['-C', repoRoot, 'rev-list', '--parents', '-n', '1', sha]);
+    if (result.code !== 0) return { ok: false };
+    const tokens = result.stdout
+      .trim()
+      .split(/\s+/)
+      .filter((token) => token !== '');
+    return { ok: true, parents: tokens.slice(1) };
+  };
 
   return {
     validateRef,
@@ -607,5 +983,13 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     mergePr,
     retargetBase,
     pushRef,
+    diffPatch,
+    commitParents,
+    isAncestor,
+    readCommitMessage,
+    readCommitEncoding,
+    readCommitIdentity,
+    objectExists,
+    fetchBaseBranch,
   };
 }

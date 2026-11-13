@@ -132,6 +132,20 @@ describe('cq.json effective policy', () => {
     });
   });
 
+  test('an inversion created by merging flags into config is rejected, not clamped', () => {
+    // Each value validates against the other tier's default; only the merge inverts them.
+    const config: CqConfig = {
+      ...minimal,
+      review: { size: { medium: { maxChangedLines: 250 } } },
+    };
+    expect(() =>
+      resolveCqConfigDefaults(config, {
+        ...flags,
+        review: { size: { small: { maxChangedLines: 300 } } },
+      }),
+    ).toThrow(/review\.size: effective medium maxChangedLines \(250\)/);
+  });
+
   test('explicit kinds and related args survive resolution', () => {
     const config: CqConfig = {
       ...minimal,
