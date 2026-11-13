@@ -1851,11 +1851,16 @@ class RepairDrainTest(unittest.TestCase):
         self.config['repair']['max_concurrent_items'] = 2
         active_seen = {}
 
+        real_reap = service.reap_item
+
         def reap_writes_marker(active):
             active_seen.update(active)
             (self.root / 'state/runner-disabled').write_text('handover\n')
-            active.clear()
-            return False
+            # Keep the coordinator's real cleanup set: the children are still
+            # alive here (they wait for this marker), so the real reap finds
+            # nothing to report and hands the preserved records back to the
+            # pass's own teardown instead of discarding them.
+            return real_reap(active)
 
         def hold_until_capacity_wait(config, item, job_ids):
             # The children stay alive until the capacity wait writes the
