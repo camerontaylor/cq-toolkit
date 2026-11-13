@@ -763,6 +763,14 @@ def triage_phase(config, dry_run=False):
         bounded_config = copy.deepcopy(config)
         bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
         selected = options.get('escalation_role', config['repair']['roles']['judge_critical']) if row.get('_escalate') else role
+        if runner_disabled():
+            # A handover can start while the phase runs; phase() keeps deferred
+            # rows pending, so this judgment is deferred and no later candidate
+            # starts paid work.
+            narrate(RUNNER_DISABLED + ': triage judgment deferred')
+            publish_refusal()
+            return {'stop': 'deferred', 'errorClass': 'runner-disabled',
+                    'reason': 'runner disabled for host handover; triage judge deferred'}
         if blocked(config['repair']):
             # The blackout can start during drain()'s tick-lock wait or this pass;
             # phase() keeps deferred rows pending for the next pass.

@@ -1665,6 +1665,37 @@ class RepairDrainTest(unittest.TestCase):
         self.assertIsNone(self.result('crq-run1-F1'))
         self.assertIsNone(self.result('crq-run2-F1'))
 
+    def test_marker_during_triage_defers_later_judgments(self):
+        # The triage phase judges candidates one at a time; a marker that
+        # appears between two judgments must defer the rest instead of starting
+        # more paid work.
+        (self.root / 'state/backfill/findings/triage').mkdir(parents=True, exist_ok=True)
+        reports = []
+        judge = {}
+
+        def fake_phase(inbox, repo, tip, judge_cb, transport, now, maximum, seconds, dry_run):
+            judge['cb'] = judge_cb
+            row = {'finding': {'id': 'f' * 64}, 'review_id': 'r1'}
+            reports.append(judge_cb(row, {'context': []}, 60))
+            (self.root / 'state/runner-disabled').write_text('handover\n')
+            reports.append(judge_cb(row, {'context': []}, 60))
+            return {'judged': 1}
+
+        import backfill_runtime
+        import finding_delivery
+        with mock.patch('crq_repair.triage.phase', side_effect=fake_phase), \
+             mock.patch.object(service, 'dispatch', return_value={'stop': 'ok'}) as dispatch, \
+             mock.patch.object(service, 'triage_context_scan', return_value=True), \
+             mock.patch.object(service, 'git', return_value='a' * 40), \
+             mock.patch.object(backfill_runtime, 'settings', return_value={'rollout': 1}), \
+             mock.patch.object(backfill_runtime, 'services',
+                               return_value=('repo', None, 'outbox', None)), \
+             mock.patch.object(finding_delivery, 'Inbox'):
+            service.triage_phase(self.config)
+        self.assertEqual(dispatch.call_count, 1)
+        self.assertEqual(reports[1].get('stop'), 'deferred')
+        self.assertEqual(reports[1].get('errorClass'), 'runner-disabled')
+
     def test_marker_written_during_fetch_stops_before_triage(self):
         # The guard at pass start is sampled before the network fetch; a marker
         # written while the fetch runs must stop the pass before paid triage.
