@@ -398,6 +398,13 @@ describe('latest CRQ verdict at the exact head', () => {
       submittedAt: at,
       body: body(verdict, head, refresh),
     });
+  test('CRQ PASS minor prose cannot supply a competing verdict', () => {
+    const pass = crq('PASS', '2026-01-01T00:00:01Z');
+    pass.body += 'Minor wording: ITERATE, HOLD, FAIL and not PASS are examples.';
+    expect(classifyPr(candidate({ reviews: [pass] }), PENDING_MS).reason).toBe(
+      'settle_window_pending',
+    );
+  });
   test('dismissed ITERATE without chronology cannot hide earlier PASS', () => {
     const pass = crq('PASS', '2026-01-01T00:00:01Z');
     const dismissed = {

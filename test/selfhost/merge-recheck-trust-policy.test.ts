@@ -96,6 +96,14 @@ describe('latest CRQ exact-head evidence', () => {
       submittedAt: at,
       body: `${refresh ? `<!-- crq-verdict-refresh head=${head} scan-run=scan -->` : '<!-- crq-findings run=scan -->'}\n**Independent review (CodeRabbit CLI via crq): ${verdict} for \`${head}\`**\n`,
     });
+  test('CRQ PASS minor prose cannot supply a competing verdict', async () => {
+    const pass = crq('PASS', '2026-09-25T00:00:01Z');
+    pass.body = (pass.body ?? '') + 'Minor wording: ITERATE, HOLD, FAIL and not PASS are examples.';
+    expect(
+      judgeAtHead(await snapshotOf(prSpec({ reviews: [pass] })), SHA_B, CONSERVATIVE_TRUST_POLICY)
+        .accepted,
+    ).toBe(true);
+  });
   test.each(['DISMISSED', 'PENDING'])('void %s ITERATE cannot hide PASS', async (state) => {
     const pass = crq('PASS', '2026-09-25T00:00:01Z');
     const voided = { ...crq('ITERATE', '2026-09-25T00:00:02Z'), state, submittedAt: null };

@@ -69,8 +69,10 @@ as visible review debt. The `crq-findings` marker alone does not identify a crq
 review: agent reviews posted with `cq-review-post --findings` also carry it.
 
 **Implementation limit.** `src/shared/independent-review.ts` currently requires
-an explicit `PASS` and full head SHA, rejects uppercase `HOLD`, `FAIL` or `ITERATE` words
-and negated PASS, and accepts crq through the same exact-head PASS format. It does not infer
+an explicit `PASS` and full head SHA. Recognized crq receipts use only their leading
+verdict header and its exact head SHA; finding prose cannot change either. Other
+comments retain the whole-body heuristic: uppercase `HOLD`, `FAIL` or `ITERATE`
+words and negated PASS reject acceptance. It does not infer
 acceptance from a findings marker or disposition alone. Its bot-author filter accepts `cq-review[bot]` agent reviews without
 requiring a `crq-findings` marker, and excludes other bot authors. These parser
 limits do not redefine the owner's merge bar; the merging agent reads the

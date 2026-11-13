@@ -49,8 +49,10 @@ agent must review the final head separately from the author agent. The reviewer 
 share the author's GitHub account. Agent PASS reviews use `cq-review-post`; human PASS reviews name the exact head.
 The merging agent judges independence. `cq-review[bot]` agent PASS reviews count
 without a `crq-findings` marker; other bot authors are excluded from agent PASS
-evidence. The current parser requires PASS and a full head SHA, rejects ITERATE
-even when the body mentions PASS, and accepts crq through that same format; see [merge policy](../docs/promotion-policy.md#merge-to-main)
+evidence. Recognized crq receipts require PASS and the exact head SHA in their leading
+verdict header; finding prose supplies neither a verdict nor a matching head.
+Other comments retain the whole-body PASS/full-SHA heuristic and reject competing
+HOLD/FAIL/ITERATE words or negated PASS; see [merge policy](../docs/promotion-policy.md#merge-to-main)
 for this implementation limit.
 
 ## I3 — merge commits directly to main
