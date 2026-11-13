@@ -150,6 +150,12 @@ describe('1.1 defaultSessionsDir', () => {
     expect(defaultSessionsDir()).toBe(join(homedir(), '.local', 'state', 'cq', 'sessions'));
   });
 
+  test('a relative XDG_STATE_HOME is ignored (XDG spec)', () => {
+    vi.stubEnv('CQ_SESSIONS_DIR', '');
+    vi.stubEnv('XDG_STATE_HOME', 'state');
+    expect(defaultSessionsDir()).toBe(join(homedir(), '.local', 'state', 'cq', 'sessions'));
+  });
+
   test('CQ_SESSIONS_DIR overrides both; blank is ignored', () => {
     vi.stubEnv('XDG_STATE_HOME', '/state');
     vi.stubEnv('CQ_SESSIONS_DIR', '/elsewhere');
