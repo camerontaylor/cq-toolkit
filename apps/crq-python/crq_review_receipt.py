@@ -42,7 +42,8 @@ def body_major_at_head(rows, pr, head, login):
     for row in rows:
         author, body = row.get('user', {}).get('login') or '', row['body']
         fallback = ('Unattested: App identity unavailable; posted with the host account.' in body
-                    and author and not author.endswith('[bot]'))
+                    and author and not author.endswith('[bot]')
+                    and row.get('author_association') in {'OWNER', 'MEMBER', 'COLLABORATOR'})
         if author not in {login, 'cq-review[bot]'} and not fallback:
             continue
         for match in re.finditer(re.escape(PREFIX) + r'(.*?) -->', body):
@@ -66,13 +67,13 @@ def prior_receipt(prf, gh, repo, pr, meta, login):
         if not isinstance(row, dict):
             raise RuntimeError('invalid PR review row')
         body = row.get('body') or ''
+        if row.get('user', {}).get('login') not in {login, 'cq-review[bot]'}:
+            continue
         if body.startswith(prf.marker(meta['run_id']) + '\n') and PREFIX not in body:
             # Upgrade must preserve the original run-marker crash barrier too.
             if f"{meta['base']}..{meta['head']}" not in body:
                 raise ValueError('changed legacy CRQ review binding')
             return {'id': row['id'], 'url': row.get('html_url'), 'login': row.get('user', {}).get('login'), 'body': body}
-        if row.get('user', {}).get('login') not in {login, 'cq-review[bot]'}:
-            continue
         for match in re.finditer(re.escape(PREFIX) + r'(.*?) -->', body):
             try:
                 found = json.loads(match[1])
@@ -98,7 +99,7 @@ def open_major(prf, gh, repo, pr, login):
     while True:
         query = '''query($owner:String!,$name:String!,$pr:Int!,$cursor:String){
           repository(owner:$owner,name:$name){pullRequest(number:$pr){reviewThreads(first:100,after:$cursor){
-            pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{body author{login} pullRequestReview{body author{login}}}}}
+            pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{body author{login} pullRequestReview{body authorAssociation author{login}}}}}
           }}}}'''
         args = ['gh', 'api', 'graphql', '-f', 'query=' + query, '-f', 'owner=' + owner,
                 '-f', 'name=' + name, '-F', 'pr=' + str(pr)]
@@ -123,7 +124,15 @@ def open_major(prf, gh, repo, pr, login):
                 # cq-review-post summaries have a different explicit label.
                 legacy = (review_body.startswith('<!-- crq-findings run=') and
                           '### crq findings (CodeRabbit CLI, local run ' in review_body)
-                own = bool(re.search(r'\n<!-- crq-review-thread run=[A-Za-z0-9._-]+ head=[0-9a-f]{40} finding=[0-9a-f]{64} -->$', body)) or legacy
+                trusted = {login, 'cq-review[bot]', 'cq-review'}
+                author = (first[0].get('author') or {}).get('login') or ''
+                review_author = (review.get('author') or {}).get('login')
+                fallback = (author and not author.endswith('[bot]') and author == review_author
+                            and review.get('authorAssociation') in {'OWNER', 'MEMBER', 'COLLABORATOR'}
+                            and 'Unattested: App identity unavailable; posted with the host account.' in review_body)
+                authored = author in trusted or fallback
+                legacy = legacy and (review_author in trusted or fallback)
+                own = authored and (bool(re.search(r'\n<!-- crq-review-thread run=[A-Za-z0-9._-]+ head=[0-9a-f]{40} finding=[0-9a-f]{64} -->$', body)) or legacy)
                 if type(thread['isResolved']) is not bool:
                     raise ValueError()
                 if own and not thread['isResolved'] and re.search(r'^\*\*crq finding F\d+ \[(major|critical|blocker|fatal)\]\*\*', body, re.I):

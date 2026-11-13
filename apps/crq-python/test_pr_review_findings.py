@@ -473,6 +473,13 @@ elif '--paginate' not in args:
 
 
 class CrqIntegrationTest(unittest.TestCase):
+    def setUp(self):
+        # Delivery may replace _gh with an App transport: never mint credentials in a test.
+        patcher = mock.patch.object(prf.crq_review_identity, 'authenticated_gh',
+            side_effect=prf.crq_review_identity.IdentityUnavailable('helper-missing'))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def harvest(self, item, events, findings):
         at = dt.datetime(2026, 11, 6, 12, tzinfo=dt.timezone.utc)
         td = tempfile.TemporaryDirectory()

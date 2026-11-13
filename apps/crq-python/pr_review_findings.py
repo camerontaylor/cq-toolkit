@@ -82,7 +82,7 @@ def load_findings(ndjson: Path, *, highest_severity=False) -> List[Dict[str, Any
         key = (finding["path"], finding["start"], finding["end"], finding["title"], finding["text"])
         if key in seen:
             if highest_severity:
-                rank = {"critical": 5, "major": 4, "minor": 3, "trivial": 2, "info": 1, "none": 0}
+                rank = {"fatal": 7, "blocker": 6, "critical": 5, "major": 4, "minor": 3, "trivial": 2, "info": 1, "none": 0}
                 prior = out[seen[key]]
                 if rank.get(finding["severity"].lower(), 0) > rank.get(prior["severity"].lower(), 0):
                     prior["severity"] = finding["severity"]

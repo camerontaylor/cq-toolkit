@@ -96,6 +96,63 @@ describe('latest CRQ exact-head evidence', () => {
       submittedAt: at,
       body: `${refresh ? `<!-- crq-verdict-refresh head=${head} scan-run=scan -->` : '<!-- crq-findings run=scan -->'}\n**Independent review (CodeRabbit CLI via crq): ${verdict} for \`${head}\`**\n`,
     });
+  test.each(['DISMISSED', 'PENDING'])('void %s ITERATE cannot hide PASS', async (state) => {
+    const pass = crq('PASS', '2026-09-25T00:00:01Z');
+    const voided = { ...crq('ITERATE', '2026-09-25T00:00:02Z'), state, submittedAt: null };
+    expect(
+      judgeAtHead(
+        await snapshotOf(prSpec({ reviews: [voided, pass] })),
+        SHA_B,
+        CONSERVATIVE_TRUST_POLICY,
+      ).accepted,
+    ).toBe(true);
+  });
+  test('native changes requested with a CRQ header remains an objection', async () => {
+    const objection = review({
+      login: 'objector',
+      state: 'CHANGES_REQUESTED',
+      body: crq('ITERATE', '2026-09-25T00:00:02Z').body ?? '',
+    });
+    expect(
+      judgeAtHead(
+        await snapshotOf(prSpec({ reviews: [crq('PASS', '2026-09-25T00:00:01Z'), objection] })),
+        SHA_B,
+        CONSERVATIVE_TRUST_POLICY,
+      ),
+    ).toMatchObject({ accepted: false, reason: 'objection_outstanding' });
+  });
+  test('trusted non-author fallback supersedes App evidence and untrusted does not', async () => {
+    const app = crq('PASS', '2026-09-25T00:00:01Z');
+    const host = {
+      ...crq('ITERATE', '2026-09-25T00:00:02Z'),
+      login: 'queue-host',
+      typename: 'User',
+      association: 'OWNER',
+    };
+    expect(
+      judgeAtHead(
+        await snapshotOf(prSpec({ reviews: [app, host] })),
+        SHA_B,
+        CONSERVATIVE_TRUST_POLICY,
+      ).accepted,
+    ).toBe(false);
+    expect(
+      judgeAtHead(
+        await snapshotOf(prSpec({ reviews: [{ ...host, body: app.body ?? '' }] })),
+        SHA_B,
+        CONSERVATIVE_TRUST_POLICY,
+      ).accepted,
+    ).toBe(true);
+    expect(
+      judgeAtHead(
+        await snapshotOf(
+          prSpec({ reviews: [{ ...host, body: app.body ?? '', association: 'NONE' }] }),
+        ),
+        SHA_B,
+        CONSERVATIVE_TRUST_POLICY,
+      ).accepted,
+    ).toBe(false);
+  });
   test.each([false, true])('uses full-history submission time (reverse=%s)', async (reverse) => {
     const old = crq('PASS', '2026-09-25T00:00:01Z');
     const newer = crq('ITERATE', '2026-09-25T00:00:02Z');

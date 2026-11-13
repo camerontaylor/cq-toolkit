@@ -19,7 +19,9 @@ class IdentityTest(unittest.TestCase):
         answers = [self.response('{"installation_token":"repo-scoped-v1"}'),
                    self.response('fixture-private-token\n', '{"expires_at":"2099-01-01T00:00:00Z"}'),
                    self.response('{}')]
-        with mock.patch.object(identity.subprocess, 'run', side_effect=answers) as run:
+        with mock.patch.dict(identity.os.environ, {'GH_HOST': 'foreign.invalid', 'GH_ENTERPRISE_TOKEN': 'foreign',
+                                                  'GITHUB_ENTERPRISE_TOKEN': 'foreign2', 'KEEP_ME': 'yes'}), \
+             mock.patch.object(identity.subprocess, 'run', side_effect=answers) as run:
             gh = identity.authenticated_gh(REPO)
             gh(['gh', 'api', 'repos/' + REPO + '/pulls/7'])
         self.assertEqual(run.call_args_list[0].args[0], ['cq-review-post', '--capabilities'])
@@ -27,6 +29,9 @@ class IdentityTest(unittest.TestCase):
             ['cq-review-post', '--installation-token', '--repo', REPO])
         self.assertEqual(run.call_args.kwargs['env']['GH_TOKEN'], 'fixture-private-token')
         self.assertNotIn('fixture-private-token', str(run.call_args.args))
+        for key in ('GH_HOST', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'):
+            self.assertNotIn(key, run.call_args.kwargs['env'])
+        self.assertEqual(run.call_args.kwargs['env']['KEEP_ME'], 'yes')
 
     def test_api_diagnostics_cannot_propagate_token_to_receipt_errors(self):
         answers = [self.response('{"installation_token":"repo-scoped-v1"}'),

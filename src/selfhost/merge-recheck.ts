@@ -922,6 +922,11 @@ const sameAccountAgentAccepted = (
   // trusted CRQ evidence. The App bypasses plain shared-account exclusions.
   const evidence = [...snapshot.reviews, ...(snapshot.allClear?.comments ?? [])].filter(
     (review) => {
+      if (
+        isCrqReviewBody(review.body) &&
+        (review.state === 'DISMISSED' || review.state === 'PENDING')
+      )
+        return false;
       if (isIgnoredBotAuthor(review.authorType, review.authorLogin)) return false;
       const login = review.authorLogin;
       if (login === null || login === '') return false;
@@ -975,7 +980,9 @@ export function judgeAtHead(
   policy: TrustPolicy,
 ): HeadJudgment {
   const trusted = snapshot.reviews.filter(
-    (review) => !isCrqReviewBody(review.body) && isTrusted(review, snapshot.authorLogin, policy),
+    (review) =>
+      (!isCrqReviewBody(review.body) || review.state === 'CHANGES_REQUESTED') &&
+      isTrusted(review, snapshot.authorLogin, policy),
   );
   const objectors = [...foldLatestOpinionated(trusted).values()]
     .filter((review) => review.state === 'CHANGES_REQUESTED')

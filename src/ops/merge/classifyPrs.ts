@@ -323,10 +323,21 @@ const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContex
       true;
   const evidence = [...candidate.reviews, ...candidate.issueComments].filter(
     (comment) =>
-      isReviewAppAuthor(comment.authorType, comment.authorLogin) ||
-      (authorSharesAccount &&
-        comment.authorLogin === prAuthor &&
-        !isIgnoredBotAuthor(comment.authorType, comment.authorLogin)),
+      (!('state' in comment) || comment.state !== 'DISMISSED') &&
+      (isReviewAppAuthor(comment.authorType, comment.authorLogin) ||
+        (isCrqReviewBody(comment.body) &&
+          comment.authorType === 'User' &&
+          comment.authorLogin != null &&
+          comment.authorLogin.toLowerCase() !== ctx.config.automationLogin?.toLowerCase() &&
+          !ctx.config.excludedLogins?.some(
+            (login) => login.toLowerCase() === comment.authorLogin?.toLowerCase(),
+          ) &&
+          (ctx.config.trustedAssociations ?? ['OWNER', 'MEMBER', 'COLLABORATOR']).includes(
+            ('authorAssociation' in comment ? comment.authorAssociation : null) ?? '',
+          )) ||
+        (authorSharesAccount &&
+          comment.authorLogin === prAuthor &&
+          !isIgnoredBotAuthor(comment.authorType, comment.authorLogin))),
   );
   return latestCrqReviewEvidence(evidence, head, (review) =>
     'submittedAt' in review ? review.submittedAt : review.createdAt,
@@ -462,7 +473,7 @@ export function classifyPr(
     return candidate.headRefOid != null && review.commitOid === candidate.headRefOid;
   };
   const foldInput = candidate.reviews.filter((review) => {
-    if (isCrqReviewBody(review.body)) return false;
+    if (isCrqReviewBody(review.body) && review.state !== 'CHANGES_REQUESTED') return false;
     // COMMENTED/DISMISSED are transparent: they must not mask a standing
     // verdict from the same actor.
     if (review.state !== 'APPROVED' && review.state !== 'CHANGES_REQUESTED') return false;
@@ -471,7 +482,9 @@ export function classifyPr(
   });
   const foldedReviews = policyActive
     ? latestReviewPerActor(foldInput)
-    : candidate.reviews.filter((review) => !isCrqReviewBody(review.body));
+    : candidate.reviews.filter(
+        (review) => !isCrqReviewBody(review.body) || review.state === 'CHANGES_REQUESTED',
+      );
   // Row 6 — an OUTSTANDING OBJECTION: a non-author reviewer's
   // CHANGES_REQUESTED against the last commit's head state, not yet
   // withdrawn (verdict moved off CHANGES_REQUESTED). An objection is not

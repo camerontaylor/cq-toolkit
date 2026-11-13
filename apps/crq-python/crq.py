@@ -95,6 +95,10 @@ def item_repo(item: Dict[str, Any]) -> str:
     items (docs/multi-repo.md). New writers stamp `repo` at item creation, so
     the field spreads through the queue as items are created — no reset."""
     return item.get("repo") or REPO
+# Legacy CodeRabbit vocabulary for summary defaults and failure/continuation
+# classification, not the receipt verdict predicate. Receipt verdicts use
+# crq_review_receipt.BLOCKING, including external blocker/fatal aliases.
+# Counts below preserve additional producer severities rather than dropping them.
 BLOCKING_SEVERITIES = {"critical", "major"}
 SEVERITIES = ["critical", "major", "minor", "trivial", "info", "none"]
 
@@ -2437,18 +2441,18 @@ def deliver_pending_review_refreshes(q: Dict[str, Any]) -> List[str]:
                 continue
             if (not all(isinstance(request.get(key), str) and request[key] for key in ("run_id", "base", "head"))
                     or type(request.get("pr")) is not int):
-                item["review_refresh"] = {"state": "abandoned", "error": "malformed CRQ refresh request"}
+                item[prefix + "_refresh"] = {"state": "abandoned", "error": "malformed CRQ refresh request"}
                 continue
-            previous = item.get("review_refresh", {})
+            previous = item.get(prefix + "_refresh", {})
             if (previous.get("head") == request["head"] and previous.get("scan_run") == request["run_id"]
                     and previous.get("state") in ("created", "existing", "abandoned", "skipped-head", "skipped-range", "body-major")):
                 continue
-            candidates.append((item, request))
-    candidates.sort(key=lambda pair: pair[0].get("review_refresh_attempt_at") or "")
+            candidates.append((item, request, prefix))
+    candidates.sort(key=lambda pair: pair[0].get(pair[2] + "_refresh_attempt_at") or "")
     log = []
-    for item, request in candidates[:PR_REVIEWS_PER_TICK]:
-        item["review_refresh_attempt_at"] = iso()
-        prior = item.get("review_refresh", {})
+    for item, request, prefix in candidates[:PR_REVIEWS_PER_TICK]:
+        item[prefix + "_refresh_attempt_at"] = iso()
+        prior = item.get(prefix + "_refresh", {})
         attempts = (prior.get("attempts", 0) if prior.get("head") == request["head"]
                     and prior.get("scan_run") == request["run_id"] else 0)
         meta = {key: request[key] for key in ("run_id", "base", "head")}
@@ -2459,7 +2463,7 @@ def deliver_pending_review_refreshes(q: Dict[str, Any]) -> List[str]:
         except (RuntimeError, OSError, ValueError) as exc:
             attempts += 1
             result = {"state": "abandoned" if attempts >= PR_REVIEW_MAX_ATTEMPTS else "retry", "error": str(exc)[:300]}
-        item["review_refresh"] = {**result, "head": request["head"], "scan_run": request["run_id"], "attempts": attempts}
+        item[prefix + "_refresh"] = {**result, "head": request["head"], "scan_run": request["run_id"], "attempts": attempts}
         if result["state"] == "created":
             log.append(f"PASS refresh on PR #{request['pr']} ({result['state']})")
     return log

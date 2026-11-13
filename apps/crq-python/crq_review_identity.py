@@ -49,7 +49,9 @@ def authenticated_gh(repo):
             raise ValueError()
     except (ValueError, KeyError, TypeError, AttributeError):
         raise IdentityUnavailable('invalid-credential-response') from None
-    env = {**os.environ, 'GH_TOKEN': token}
+    env = {key: value for key, value in os.environ.items()
+           if key not in {'GH_HOST', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'}}
+    env['GH_TOKEN'] = token
 
     def gh(argv, *, input_text=None):
         if time.time() + 10 >= expiry.timestamp():

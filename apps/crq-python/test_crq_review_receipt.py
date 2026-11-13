@@ -83,6 +83,50 @@ class ReceiptTest(unittest.TestCase):
         self.assertIn('[major]', gh.posts()[0]['comments'][0]['body'])
         self.assertIn('ITERATE for', gh.posts()[0]['body'])
 
+    def test_all_blocking_aliases_survive_duplicate_minor_and_keep_iterate(self):
+        for severity in ('blocker', 'fatal', 'critical', 'major'):
+            for events in ([{**ANCHORED, 'severity': 'minor'}, {**ANCHORED, 'severity': severity}],
+                           [{**ANCHORED, 'severity': severity}, {**ANCHORED, 'severity': 'minor'}]):
+                with self.subTest(severity=severity, events=events):
+                    gh = ReceiptGh()
+                    self.deliver(events, gh)
+                    self.assertIn('ITERATE for', gh.posts()[0]['body'])
+                    self.assertIn(f'[{severity}]', gh.posts()[0]['comments'][0]['body'])
+
+    def test_foreign_legacy_marker_cannot_suppress_or_invalidate_delivery(self):
+        for suffix in (f'{BASE}..{HEAD}', 'wrong-range'):
+            foreign = {'id': 123, 'user': {'login': 'unrelated'},
+                       'body': prf.marker(META['run_id']) + '\n' + suffix}
+            gh = ReceiptGh(pages=[[foreign]])
+            self.assertEqual(self.deliver(gh=gh)['state'], 'created')
+        trusted = {**foreign, 'user': {'login': 'cq-review[bot]'},
+                   'body': prf.marker(META['run_id']) + f'\n{BASE}..{HEAD}'}
+        gh = ReceiptGh(pages=[[trusted]])
+        self.assertEqual(self.deliver(gh=gh)['state'], 'existing')
+        self.assertEqual(gh.posts(), [])
+
+    def test_trusted_unattested_host_thread_survives_app_recovery_but_foreign_copy_does_not(self):
+        for association, expected in [('OWNER', 'ITERATE'), ('NONE', 'PASS')]:
+            root = thread()
+            root['comments']['nodes'][0].update(author={'login': 'queue-host'}, pullRequestReview={
+                'body': 'Unattested: App identity unavailable; posted with the host account.',
+                'author': {'login': 'queue-host'}, 'authorAssociation': association})
+            gh = ReceiptGh(threads=[{'nodes': [root], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}])
+            self.deliver(gh=gh)
+            self.assertIn(expected + ' for', gh.posts()[0]['body'])
+
+    def test_foreign_marked_threads_cannot_hold_pass(self):
+        for legacy in (False, True):
+            root = thread()
+            root['comments']['nodes'][0]['author']['login'] = 'unrelated'
+            if legacy:
+                root['comments']['nodes'][0]['pullRequestReview'] = {
+                    'body': '<!-- crq-findings run=old -->\n### crq findings (CodeRabbit CLI, local run old)',
+                    'author': {'login': 'unrelated'}}
+            gh = ReceiptGh(threads=[{'nodes': [root], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}])
+            self.deliver(gh=gh)
+            self.assertIn('PASS for', gh.posts()[0]['body'])
+
     def test_minor_threads_do_not_hold_pass_even_if_their_prose_mentions_major(self):
         minor = thread(severity='minor')
         minor['comments']['nodes'][0]['body'] = minor['comments']['nodes'][0]['body'].replace('bug', 'mentions [major]')
@@ -310,7 +354,7 @@ class RefreshTest(unittest.TestCase):
         original = self.original()
         body = original['body'].replace('whole-pr-success -->', 'whole-pr-success body-major=1 -->')
         body = body.replace(f'for `{HEAD}`**', f'for `{HEAD}`**\nUnattested: App identity unavailable; posted with the host account.')
-        earlier = {**original, 'body': body, 'user': {'login': 'crq-host'}}
+        earlier = {**original, 'body': body, 'user': {'login': 'crq-host'}, 'author_association': 'OWNER'}
         self.meta = {**self.meta, 'run_id': 'app-recovered'}
         (self.root / 'meta.json').write_text(json.dumps({**self.meta, 'range_policy': 'full-range-once-v1'}))
         gh = ReceiptGh(pages=[[earlier]])
@@ -392,7 +436,7 @@ class RefreshDeliveryTest(unittest.TestCase):
             self.assertEqual(len(crq.deliver_pending_review_refreshes({'items': [item]})), 1)
             crq.deliver_pending_review_refreshes({'items': [item]})
         refresh.assert_called_once()
-        self.assertEqual(item['review_refresh']['head'], HEAD)
+        self.assertEqual(item['pr_review_refresh']['head'], HEAD)
         self.assertNotIn('run', item)
         self.assertNotIn('pr_review_pending', item)
 
@@ -400,12 +444,12 @@ class RefreshDeliveryTest(unittest.TestCase):
         item = {'id': 'pr7', 'kind': 'open', 'state': 'done',
                 'pr_review': {'state': 'created', 'verdict': 'ITERATE', 'whole_pr_scan': True},
                 'pr_review_request': {**META, 'pr': 7, 'posting_identity': 'cq-review[bot]'},
-                'review_refresh': {'head': HEAD, 'scan_run': 'older-scan', 'state': 'created'}}
+                'pr_review_refresh': {'head': HEAD, 'scan_run': 'older-scan', 'state': 'created'}}
         with mock.patch.object(receipt, 'refresh', return_value={'state': 'created'}) as refresh:
             for _ in range(2):
                 crq.deliver_pending_review_refreshes({'items': [item]})
         refresh.assert_called_once()
-        self.assertEqual(item['review_refresh']['scan_run'], META['run_id'])
+        self.assertEqual(item['pr_review_refresh']['scan_run'], META['run_id'])
 
     def test_closed_or_superseded_refresh_requests_settle_and_stop_polling(self):
         for state in ('skipped-head', 'skipped-range', 'body-major'):
@@ -416,7 +460,23 @@ class RefreshDeliveryTest(unittest.TestCase):
                 for _ in range(3):
                     crq.deliver_pending_review_refreshes({'items': [item]})
             refresh.assert_called_once()
-            self.assertEqual(item['review_refresh']['state'], state)
+            self.assertEqual(item['pr_review_refresh']['state'], state)
+
+    def test_findings_and_clean_refreshes_settle_and_exhaust_errors_independently(self):
+        for failure in (False, True):
+            item = {'id': 'pr7', 'kind': 'open', 'state': 'done'}
+            for prefix in ('pr_review', 'clean_review'):
+                item[prefix] = {'state': 'created', 'verdict': 'ITERATE', 'whole_pr_scan': True}
+                item[prefix + '_request'] = {**META, 'run_id': prefix, 'pr': 7, 'posting_identity': 'cq-review[bot]'}
+            with mock.patch.object(receipt, 'refresh', **({'side_effect': RuntimeError('offline')} if failure
+                                   else {'return_value': {'state': 'skipped-head'}})) as refresh:
+                for _ in range(crq.PR_REVIEW_MAX_ATTEMPTS + 2):
+                    crq.deliver_pending_review_refreshes({'items': [item]})
+            expected = crq.PR_REVIEW_MAX_ATTEMPTS if failure else 1
+            self.assertEqual(refresh.call_count, 2 * expected)
+            for prefix in ('pr_review', 'clean_review'):
+                self.assertEqual(item[prefix + '_refresh']['state'], 'abandoned' if failure else 'skipped-head')
+                self.assertEqual(item[prefix + '_refresh']['attempts'], expected if failure else 0)
 
     def test_422_delivery_keeps_findings_debt_for_retry_without_cleaning_it(self):
         item = {'id': 'pr7', 'kind': 'open', 'pr_review_pending': True,

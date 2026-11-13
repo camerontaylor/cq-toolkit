@@ -294,7 +294,7 @@ or an earlier unresolved major/critical CRQ thread produce ITERATE.
   findings expose no invocable deterministic per-rule re-check subset.
 - When a complete whole-PR scan's latest verdict at the current head was ITERATE,
   a later tick can refresh it to PASS after the author resolves all major-or-above
-  CRQ threads, provided no post-change scan of that head left a major finding in the body. The refresh cites that saved scan; it runs no scan, creates no
+  CRQ threads, provided no scan of that head left a major finding in the body. The refresh cites that saved scan; it runs no scan, creates no
   findings and uses `<!-- crq-verdict-refresh head=<sha> scan-run=<run id> -->`.
   Its whole head-and-scan-run marker dedupes one refresh per scan of a head,
   separate from original per-run retry dedupe. A later complete whole-PR scan at
