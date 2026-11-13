@@ -469,6 +469,44 @@ class Run:
                        "target": self.target, "prior_sha": self.prior_sha,
                        **extra})
 
+    def persist_recovery_receipt(self):
+        """Persist the immutable recovery receipt before admission.
+
+        ``phase.json`` is rewritten by every later phase, so once the flow
+        moves past ``prepared`` the only durable copy of the pre-deploy
+        measurements is this receipt. It carries everything recovering a
+        stuck host needs: the measured prior SHA, the triggers observed
+        before any stop, the runtime measurement, the config digest and the
+        preserved-state digests. ``durable_write`` fsyncs file and directory
+        into the private run record outside the checkout, so the receipt
+        survives a process that dies in the drain or the switch, and nothing
+        in this flow rewrites or removes it. A rewrite attempt must match
+        the existing bytes (modulo the wall-clock stamp) or this run refuses
+        rather than mutate its own evidence.
+        """
+        path = Path(self.run_dir) / "recovery-receipt.json"
+        receipt = {
+            "operation": "deploy",
+            "written_at": now_iso(),
+            "target": self.target,
+            "prior_sha": self.prior_sha,
+            "original_triggers": self.original,
+            "cq_bin": self.cq_bin,
+            "config_sha256": sha256_bytes(self.original_config),
+            "preserved": self.preserved,
+        }
+        if path.exists():
+            existing = load_json(path)
+            existing.pop("written_at", None)
+            expected = dict(receipt)
+            expected.pop("written_at")
+            require(existing == expected,
+                    "the recovery receipt in " + str(self.run_dir)
+                    + " already exists with different content; refusing to "
+                    "mutate the recorded evidence")
+            return
+        durable_write(path, receipt)
+
     def claim_run_dir(self):
         base = Path(self.args.record_dir)
         resolved = base.resolve()
@@ -582,6 +620,10 @@ class Run:
         # is stopped.
         self.require_unchanged_unit_templates()
 
+        # The held phase rewrites phase.json, so the pre-admission evidence
+        # must be copied to its own immutable receipt first: if this process
+        # dies in the drain or the switch, the receipt is what recovery reads.
+        self.persist_recovery_receipt()
         self.hold = Hold(self.root)
         self.hold.acquire()
         self.phase("held")
