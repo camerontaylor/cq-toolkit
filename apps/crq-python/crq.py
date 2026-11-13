@@ -3448,12 +3448,13 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         # "examined 12, starved 12" are different states, and only one of them
         # means the queue is genuinely quiet.
         if reconciled.get('examined'):
-            log.append(f"reconcile: {reconciled['examined']} examined, {reconciled['projected']} projected, "
-                       f"{reconciled['starved']} starved, {reconciled['deferred']} deferred")
+            log.append(f"reconcile: {reconciled.get('examined', 0)} examined, "
+                       f"{reconciled.get('projected', 0)} projected, "
+                       f"{reconciled.get('starved', 0)} starved, {reconciled.get('deferred', 0)} deferred")
         if reconciled.get('starved') or reconciled.get('deferred'):
-            event('reconcile_incomplete', examined=reconciled['examined'],
-                  projected=reconciled['projected'], starved=reconciled['starved'],
-                  deferred=reconciled['deferred'], errors=reconciled['errors'])
+            event('reconcile_incomplete', examined=reconciled.get('examined', 0),
+                  projected=reconciled.get('projected', 0), starved=reconciled.get('starved', 0),
+                  deferred=reconciled.get('deferred', 0), errors=reconciled.get('errors') or [])
     prev = parse_iso(q.get("last_tick"))
     stale_min = CONFIG.get("stale_alarm_min", 36)
     if prev and not dry and (now() - prev).total_seconds() / 60 > stale_min:

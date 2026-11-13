@@ -207,6 +207,26 @@ class CurrentTest(CurrentFixture, unittest.TestCase):
         self.assertEqual('fixed', item['remediation_state'])
         self.assertNotIn('repair_error', item)
 
+    def test_receipt_lane_counts_skips_it_reports(self):
+        item = {'id': 'receipt-item', 'kind': crq.review_receipt.KIND, 'run': 'r1'}
+        lane = {'starved': 1, 'deferred': 2, 'errors': ['RefreshExhausted: exhausted']}
+        with mock.patch.object(crq.repair_tick, 'reconcile_current_fix', return_value=lane):
+            stats = crq.repair_tick.reconcile_fix_prs(object(), {'items': [item]})
+        self.assertEqual(1, stats['examined'])
+        self.assertEqual(1, stats['starved'])
+        self.assertEqual(2, stats['deferred'])
+        self.assertEqual(1, len(stats['errors']))
+
+    def test_receipt_lane_failure_is_counted_not_only_recorded(self):
+        item = {'id': 'receipt-item', 'kind': crq.review_receipt.KIND, 'remediation': {'kept': 1},
+                'remediation_state': 'fixed'}
+        with mock.patch.object(crq.repair_tick, 'reconcile_current_fix',
+                               side_effect=RuntimeError('forge read failed')):
+            stats = crq.repair_tick.reconcile_fix_prs(object(), {'items': [item]})
+        self.assertEqual(1, stats['deferred'])
+        self.assertIn('repair_error', item)
+        self.assertNotIn('remediation', item)
+
     def test_tick_reports_a_starved_reconcile_pass(self):
         """The digest line is what makes a starved pass visible without a probe."""
         stats = {'examined': 3, 'projected': 0, 'starved': 3, 'deferred': 0, 'errors': []}

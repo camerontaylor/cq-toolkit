@@ -738,6 +738,21 @@ def archive_legacy(c, q):
 
 
 def reconcile_current_fix(c, item):
+    """Revalidate one receipt's repair records, reporting what it could not read.
+
+    Returns {'starved', 'deferred', 'errors'} so the caller can count a pass that
+    read nothing. A swallowed forge failure here is a skipped record, and a
+    skipped record that nobody counts is the silence this whole change exists to
+    remove.
+    """
+    counts = {'starved': 0, 'deferred': 0, 'errors': []}
+
+    def skipped(exc):
+        key = 'starved' if isinstance(exc, deferred_refresh.RefreshExhausted) else 'deferred'
+        counts[key] += 1
+        if len(counts['errors']) < 2:
+            counts['errors'].append('%s: %s' % (type(exc).__name__, exc))
+
     # Revalidate on every tick; a rewritten target must revoke old evidence.
     item.pop('remediation', None)
     if item.get('remediation_state') == 'fixed':
@@ -747,15 +762,15 @@ def reconcile_current_fix(c, item):
                if r.get('receipt_id') == rid and r.get('state') == 'published'
                and not r.get('not_fixed')]
     if not rid or not records:
-        return
+        return counts
     import hashlib
     try:
         data = (c.STATE / 'receipts' / (rid + '.json')).read_bytes()
         if hashlib.sha256(data).hexdigest() != rid:
-            return
+            return counts
         doc = json.loads(data)
     except (OSError, ValueError):
-        return
+        return counts
     for record in records:
         pr = record.get('fix_pr')
         publication = record.get('publication', {})
@@ -773,11 +788,10 @@ def reconcile_current_fix(c, item):
         if not info:
             try:
                 info = c.pr_info(pr['number'])
-            except deferred_refresh.RefreshExhausted:
-                # Let the pass count this as starvation rather than skipping the
-                # receipt in silence; nothing here has written state yet.
-                raise
-            except Exception:
+            except Exception as exc:
+                # Starvation and a real forge failure both skip this record, and
+                # both must reach the counters rather than passing as quiet.
+                skipped(exc)
                 continue
         if (info.get('state') == 'CLOSED' or
                 info.get('state') == 'MERGED' and info.get('headRefOid') != publication.get('head')):
@@ -803,8 +817,9 @@ def reconcile_current_fix(c, item):
         if review_receipt.remediation_fixed(item, doc, rid):
             item['remediation_state'] = 'fixed'
             record['merged_fix'] = copy.deepcopy(info)
-            return
+            return counts
         item.pop('remediation', None)
+    return counts
 
 
 def source_thread(c, job):
@@ -1256,16 +1271,29 @@ def reconcile_fix_prs(c, q):
         if item['kind'] == review_receipt.KIND:
             stats['examined'] += 1
             try:
-                reconcile_current_fix(c, item)
+                skips = reconcile_current_fix(c, item)
             except deferred_refresh.RefreshExhausted as exc:
                 # Starvation is not the item's fault: count it and leave the
                 # remediation state alone, unlike a genuine reconcile error.
                 swallowed(exc, item, item.get('run') or '')
             except Exception as exc:
+                # A reconcile that failed outright is an error like any other,
+                # and a pass of nothing but errors must not read as a quiet one.
+                swallowed(exc, item, item.get('run') or '')
                 item.pop('remediation', None)
                 if item.get('remediation_state') == 'fixed':
                     item['remediation_state'] = 'pending-merged-evidence'
                 item['repair_error'] = str(exc)[:300]
+            else:
+                # Skips inside the lane are counted by the lane itself.
+                skips = skips if isinstance(skips, dict) else {}
+                stats['starved'] += int(skips.get('starved') or 0)
+                stats['deferred'] += int(skips.get('deferred') or 0)
+                for message in (skips.get('errors') or [])[:2]:
+                    if len(stats['errors']) < 5:
+                        stats['errors'].append({'item': item.get('id'),
+                                                'run': item.get('run') or '',
+                                                'error': message})
             continue
         for run, record in item.get('repair_runs', {}).items():
             pr = record.get('fix_pr')
