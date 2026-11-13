@@ -15,6 +15,7 @@ pinned revision and manifest digest refusal before host reads,
 candidate/running naming, quiescence polling and fail-safe, and both
 ancestry modes through the fixture rehearsal at the pinned revision.
 """
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -2038,9 +2039,59 @@ class CLIStatusGateTests(RunbookFixture):
             (ops / "digests.py").write_text(
                 'def file_digest(path):\n    return "0" * 64\n\n'
                 'def tree_digest(path):\n    return "0" * 64\n')
+            stdout = io_string()
             with self.assertRaisesRegex(Exception,
-                                       "does not match the reviewed digest"):
+                                       "does not match the reviewed digest"), \
+                    contextlib.redirect_stdout(stdout):
                 _load("probe_coerced_runbook", ops / "deploy-runbook.py")
+            # The refusal is one machine-readable document, emitted before
+            # anything from the ops directory is imported or executed.
+            document = json.loads(stdout.getvalue())
+            self.assertEqual(document["error"]["kind"], "unverified_ops_bytes")
+            self.assertIn("digests.py", document["error"]["message"])
+            self.assertEqual(stdout.getvalue().count("\"error\""), 1,
+                             "exactly one error document on stdout")
+
+    def test_the_digests_module_is_built_from_the_verified_buffer(self):
+        # The pin is only a pin if the bytes it checked are the bytes that
+        # execute: an import would re-open the file, so the module is executed
+        # from the verified buffer and registered under the import name.
+        self.assertIs(sys.modules["digests"], rb.digests)
+        self.assertEqual(rb.digests.__file__,
+                         str(rb.OPS_DIR / "digests.py"))
+        self.assertIsNone(getattr(rb.digests, "__loader__", None),
+                          "exec'd modules have no loader; an import has one")
+        self.assertIn(b"def file_digest", rb.VERIFIED_SIBLING_BYTES["digests.py"])
+
+    def test_the_schema_applied_comes_from_the_verified_buffer(self):
+        # Reread mismatch: if the schema were loaded from the path, a file
+        # edited after the hash check would decide validation. The buffer is
+        # what validates, so the path is never read again.
+        with mock.patch.object(rb, "load_json",
+                               side_effect=AssertionError("schema re-read")):
+            self.assertIsNotNone(rb.verified_schema())
+        # Widening the buffer (not the file) changes the verdict, which is the
+        # proof that the buffer is the source.
+        pinned = rb.VERIFIED_SIBLING_BYTES["deploy-invariants.schema.json"]
+        try:
+            rb.VERIFIED_SIBLING_BYTES["deploy-invariants.schema.json"] = (
+                b'{"type": "object", "required": ["never_present"]}')
+            rb._VERIFIED_SCHEMA = None
+            handle = tempfile.NamedTemporaryFile("w", suffix=".json",
+                                                 delete=False)
+            handle.write("{}")
+            handle.close()
+            path = Path(handle.name)
+            try:
+                digest = rb.digests.file_digest(path)
+                with self.assertRaisesRegex(rb.Refused, "never_present"):
+                    rb.validate_manifest_document(
+                        {"schema_version": 1}, path, digest)
+            finally:
+                path.unlink()
+        finally:
+            rb.VERIFIED_SIBLING_BYTES["deploy-invariants.schema.json"] = pinned
+            rb._VERIFIED_SCHEMA = None
 
     def test_status_accepts_an_alias_of_the_bound_root(self):
         # F5: the binding is by resolved path, so a relative or symlinked
@@ -2412,6 +2463,23 @@ class MarkerPathTests(RunbookFixture):
             self.assertNotIn("deployment root mismatch", str(refusal))
         self.assertEqual(len(reached), 1,
                          "the alias must reach the effects factory")
+
+    def test_a_wrong_root_refuses_before_the_probe_and_the_imports(self):
+        # The ordering is the finding: a root the manifest does not approve
+        # must refuse without reading host state and without executing
+        # candidate code, so neither the probe nor load_module may run.
+        self.build_repo()
+        document = self.manifest()
+        document["marker"]["root"] = str(self.base / "other-checkout")
+        args = self.args(manifest_path=self.write_manifest(document))
+        with mock.patch.object(
+                rb, "check_active_trigger_authorization") as probe, \
+             mock.patch.object(rb, "load_module") as loader:
+            with self.assertRaisesRegex(rb.Refused,
+                                        "deployment root mismatch"):
+                rb.execute(args, effects_factory=lambda m, b: FakeUnits(m))
+        self.assertFalse(probe.called, "the host probe must not run")
+        self.assertFalse(loader.called, "candidate modules must not be imported")
 
     def test_manifest_root_must_be_absolute(self):
         # A relative approved root could mean anything from a different

@@ -79,6 +79,7 @@ import os
 import re
 import subprocess
 import sys
+import types
 import tempfile
 import time
 import uuid
@@ -114,34 +115,47 @@ REVIEWED_SIBLING_SHA256 = {
         "6c8c0e06d42301467fccac7a27ad48ec236ba5a04c0b1f11691459daa4979116",
 }
 RUNBOOK_SELF_DIGEST = hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()
+# The verified bytes are CONSUMED, never re-read. Hashing a file and then
+# letting an import or a JSON load open it again checks bytes that are not the
+# bytes used, which is the whole defect this closes: the check and the use must
+# be the same read. Every consumer below (the digests module, the schema) is
+# built from these buffers.
+VERIFIED_SIBLING_BYTES = {}
 for _sibling_name, _sibling_want in REVIEWED_SIBLING_SHA256.items():
-    _sibling_got = hashlib.sha256(
-        (OPS_DIR / _sibling_name).read_bytes()).hexdigest()
+    _sibling_bytes = (OPS_DIR / _sibling_name).read_bytes()
+    _sibling_got = hashlib.sha256(_sibling_bytes).hexdigest()
     if _sibling_got != _sibling_want:
         _message = ("ops sibling " + _sibling_name + " does not match the "
                     "reviewed digest: got " + _sibling_got + " want "
                     + _sibling_want + "; refusing to import or use unverified "
                     "ops bytes")
-        # Fail closed before the protocol exists. This runs before anything
-        # from the ops directory is imported and before the refusal helpers are
-        # defined, so it cannot emit the documented JSON refusal document and
-        # does not pretend to: the contract for this failure is a nonzero exit
-        # with the reason on stderr, and no JSON on stdout. Only stdlib has
-        # been used at this point.
-        #
-        # Scope, stated without overclaiming: these pins catch a sibling that
-        # was substituted, truncated or edited without the runbook being
-        # updated, and a runbook edited without --runbook-sha256 being updated.
-        # They are not a claim of self-authenticity - bytes that pin themselves
-        # cannot prove their own provenance - they close the accidental and
-        # partial-substitution class, which is the class the GO can check.
+        # One machine-readable refusal and a nonzero exit. Only stdlib has
+        # been used at this point, so the documented error document can be
+        # emitted without importing or executing anything from the ops
+        # directory.
+        sys.stdout.write(json.dumps(
+            {"error": {"kind": "unverified_ops_bytes",
+                       "message": _message}},
+            indent=2, sort_keys=True) + "\n")
+        sys.stdout.flush()
         raise RuntimeError(_message)
-del _sibling_name, _sibling_want, _sibling_got
+    VERIFIED_SIBLING_BYTES[_sibling_name] = _sibling_bytes
+del _sibling_name, _sibling_want, _sibling_got, _sibling_bytes
 
 if str(OPS_DIR) not in sys.path:
     sys.path.insert(0, str(OPS_DIR))
 
-import digests  # noqa: E402  (sibling module, verified above)
+# Build the digests module from the verified buffer. An `import` here would
+# re-open the file, so the bytes that were hashed and the bytes that execute
+# would be two different reads.
+_digests_module = types.ModuleType("digests")
+_digests_module.__file__ = str(OPS_DIR / "digests.py")
+exec(compile(VERIFIED_SIBLING_BYTES["digests.py"],
+             _digests_module.__file__, "exec"),
+     _digests_module.__dict__)
+sys.modules["digests"] = _digests_module
+import digests  # noqa: E402  (the module just built from the verified buffer)
+del _digests_module
 
 RUNBOOK_SCHEMA_VERSION = 1
 HEX40_RE = re.compile(r"[0-9a-f]{40}")
@@ -152,6 +166,7 @@ RELEASE_ORDER = ("start_original_active", "assert_original",
 DRAIN_MODE = "controller_drain_check_owned_runs"
 RESTORE_TARGET = "original_observed"
 SCHEMA_PATH = OPS_DIR / "deploy-invariants.schema.json"
+_VERIFIED_SCHEMA = None
 LONG_SERVICES = ("crq-repair.service", "crq-backfill.service")
 ACTIVE_STATES = ("active", "inactive")
 DEAD_STATES = ("inactive", "failed")
@@ -1441,6 +1456,19 @@ def build_arg_parser():
     return parser
 
 
+def verified_schema():
+    """The invariants schema, parsed once from the hash-verified buffer.
+
+    Loading it from the path would read the file a second time, so the schema
+    that was verified and the schema that is applied could differ."""
+    global _VERIFIED_SCHEMA
+    if _VERIFIED_SCHEMA is None:
+        _VERIFIED_SCHEMA = json.loads(
+            VERIFIED_SIBLING_BYTES[
+                "deploy-invariants.schema.json"].decode("utf-8"))
+    return _VERIFIED_SCHEMA
+
+
 def validate_manifest_document(manifest, manifest_path, manifest_sha256):
     require(isinstance(manifest, dict), "manifest must be a JSON object")
     require(manifest.get("schema_version") == RUNBOOK_SCHEMA_VERSION,
@@ -1451,10 +1479,46 @@ def validate_manifest_document(manifest, manifest_path, manifest_sha256):
             + manifest_sha256)
     # Finding 2: the message exists only when validation failed; a valid
     # manifest never concatenates a None problem into an error string.
-    schema_problem_text = manifest_problem(manifest, load_json(SCHEMA_PATH))
+    schema_problem_text = manifest_problem(manifest, verified_schema())
     if schema_problem_text is not None:
         require(False, "manifest schema: " + schema_problem_text)
+    # The manifest restates the marker path for review; the executable value is
+    # derived from --root (``marker_path``) so the two name the same file the
+    # tick reads. Any other manifest value is refused rather than kept as a
+    # second, unchecked source of truth.
+    require(manifest["marker"]["path"] == MARKER_RELPATH,
+            "manifest marker.path must be exactly " + MARKER_RELPATH
+            + " (the tick's own marker); got "
+            + repr(manifest["marker"]["path"]))
     return manifest
+
+
+def validate_manifest_root(manifest, args):
+    """Bind --root to the deployment root the manifest was approved against.
+
+    Finding (design review F2): every marker path is derived from --root, so
+    an operator passing another checkout stopped units while the live tick -
+    which reads its own root's state/runner-disabled - never saw the hold. The
+    manifest carries the absolute deployment root the deploy was approved
+    against and this compares it.
+
+    Pure: it reads only the manifest already in hand and the path the caller
+    passed, so execute() calls it immediately after the manifest validation and
+    therefore before the systemctl probe, before every candidate import and
+    before any marker operation. Not an approval: the approved value is
+    compared, and the comparison is the whole mechanism."""
+    approved_root = (manifest.get("marker") or {}).get("root")
+    require(isinstance(approved_root, str) and approved_root
+            and Path(approved_root).is_absolute(),
+            "manifest marker.root must be the absolute deployment root the "
+            "deploy was approved against; got " + repr(approved_root))
+    resolved_root = Path(args.root).resolve()
+    require(resolved_root == Path(approved_root).resolve(),
+            "deployment root mismatch: --root resolves to "
+            + str(resolved_root) + " but the manifest approves "
+            + str(Path(approved_root).resolve()) + "; the live tick reads the "
+            "marker from the approved tree, so this run would stop units for a "
+            "hold nothing observes")
 
 
 def check_pinned_revision(args):
@@ -1540,16 +1604,19 @@ def execute(args, effects_factory=None) -> dict:
     were constructed. Production (factory None) builds ``RealUnits`` and the
     controller's ``Effects``. Returns the run's result document (the caller
     prints it; ``main`` maps it to an exit status)."""
-    # Order is the point of the finding this closes. The runbook pin, the
-    # manifest and the root comparison read only this checkout's own files, so
-    # they run BEFORE the systemctl authorization probe and before any
-    # candidate module is imported: an unauthorized invocation, or one pointed
-    # at the wrong checkout, refuses without a host read and without executing
-    # imported code. The guard still precedes every effect, every marker
-    # operation and every import.
+    # Order is the point of the findings this closes, and it is the order the
+    # code now has rather than a comment about an intended one: the runbook
+    # pin, the manifest (schema included, parsed from the verified buffer), the
+    # marker path and the root comparison read only this checkout's own files,
+    # so they run BEFORE the systemctl authorization probe and before any
+    # candidate module is imported. An unauthorized invocation, or one pointed
+    # at the wrong checkout, therefore refuses without a host read and without
+    # executing imported code. The guard still precedes every effect, every
+    # marker operation and every import.
     check_pinned_revision(args)
     manifest = validate_manifest_document(load_json(args.manifest),
                                           args.manifest, args.manifest_sha256)
+    validate_manifest_root(manifest, args)
     check_active_trigger_authorization(args)
     candidate_ops = Path(args.candidate_root) / "apps/crq-python/ops"
     # Digest-pin the candidate modules BEFORE importing them: an import is
@@ -1574,34 +1641,6 @@ def execute(args, effects_factory=None) -> dict:
             "--target-sha must equal the manifest identity target_sha: "
             "command line " + str(args.target_sha) + " manifest "
             + str(manifest["identity"]["target_sha"]))
-    # The manifest restates the marker path for review; the executable value
-    # is derived from --root (``marker_path``) so the two are the same file
-    # the tick reads. Any other manifest value is refused rather than kept as
-    # a second, unchecked source of truth.
-    require(manifest["marker"]["path"] == MARKER_RELPATH,
-            "manifest marker.path must be exactly " + MARKER_RELPATH
-            + " (the tick's own marker); got "
-            + repr(manifest["marker"]["path"]))
-    # Finding (design review F2): every marker path is derived from --root,
-    # so an operator passing another checkout stopped units while the live
-    # tick - which reads its own root's state/runner-disabled - never saw the
-    # hold. The manifest now carries the absolute deployment root the deploy
-    # was approved against and this refuses before any host read or marker
-    # operation (and, because this runs ahead of the provision now, before the
-    # systemctl probe and the candidate imports). Not an approval: the approved
-    # value is compared, and the comparison is the whole mechanism.
-    approved_root = (manifest.get("marker") or {}).get("root")
-    require(isinstance(approved_root, str) and approved_root
-            and Path(approved_root).is_absolute(),
-            "manifest marker.root must be the absolute deployment root the "
-            "deploy was approved against; got " + repr(approved_root))
-    resolved_root = Path(args.root).resolve()
-    require(resolved_root == Path(approved_root).resolve(),
-            "deployment root mismatch: --root resolves to "
-            + str(resolved_root) + " but the manifest approves "
-            + str(Path(approved_root).resolve()) + "; the live tick reads the "
-            "marker from the approved tree, so this run would stop units for a "
-            "hold nothing observes")
     if args.rehearsal:
         # Finding 3, defense in depth: even a direct execute() call with
         # --rehearsal must not fall through to the live factory.
