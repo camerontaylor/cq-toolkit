@@ -49,6 +49,9 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence, *, preserve_work
     old_record = item.get('repair_runs', {}).get(old['run'])
     if not old_record or old_job_id not in old_record.get('jobs', []):
         raise ValueError('historical finding lacks tick-owned repair evidence')
+    if (item.get('kind') == review_receipt.KIND
+            and old_record.get('receipt_id') != item.get('receipt_id')):
+        raise ValueError('historical finding belongs to a different receipt')
     binding = {'origin_job': old_job_id, 'source_sha': source_sha, 'evidence': evidence}
     if preserve_worktree:
         binding['preserve_worktree'] = True
@@ -70,6 +73,19 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence, *, preserve_work
         count = sum(r.get('pin') == source_sha for r in history)
     if count >= c.CONFIG['repair'].get('max_rounds_per_pin', 2):
         raise ValueError('repair round ceiling reached for current source pin')
+    receipt_binding = None
+    if item.get('kind') == review_receipt.KIND and item.get('receipt_id'):
+        # A prepared receipt retry must keep the receipt binding and cover the
+        # whole receipt, or reconcile_current_fix can never credit the merged
+        # fix with the receipt's remediation evidence. A single prepared job
+        # only covers a single-finding receipt; reject the rest before any write.
+        receipt_doc = json.loads((c.STATE / 'receipts' / (item['receipt_id'] + '.json')).read_bytes())
+        receipt_findings = sorted(review_receipt.digest(f) for f in receipt_doc.get('findings', []))
+        if len(receipt_findings) != 1:
+            raise ValueError('prepared receipt retry does not cover the complete receipt')
+        receipt_binding = {'receipt_id': item['receipt_id'],
+                           'receipt_findings': receipt_findings,
+                           'repair_findings': [review_receipt.digest(old['finding'])]}
     # Scan the FULL pinned file, not just the tip commit's changed lines.
     # The same path-scoped denylist and gitleaks policy precedes any model use.
     source_file = source_path(old['finding'])
@@ -103,7 +119,8 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence, *, preserve_work
     item.setdefault('repair_runs', {})[run] = {
         'jobs': [job_id], 'pin': source_sha, 'base': source_sha, 'branch': None,
         'open_pr': False, 'round': count + 1, 'state': 'queued',
-        'origin_job': old_job_id, 'revalidation_sha256': identity(evidence)}
+        'origin_job': old_job_id, 'revalidation_sha256': identity(evidence),
+        **(receipt_binding or {})}
     if old.get('canonical_finding_id'):
         item['repair_runs'][run]['canonical_finding_id'] = old['canonical_finding_id']
     c.save_queue(q)
