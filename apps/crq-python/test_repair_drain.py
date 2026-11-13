@@ -2173,5 +2173,58 @@ class CanonicalFixedProjectionTest(unittest.TestCase):
         self.assert_spooled_successor_prevents_projection('superseded')
 
 
+class UnpublishedSiblingValidationTest(unittest.TestCase):
+    """Sibling results bypass harvest's validation, so the sibling path must
+    apply the same identity and binding checks before a verdict becomes an
+    authoritative outcome write-back (Codex P2, PR 1679)."""
+
+    def setUp(self):
+        self.job = {'job': 'crq-run1-F2', 'item': 'item1', 'canonical_finding_id': 'f' * 64,
+                    'source_sha': 'a' * 40, 'finding_sha256': 'b' * 64, 'origin_job': None,
+                    'repair_base': 'c' * 40, 'finding': {'severity': 'major'}}
+        self.outcome_calls = []
+        self.mark_calls = []
+        self.record = {'jobs': ['crq-run1-F1', 'crq-run1-F2'], 'state': 'failed'}
+
+    def run_siblings(self, result):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            (state / 'repair' / 'crq-run1-F2').mkdir(parents=True)
+            (state / 'repair/inbox').mkdir(parents=True)
+            (state / 'repair' / 'crq-run1-F2' / 'result.json').write_text(json.dumps(result))
+            (state / 'repair' / 'inbox' / 'crq-run1-F2.json').write_text(json.dumps(self.job))
+            c = SimpleNamespace(STATE=state, iso=lambda: 'now', CONFIG={'repair': {}})
+            with mock.patch.object(repair_tick, 'finding_inbox', return_value=SimpleNamespace(
+                    repair_outcome=lambda *a, **k: self.outcome_calls.append(a))), \
+                 mock.patch.object(repair_tick, 'mark_finding_outcome',
+                                   side_effect=lambda *a, **k: self.mark_calls.append(a)):
+                repair_tick.record_unpublished_siblings(c, self.record, {'crq-run1-F1'})
+
+    def test_valid_terminal_sibling_reaches_mark_finding_outcome(self):
+        self.run_siblings({'job': 'crq-run1-F2', 'item': 'item1', 'verdict': 'NOT-FIXED',
+                           'source_sha': 'a' * 40, 'finding_sha256': 'b' * 64, 'origin_job': None})
+        self.assertEqual(len(self.mark_calls), 1)
+        self.assertEqual(self.mark_calls[0][1]['job'], 'crq-run1-F2')
+
+    def test_mismatched_binding_sibling_is_terminalized(self):
+        result = {'job': 'crq-run1-F2', 'item': 'item1', 'verdict': 'NOT-FIXED',
+                  'source_sha': 'd' * 40, 'finding_sha256': 'b' * 64, 'origin_job': None,
+                  'unchanged_evidence': {'fake': True}}
+        self.run_siblings(result)
+        self.assertEqual(len(self.mark_calls), 1)
+        failure = self.mark_calls[0][2]
+        self.assertEqual(failure['verdict'], 'FAILED')
+        self.assertIn('binding mismatch', failure['reason'])
+        self.assertNotIn('unchanged_evidence', failure)
+
+    def test_identity_mismatch_sibling_is_terminalized(self):
+        result = {'job': 'other-job', 'item': 'item1', 'verdict': 'STALE'}
+        self.run_siblings(result)
+        self.assertEqual(len(self.mark_calls), 1)
+        failure = self.mark_calls[0][2]
+        self.assertEqual(failure['verdict'], 'FAILED')
+        self.assertIn('identity mismatch', failure['reason'])
+
+
 if __name__ == '__main__':
     unittest.main()

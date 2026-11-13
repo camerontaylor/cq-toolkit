@@ -315,9 +315,11 @@ def record_terminal_failure(c, q, item, record, verdicts, expected, job_id, exc)
 def record_unpublished_siblings(c, record, handled):
     """A failed run can never publish. A FIXED sibling records no outcome of
     its own (only publication fixes a finding), so give each verified sibling an
-    explicit decision instead of leaving it bound to a dead run. `handled` are
-    the jobs whose own outcome the caller records. Idempotent, so the terminal
-    replay path can repeat it after a failed ledger write."""
+    explicit decision instead of leaving it bound to a dead run; terminal
+    FAILED/NOT-FIXED/STALE siblings record their own verdict through
+    `mark_finding_outcome`. `handled` are the jobs whose own outcome the caller
+    records. Idempotent, so the terminal replay path can repeat it after a
+    failed ledger write."""
     failures = []
     for other in record.get('jobs') or ():
         if other in handled or not isinstance(other, str):
@@ -329,13 +331,34 @@ def record_unpublished_siblings(c, record, handled):
             continue
         if not isinstance(result, dict) or not isinstance(job, dict):
             continue
-        if result.get('verdict') != 'FIXED' or not job.get('canonical_finding_id'):
+        if not job.get('canonical_finding_id'):
             continue
         try:
-            finding_inbox(c).repair_outcome(
-                job['canonical_finding_id'], other, 'needs-human',
-                'repair run failed before publication; the verified fix was not published',
-                c.iso(), repair_base=job.get('repair_base'), failure_class='exhausted')
+            if result.get('verdict') == 'FIXED':
+                finding_inbox(c).repair_outcome(
+                    job['canonical_finding_id'], other, 'needs-human',
+                    'repair run failed before publication; the verified fix was not published',
+                    c.iso(), repair_base=job.get('repair_base'), failure_class='exhausted')
+            elif result.get('verdict') in ('FAILED', 'NOT-FIXED', 'STALE'):
+                # Sibling results bypass harvest's validation, so apply the
+                # same identity and binding checks before the verdict becomes
+                # an authoritative outcome write-back. A deterministic artifact
+                # defect is terminalized (like harvest's record_terminal_failure)
+                # instead of replayed forever: the failure outcome is recorded,
+                # the attacker-controlled verdict is not, and the tick proceeds.
+                if result.get('job') != other or result.get('item') != job.get('item'):
+                    reason = 'invalid repair result: sibling identity mismatch'
+                elif job.get('source_sha') and any(result.get(k) != job.get(k)
+                        for k in ('source_sha', 'finding_sha256', 'origin_job')):
+                    reason = 'invalid repair result: sibling source/evidence binding mismatch'
+                else:
+                    reason = None
+                if reason is not None:
+                    mark_finding_outcome(c, job, {'job': other, 'item': job.get('item'),
+                                                  'verdict': 'FAILED', 'reason': reason,
+                                                  'finding': job.get('finding')})
+                else:
+                    mark_finding_outcome(c, job, result)
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
             # One sibling's ledger write must not skip the healthy ones; the
             # terminal replay retries whatever is left.
