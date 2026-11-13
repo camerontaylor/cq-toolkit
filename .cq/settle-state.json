@@ -2,45 +2,6 @@
   "version": 1,
   "repo": "camerontaylor/cq-toolkit",
   "prs": {
-    "1680": {
-      "tuple": {
-        "head": "8f1c80f7d8ea3afe44a0167cf710720730abee6c",
-        "base": "b7a9d30e6da70bc6b5ba6f43874fb7595c4465ec",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-13T05:44:53.038Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1681": {
-      "tuple": {
-        "head": "dabcda7d0a8ddb1262cc02d08e8c65ddf0bb6b5c",
-        "base": "b7a9d30e6da70bc6b5ba6f43874fb7595c4465ec",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-13T05:12:41.563Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1682": {
-      "tuple": {
-        "head": "bafb07942eec8bc8bfdf2fbbb993d43a9125f2f7",
-        "base": "b7a9d30e6da70bc6b5ba6f43874fb7595c4465ec",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-13T05:12:41.563Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1683": {
       "tuple": {
         "head": "b108a5468f5c3fcf1fbaec4ea94c3812f4603d9b",
@@ -50,19 +11,6 @@
       "observations": [
         {
           "observedAt": "2026-11-13T06:31:25.588Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1684": {
-      "tuple": {
-        "head": "b59966b8865dc14e074bd4ef3749f36ff0675f0c",
-        "base": "b7a9d30e6da70bc6b5ba6f43874fb7595c4465ec",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-13T05:44:26.892Z",
           "by": "self-merge-prs:observe"
         }
       ]
