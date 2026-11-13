@@ -1306,13 +1306,50 @@ def cmd_verify(args) -> int:
     return 0 if not problems else 1
 
 
+def _error_artifact(kind, subcommand, message, exit_code) -> dict:
+    """The one JSON artifact for an error with no result (doctrine I1)."""
+    return {"error": {"kind": kind, "subcommand": subcommand,
+                      "message": message, "exitCode": exit_code}}
+
+
+class _JsonArgumentParser(argparse.ArgumentParser):
+    """argparse parser that answers argument failures with the I1 artifact.
+
+    Machine mode (--json) is shared with the subparsers argparse derives from
+    this class, so every usage error -- on this parser or a subparser --
+    writes one error object to stdout with exit code 2 and keeps stderr
+    empty. Without --json, the same artifact still goes to stdout (I1:
+    stdout is always one JSON artifact) and the usage narration goes to
+    stderr.
+    """
+
+    json_mode = False
+    subcommand = None
+
+    def error(self, message):
+        print(json.dumps(_error_artifact("usage", self.subcommand, message, 2),
+                         indent=2, sort_keys=True))
+        if not self.json_mode:
+            print("usage: " + message, file=sys.stderr)
+        raise SystemExit(2)
+
+
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    if argv is None:
+        argv = sys.argv[1:]
+    parser = _JsonArgumentParser(description=__doc__)
+    # Machine mode is needed before the parse, because a usage error is the
+    # one failure that never produces a namespace to read --json from.
+    parser.json_mode = "--json" in argv
     parser.add_argument("--state-dir", default=str(DEFAULT_STATE))
     parser.add_argument("--tools", type=pathlib.Path,
                         help="directory holding qemu, qemu-img and cloud-localds")
     parser.add_argument("--source-commit", default=None,
                         help="full git commit whose tree produced the executed scripts")
+    parser.add_argument("--json", action="store_true",
+                        help="machine mode: every error emits one JSON error "
+                             "artifact on stdout (usage exit 2, runtime exit 1) "
+                             "and stderr stays empty")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("plan")
     sub.add_parser("fetch")
@@ -1335,6 +1372,11 @@ def main(argv=None) -> int:
                          help="move this run's overlay/seed/key into state/trash")
     verify = sub.add_parser("verify")
     verify.add_argument("report")
+    # Argument failures raised by a subparser (e.g. a missing --run-id) must
+    # honor --json too, and name the operation in the artifact.
+    for name, child in sub.choices.items():
+        child.json_mode = parser.json_mode
+        child.subcommand = name
     args = parser.parse_args(argv)
     commands = {"plan": cmd_plan, "fetch": cmd_fetch, "prepare": cmd_prepare,
                 "boot": cmd_boot, "phase": cmd_phase,
@@ -1342,9 +1384,25 @@ def main(argv=None) -> int:
                 "run": cmd_run, "destroy": cmd_destroy, "verify": cmd_verify}
     try:
         return commands[args.command](args)
-    except (ValueError, RuntimeError) as exc:
-        print("refused: " + str(exc), file=sys.stderr)
+    except ValueError as exc:
+        # Refusals and missing arguments (e.g. run without --source-commit)
+        # stay usage errors (exit 2) but still write the one JSON artifact to
+        # stdout; stderr stays empty in machine mode.
+        message = str(exc) or type(exc).__name__
+        print(json.dumps(_error_artifact("refused", args.command, message, 2),
+                         indent=2, sort_keys=True))
+        if not parser.json_mode:
+            print("refused: " + message, file=sys.stderr)
         return 2
+    except RuntimeError as exc:
+        # A RuntimeError from QEMU or a guest phase is a thrown error
+        # (exit 1), never an argument error.
+        message = str(exc) or type(exc).__name__
+        print(json.dumps(_error_artifact("thrown", args.command, message, 1),
+                         indent=2, sort_keys=True))
+        if not parser.json_mode:
+            print("error: " + message, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
