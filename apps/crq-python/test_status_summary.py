@@ -606,6 +606,62 @@ class ReposSummaryTests(unittest.TestCase):
         self.assertEqual(m["queue_wait"]["interactive"],
                          {"count": 1, "buckets": {"lt_60s": 0, "lt_600s": 1, "lt_3600s": 0, "gte_3600s": 0}})
 
+    def test_review_metrics_terminal_band_and_unknown_attempt_rules(self):
+        """Regression: unknown counted once; only the terminal attempt's band.
+
+        - An attempt with no started_at and no outcome increments
+          attempts.unknown once, not once per check.
+        - Completion band uses only the terminal attempt: an earlier
+          interactive band must not win when the terminal attempt has no
+          valid band; the item still lands in completion.first/repeat and
+          in unknown_band.
+        - pr_associated.items uses the same retained-link predicate as
+          reuse/starts: an association via review_pr_links alone counts.
+        """
+        double_unknown = dict(id="lr-u", kind="local-review", generation=1,
+                              state="pending", created_at="2026-11-06T00:00:00Z",
+                              attempts=[dict(outcome=None, started_at=None)])
+        bandless_terminal = dict(id="lr-b", kind="local-review", generation=1,
+                                 state="done", scope_adequate=True,
+                                 created_at="2026-11-06T01:00:00Z",
+                                 completed_at="2026-11-06T01:10:00Z",
+                                 attempts=[dict(run_id="r1", band="interactive",
+                                                started_at="2026-11-06T01:01:00Z",
+                                                outcome="error", counted=False),
+                                           dict(run_id="r2", outcome="completed",
+                                                counted=True)])
+        link_only = dict(id="lr-link", kind="local-review", generation=1,
+                         state="done", scope_adequate=True,
+                         created_at="2026-11-06T02:00:00Z",
+                         completed_at="2026-11-06T02:05:00Z",
+                         attempts=[dict(run_id="r3", band="background",
+                                        started_at="2026-11-06T02:00:30Z",
+                                        outcome="completed", counted=True)])
+        queue = {"items": [double_unknown, bandless_terminal, link_only],
+                 "review_requests": {},
+                 "review_pr_links": {"owner/other#9": {"item": "lr-link", "pr": 9,
+                                                       "repo": "owner/other"}},
+                 "review_notify_outbox": {}}
+        data = adapter.summarize({"generated_at": "2026-11-07T00:00:00Z"}, queue, {},
+                                 {"repo": "owner/repo", "max_starts_per_hour": 8}, [], 0)
+        m = data["review_metrics"]
+        # One unknown flag per attempt, even when both checks would fire:
+        # the no-evidence attempt (lr-u) and the bandless terminal attempt
+        # r2 (outcome completed, no started_at) each count exactly once.
+        self.assertEqual(m["attempts"], {"failed": 1, "unknown": 2, "no_review": 0})
+        # Terminal attempt has no valid band: the earlier interactive band
+        # must not win; both completed items are first-class, one under
+        # unknown_band and one under background (the link-only item).
+        self.assertEqual(m["completion"]["interactive"],
+                         {"count": 0, "buckets": {"lt_60s": 0, "lt_600s": 0, "lt_3600s": 0, "gte_3600s": 0}})
+        self.assertEqual(m["completion"]["first"]["count"], 2)
+        self.assertEqual(m["completion"]["background"]["buckets"]["lt_600s"], 1)
+        self.assertEqual(m["completion"]["unknown_band"],
+                         {"count": 1, "buckets": {"lt_60s": 0, "lt_600s": 0, "lt_3600s": 1, "gte_3600s": 0}})
+        # Association via review_pr_links alone counts in items (and starts).
+        self.assertEqual(m["pr_associated"], {"items": 1, "reuse_requests": 0,
+                                              "additional_starts": 1})
+
 
 if __name__ == "__main__":
     unittest.main()

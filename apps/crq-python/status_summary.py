@@ -373,15 +373,15 @@ def review_metrics(queue, events, now):
                 if type(attempts) is int:
                     app_attempts += attempts
             continue
-        if item.get("pr") is not None:
+        pr_linked = (item["id"] in pr_link_items or item.get("pr_observers") or
+                     item.get("pr") is not None)
+        if pr_linked:
             pr_items += 1
         repeated = is_repeat(item)
         if repeated:
             repeat_items += 1
             if item.get("state") == "done" and item.get("scope_adequate") is True:
                 completed_repeats += 1
-        pr_linked = (item["id"] in pr_link_items or item.get("pr_observers") or
-                     item.get("pr") is not None)
         run = item.get("run")
         if isinstance(run, dict):
             # Vendor starts come from actual launches, not admission or reuse
@@ -400,15 +400,17 @@ def review_metrics(queue, events, now):
             if not isinstance(attempt, dict):
                 unknown_attempts += 1
                 continue
-            if timestamp(attempt.get("started_at")) is not None:
+            started_at = timestamp(attempt.get("started_at"))
+            if started_at is not None:
                 # A start time is launch evidence; a reused run id alone is not
                 # (receipt-only reuse retains the source run id, started_at null).
                 starts += 1
                 if pr_linked:
                     pr_starts += 1
-            else:
-                unknown_attempts += 1
             outcome = attempt.get("outcome")
+            # One unknown flag per attempt: a launch-evidence check and an
+            # outcome check on the same attempt must not count twice.
+            unknown = started_at is None
             # Classifier vocabulary (crq.classify): rate_limited, auth and
             # action_required are vendor stops after a real invocation; error,
             # interrupted, timeout and malformed are failed invocations.
@@ -416,7 +418,7 @@ def review_metrics(queue, events, now):
             # (diff oversize, no review performed) mean no vendor review ran,
             # so they are neither failed nor successful attempts.
             if outcome is None:
-                unknown_attempts += 1
+                unknown = True
             elif outcome == "completed" and attempt.get("counted") is not False:
                 pass
             elif outcome in ("error", "interrupted", "timeout", "malformed",
@@ -425,6 +427,8 @@ def review_metrics(queue, events, now):
             elif outcome in ("skipped", "too_large"):
                 no_review += 1
             else:
+                unknown = True
+            if unknown:
                 unknown_attempts += 1
             band = attempt.get("band") if attempt.get("band") in ("interactive", "background") else None
             started_at = timestamp(attempt.get("started_at"))
@@ -455,15 +459,17 @@ def review_metrics(queue, events, now):
             completed_at = timestamp(item.get("completed_at"))
             if completed_at is not None:
                 lag = max(0, completed_at - created_at)
-                # Band attribution follows the terminal (latest) attempt's own
-                # band; an unknown band counts nowhere instead of as background.
-                band = next((a.get("band") for a in reversed(item_attempts)
-                             if isinstance(a, dict) and a.get("band") in ("interactive", "background")),
-                            None)
+                # Band attribution follows only the terminal (latest) attempt:
+                # searching backward past a band-less terminal attempt would
+                # let an earlier interactive band win. A missing/invalid
+                # terminal band counts under unknown_band.
+                terminal = item_attempts[-1] if item_attempts else None
+                band = (terminal.get("band") if isinstance(terminal, dict) and
+                        terminal.get("band") in ("interactive", "background") else None)
+                add_to = completion_class["repeat"] if repeated else completion_class["first"]
+                add_to["count"] += 1
+                add_to["buckets"][_bucket(lag)] += 1
                 if band is not None:
-                    add_to = completion_class["repeat"] if repeated else completion_class["first"]
-                    add_to["count"] += 1
-                    add_to["buckets"][_bucket(lag)] += 1
                     completion[band]["count"] += 1
                     completion[band]["buckets"][_bucket(lag)] += 1
                 else:
