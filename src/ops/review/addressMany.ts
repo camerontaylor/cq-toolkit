@@ -80,26 +80,64 @@ export type ReviewAddressManyResult = OpResult<
 class IsolationRefusal extends Error {}
 
 /**
+ * The caller's effective `core.sshCommand` (system, global, local and, when
+ * enabled, worktree scopes) or none: setting GIT_SSH_COMMAND would otherwise
+ * override it and silently discard its options when batch mode is enforced.
+ */
+const resolveCoreSshCommand = async (repoRoot: string): Promise<string | undefined> => {
+  const run = promisify(execFile);
+  try {
+    const configured = await run('git', ['-C', repoRoot, 'config', '--get', 'core.sshCommand'], {
+      timeout: 300_000,
+      env: { ...processEnv(), GIT_TERMINAL_PROMPT: '0' },
+    });
+    const command = configured.stdout.trim();
+    return command ? command : undefined;
+  } catch {
+    // Unset (exit 1) or unreadable configuration resolves to no configured
+    // command; a real git failure surfaces on the next work invocation.
+    return undefined;
+  }
+};
+
+/**
  * Bounded, non-interactive options for clone-setup Git calls. Git asks for
  * credentials through `/dev/tty`, not stdin, so a private remote without a
  * usable credential would otherwise stall the worker (and its reservation)
  * forever; the timeout bounds hangs that no prompt explains.
  */
-const gitSubprocess = (): { timeout: number; env: NodeJS.ProcessEnv } => {
+export const gitSubprocess = (
+  configuredSshCommand?: string,
+): { timeout: number; env: NodeJS.ProcessEnv } => {
   const env: NodeJS.ProcessEnv = { ...processEnv(), GIT_TERMINAL_PROMPT: '0' };
   // GIT_TERMINAL_PROMPT=0 covers git's own credential prompts, but OpenSSH
   // reads /dev/tty directly for passphrase/host-key prompts and ignores it.
   // BatchMode makes ssh non-interactive (it refuses instead of prompting)
   // without discarding caller-configured SSH commands or settings; an ssh
   // variant that does not know BatchMode would only fail earlier, which the
-  // timeout below bounds anyway.
+  // timeout below bounds anyway. With no env vars set, the caller's resolved
+  // core.sshCommand stays the base command so its options survive; plain ssh
+  // applies only when nothing is configured. Any existing BatchMode option is
+  // dropped first, in its attached (`-oBatchMode=no`), separated
+  // (`-o BatchMode=no`) and quoted (`"-oBatchMode=no"`) forms: OpenSSH honors
+  // the first occurrence of an option, so a configured `BatchMode=no` would
+  // win over an appended `-oBatchMode=yes`, and every occurrence must go so
+  // the appended one is the only one in force. Lookbehind and lookahead
+  // delimit each option, so removal takes the option and its trailing
+  // whitespace but never a bounding quote: shell quoting stays balanced and
+  // the rewritten command remains valid for shell execution.
+  const enforceBatchMode = (command: string): string => {
+    const stripped = command
+      .replace(/(?<=^|[\s"'])-o\s*batchmode=\S*?(?=$|[\s"'])\s*/gi, ' ')
+      .trim()
+      .replace(/\s+/g, ' ');
+    return `${stripped} -oBatchMode=yes`;
+  };
   if (env['GIT_SSH'] === undefined && env['GIT_SSH_COMMAND'] === undefined) {
-    env['GIT_SSH_COMMAND'] = 'ssh -oBatchMode=yes';
-  } else if (
-    env['GIT_SSH_COMMAND'] !== undefined &&
-    !/(^|[\s"'])-oBatchMode=yes([\s"']|$)/.test(env['GIT_SSH_COMMAND'])
-  ) {
-    env['GIT_SSH_COMMAND'] = `${env['GIT_SSH_COMMAND']} -oBatchMode=yes`;
+    const base = configuredSshCommand?.trim() || 'ssh';
+    env['GIT_SSH_COMMAND'] = enforceBatchMode(base);
+  } else if (env['GIT_SSH_COMMAND'] !== undefined) {
+    env['GIT_SSH_COMMAND'] = enforceBatchMode(env['GIT_SSH_COMMAND']);
   }
   return { timeout: 300_000, env };
 };
@@ -111,9 +149,10 @@ export async function isolateAddressMany(
   options: { cloneRoot: string; target?: string; onPartial?: (path: string) => void },
 ): Promise<string> {
   const run = promisify(execFile);
+  const sshCommand = await resolveCoreSshCommand(repoRoot);
   const git = checkoutWriterContext()
-    ? (file: string, args: string[]) => checkoutWriterCommand(file, args, gitSubprocess())
-    : (file: string, args: string[]) => run(file, args, gitSubprocess());
+    ? (file: string, args: string[]) => checkoutWriterCommand(file, args, gitSubprocess(sshCommand))
+    : (file: string, args: string[]) => run(file, args, gitSubprocess(sshCommand));
   // Inspect key names only: helpers, HTTP headers and signing values may contain credentials.
   const scopes = ['--local'];
   try {
@@ -161,6 +200,12 @@ export async function isolateAddressMany(
     const origin = await git('git', ['-C', repoRoot, 'remote', 'get-url', 'origin']);
     await git('git', ['clone', '--no-hardlinks', '--', repoRoot, root]);
     await git('git', ['-C', root, 'remote', 'set-url', 'origin', origin.stdout.trim()]);
+    // Clone-setup calls carry the caller's sshCommand only through this flow's
+    // environment; later Git calls in the clone (fetch, addressing, push) run
+    // without it, so persist the resolved command in the clone's local
+    // configuration. With none configured the clone keeps Git's defaults.
+    if (sshCommand !== undefined)
+      await git('git', ['-C', root, 'config', 'core.sshCommand', sshCommand]);
     for (const role of ['author', 'committer']) {
       let ident: string;
       try {
@@ -373,7 +418,8 @@ function makeReviewAddressManyCore(
       if (!selection.candidates.length)
         return { status: 'needs-human', reason: 'No eligible PRs in selection' };
       const run = promisify(execFile);
-      const git = (file: string, args: string[]) => run(file, args, gitSubprocess());
+      const sshCommand = await resolveCoreSshCommand(input.repoRoot);
+      const git = (file: string, args: string[]) => run(file, args, gitSubprocess(sshCommand));
       const coordinationRoot =
         deps.coordinationRoot ??
         (await realpath(
