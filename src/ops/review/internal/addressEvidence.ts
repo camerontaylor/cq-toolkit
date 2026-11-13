@@ -249,31 +249,57 @@ async function terminalSession(
       if (!bin) throw new Error('terminal trusted Git executable unavailable');
       const binary = await lstat(bin);
       const directory = join(context.commonDir, `cq-address-terminal-${randomUUID()}`);
-      await validate();
-      await mkdir(directory, { mode: 0o700 });
       const config = join(directory, 'empty-config');
       const hooks = join(directory, 'empty-hooks');
-      await validate();
-      await mkdir(hooks, { mode: 0o700 });
-      await validate();
-      await writeFile(config, '', { flag: 'wx', mode: 0o600 });
-      return {
-        bin,
-        binary,
-        directoryIdentity: await lstat(directory),
-        hooksIdentity: await lstat(hooks),
-        configIdentity: await lstat(config),
-        common: context.commonDir,
-        checkouts: new Map(),
-        directory,
-        config,
-        hooks,
-        index: join(directory, 'index'),
-        bytes: 0,
-        records: 0,
+      const discard = async (remove: () => Promise<unknown>) => {
+        try {
+          await remove();
+        } catch {
+          /* Best effort: cleanup must not replace the setup failure. */
+        }
       };
+      await validate();
+      await mkdir(directory, { mode: 0o700 });
+      let hooksCreated = false;
+      let configCreated = false;
+      try {
+        await validate();
+        await mkdir(hooks, { mode: 0o700 });
+        hooksCreated = true;
+        await validate();
+        await writeFile(config, '', { flag: 'wx', mode: 0o600 });
+        configCreated = true;
+        return {
+          bin,
+          binary,
+          directoryIdentity: await lstat(directory),
+          hooksIdentity: await lstat(hooks),
+          configIdentity: await lstat(config),
+          common: context.commonDir,
+          checkouts: new Map(),
+          directory,
+          config,
+          hooks,
+          index: join(directory, 'index'),
+          bytes: 0,
+          records: 0,
+        };
+      } catch (error) {
+        // Only the paths this attempt created are removed, so a replaced or
+        // pre-existing entry is never touched by a failed setup.
+        if (configCreated) await discard(() => unlink(config));
+        if (hooksCreated) await discard(() => rmdir(hooks));
+        await discard(() => rmdir(directory));
+        throw error;
+      }
     })();
-    terminalSessions.set(token, pending);
+    const created = pending;
+    created.catch(() => {
+      // A rejected setup is not a usable session: drop it so later calls retry
+      // instead of inheriting the same failure, but only while it is still ours.
+      if (terminalSessions.get(token) === created) terminalSessions.delete(token);
+    });
+    terminalSessions.set(token, created);
   }
   return pending;
 }
