@@ -49,7 +49,7 @@ import {
 import { parseCrqState } from '../../policy/crq/state.js';
 import { utilizationDigest } from '../../policy/crq/coverageUtilization.js';
 import { mergedCurrent, type MergedCurrentView } from '../../policy/crq/statusSummary.js';
-import { parseIso, parseUtc, compactUtc } from '../../policy/crq/utc.js';
+import { parseIso, parseUtc, formatUtcMicros } from '../../policy/crq/utc.js';
 
 /** Kind string Python resolves through `author_quota.AUTHOR_KIND`. */
 const AUTHOR_KIND = 'author';
@@ -173,6 +173,7 @@ const DEFAULT_JSON: PythonJsonOptions = {
   sortKeys: false,
   keyOrder: 'insertion',
   indent: null,
+  spacedSeparators: true,
 };
 
 /** Python `json.dumps(value, sort_keys=True)` for `merged_current` and triage. */
@@ -196,11 +197,22 @@ export function jsonScalar(value: unknown): JsonValue {
   ) {
     return value;
   }
+  // Plain JS numbers (from JSON.parse'd triage rows and digest documents)
+  // wrap into the lossless JsonNumber the encoder expects: an integer lexeme
+  // stays an int, anything else a float, exactly Python's int/float split.
+  if (typeof value === 'number') {
+    return Number.isInteger(value) && Number.isSafeInteger(value)
+      ? JsonNumber.int(value)
+      : JsonNumber.float(value);
+  }
   if (value instanceof JsonObject) {
     return new JsonObject(value.entries.map(([key, entry]) => [key, jsonScalar(entry)] as const));
   }
   if (Array.isArray(value)) return value.map((entry) => jsonScalar(entry));
-  if (isRecord(value)) {
+  // `isRecord` is shape-only: a Map/Set instance would silently render its
+  // enumerable members, which no Python encoder produces, so the prototype
+  // is checked before the record path.
+  if (isRecord(value) && Object.getPrototypeOf(value) === Object.prototype) {
     return new JsonObject(Object.keys(value).map((key) => [key, jsonScalar(value[key])] as const));
   }
   throw new StatusWriterError('status.md JSON blocks serialise plain JSON data only', 'TypeError');
@@ -821,8 +833,10 @@ export function isoSeconds(nowSeconds: number): string {
   if (!Number.isFinite(nowSeconds)) {
     throw new StatusWriterError('invalid clock reading', 'OverflowError');
   }
-  const micros = BigInt(Math.trunc(nowSeconds)) * 1_000_000n;
-  const stamp = compactUtc({ epochMicros: micros });
+  // Python's strftime truncates sub-second digits, so floor toward -inf
+  // (a negative fractional second must not round up across a second).
+  const micros = BigInt(Math.floor(nowSeconds)) * 1_000_000n;
+  const stamp = formatUtcMicros(micros).replace(/\.\d{6}Z$/, 'Z');
   if (!ISO_SHAPE.test(stamp)) {
     throw new StatusWriterError('clock reading out of range', 'OverflowError');
   }

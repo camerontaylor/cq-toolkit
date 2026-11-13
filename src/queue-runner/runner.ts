@@ -45,7 +45,7 @@ const liveCommands = new Set<string>(LIVE_UNIT_COMMANDS);
  * returns the single JSON artifact plus its own exit code (3 for a busy tick
  * lock, Python parity).
  */
-export const LIVE_OPERATOR_COMMANDS = ['repair-prepare'] as const;
+export const LIVE_OPERATOR_COMMANDS = ['repair-prepare', 'status'] as const;
 const operatorLiveCommands = new Set<string>(LIVE_OPERATOR_COMMANDS);
 const backfillCommands = new Set([
   'inventory',
