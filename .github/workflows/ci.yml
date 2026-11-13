@@ -102,8 +102,11 @@ jobs:
         shard: [1, 2, 3, 4]
     # Slice 3: one running and one pending execution per shard per ref on
     # default-branch pushes. GitHub replaces the older pending entry by
-    # arrival and never cancels the running one, so a burst of merges costs
-    # two or three executions per shard and the newest arrival is tested.
+    # arrival and never cancels the running one. Executions over a burst are
+    # therefore bounded by completions, not by a fixed count: at most one
+    # running and one pending member exist per group at any moment, a new
+    # arrival replaces the pending member, and the newest arrival is the one
+    # that stays pending.
     # Pull requests keep today's behaviour: a new push cancels the
     # superseded run. A superseded commit's shards report `cancelled` and its
     # static is skipped, so that commit claims no result.
@@ -147,11 +150,14 @@ jobs:
     # Fail-closed. A skipped job counts as a SUCCESS for GitHub's required
     # checks, so `static` must never be skipped on a pull request: when a
     # shard is cancelled here, static runs and the first step below fails it.
-    # Only a default-branch push may skip static, and only when its shards
-    # were cancelled as superseded (slice 3), so that commit claims nothing.
-    # Every other event runs static so the guard step below can fail it: a
-    # nightly or manual run whose shard was cancelled reports a red static,
-    # not a skipped one (a skipped job is a silent success).
+    # The one exception is a default-branch push whose shards were cancelled
+    # as superseded (slice 3). That commit then carries a SKIPPED static,
+    # which GitHub counts as satisfying the required check, and no completed
+    # static validation: it is not an absent result and it is not evidence of
+    # a pass. Slice 3 accepts that trade for superseded commits, where the
+    # newest arrival is the one tested and recovery is a shard re-run. Every
+    # other event runs static so the guard step below can fail it: a nightly
+    # or manual run whose shard was cancelled reports a red static.
     if: ${{ always() && !cancelled() && (needs.unit.result != 'cancelled' || github.event_name != 'push') && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
     steps:
       - name: Unit shards passed
