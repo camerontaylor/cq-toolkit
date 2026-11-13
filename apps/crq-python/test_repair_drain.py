@@ -199,10 +199,19 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(report['stop'], 'rate-limit')
 
     def test_reap_aggregates_success_and_crash_before_replacement(self):
-        active = {100: 'successful', 101: 'crashed'}
+        fds = []
+        active = {}
+        for pid, item in ((100, 'successful'), (101, 'crashed')):
+            rfd, wfd = os.pipe()
+            fds.append((rfd, wfd))
+            active[pid] = (item, rfd)
         with mock.patch.object(service.os, 'waitpid', side_effect=[(100, 0), (101, 9)]):
             self.assertTrue(service.reap_item(active))
         self.assertEqual(active, {})
+        for rfd, wfd in fds:
+            os.close(wfd)
+            with self.assertRaises(OSError):
+                os.close(rfd)  # reap_completed closed the read end
 
     def test_admission_checks_exited_workers_even_below_capacity(self):
         self.config['repair']['max_concurrent_items'] = 10
@@ -948,6 +957,98 @@ class RepairDrainTest(unittest.TestCase):
             snapshot.assert_not_called()
             provider.assert_not_called()
 
+    def test_child_refusal_stops_the_pass_before_the_child_exits(self):
+        # The reviewer's interleaving: child A refuses, the marker is removed
+        # before A exits, and item B must still not be admitted in this pass.
+        # The child publishes its gate result before doing any work, and the
+        # coordinator blocks on that byte, so the exit status is not the signal.
+        self.config['repair']['max_concurrent_items'] = 2
+        parent = os.getpid()
+        forked = []
+        real_fork = os.fork
+        real_drain_item = service.drain_item
+
+        def fork_and_record():
+            forked.append(1)
+            return real_fork()
+
+        def drain_then_delay(config, item, jobs):
+            # Never reached: this child refuses at its item gate, which is the
+            # barrier's own case. The later job-level refusal is covered by
+            # test_job_level_refusal_stops_the_pass_before_the_child_exits.
+            raise AssertionError('a refused child must not start work')
+
+        stderr = io.StringIO()
+        with mock.patch.object(service.os, 'fork', side_effect=fork_and_record), \
+             mock.patch.object(service, 'runner_disabled',
+                               side_effect=lambda: os.getpid() != parent), \
+             mock.patch.object(service, 'drain_item', side_effect=drain_then_delay), \
+             mock.patch.object(service, 'process_item') as process_item, \
+             contextlib.redirect_stderr(stderr):
+            service.drain_items(self.config, {'a': ['crq-run1-F1'], 'b': ['crq-run2-F1']},
+                                ['a', 'b'])
+        self.assertEqual(len(forked), 1)
+        process_item.assert_not_called()
+
+    def test_a_published_job_refusal_stops_the_pass_without_an_exit(self):
+        # The second refusal channel, without a real child or any scheduling:
+        # the admitted child publishes b'a' at its item gate, then b'x' at its
+        # job gate (marker now present, but the marker is removed before the
+        # coordinator decides). Only the published byte can stop admission.
+        self.config['repair']['max_concurrent_items'] = 2
+        forked = []
+        pipes = []
+        real_pipe = os.pipe
+
+        def record_pipe():
+            pair = real_pipe()
+            pipes.append(pair)
+            return pair
+
+        def fake_fork():
+            forked.append(1)
+            if len(forked) == 1:
+                write = pipes[-1][1]
+                os.write(write, b'a')   # item gate: admitted
+                os.write(write, b'x')   # job gate: refused before any work
+            return 9000 + len(forked)
+
+        stderr = io.StringIO()
+        with mock.patch.object(service.os, 'pipe', side_effect=record_pipe), \
+             mock.patch.object(service.os, 'fork', side_effect=fake_fork), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'reap_completed', return_value=(False, False)), \
+             mock.patch.object(service, 'reap_item',
+                               side_effect=lambda active: (active.clear() or False)), \
+             mock.patch.object(service, 'process_item') as process_item, \
+             contextlib.redirect_stderr(stderr):
+            service.drain_items(self.config, {'a': ['crq-run1-F1'],
+                                              'b': ['crq-run2-F1']}, ['a', 'b'])
+        self.assertEqual(len(forked), 1,
+                         'the published refusal stops the next admission')
+        process_item.assert_not_called()
+
+    def test_marker_mid_item_stops_the_remaining_jobs(self):
+        # The plan's slice 5 acceptance is per job: the in-flight job finishes
+        # and the next does not start. A marker seen between serial jobs of one
+        # item must stop them, not only the next item's admission.
+        self.worktree()
+        jobs = [json.loads((self.root / 'state/repair/inbox' / (j + '.json')).read_text())
+                for j in ('crq-run1-F1', 'crq-run1-F2')]
+
+        def process(*args):
+            (self.root / 'state/runner-disabled').write_text('handover\n')
+            return {'verdict': 'NOT-FIXED'}
+
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'process', side_effect=process) as model:
+            outcome = service.process_item(self.config, jobs)
+        self.assertEqual(model.call_count, 1)
+        self.assertEqual(model.call_args.args[1]['job'], 'crq-run1-F1')
+        self.assertEqual(outcome, service.RUNNER_DISABLED_OUTCOME)
+
     def test_recovery_job_uses_separate_worktree_and_preserves_original(self):
         original = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
         (original / 'src/kept.ts').write_text('retained staged edit\n')
@@ -1346,6 +1447,55 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(expired['disposition'], 'unresolved')
         self.assertIn('blackout', expired['reason'])
 
+    def test_recovery_handover_deferral_holds_the_attempt_budget(self):
+        # A handover that starts during the tick-lock wait must defer the
+        # recovery judgment: no model call, no attempt spent, and no clock
+        # window that could turn the wait into an abandoned recovery.
+        import sys
+        job_id = 'crq-run1-F1'
+        job = json.loads(bounded.job_path(self.root, job_id).read_text())
+        original = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': job['item'], 'repair_base': self.pin,
+                'worktree': str(original), 'verdict': 'FAILED', 'reason': 'driver no_outcome'})
+        c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', CLONE=self.clone,
+                            CONFIG=self.config, iso=lambda: 'now', load_queue=lambda: self.queue,
+                            ran_locked=lambda fn: (fn(), True)[1],
+                            run=lambda args, **kw: subprocess.run(args, **kw, capture_output=True, text=True, check=True),
+                            secret_scan_diff=mock.Mock(return_value=(True, {})),
+                            save_queue=lambda q: atomic(self.root / 'state/queue.json', q))
+        artifact = self.root / 'state/repair' / job_id / 'recovery.json'
+        stderr = io.StringIO()
+        with mock.patch.dict(sys.modules, {'crq': c}), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'runner_disabled', return_value=True), \
+             mock.patch.object(service, 'dispatch') as judge, \
+             contextlib.redirect_stderr(stderr):
+            deferred = service.recover_job(self.config, job_id)
+        judge.assert_not_called()
+        self.assertEqual(deferred['state'], 'deferred')
+        self.assertIn('host handover', deferred['reason'])
+        self.assertEqual(json.loads(artifact.read_text())['attempts'], 0)
+        self.assertIn('recovery judge deferred', stderr.getvalue())
+
+    def test_marker_written_during_recovery_fetch_stops_before_the_judgment(self):
+        # The recover branch fetches before judging: a marker written during
+        # that fetch must stop the recovery before any model call.
+        (self.root / 'config.json').write_text(json.dumps(self.config))
+
+        def fetch_writes_marker(config):
+            (self.root / 'state/runner-disabled').write_text('handover\n')
+            return None
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'unused-fixture'}), \
+             mock.patch.object(service, 'fetch_clone', side_effect=fetch_writes_marker), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'recover_job') as recover_job, \
+             contextlib.redirect_stderr(stderr):
+            service.main(['--recover-job', 'crq-run1-F1'])
+        recover_job.assert_not_called()
+        self.assertIn('recovery deferred for crq-run1-F1', stderr.getvalue())
+
     def test_operator_disposition_prevents_publication_of_finished_job(self):
         item = self.queue['items'][0]
         record = item['repair_runs']['run1']
@@ -1518,6 +1668,219 @@ class RepairDrainTest(unittest.TestCase):
             service.drain(self.config)
         process_item.assert_not_called()
         self.assertIsNone(self.result('crq-run1-F2'))
+
+    def test_drain_stops_at_pass_start_when_runner_disabled(self):
+        # A handed-over host costs nothing and touches nothing: no fetch, no
+        # triage, no admission, and the queue is byte-identical afterwards.
+        (self.root / 'state/runner-disabled').write_text('Prepared inert; owner approval required.\n')
+        before = (self.root / 'state/queue.json').read_bytes()
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'fetch_clone') as fetch, \
+             mock.patch.object(service, 'triage_phase') as triage, \
+             mock.patch.object(service, 'process_item') as process_item, \
+             contextlib.redirect_stderr(stderr):
+            service.drain(self.config)
+        fetch.assert_not_called()
+        triage.assert_not_called()
+        process_item.assert_not_called()
+        self.assertIn('runner disabled for host handover (state/runner-disabled)', stderr.getvalue())
+        self.assertEqual(before, (self.root / 'state/queue.json').read_bytes())
+
+    def test_drain_admits_no_item_after_the_marker_appears(self):
+        # The check is per admission, never mid-item: the admitted item runs to
+        # completion, the next one is refused, and the pass ends there.
+        admitted = []
+
+        def admit(config, item, job_ids):
+            admitted.append(item)
+            (self.root / 'state/runner-disabled').write_text('handover\n')
+            return None
+
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'drain_item', side_effect=admit), \
+             contextlib.redirect_stderr(stderr):
+            service.drain_items(self.config, {'a': ['j1'], 'b': ['j2']}, ['a', 'b'])
+        self.assertEqual(admitted, ['a'])
+        self.assertIn('runner disabled for host handover (state/runner-disabled): pass stopped before b',
+                      stderr.getvalue())
+
+    def test_marker_written_during_the_admission_lock_wait_stops_the_fork(self):
+        # The admission lock is a wait: a marker written while this pass waits
+        # for it must stop the fork, or the wait itself becomes an admission.
+        self.config['repair']['max_concurrent_items'] = 2
+        forked = []
+        real_fork = os.fork
+
+        def fork_and_record():
+            forked.append(1)
+            return real_fork()
+
+        @contextlib.contextmanager
+        def cooldown_writes_marker():
+            (self.root / 'state/runner-disabled').write_text('handover\n')
+            yield
+
+        stderr = io.StringIO()
+        with mock.patch.object(service.os, 'fork', side_effect=fork_and_record), \
+             mock.patch.object(service, 'cooldown_write', cooldown_writes_marker), \
+             mock.patch.object(service, 'drain_item', return_value=None), \
+             contextlib.redirect_stderr(stderr):
+            service.drain_items(self.config, {'a': ['crq-run1-F1']}, ['a'])
+        self.assertEqual(forked, [], 'the marker arrived during the lock wait')
+        self.assertIn('pass stopped before a', stderr.getvalue())
+
+    def test_interrupt_in_the_admission_barrier_still_reaps_the_child(self):
+        # The barrier blocks on the child's first byte. If an interrupt lands
+        # there, the child must already be registered as admitted, or the
+        # cleanup releases service.lock beneath a child that still works.
+        self.config['repair']['max_concurrent_items'] = 2
+        reaped = []
+        real_reap = service.reap_item
+
+        def reap_and_record(active):
+            reaped.extend(active)
+            return real_reap(active)
+
+        def read_interrupts(fd, size):
+            raise KeyboardInterrupt()
+
+        with mock.patch.object(service, 'drain_item', return_value=None), \
+             mock.patch.object(service.os, 'read', side_effect=read_interrupts), \
+             mock.patch.object(service, 'reap_item', side_effect=reap_and_record):
+            with self.assertRaises(KeyboardInterrupt):
+                service.drain_items(self.config, {'a': ['crq-run1-F1']}, ['a'])
+        self.assertEqual(len(reaped), 1, 'the admitted child is still reaped')
+
+    def test_drain_item_refuses_direct_dispatch_when_runner_disabled(self):
+        (self.root / 'state/runner-disabled').write_text('handover\n')
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'process_item') as process_item, \
+             contextlib.redirect_stderr(stderr):
+            self.assertEqual(service.drain_item(self.config, 'pr1-merged', ['crq-run1-F1']),
+                             service.RUNNER_DISABLED_OUTCOME)
+        process_item.assert_not_called()
+        self.assertIn('item pr1-merged not admitted', stderr.getvalue())
+
+    def test_main_refuses_before_the_lock_and_every_dispatch_path(self):
+        # CLI admission: no state directory, no lock file, no --job dispatch and
+        # no --recover-job fetch or judge while the marker is present.
+        (self.root / 'state/runner-disabled').write_text('handover\n')
+        (self.root / 'config.json').write_text(json.dumps(self.config))
+        import shutil
+        shutil.rmtree(self.root / 'state/repair', ignore_errors=True)
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'process_item') as process_item, \
+             mock.patch.object(service, 'recover_job') as recover_job, \
+             mock.patch.object(service, 'fetch_clone') as fetch, \
+             contextlib.redirect_stderr(stderr):
+            self.assertEqual(service.main([]), 0)
+            self.assertEqual(service.main(['--job', 'crq-run1-F1', '--source-sha', self.pin,
+                                           '--finding-sha256', 'a' * 64]), 0)
+            self.assertEqual(service.main(['--recover-job', 'crq-run1-F1']), 0)
+        process_item.assert_not_called()
+        recover_job.assert_not_called()
+        fetch.assert_not_called()
+        self.assertFalse((self.root / 'state/repair').exists())
+        self.assertEqual(stderr.getvalue().count('dispatch refused'), 3)
+
+    def test_forked_child_refusal_stops_the_pass(self):
+        # With concurrency above one, the refusal happens inside a forked child.
+        # It must end the pass: the child exits with the stop code, the parent
+        # names it and admits nothing else.
+        self.config['repair']['max_concurrent_items'] = 2
+        parent = os.getpid()
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'runner_disabled',
+                               side_effect=lambda: os.getpid() != parent), \
+             mock.patch.object(service, 'process_item') as process_item, \
+             contextlib.redirect_stderr(stderr):
+            service.drain_items(self.config, {'a': ['crq-run1-F1'], 'b': ['crq-run2-F1']}, ['a', 'b'])
+        process_item.assert_not_called()
+        self.assertIn('runner disabled; stopping new admission', stderr.getvalue())
+        self.assertIsNone(self.result('crq-run1-F1'))
+        self.assertIsNone(self.result('crq-run2-F1'))
+
+    def test_marker_during_triage_defers_later_judgments(self):
+        # The triage phase judges candidates one at a time; a marker that
+        # appears between two judgments must defer the rest instead of starting
+        # more paid work.
+        (self.root / 'state/backfill/findings/triage').mkdir(parents=True, exist_ok=True)
+        reports = []
+        judge = {}
+
+        def fake_phase(inbox, repo, tip, judge_cb, transport, now, maximum, seconds, dry_run):
+            judge['cb'] = judge_cb
+            row = {'finding': {'id': 'f' * 64}, 'review_id': 'r1'}
+            reports.append(judge_cb(row, {'context': []}, 60))
+            (self.root / 'state/runner-disabled').write_text('handover\n')
+            reports.append(judge_cb(row, {'context': []}, 60))
+            return {'judged': 1}
+
+        import backfill_runtime
+        import finding_delivery
+        with mock.patch('crq_repair.triage.phase', side_effect=fake_phase), \
+             mock.patch.object(service, 'dispatch', return_value={'stop': 'ok'}) as dispatch, \
+             mock.patch.object(service, 'triage_context_scan', return_value=True), \
+             mock.patch.object(service, 'git', return_value='a' * 40), \
+             mock.patch.object(backfill_runtime, 'settings', return_value={'rollout': 1}), \
+             mock.patch.object(backfill_runtime, 'services',
+                               return_value=('repo', None, 'outbox', None)), \
+             mock.patch.object(finding_delivery, 'Inbox'):
+            service.triage_phase(self.config)
+        self.assertEqual(dispatch.call_count, 1)
+        self.assertEqual(reports[1].get('stop'), 'deferred')
+        self.assertEqual(reports[1].get('errorClass'), 'runner-disabled')
+
+    def test_marker_written_during_fetch_stops_before_triage(self):
+        # The guard at pass start is sampled before the network fetch; a marker
+        # written while the fetch runs must stop the pass before paid triage.
+        def fetch_writes_marker(config):
+            (self.root / 'state/runner-disabled').write_text('handover\n')
+            return None
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'fetch_clone', side_effect=fetch_writes_marker), \
+             mock.patch.object(service, 'triage_phase') as triage_phase, \
+             contextlib.redirect_stderr(stderr):
+            service.drain(self.config)
+        triage_phase.assert_not_called()
+        self.assertIn('pass stopped before triage', stderr.getvalue())
+
+    def test_marker_written_while_waiting_for_capacity_stops_the_pass(self):
+        # Capacity wait can be long; a marker written during it must stop the
+        # next admission instead of being sampled only at the top of the loop.
+        self.config['repair']['max_concurrent_items'] = 2
+        active_seen = {}
+
+        real_reap = service.reap_item
+
+        def reap_writes_marker(active):
+            active_seen.update(active)
+            (self.root / 'state/runner-disabled').write_text('handover\n')
+            # Keep the coordinator's real cleanup set: the children are still
+            # alive here (they wait for this marker), so the real reap finds
+            # nothing to report and hands the preserved records back to the
+            # pass's own teardown instead of discarding them.
+            return real_reap(active)
+
+        def hold_until_capacity_wait(config, item, job_ids):
+            # The children stay alive until the capacity wait writes the
+            # marker: a mock that returns at once lets either child exit and
+            # be reaped first, which would make active_seen scheduling-bound.
+            deadline = time.time() + 20
+            while not (self.root / 'state/runner-disabled').exists():
+                if time.time() > deadline:
+                    raise AssertionError('capacity wait never wrote the marker')
+                time.sleep(0.005)
+            return None
+
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'reap_item', side_effect=reap_writes_marker), \
+             mock.patch.object(service, 'drain_item', side_effect=hold_until_capacity_wait), \
+             contextlib.redirect_stderr(stderr):
+            service.drain_items(self.config, {'a': ['crq-run1-F1'], 'b': ['crq-run2-F1'],
+                                              'c': ['crq-run3-F1']}, ['a', 'b', 'c'])
+        self.assertEqual({item for item, _fd in active_seen.values()}, {'a', 'b'})
+        self.assertIn('pass stopped before c', stderr.getvalue())
 
     def test_process_item_starts_no_finding_inside_blackout(self):
         _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
