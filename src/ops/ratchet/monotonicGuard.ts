@@ -179,7 +179,20 @@ const UNIT_RE = /"unit"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 // A property KEY containing any escape: JSON.parse decodes `"val\u0075e"` to
 // `value`, invisible to every literal-key regex above (and the last duplicate
 // key wins). Rendered baselines never escape keys — fail closed.
-const ESCAPED_KEY_RE = /(?:^|[,{])\s*"(?:[^"\\]|\\.)*\\(?:[^"\\]|\\.)*"\s*:/m;
+// LINEAR SHAPE (review): the escape is spelled ONCE, after an escape-free
+// prefix (`[^"\\]*\\.`) and before a single `(?:[^"\\]|\\.)*` tail. The
+// previous `(?:[^"\\]|\\.)*\\(?:[^"\\]|\\.)*` had two adjacent star groups
+// that both accept `\\.`, so a single escape could be claimed by either and
+// the engine re-scanned the tail at every split point — O(n²) per start
+// position on a crafted diff line (PR-author controlled, few hundred KB
+// stalls the gate). For every body a closing quote can follow (valid JSON),
+// the new shape is a SUPERSET: it fires whenever the body carries any escape
+// at all, and additionally catches the `\\`-escaped bodies the ambiguous
+// form missed (a body pair `\\\\` had no reachable bare `\\`). The only body it
+// stops matching is a DANGLING escape before the quote, which no JSON
+// document can close — there is no key there to decode. (`m`: `^` is a LINE
+// start — the callers join diff lines.)
+const ESCAPED_KEY_RE = /(?:^|[,{])\s*"[^"\\]*\\.(?:[^"\\]|\\.)*"\s*:/m;
 
 /**
  * Decode one captured JSON string body (the capture EXCLUDES the quotes):
