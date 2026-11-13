@@ -1519,6 +1519,50 @@ class RepairDrainTest(unittest.TestCase):
         process_item.assert_not_called()
         self.assertIsNone(self.result('crq-run1-F2'))
 
+    def test_drain_stops_at_pass_start_when_runner_disabled(self):
+        # A handed-over host costs nothing and touches nothing: no fetch, no
+        # triage, no admission, and the queue is byte-identical afterwards.
+        (self.root / 'state/runner-disabled').write_text('Prepared inert; owner approval required.\n')
+        before = (self.root / 'state/queue.json').read_bytes()
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'fetch_clone') as fetch, \
+             mock.patch.object(service, 'triage_phase') as triage, \
+             mock.patch.object(service, 'process_item') as process_item, \
+             contextlib.redirect_stderr(stderr):
+            service.drain(self.config)
+        fetch.assert_not_called()
+        triage.assert_not_called()
+        process_item.assert_not_called()
+        self.assertIn('runner disabled for host handover (state/runner-disabled)', stderr.getvalue())
+        self.assertEqual(before, (self.root / 'state/queue.json').read_bytes())
+
+    def test_drain_admits_no_item_after_the_marker_appears(self):
+        # The check is per admission, never mid-item: the admitted item runs to
+        # completion, the next one is refused, and the pass ends there.
+        admitted = []
+
+        def admit(config, item, job_ids):
+            admitted.append(item)
+            (self.root / 'state/runner-disabled').write_text('handover\n')
+            return None
+
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'drain_item', side_effect=admit), \
+             contextlib.redirect_stderr(stderr):
+            service.drain_items(self.config, {'a': ['j1'], 'b': ['j2']}, ['a', 'b'])
+        self.assertEqual(admitted, ['a'])
+        self.assertIn('runner disabled for host handover (state/runner-disabled): pass stopped before b',
+                      stderr.getvalue())
+
+    def test_drain_item_refuses_direct_dispatch_when_runner_disabled(self):
+        (self.root / 'state/runner-disabled').write_text('handover\n')
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'process_item') as process_item, \
+             contextlib.redirect_stderr(stderr):
+            self.assertIsNone(service.drain_item(self.config, 'pr1-merged', ['crq-run1-F1']))
+        process_item.assert_not_called()
+        self.assertIn('item pr1-merged not admitted', stderr.getvalue())
+
     def test_process_item_starts_no_finding_inside_blackout(self):
         _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
         with mock.patch.object(service, 'blocked', return_value=True), \

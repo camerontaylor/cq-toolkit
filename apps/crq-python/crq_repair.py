@@ -36,6 +36,20 @@ def narrate(message):
     machine-readable channel."""
     print(message, file=sys.stderr, flush=True)
 
+# Host handover marker: one phrase for every entry point, so an operator greps
+# one string. The repair pass consults it only at admission points.
+RUNNER_DISABLED = 'runner disabled for host handover (state/runner-disabled)'
+
+
+def runner_disabled():
+    """True while a host handover holds the runner inert.
+
+    Read only at admission points: the start of a pass and before each item.
+    A check mid-item or mid-job would abandon a paid worker, so nothing deeper
+    in the pass calls this.
+    """
+    return (ROOT / 'state/runner-disabled').exists()
+
 
 def write_result(result):
     """The one CLI result writer: exactly one JSON artifact on stdout, never
@@ -758,6 +772,11 @@ def triage_phase(config, dry_run=False):
 def drain(config):
     """Automatic inbox drain, minor-only items after critical/major items. Items use isolated worker
     processes up to the configured cap, with serial findings within each item."""
+    # Admission before any fetch, triage or write: a handed-over host must cost
+    # nothing and leave the queue and inbox exactly as they are.
+    if runner_disabled():
+        narrate(RUNNER_DISABLED + ': pass not started')
+        return
     repair = config['repair']
     worker_limit(config)  # validate before triage or any provider spend
     until = dispatch_paused(config)
@@ -800,6 +819,11 @@ def drain(config):
 
 
 def drain_item(config, item, job_ids):
+    # A marker that appeared during the pass stops the next admission; the
+    # item already running is never interrupted.
+    if runner_disabled():
+        narrate(RUNNER_DISABLED + ': item ' + str(item) + ' not admitted')
+        return None
     if blocked(config['repair']) or dispatch_paused(config):
         return 'rate-limit'
     # Re-read the queue per item: the tick may harvest or the tip may move
@@ -848,6 +872,9 @@ def drain_items(config, groups, order):
     stopped = False
     try:
         for item in order:
+            if runner_disabled():
+                narrate(RUNNER_DISABLED + ': pass stopped before ' + str(item))
+                break
             while len(active) >= limit:
                 stopped = reap_item(active) or stopped
             stopped = reap_completed(active)[0] or stopped
