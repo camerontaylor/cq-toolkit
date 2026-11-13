@@ -25,6 +25,13 @@ import {
   type JsonValue,
 } from '../../../src/policy/crq/jsonValue.js';
 import { projectInventory } from '../../../src/policy/crq/queueInventory.js';
+import { runLiveness } from '../../../src/adapters/process/liveness.js';
+import {
+  DISCOVERY_SELECTOR,
+  checkpointDigest,
+  newCheckpoint,
+  summarize,
+} from '../../../src/policy/crq/reconcileCheckpoint.js';
 import { ReceiptSnapshot } from '../../../src/policy/crq/queueReceipt.js';
 import {
   receiptJsonDigest,
@@ -101,6 +108,8 @@ function harness(options: {
   queue?: JsonObject;
   receipts?: readonly JsonObject[];
   forge?: Map<number, JsonValue>;
+  /** Wrapper bytes for one interval, keyed by nothing: one interval per case. */
+  wrapper?: string;
 }): Harness {
   const receiptBytes = new Map<string, Uint8Array>();
   for (const document of options.receipts ?? []) {
@@ -137,7 +146,8 @@ function harness(options: {
     withForgeCache: async (_key, check) => check(),
     reconcilePath: (key) => `/state/reconcile/${key}.json`,
     readReconcileWrapperText: async () => {
-      throw new Error('no reconcile wrapper in this harness');
+      if (options.wrapper === undefined) throw new Error('no reconcile wrapper in this harness');
+      return options.wrapper;
     },
     verifySource: async (_repo, pr) => {
       const value = state.forge.get(pr);
@@ -411,6 +421,7 @@ describe('queue-v1 forced-command gate', () => {
     readStdin: () => Promise<Uint8Array>;
     stdout: (bytes: Uint8Array) => void;
     stderr: (message: string) => void;
+    terminate: () => void;
     root: string;
   } {
     const env: Record<string, string | undefined> = {
@@ -424,6 +435,7 @@ describe('queue-v1 forced-command gate', () => {
       readStdin: async () => new TextEncoder().encode(input.frame ?? ''),
       stdout: () => {},
       stderr: () => {},
+      terminate: () => {},
       root: input.root,
     };
   }
@@ -442,6 +454,25 @@ describe('queue-v1 forced-command gate', () => {
       }),
     ];
     for (const item of cases) expect(await runQueueCapabilityMain(item)).toBe(2);
+  });
+
+  test('the deadline refuses, stops the work and never writes a late success', async () => {
+    const { root, policyPath } = await runnerRoot(policy());
+    let terminated = 0;
+    const written: Uint8Array[] = [];
+    const exitCode = await runQueueCapabilityMain({
+      ...deps({ root, policyPath, env: { SSH_ORIGINAL_COMMAND: 'queue-v1' } }),
+      // An open stdin stream never settles: only the bound can end the request.
+      readStdin: () => new Promise<Uint8Array>(() => undefined),
+      stdout: (bytes) => written.push(bytes),
+      terminate: () => {
+        terminated += 1;
+      },
+      deadlineMs: 10,
+    });
+    expect(exitCode).toBe(2);
+    expect(terminated).toBe(1);
+    expect(written).toHaveLength(0);
   });
 
   test('serves the allowlisted capability and writes the response bytes', async () => {
@@ -670,5 +701,280 @@ describe('queue-v1 interval inventory projection', () => {
     expect(error.get('code')).toBe('stale-cursor');
     expect(error.get('retryable')).toBe(false);
     expect(error.get('restart')).toBe(true);
+  });
+});
+
+describe('queue-v1 inventory over the wire', () => {
+  const after = '2026-01-01T00:00:00Z';
+  const before = '2026-11-13T00:00:00Z';
+  const binding = { repo: REPO, targetSelector: 'promoted-main', after, before };
+
+  const subject = {
+    repo: REPO,
+    pr: 7,
+    merge_sha: MERGE,
+    target_selector: 'promoted-main',
+    policy: 'affected-current-additions-v1',
+  };
+  const itemId = `current-${receiptJsonDigest(object(subject)).slice(0, 32)}`;
+  const document = object({
+    version: 1,
+    request_id: 'req-merged',
+    item_id: itemId,
+    source: subject,
+    capture: { equivalence: 'e'.repeat(64) },
+    outcome: 'terminal-clean',
+    counted: true,
+    classification: { outcome: 'completed', counted: true },
+  });
+  const receiptId = sha256Hex(new TextEncoder().encode(receiptJsonText(document)));
+
+  const mergedAt = '2026-06-01T00:00:00Z';
+  const intent = object({
+    disposition: 'intent',
+    pr: 7,
+    merged_at: mergedAt,
+    merge_sha: MERGE,
+    head: HEAD,
+    subject: {
+      repo: null,
+      pr: 7,
+      merge_sha: MERGE,
+      target_selector: 'promoted-main',
+      policy: 'affected-current-additions-v1',
+    },
+  });
+
+  function builtCheckpoint(): JsonObject {
+    const base = newCheckpoint({ after, before }, 50, REPO, DISCOVERY_SELECTOR);
+    const replaced = new Set([
+      'inventory',
+      'complete',
+      'pages_read',
+      'records_read',
+      'record_keys',
+      'seen',
+    ]);
+    const partial = new JsonObject([
+      ...base.entries.filter(([key]) => !replaced.has(key)),
+      ['inventory', [intent]],
+      ['seen', object({ '7': { merge_sha: MERGE, merged_at: mergedAt } })],
+      ['record_keys', ['f'.repeat(64)]],
+      ['records_read', JsonNumber.int(1)],
+      ['pages_read', JsonNumber.int(1)],
+      ['complete', true],
+    ]);
+    const withSummary = new JsonObject([...partial.entries, ['summary', summarize(partial)]]);
+    return new JsonObject([...withSummary.entries, ['digest', checkpointDigest(withSummary)]]);
+  }
+
+  function builtWrapper(): string {
+    const source = object({
+      version: 1,
+      method: 'all-number-slots-v1',
+      repo: REPO,
+      base: DISCOVERY_SELECTOR,
+      repository_id: '4242',
+      window: 50,
+      ceiling: 0,
+    });
+    const partial = new JsonObject([
+      ['source', source],
+      ['checkpoint', builtCheckpoint()],
+    ]);
+    return receiptJsonText(
+      new JsonObject([...partial.entries, ['digest', checkpointDigest(partial)]]),
+    );
+  }
+
+  function queue(): JsonObject {
+    return object({
+      items: [
+        {
+          id: itemId,
+          kind: 'merged-current',
+          pr: 7,
+          merge_commit: MERGE,
+          subject,
+          request_id: 'req-merged',
+          state: 'reviewing',
+          receipt_id: receiptId,
+          attempts: [],
+        },
+      ],
+      merged_current_requests: { 'req-merged': { binding: subject, item: itemId } },
+      queue_client_requests: {
+        'req-merged': {
+          binding: mergedRef.binding,
+          principal: PRINCIPAL,
+          state: 'ready-current',
+          pr: 7,
+          mergeSha: MERGE,
+          createdAt: '2026-11-13T00:00:00Z',
+        },
+      },
+    });
+  }
+
+  test('projects a stored wrapper end to end', async () => {
+    const h = harness({ queue: queue(), receipts: [document], wrapper: builtWrapper() });
+    const response = (await h.call(
+      `${JSON.stringify({ v: 1, op: 'inventory', requestId: 'inv-1', binding, states: null, cursor: null, limit: 10 })}\n`,
+      {
+        policy: policy({
+          inventory_reads: [{ principal: PRINCIPAL, binding }],
+        }),
+      },
+    )) as { result: Record<string, unknown> };
+    const entries = response.result.entries as Array<Record<string, unknown>>;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      pr: 7,
+      mergeSha: MERGE,
+      requestId: 'req-merged',
+      itemId,
+      state: 'reviewed',
+    });
+    expect(response.result.terminal).toBe(true);
+    expect(response.result.nextCursor).toBeNull();
+    const proof = response.result.proof as Record<string, unknown>;
+    expect(proof.intervalConvention).toBe('(after,before]');
+    expect(proof.completeThrough).toBe(before);
+    expect(proof.count).toBe(1);
+  });
+});
+
+describe('queue-v1 interval inventory receipt budget', () => {
+  const binding = {
+    repo: REPO,
+    targetSelector: 'promoted-main',
+    after: '2026-01-01T00:00:00Z',
+    before: '2026-11-13T00:00:00Z',
+  } as const;
+  const shas = ['1'.repeat(40), '2'.repeat(40), '3'.repeat(40)];
+
+  function subjectFor(pr: number): Record<string, unknown> {
+    return {
+      repo: REPO,
+      pr,
+      merge_sha: shas[pr - 1] as string,
+      target_selector: 'promoted-main',
+      policy: 'affected-current-additions-v1',
+    };
+  }
+
+  function build(): {
+    queue: JsonObject;
+    checkpoint: JsonObject;
+    sizes: Map<string, number>;
+    bytes: Map<string, Uint8Array>;
+  } {
+    const items: unknown[] = [];
+    const mappings: Record<string, unknown> = {};
+    const entries: Record<string, unknown> = {};
+    const inventory: unknown[] = [];
+    const sizes = new Map<string, number>();
+    const bytes = new Map<string, Uint8Array>();
+    for (const pr of [1, 2, 3]) {
+      const subject = subjectFor(pr);
+      const requestId = `req-${String(pr)}`;
+      const itemId = `current-${receiptJsonDigest(object(subject)).slice(0, 32)}`;
+      const document = object({
+        version: 1,
+        request_id: requestId,
+        item_id: itemId,
+        source: subject,
+        capture: { equivalence: `${String(pr)}`.repeat(64) },
+        outcome: 'terminal-clean',
+        counted: true,
+        classification: { outcome: 'completed', counted: true },
+      });
+      const data = new TextEncoder().encode(receiptJsonText(document));
+      const receiptId = sha256Hex(data);
+      bytes.set(receiptId, data);
+      // Row 2's receipt alone exceeds the request budget; the others fit.
+      sizes.set(receiptId, pr === 2 ? 2 ** 40 : data.length);
+      items.push({
+        id: itemId,
+        kind: 'merged-current',
+        pr,
+        merge_commit: shas[pr - 1],
+        subject,
+        request_id: requestId,
+        state: 'reviewing',
+        receipt_id: receiptId,
+        attempts: [],
+      });
+      mappings[requestId] = { binding: subject, item: itemId };
+      entries[requestId] = {
+        binding: { ...mergedRef.binding, pr, mergeSha: shas[pr - 1] },
+        principal: PRINCIPAL,
+        state: 'ready-current',
+        pr,
+        mergeSha: shas[pr - 1],
+        createdAt: '2026-11-13T00:00:00Z',
+      };
+      inventory.push({ pr, merge_sha: shas[pr - 1] });
+    }
+    return {
+      queue: object({ items, merged_current_requests: mappings, queue_client_requests: entries }),
+      checkpoint: object({
+        complete: true,
+        dry_run: false,
+        digest: 'f'.repeat(64),
+        before: binding.before,
+        inventory,
+      }),
+      sizes,
+      bytes,
+    };
+  }
+
+  test('an over-budget receipt blocks its own row and keeps the rest', async () => {
+    const { queue, checkpoint, sizes, bytes } = build();
+    const result = await projectInventory({
+      queue,
+      checkpoint,
+      binding,
+      principal: PRINCIPAL,
+      states: null,
+      cursor: null,
+      limit: 10,
+      projectFixed: false,
+      effects: {
+        statSize: async (receiptId) => sizes.get(receiptId) ?? 0,
+        snapshot: async (receiptId, maxBytes) => {
+          const data = bytes.get(receiptId);
+          if (data === undefined) throw new Error(`unexpected snapshot for ${receiptId}`);
+          return new ReceiptSnapshot(receiptId, data, maxBytes);
+        },
+      },
+    });
+    const entries = result.get('entries') as unknown as Array<Record<string, unknown>>;
+    expect(entries).toHaveLength(3);
+    // The over-budget row is blocked; the interval keeps projecting past it.
+    expect(entries.map((row) => row.state)).toEqual(['reviewed', 'blocked', 'reviewed']);
+    const blockedReason = entries[1]?.reason as JsonObject;
+    expect(blockedReason.get('code')).toBe('inventory-receipt-budget');
+    expect(blockedReason.get('category')).toBe('capacity');
+    expect((result.get('proof') as JsonObject).get('count')).toBeInstanceOf(JsonNumber);
+  });
+});
+
+describe('retry liveness reads a persisted run', () => {
+  test('a lossless pid still proves or refutes the recorded owner', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'crq-liveness-'));
+    tempDirs.push(dir);
+    // No marker, no live pids: `legacy` would harvest once the CLI group is
+    // proved empty, but the persisted queue pid contradicts this pidfile.
+    await writeFile(
+      join(dir, 'review.pid'),
+      JSON.stringify({ pid: 4_000_001, pgid: 4_000_001, cli_pid: 4_000_002, run_id: 'r1' }),
+    );
+    const run = new JsonObject([
+      ['run_id', 'r1'],
+      ['pid', JsonNumber.int(4_000_003)],
+    ]);
+    expect(await runLiveness(dir, run, true)).toBe('ambiguous');
   });
 });

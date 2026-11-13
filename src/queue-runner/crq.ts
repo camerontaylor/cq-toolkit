@@ -36,6 +36,9 @@ if (command === 'queue-capability') {
     stderr: (message) => {
       process.stderr.write(`${message}\n`);
     },
+    // The deadline must end the process, not just the race: a pending stdin
+    // read or a held queue lock would otherwise outlive the refusal.
+    terminate: () => process.exit(2),
     root,
   });
 } else {

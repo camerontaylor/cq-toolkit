@@ -10,7 +10,7 @@
  * `run_liveness` and `author_quota.identity_kind`/`run_state`.
  */
 import { execFile } from 'node:child_process';
-import { JsonObject } from '../../policy/crq/jsonValue.js';
+import { JsonNumber, JsonObject } from '../../policy/crq/jsonValue.js';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -28,6 +28,18 @@ export type LivenessState = 'alive' | 'harvest' | 'ambiguous';
 
 function positive(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+/**
+ * A persisted queue `run` keeps numbers as `JsonNumber`; the predicates below
+ * compare primitive pids, so unwrap the lossless integer first. `undefined`
+ * leaves every check fail-closed exactly as an absent field does.
+ */
+function numeric(value: unknown): number | undefined {
+  if (value instanceof JsonNumber) {
+    return value.kind === 'int' ? Number(value.integer) : (value.float ?? undefined);
+  }
+  return typeof value === 'number' ? value : undefined;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -155,7 +167,7 @@ export async function runLiveness(
     recorded instanceof JsonObject ? recorded.get(key) : recorded[key];
   const pidfile = await readPidfile(runDir);
   const recordedRunId = field('run_id');
-  const recordedPid = field('pid');
+  const recordedPid = numeric(field('pid'));
   const runId = typeof recordedRunId === 'string' ? recordedRunId : null;
   const kind = identityKind(pidfile, {
     runId,

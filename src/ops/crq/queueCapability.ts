@@ -12,7 +12,12 @@
  * the Python `json.dump(indent=2)` byte encoding, so a Python runner can adopt a
  * queue file this module wrote and vice versa.
  */
-import { JsonNumber, JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
+import {
+  JsonNumber,
+  JsonObject,
+  parseJsonValue,
+  type JsonValue,
+} from '../../policy/crq/jsonValue.js';
 import { receiptJsonDigest } from '../../policy/crq/pythonJson.js';
 import {
   MAX_RECEIPT_BYTES,
@@ -24,6 +29,7 @@ import {
   refuseQueue,
   remediationFixed,
   remediationSummary,
+  identityInput,
   reusableNoncountedTerminal,
 } from '../../policy/crq/queueReceipt.js';
 import {
@@ -409,7 +415,7 @@ async function execute(
       if (!samePr || !sameMerge) {
         const equivalent =
           pyTruthy(item.reused_from) &&
-          (reusableCurrent(document, item.capture) ||
+          (reusableCurrent(identityInput(document), identityInput(item.capture)) ||
             reusableNoncountedTerminal(document, item.capture));
         if (!equivalent) refuse('receipt source mismatch without proven equivalent reuse');
       }
@@ -801,9 +807,9 @@ function requestAlias(
   }
   const retained = asObjectOrEmpty(document.get('capture'));
   const capture = asObjectOrEmpty(item.get('capture'));
-  const equivalence = currentEquivalence(capture);
+  const equivalence = currentEquivalence(identityInput(capture));
   if (
-    !pythonValueEqual(currentEquivalence(retained), equivalence) ||
+    !pythonValueEqual(currentEquivalence(identityInput(retained)), equivalence) ||
     !pythonValueEqual(retained.get('equivalence'), equivalence) ||
     !pythonValueEqual(capture.get('equivalence'), equivalence)
   ) {
@@ -894,9 +900,11 @@ async function inventoryResult(
 }
 
 function parseWrapper(text: string): JsonObject {
-  let parsed: unknown;
+  let parsed: JsonValue;
   try {
-    parsed = JSON.parse(text) as unknown;
+    // The wrapper and its nested checkpoint must keep the lossless model the
+    // inventory projection reads (`JSON.parse` loses `JsonObject`/`JsonNumber`).
+    parsed = parseJsonValue(text, { duplicates: 'error' });
   } catch {
     refuse('invalid reconcile wrapper');
   }

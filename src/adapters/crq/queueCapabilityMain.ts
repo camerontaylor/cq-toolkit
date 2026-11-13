@@ -32,6 +32,13 @@ export interface QueueCapabilityMainDeps {
   readonly readStdin: () => Promise<Uint8Array>;
   readonly stdout: (bytes: Uint8Array) => void;
   readonly stderr: (message: string) => void;
+  /**
+   * Ends the process when the deadline wins. A refusal must also STOP the
+   * pending work: stdin may still be open and an effect may still be holding a
+   * lock, so without a hard exit a late success could be written after the
+   * refusal (or the process could outlive the bound entirely).
+   */
+  readonly terminate: () => void;
   /** The runner root holding `config.json`, `state/` and `runs/`. */
   readonly root: string;
   readonly deadlineMs?: number;
@@ -67,6 +74,7 @@ async function runnerConfig(root: string): Promise<{ repo: string; projectFixed:
  */
 export async function runQueueCapabilityMain(deps: QueueCapabilityMainDeps): Promise<number> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let expired = false;
   const work = async (): Promise<number> => {
     // `len(sys.argv) != 1`: the forced command carries no arguments.
     if (deps.argv.length !== 0) return refuse(deps);
@@ -87,15 +95,22 @@ export async function runQueueCapabilityMain(deps: QueueCapabilityMainDeps): Pro
         ...(deps.now === undefined ? {} : { now: deps.now }),
       }),
     );
+    // The deadline may have won while the effects ran; the refusal stands.
+    if (expired) return 2;
     deps.stdout(response);
     return 0;
   };
   const deadline = new Promise<number>((resolve) => {
-    timer = setTimeout(() => resolve(refuse(deps)), deps.deadlineMs ?? QUEUE_DEADLINE_MS);
+    timer = setTimeout(() => {
+      expired = true;
+      resolve(refuse(deps));
+    }, deps.deadlineMs ?? QUEUE_DEADLINE_MS);
     timer.unref?.();
   });
   try {
-    return await Promise.race([work().catch(() => refuse(deps)), deadline]);
+    const code = await Promise.race([work().catch(() => refuse(deps)), deadline]);
+    if (expired) deps.terminate();
+    return code;
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }

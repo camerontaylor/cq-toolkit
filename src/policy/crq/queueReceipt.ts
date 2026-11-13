@@ -7,7 +7,13 @@
  * receipt-bound remediation predicate. Bytes and queue documents are supplied
  * by the caller; nothing here reads a file, a clock or the environment.
  */
-import { JsonObject, JsonNumber, parseJsonValue, type JsonValue } from './jsonValue.js';
+import {
+  JsonObject,
+  JsonNumber,
+  parseJsonValue,
+  toPlainJsonRetainingNumbers,
+  type JsonValue,
+} from './jsonValue.js';
 import { receiptJsonDigest, sha256Hex } from './pythonJson.js';
 import {
   MERGED_CURRENT_KIND,
@@ -368,6 +374,17 @@ export function clientStatusProjection(
 }
 
 /**
+ * The shared identity predicates (`receiptIdentity.ts`) read plain properties,
+ * while every document here is a lossless `JsonObject`. Convert at the seam so
+ * a valid captured equivalence is compared as Python's dicts would be.
+ */
+export function identityInput(value: unknown): unknown {
+  return value instanceof JsonObject || value instanceof JsonNumber || Array.isArray(value)
+    ? toPlainJsonRetainingNumbers(value as JsonValue)
+    : value;
+}
+
+/**
  * `review_receipt.reusable_noncounted_terminal`: equivalent terminal scope
  * evidence that grants no review credit (`classification` is null when no
  * review was dispatched).
@@ -375,12 +392,12 @@ export function clientStatusProjection(
 export function reusableNoncountedTerminal(document: unknown, capture: unknown): boolean {
   try {
     if (!isJsonRecord(document)) return false;
-    const retained = currentEquivalence(recordGet(document, 'capture'));
+    const retained = currentEquivalence(identityInput(recordGet(document, 'capture')));
     const classification = recordGet(document, 'classification');
     const retainedCapture = recordGet(document, 'capture');
     return (
       pythonValueEqual(recordGet(document, 'version'), RECEIPT_VERSION) &&
-      currentEquivalence(capture) === retained &&
+      currentEquivalence(identityInput(capture)) === retained &&
       isJsonRecord(retainedCapture) &&
       recordGet(retainedCapture, 'equivalence') === retained &&
       (recordGet(document, 'outcome') === 'no-current-code' ||

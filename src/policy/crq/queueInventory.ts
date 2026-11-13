@@ -15,6 +15,7 @@ import {
   QUEUE_RECEIPT_POLICY,
   ReceiptSnapshot,
   clientStatusProjection,
+  identityInput,
   receiptStatus,
   remediationFixed,
   remediationSummary,
@@ -192,7 +193,6 @@ export async function projectInventory(input: InventoryInput): Promise<Inventory
   };
   const rows: Row[] = [];
   let receiptBudget = MAX_RECEIPT_BYTES;
-  let budgetExhausted = false;
 
   for (const source of inventory) {
     if (!isJsonRecord(source)) continue;
@@ -255,9 +255,10 @@ export async function projectInventory(input: InventoryInput): Promise<Inventory
       } else if (typeof status.receipt_id === 'string' && status.receipt_id.length > 0) {
         const receiptId = status.receipt_id;
         if ((await input.effects.statSize(receiptId)) > receiptBudget) {
+          // Python breaks this entry's candidate loop only: later checkpoint
+          // entries still project, so the interval is never silently shortened.
           row.state = 'blocked';
           row.reason = fromPlainJson(REASON_RECEIPT_BUDGET);
-          budgetExhausted = true;
           break;
         }
         const snapshot = await input.effects.snapshot(receiptId, receiptBudget);
@@ -268,9 +269,7 @@ export async function projectInventory(input: InventoryInput): Promise<Inventory
           isJsonRecord(receiptSource) &&
           recordGet(receiptSource, 'repo') === binding.repo &&
           recordGet(receiptSource, 'target_selector') === binding.targetSelector;
-        const equivalent =
-          pyTruthy(status.reused_from) &&
-          reusable(document, (item.get('capture') as JsonValue) ?? null);
+        const equivalent = pyTruthy(status.reused_from) && reusable(document, item.get('capture'));
         if (!sourceMatches || (!pythonValueEqual(receiptSource, subject) && !equivalent)) {
           row.state = 'blocked';
           row.reason = fromPlainJson(REASON_RECEIPT_SOURCE);
@@ -305,7 +304,6 @@ export async function projectInventory(input: InventoryInput): Promise<Inventory
       break;
     }
     rows.push(row);
-    if (budgetExhausted) break;
   }
 
   rows.sort((left, right) => {
@@ -381,10 +379,14 @@ function countedTerminal(document: JsonRecordLike): boolean {
   );
 }
 
-function reusable(document: JsonRecordLike, capture: JsonValue): boolean {
+function reusable(document: unknown, capture: unknown): boolean {
   // `reusable_current or reusable_noncounted_terminal`; equivalence is checked
   // by the shared receipt predicates so a partial scope never earns credit.
-  return reusableCurrent(document, capture) || reusableNoncountedTerminal(document, capture);
+  // Those predicates read plain properties, so hand them plain values.
+  return (
+    reusableCurrent(identityInput(document), identityInput(capture)) ||
+    reusableNoncountedTerminal(document, capture)
+  );
 }
 
 function escapeRegExp(value: string): string {
