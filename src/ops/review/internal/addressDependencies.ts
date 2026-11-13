@@ -167,18 +167,22 @@ export async function assertAddressDependencyMetadata(
   // and their implicit pre/post hooks. A change to any of these changes what
   // installation executes, even when every lifecycle key itself is identical.
   const invokedScripts = (scripts: Record<string, string>): Set<string> => {
-    const invoked = new Set<string>();
-    for (const [key, command] of Object.entries(scripts)) {
-      if (!installLifecycleScripts.has(key)) continue;
+    const selected = new Set<string>();
+    const worklist = [...installLifecycleScripts].filter((key) => key in scripts);
+    while (worklist.length > 0) {
+      const key = worklist.pop();
+      if (key === undefined || selected.has(key)) continue;
+      selected.add(key);
+      const command = scripts[key] ?? '';
       for (const target of Object.keys(scripts)) {
-        if (target !== key && command.includes(target)) invoked.add(target);
+        if (target === key || selected.has(target) || !command.includes(target)) continue;
+        worklist.push(target);
+      }
+      for (const hook of [`pre${key}`, `post${key}`]) {
+        if (hook in scripts && !selected.has(hook)) worklist.push(hook);
       }
     }
-    for (const name of [...invoked]) {
-      if (`pre${name}` in scripts) invoked.add(`pre${name}`);
-      if (`post${name}` in scripts) invoked.add(`post${name}`);
-    }
-    return invoked;
+    return selected;
   };
   const relevant = (text: string | null) => {
     if (text === null) return text;
