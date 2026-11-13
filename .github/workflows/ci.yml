@@ -93,12 +93,29 @@ jobs:
     needs: changes
     if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && (needs.changes.result != 'success' || needs.changes.outputs.typescript != 'false') }}
     # Fail-fast false: every shard reports, so a red run names all failing
-    # shards instead of the first one to finish. (Slice 3 adds per-shard
-    # job-level concurrency here; it is deliberately not in this change.)
+    # shards instead of the first one to finish. The slice 3 concurrency
+    # block below adds one running and one pending execution per shard on
+    # default-branch pushes, and leaves pull requests on today's cancel.
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
+    # Slice 3: one running and one pending execution per shard per ref on
+    # default-branch pushes. GitHub replaces the older pending entry by
+    # arrival and never cancels the running one. Executions over a burst are
+    # therefore bounded by completions, not by a fixed count: at most one
+    # running and one pending member exist per group at any moment, a new
+    # arrival replaces the pending member, and the newest arrival is the one
+    # that stays pending.
+    # Pull requests keep today's behaviour: a new push cancels the
+    # superseded run. A superseded commit's shards report `cancelled` and its
+    # static is skipped: it has no completed static validation, and the skipped
+    # check still counts as satisfying the required context (the trade the
+    # static job's comment below sets out).
+    concurrency:
+      group: ${{ github.workflow }}-unit-${{ matrix.shard }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -135,11 +152,15 @@ jobs:
     # Fail-closed. A skipped job counts as a SUCCESS for GitHub's required
     # checks, so `static` must never be skipped on a pull request: when a
     # shard is cancelled here, static runs and the first step below fails it.
-    # Only a default-branch push may skip static, and only when its shards
-    # were cancelled as superseded (slice 3), so that commit claims nothing.
-    # Every other event runs static so the guard step below can fail it: a
-    # nightly or manual run whose shard was cancelled reports a red static,
-    # not a skipped one (a skipped job is a silent success).
+    # the exception is a cancellation of a default-branch push's shards,
+    # whether by supersession (slice 3) or by an operator cancelling the run:
+    # this condition cannot tell the two apart. That commit then carries a
+    # SKIPPED static, which GitHub counts as satisfying the required check,
+    # and no completed static validation - not an absent result, not evidence
+    # of a pass. Supersession is the accepted trade, where the newest arrival
+    # is the one tested and recovery is a shard re-run; a skipped static on a
+    # main head is therefore always worth checking how the run ended. Every
+    # other event runs static so the guard step below can fail it.
     if: ${{ always() && !cancelled() && (needs.unit.result != 'cancelled' || github.event_name != 'push') && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
     steps:
       - name: Unit shards passed
