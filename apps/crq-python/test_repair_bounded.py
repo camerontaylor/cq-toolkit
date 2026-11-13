@@ -513,6 +513,42 @@ class BoundedRepairTest(unittest.TestCase):
             repair_tick.harvest(self.c, self.queue, item)
         self.assertEqual(json.loads(row.read_text())['status'], 'needs-human')
 
+    def test_terminal_failure_attempts_every_sibling_write_back(self):
+        job_id, job = self.prepare()
+        item = self.queue['items'][0]
+        record = item['repair_runs'][job['run']]
+        siblings = ['crq-run1-F2', 'crq-run1-F3']
+        for index, sibling_id in enumerate(siblings):
+            sibling = copy.deepcopy(job)
+            sibling.update(job=sibling_id, canonical_finding_id=str(index + 1) * 64)
+            atomic(bounded.job_path(self.root, sibling_id), sibling)
+            atomic(self.root / 'state/backfill/findings/triage' / (str(index + 1) * 64 + '.json'),
+                   {'status': 'delivered', 'receipt': {'repair_task': sibling_id},
+                    'review_id': 'e' * 64, 'previous_event_id': None})
+            atomic(self.root / 'state/repair' / sibling_id / 'result.json',
+                   {'job': sibling_id, 'item': job['item'], 'verdict': 'FIXED',
+                    'commits': ['a' * 40], 'attempts': [{'rung': 'A0'}],
+                    'repair_base': record['base'],
+                    'worktree': str(self.root / 'wt/crq-repair-pr1-merged')})
+        record['jobs'] = [job_id] + siblings
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': [],
+                'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'],
+                'origin_job': OLD, 'repair_base': record['base']})
+        self.c.iso = lambda: '2026-11-12T00:00:00Z'
+        attempted = []
+        def outcome(fid, other, *args, **kwargs):
+            attempted.append(other)
+            if len(attempted) == 1:
+                raise OSError('ledger write')
+        with mock.patch.object(repair_tick, 'finding_inbox') as inbox:
+            inbox.return_value.repair_outcome.side_effect = outcome
+            with self.assertRaisesRegex(OSError, 'ledger write'):
+                repair_tick.harvest(self.c, self.queue, item)
+        # The first sibling's failure must not skip the second.
+        self.assertEqual(attempted, siblings)
+        self.assertEqual(record['state'], 'failed')
+
     def test_unavailable_detector_keeps_the_run_retryable(self):
         job_id, job = self.prepare()
         item = self.queue['items'][0]

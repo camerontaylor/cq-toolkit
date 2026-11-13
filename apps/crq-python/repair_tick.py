@@ -316,6 +316,7 @@ def record_unpublished_siblings(c, record, handled):
     explicit decision instead of leaving it bound to a dead run. `handled` are
     the jobs whose own outcome the caller records. Idempotent, so the terminal
     replay path can repeat it after a failed ledger write."""
+    failures = []
     for other in record.get('jobs') or ():
         if other in handled or not isinstance(other, str):
             continue
@@ -328,10 +329,17 @@ def record_unpublished_siblings(c, record, handled):
             continue
         if result.get('verdict') != 'FIXED' or not job.get('canonical_finding_id'):
             continue
-        finding_inbox(c).repair_outcome(
-            job['canonical_finding_id'], other, 'needs-human',
-            'repair run failed before publication; the verified fix was not published',
-            c.iso(), repair_base=job.get('repair_base'), failure_class='exhausted')
+        try:
+            finding_inbox(c).repair_outcome(
+                job['canonical_finding_id'], other, 'needs-human',
+                'repair run failed before publication; the verified fix was not published',
+                c.iso(), repair_base=job.get('repair_base'), failure_class='exhausted')
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            # One sibling's ledger write must not skip the healthy ones; the
+            # terminal replay retries whatever is left.
+            failures.append(exc)
+    if failures:
+        raise failures[0]
 
 
 def harvest(c, q, item, dry=False):
