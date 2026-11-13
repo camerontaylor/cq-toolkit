@@ -569,7 +569,7 @@ class ManifestSchemaTests(RunbookFixture):
         document = self.build_document()
         mutate(document)
         return rb.manifest_problem(document, json.loads(
-            rb.SCHEMA_PATH.read_text()))
+            (rb.OPS_DIR / "deploy-invariants.schema.json").read_text()))
 
     def build_document(self):
         # setUp already built the repo; do not run build_repo twice (a second
@@ -1317,7 +1317,7 @@ class RecordNamingTests(RunbookFixture):
         document["artifacts"]["candidate_deps_sha256"] = \
             document["artifacts"]["running_deps_sha256"]
         problem = rb.manifest_problem(document, json.loads(
-            rb.SCHEMA_PATH.read_text()))
+            (rb.OPS_DIR / "deploy-invariants.schema.json").read_text()))
         self.assertIsNone(problem)  # an equal pair is legal and explicit
 
 
@@ -2040,10 +2040,16 @@ class CLIStatusGateTests(RunbookFixture):
                 'def file_digest(path):\n    return "0" * 64\n\n'
                 'def tree_digest(path):\n    return "0" * 64\n')
             stdout = io_string()
-            with self.assertRaisesRegex(Exception,
-                                       "does not match the reviewed digest"), \
-                    contextlib.redirect_stdout(stdout):
+            stderr = io_string()
+            with self.assertRaises(SystemExit) as refusal, \
+                    contextlib.redirect_stdout(stdout), \
+                    contextlib.redirect_stderr(stderr):
                 _load("probe_coerced_runbook", ops / "deploy-runbook.py")
+            # A decision this file made deliberately is not a crash: the exit
+            # is status 1 and the refusal is the document, without a traceback.
+            self.assertEqual(refusal.exception.code, 1)
+            self.assertEqual(stderr.getvalue(), "",
+                             "no traceback for a deliberate refusal")
             # The refusal is one machine-readable document, emitted before
             # anything from the ops directory is imported or executed.
             document = json.loads(stdout.getvalue())
