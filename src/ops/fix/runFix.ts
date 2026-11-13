@@ -6,7 +6,7 @@ import {
   type EscalationState,
 } from './escalation.js';
 import { provenanceConfig } from '../../config/provenance.js';
-import { currentCqEnv } from '../../config/run-env.js';
+import { currentCqEnv, currentEntryEnv, type EntryEnv } from '../../config/run-env.js';
 import type { z } from 'zod';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -74,7 +74,6 @@ import {
 } from './report.js';
 import { makePortableReviewScanner, type DiffSecretScanner } from '../dev/denylist.js';
 import { makeSubprocessDevEffects } from '../dev/effects.js';
-import { processEnv } from '../../config/process-env.js';
 import type { CqEnv } from '../../config/env.js';
 
 export type FixRunInput = z.input<typeof FixRunInputSchema>;
@@ -145,6 +144,12 @@ export interface FixRunDeps {
    * the enclosing run snapshot (or one fresh read) at entry.
    */
   cqEnv?: CqEnv;
+  /**
+   * The host's environment record. A foreign-name reader below the
+   * composition (the PASEO_AGENT_ID provenance fallback) takes this
+   * entry-time snapshot; absent, the enclosing run's record applies.
+   */
+  env?: EntryEnv;
 }
 
 /** The composition observation surface makeFixRun exposes to its report. */
@@ -234,6 +239,7 @@ async function captureProvenance(
   base: string,
   configText: string,
   cqEnv: CqEnv,
+  env: EntryEnv,
 ): Promise<{ provenance: ProvenanceRecord; correlation: CorrelationRecord }> {
   const execFileAsync = promisify(execFile);
   const git = async (args: string[]): Promise<string> => {
@@ -273,10 +279,9 @@ async function captureProvenance(
   // parentWorkId is a UUID per CorrelationRecordSchema: only a genuinely
   // UUID-shaped inbound id persists; the paseo:<id> link form (and any other
   // non-UUID evidence) stays null rather than failing the header. The
-  // explicit CQ_* tiers come from the ENTRY snapshot, so ambient drift after
-  // entry cannot move them; only the foreign PASEO_AGENT_ID fallback is a
-  // live read (it is not part of the CQ_* registry).
-  const inboundParent = inboundParentWorkIdFromSnapshot(cqEnv, processEnv()) ?? null;
+  // explicit CQ_* tiers AND the foreign PASEO_AGENT_ID fallback come from the
+  // ENTRY records, so ambient drift after entry cannot move them.
+  const inboundParent = inboundParentWorkIdFromSnapshot(cqEnv, env) ?? null;
   const correlation: CorrelationRecord = {
     workId: randomUUID(),
     parentWorkId: inboundParent !== null && UUID_PATTERN.test(inboundParent) ? inboundParent : null,
@@ -343,8 +348,11 @@ export function makeFixRun(deps: FixRunDeps = {}) {
     // The composition's ENTRY snapshot: the dispatch wiring's CqEnv when the
     // host supplied it, else the enclosing run's snapshot (or one fresh read
     // for a direct library call). Resolved before any await, so an ambient
-    // change after entry cannot move provenance identity or config.
+    // change after entry cannot move provenance identity or config. The
+    // environment record is pinned the same way (foreign-name readers), and
+    // an explicit `deps.env` is copied so it cannot drift under the run.
     const cqEnv = deps.cqEnv ?? currentCqEnv();
+    const env = Object.freeze({ ...(deps.env ?? currentEntryEnv()) });
     const parentSignal = currentJobContext()?.signal;
     const repoRoot = resolve(input.repoRoot);
     const runPrefix = input.runPrefix ?? `cq/fix-${randomUUID()}`;
@@ -833,6 +841,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         config.base,
         configText,
         cqEnv,
+        env,
       );
       const { provenance } = captured;
       // An injected writer owns the stream's identities; adopt its workId.

@@ -18,7 +18,7 @@
 // the entry's discoverable floor instance — the honest, schema-valid,
 // agent-free pass. Real runs author the builder in the SDK / entry modules;
 // `run-plan --plan=<file>` remains the way to run an arbitrary plan JSON.
-import type { CqEnv } from '../registry/entry-env.js';
+import type { CqEnv, EntryEnv } from '../registry/entry-env.js';
 import { PlanSchema } from '../kernel/schema.js';
 import type { PlanRegistryEntry } from '../kernel/types.js';
 import { listPlans } from '../registry/plans.js';
@@ -55,7 +55,13 @@ export async function runPlanEntryCommand(
   flags: Record<string, unknown>,
   io: CliIo,
   mode: NarrationMode,
-  opts?: { opsRoot?: string; plansRoot?: string; failOnVerdict?: boolean; cqEnv?: CqEnv },
+  opts?: {
+    opsRoot?: string;
+    plansRoot?: string;
+    failOnVerdict?: boolean;
+    cqEnv?: CqEnv;
+    env?: EntryEnv;
+  },
 ): Promise<number> {
   const parsed = parseRunPlanInput(entry.name, flags, io, mode, RunPlanCommandSchema);
   if (!parsed.ok) return parsed.code;
@@ -63,7 +69,10 @@ export async function runPlanEntryCommand(
   // applies to a plan FILE (PlanSchema.parse in runPlanCommand): a malformed
   // floor is an input-class defect (exit 2, no artifact), not an opaque
   // kernel throw. An importer that THROWS stays a runtime throw → exit 1.
-  const imported = await entry.importer(opts?.cqEnv !== undefined ? { cqEnv: opts.cqEnv } : {});
+  const imported = await entry.importer({
+    ...(opts?.cqEnv !== undefined ? { cqEnv: opts.cqEnv } : {}),
+    ...(opts?.env !== undefined ? { env: opts.env } : {}),
+  });
   const checked = PlanSchema.safeParse(imported);
   if (!checked.success) {
     return inputDefect(

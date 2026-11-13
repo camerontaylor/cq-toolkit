@@ -46,7 +46,7 @@
 import { z } from 'zod';
 import { DispatchError } from '../errors.js';
 import type { ModelSpec } from '../types.js';
-import { processEnv } from '../../config/process-env.js';
+import { currentEntryEnv } from '../../config/run-env.js';
 
 // ---------------------------------------------------------------------------
 // The routing table — plain data, schema-validated (invalid tables throw loudly)
@@ -183,14 +183,15 @@ export function authEnvPlan(keyEnv: string): Record<string, string> {
  * reports what it actually served, and the shared served-model assertion
  * fails a remap post-hoc.
  *
- * `env` is the environment the base URL is resolved against (defaults to
- * `process.env`; tests inject a literal record). A set-but-EMPTY override
- * counts as unset — the documented default applies.
+ * `env` is the environment the base URL is resolved against (defaults to the
+ * enclosing run's entry snapshot, or the process environment outside a run;
+ * tests inject a literal record). A set-but-EMPTY override counts as unset —
+ * the documented default applies.
  */
 export function resolveRoute(
   modelSpec: ModelSpec,
   table: RoutingTable = defaultRoutingTable(),
-  env: Readonly<Record<string, string | undefined>> = processEnv(),
+  env: Readonly<Record<string, string | undefined>> = currentEntryEnv(),
 ): Route {
   const parsed: RoutingTable = RoutingTableSchema.parse(table);
   const endpointName = modelSpec.provider;

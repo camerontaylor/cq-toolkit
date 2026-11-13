@@ -16,14 +16,14 @@
 // context exists); otherwise the snapshot fallback is one fresh read at CALL
 // time, so tests can still set it per invocation. An empty/blank value is
 // ignored rather than honored (a blank path must never become the store).
-// `XDG_STATE_HOME` is FOREIGN, not a CQ_* key: it keeps its live process
-// semantics and is never snapshotted.
+// `XDG_STATE_HOME` is FOREIGN, not a CQ_* key: it reads the run's entry
+// snapshot (`currentEntryEnv()`), so an ambient change after entry cannot
+// move the store; outside a run the live process value is the fallback.
 
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { currentCqEnv } from '../config/run-env.js';
+import { currentCqEnv, currentEntryEnv } from '../config/run-env.js';
 import type { CqEnv } from '../config/env.js';
-import { processEnv } from '../config/process-env.js';
 
 /**
  * The default sessions directory: durable, XDG-respecting, one copy.
@@ -35,7 +35,7 @@ export function defaultSessionsDir(cqEnv?: CqEnv): string {
   if (typeof override === 'string' && override.trim() !== '') {
     return override.trim();
   }
-  const stateHome = processEnv()['XDG_STATE_HOME'];
+  const stateHome = currentEntryEnv()['XDG_STATE_HOME'];
   const base =
     stateHome !== undefined && stateHome.trim() !== '' && isAbsolute(stateHome)
       ? stateHome
