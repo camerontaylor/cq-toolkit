@@ -614,6 +614,119 @@
                 }
               },
               "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["v", "op", "producer", "source_id", "report"],
+              "properties": {
+                "v": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "op": {
+                  "const": "record"
+                },
+                "producer": {
+                  "enum": ["manual", "agent"]
+                },
+                "source_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "repo": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+                },
+                "head_commit": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "base_commit": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "head_tree": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "target": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "reviewer": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "authenticated_submitter": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "verdict": {
+                  "enum": ["APPROVED", "CHANGES_REQUESTED", "COMMENTED"]
+                },
+                "claimed_scope": {
+                  "type": "array",
+                  "maxItems": 256,
+                  "items": {
+                    "type": "object",
+                    "required": ["path", "blob", "intervals"],
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "blob": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{40,64}$"
+                      },
+                      "intervals": {
+                        "type": "array",
+                        "items": {
+                          "type": "array",
+                          "minItems": 2,
+                          "maxItems": 2,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 1
+                          }
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "independence": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "supersedes": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "forge_evidence": {
+                  "enum": ["off-forge-import", "github-review-comment"]
+                },
+                "report": {
+                  "type": "object",
+                  "required": ["encoding", "data"],
+                  "properties": {
+                    "encoding": {
+                      "const": "utf8"
+                    },
+                    "data": {
+                      "type": "string",
+                      "maxLength": 262144
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
             }
           ]
         }
@@ -735,7 +848,8 @@
                       "result",
                       "cancel",
                       "notify-update",
-                      "review-history"
+                      "review-history",
+                      "record"
                     ]
                   }
                 },
@@ -746,7 +860,8 @@
                       "original-commit-snapshot-v1",
                       "chunked-result-v1",
                       "repeat-generations-v1",
-                      "review-history-v1"
+                      "review-history-v1",
+                      "review-record-v1"
                     ]
                   }
                 },
@@ -868,6 +983,40 @@
                     }
                   },
                   "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["v", "op", "action", "record_digest"],
+              "properties": {
+                "v": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "op": {
+                  "const": "record"
+                },
+                "action": {
+                  "enum": ["recorded", "duplicate", "quarantined", "refused"]
+                },
+                "record_digest": {
+                  "type": ["string", "null"],
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "duplicate_of": {
+                  "type": ["string", "null"],
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "supersedes": {
+                  "type": ["string", "null"],
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
                 }
               },
               "additionalProperties": false

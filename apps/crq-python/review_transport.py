@@ -21,7 +21,9 @@ MAX_BYTES = 6 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024
 DEADLINE_S = 120
 OPERATIONS = ["capabilities", "submit", "status", "result", "cancel", "notify-update",
-              "review-history"]
+              "review-history", "record"]
+FEATURES = ["original-commit-snapshot-v1", "chunked-result-v1", "repeat-generations-v1",
+            "review-history-v1", "review-record-v1"]
 
 
 def decode(raw):
@@ -35,9 +37,7 @@ def decode(raw):
 
 
 def capabilities():
-    return dict(v=1, command="review-v1", operations=OPERATIONS,
-                features=["original-commit-snapshot-v1", "chunked-result-v1", "repeat-generations-v1",
-                          "review-history-v1"],
+    return dict(v=1, command="review-v1", operations=OPERATIONS, features=FEATURES,
                 limits=dict(max_request_bytes=MAX_BYTES, max_snapshot_bytes=MAX_SNAPSHOT_BYTES,
                             max_content_bytes=author_snapshot.MAX_ORIGINAL_CONTENT,
                             max_objects=author_snapshot.MAX_OBJECTS, chunk_bytes=review_receipt.CHUNK_BYTES))
@@ -125,6 +125,88 @@ def resolve(runner, inputs, stored):
                  profile={k: stored[k] for k in ("adapter", "revision")})
     operation.identity(facts)
     return facts
+
+
+def record_import(q, req, runner):
+    """S3b review-record: normalize one import and return its disposition.
+
+    The import is idempotent on (producer, source id, report digest); one
+    malformed import quarantines alone with a readable reason and never stops
+    queue scheduling. The record lands in the outbox for the next ledger
+    publication; nothing is dispatched and no vendor capacity is reserved.
+    """
+    import review_ledger
+    import review_record
+    submitted = {
+        "producer": req["producer"],
+        "id": req["source_id"],
+        "report_bytes": req["report"]["data"].encode("utf-8"),
+        "repo": req.get("repo"),
+        "head": req.get("head_commit"),
+        "base": req.get("base_commit"),
+        "head_tree": req.get("head_tree"),
+        "target": req.get("target"),
+        "reviewer": req.get("reviewer"),
+        "authenticated_submitter": req.get("authenticated_submitter"),
+        "verdict": req.get("verdict"),
+        "claimed_scope": req.get("claimed_scope"),
+        "independence": req.get("independence"),
+        "supersedes": req.get("supersedes"),
+        "forge_evidence": req.get("forge_evidence"),
+    }
+    retained = _retained_records(runner)
+    events, action = review_record.import_record(submitted, runner.iso(), retained)
+    kind, _, detail = action.partition(":")
+    result = dict(v=1, op="record", action="recorded" if kind == "record" else kind,
+                  record_digest=None, duplicate_of=None, supersedes=req.get("supersedes"))
+    if events:
+        store = review_ledger.ArtifactStore(runner.STATE / "record-artifacts")
+        # The imported report bytes are retained content-addressed before the
+        # event spools; the ledger record then references the durable artifact.
+        # Rehashing with the durable reference changes the record id, so the
+        # response carries the retained (published) id, not the import preview.
+        retained_ref = store.put(req["report"]["data"].encode("utf-8"))
+        box = review_ledger.Outbox(runner.STATE / "record-outbox", store)
+        for value in events:
+            value = copy.deepcopy(value)
+            value["payload"]["artifacts"] = [dict(retained_ref, kind="report")]
+            value["id"] = review_ledger.digest({k: v for k, v in value.items() if k != "id"})
+            review_ledger.validate(value)
+            if value["event_type"] == "review":
+                detail = value["id"]
+                retained.append(value)
+            box.spool(value)
+    if kind == "record":
+        result["record_digest"] = detail
+    elif kind == "duplicate":
+        result["duplicate_of"] = detail
+    elif kind in ("quarantined", "refused"):
+        result["reason"] = detail
+    return result
+
+
+def _retained_records(runner):
+    """Retained record events for idempotency; an unreadable one is skipped.
+
+    Idempotency consults the local record outbox (pending and acknowledged) so
+    a repeated import after a lost response stays a duplicate without making a
+    ledger read failure block scheduling.
+    """
+    import review_ledger
+    records = []
+    root = runner.STATE / "record-outbox"
+    for name in ("pending", "ack"):
+        directory = root / name
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.json")):
+            try:
+                value = review_ledger.loads(path.read_bytes())
+            except (review_ledger.IntegrityError, OSError):
+                continue
+            if value.get("event_type") == "review":
+                records.append(value)
+    return records
 
 
 def retained(runner, item):
@@ -238,6 +320,8 @@ def handle(raw, runner, *, principal, policy):
     elif op == "cancel":
         result = admission.cancel(q, req["request_id"])
         runner.save_queue(q)
+    elif op == "record":
+        result = record_import(q, req, runner)
     elif op == "review-history":
         if req.get("request_id"):
             binding = q.get("review_requests", {}).get(req["request_id"])
