@@ -118,7 +118,7 @@ describe('checkDiffMonotonicity', () => {
       '"value": 80',
       '"value": 80, "a\\\\": 50',
     );
-    expect(() => JSON.parse(injected)).not.toThrow();
+    expect(() => void JSON.parse(injected)).not.toThrow();
     expect(
       checkDiffMonotonicity(
         modifiedSection(
