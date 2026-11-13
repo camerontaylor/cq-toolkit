@@ -20,7 +20,8 @@
   },
   "bin": {
     "cq": "dist/cli.js",
-    "cq-harness-mcp": "dist/harness/mcp/bin.js"
+    "cq-harness-mcp": "dist/harness/mcp/bin.js",
+    "crq": "dist/queue-runner/crq.js"
   },
   "scripts": {
     "build": "node scripts/build.mjs",

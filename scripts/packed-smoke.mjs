@@ -313,7 +313,7 @@ async function mcpSmoke(prefix, timeoutMs) {
     return await leg('mcp-bin', async () => {
       if (!existsSync(bin))
         return { ok: false, reason: `cq-harness-mcp bin mapping missing from the install: ${bin}` };
-      return mcpRoundTrip(bin, smokeManifest(workspace), timeoutMs);
+      return mcpRoundTrip(bin, smokeManifest(workspace), timeoutMs, prefix);
     });
   } finally {
     rmSync(workspace, { recursive: true, force: true });
@@ -326,9 +326,10 @@ async function mcpSmoke(prefix, timeoutMs) {
  * a server that replies but never exits is SIGKILLed and fails the leg
  * instead of hanging forever. Resolves `{ok, ...}` exactly once.
  */
-function mcpRoundTrip(bin, manifest, timeoutMs) {
+function mcpRoundTrip(bin, manifest, timeoutMs, prefix) {
   return new Promise((resolveLeg) => {
     const child = spawn(bin, [JSON.stringify(manifest)], {
+      cwd: prefix,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stderr = '';

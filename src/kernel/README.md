@@ -104,10 +104,9 @@ reason" clause):
   preceding `job-started` (no dispatch happened; the verified inputsHash
   makes the attestation sound). This keeps each run's journal
   self-contained so the per-job fold rule survives chained resumes.
-- `stopOnError` leaving jobs unstarted does NOT set `stoppedEarly`: the
-  frozen `RunEarlyStopReason` only contains `'budget'`, and honest-stop
-  marking is T1.3's — callers read `counts.queued`/`counts.blocked` to see
-  what never ran.
+- `stopOnError` leaving jobs unstarted does NOT set `stoppedEarly`. Callers
+  read `counts.queued`/`counts.blocked` to see what never ran. The frozen
+  `RunEarlyStopReason` contains `'budget'` and `'signal'`.
 
 ## Budget governor (T1.3)
 
@@ -223,14 +222,16 @@ the dual in-flight/dispatch caps. Source: `src/kernel/governor.ts`.
   v1 runs by `at`, then v2 runs by their claimed `seq` (journal v2,
   ADR-0003 annex) — with or without `resume: true` (only the replay-skip
   map is resume-gated): attempts seed as `1 + |prior job-started(jobId)|`,
-  the dispatch count and the usage/`costUSD` rollups seed from
-  job-finished events (a finish counts only when it CLOSES an open start),
-  so a run continues the SAME budget. The seed's open-start dedupe is
-  keyed PER (run, job): a finish closes only its own run's start, so a
-  finish-only re-attestation in a later run can never close (and
-  double-charge) the start of a run that died first. Identity residual
-  (recorded, unreachable from the CLI today): the attempt seed keys on
-  `job.id`, which the PLAN controls — a plan that renames its job ids
+  the dispatch count and usage rollups seed from job-finished events (a
+  finish counts only when it CLOSES an open start); the `costUSD` rollup
+  instead seeds from reservation events for a run with any reservations (an
+  unresolved reservation charges IN FULL — see Fold eras) and from
+  job-finished events otherwise, so a run continues the SAME budget. The
+  seed's open-start dedupe is keyed PER (run, job): a finish closes only its
+  own run's start, so a finish-only re-attestation in a later run can never
+  close (and double-charge) the start of a run that died first. Identity
+  residual (recorded, unreachable from the CLI today): the attempt seed keys
+  on `job.id`, which the PLAN controls — a plan that renames its job ids
   between runs presents as fresh jobs and resets its per-job attempt
   lineage (rename evasion); stable identity needs a plan-external job
   identity, which is not in v1.1. The SAME keying bounds the A12b
@@ -436,15 +437,23 @@ to `settle`.
   pre-dispatch floor at this seam (no `W_max`); the ADR's floor machinery
   (W2.1/W3.5) is the closure, and until then breach is evidence of
   underselling, not prevention. Residuals, recorded: post-settle folds from
-  a detached (killed) op promise are suppressed at the runner — the `full`
-  charge covers them — but a misbehaving op streaming evidence after a
-  NORMAL settle would move the live ledger without journal backing (the
-  driver-side report-on-every-exit-path guard, W2.1, is the real closure);
-  and a durable `reservation-settled` WRITE failure after the in-memory
-  settle leaves the journal's reservation open while the live ledger took
-  the charge — the next fold charges `r` in full where the live run charged
-  possibly-less (conservative, but permanent divergence with no abandon
-  path; the write-ahead OPEN side has one, the settle side has none).
+  a detached (killed) op promise are suppressed at the runner, and the `full`
+  charge does NOT cover what they would have reported — it is max(r, folded),
+  built only from the reservation and the evidence folded BEFORE settlement.
+  An op that keeps spending after its invocation settled (detaching stops
+  the run WAITING, not the op) therefore overshoots unrecorded: its late
+  evidence is dropped, and with no fold there is no `charged > r`, so no
+  `breach` can fire on that spend. The full charge is a floor on what the
+  folds saw, never a ceiling on what a detached op can still spend. A
+  DIFFERENT case, with the opposite failure: a misbehaving op streaming
+  evidence after a NORMAL settle would move the live ledger without journal
+  backing (the driver-side report-on-every-exit-path guard, W2.1, is the
+  real closure); and a durable `reservation-settled` WRITE failure after the
+  in-memory settle leaves the journal's reservation open while the live
+  ledger took the charge — the next fold charges `r` in full where the live
+  run charged possibly-less (conservative, but permanent divergence with no
+  abandon path; the write-ahead OPEN side has one, the settle side has
+  none).
 - **The structured driver-seam settle channel** (`errorClass`,
   `providerSignals`, `failedAttemptsObserved`, ADR-0003 §2.2 step 9) rides
   `reservation-settled` from W2.1/W3.3 outward; this slice journals the

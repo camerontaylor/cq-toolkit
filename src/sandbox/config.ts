@@ -16,8 +16,8 @@ import {
   type SandboxNetwork,
 } from '../config/parsers.js';
 import { assertCqEnvName } from '../config/entry.js';
+import { currentCqEnv } from '../config/run-env.js';
 import type { CqEnv } from '../config/env.js';
-import { processEnv } from '../config/process-env.js';
 import type { CqEnvRegistry } from '../config/env-registry.js';
 import { assertOptInAuthority } from '../config/optin.js';
 
@@ -65,10 +65,16 @@ export interface SandboxConfig {
 export interface ResolveSandboxOptions {
   /**
    * The entry point's CQ_* snapshot. Preferred: its already-parsed values form
-   * the env layer. Without it (and without `env`) the process environment is
-   * parsed directly, as before.
+   * the env layer. When neither `cqEnv` nor `env` is passed, the resolver reads
+   * the run's registered snapshot (`currentCqEnv()`), falling back to a fresh
+   * snapshot of the process environment outside a run. An ambient `CQ_SANDBOX`
+   * change after entry therefore cannot be observed here mid-run.
    */
   cqEnv?: CqEnv;
+  /**
+   * An explicit raw environment: the deliberate foreign-environment injection
+   * path. When passed it REPLACES the env layer entirely (no snapshot merge).
+   */
   env?: Readonly<Record<string, string | undefined>>;
   optIn?: SandboxOptIn;
   /** Registry consulted for the `trust` flag; default the shipped registry (a test seam). */
@@ -97,12 +103,16 @@ function platformOf(platform: NodeJS.Platform): SandboxPlatform {
  * for a driver-scoped tightened configuration, never as a shipped default.
  */
 export function resolveSandboxConfig(options: ResolveSandboxOptions = {}): SandboxConfig {
-  const env = options.env ?? processEnv();
-  const typed = options.cqEnv?.values;
+  // The env layer is a SNAPSHOT, never a live ambient read: the run's
+  // registered snapshot when one exists, else a fresh read of the process
+  // environment. An explicit `env` overrides the snapshot for callers that
+  // inject a foreign environment deliberately.
+  const cqEnv = options.cqEnv ?? (options.env === undefined ? currentCqEnv() : undefined);
   const optIn = options.optIn ?? {};
   assertOptInAuthority('sandbox', optIn, SANDBOX_OPT_IN_ENV, options.registry);
   // optIn beats the env layer; the env layer is the snapshot's parsed value
-  // when one was passed, else the raw process/explicit env parsed here.
+  // when a snapshot was passed (or read from the run context), else the raw
+  // explicit env parsed here.
   const layered = <T>(
     optInRaw: string | undefined,
     parse: (raw: string | undefined) => T,
@@ -110,10 +120,10 @@ export function resolveSandboxConfig(options: ResolveSandboxOptions = {}): Sandb
   ): T =>
     optInRaw !== undefined
       ? parse(optInRaw)
-      : typed !== undefined && options.cqEnv !== undefined
-        ? (assertCqEnvName(options.cqEnv, 'sandbox', name),
-          (typed[name] as T | undefined) ?? parse(undefined))
-        : parse(env[name]);
+      : cqEnv !== undefined
+        ? (assertCqEnvName(cqEnv, 'sandbox', name),
+          (cqEnv.values[name] as T | undefined) ?? parse(undefined))
+        : parse(options.env?.[name]);
   const mode = layered(optIn.sandbox, parseMode, 'CQ_SANDBOX');
   const backend = layered(optIn['sandbox.backend'], parseBackend, 'CQ_SANDBOX_BACKEND') ?? 'auto';
   if (backend === 'cc-native' && options.driverScopedCcNative !== true) {

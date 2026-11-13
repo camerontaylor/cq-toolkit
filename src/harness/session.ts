@@ -68,8 +68,12 @@ import { TOOL_FAILURE_KINDS } from './failures.js';
  * journal join) and `toolCalls` (the assistant's REQUESTED tool calls of
  * that step, JSON-encoded; the role-'tool' lines that follow remain the
  * RESULTS). Both absent on every pre-existing line; the schema stays
- * strict, so old readers reject only these NEW keys — there are none in
- * old files.
+ * strict, so old readers reject these NEW keys. The format change is
+ * ONE-WAY, and not only for these keys: a reader that predates the
+ * `tool-failure` and `budget-stop` line types fails the whole session
+ * file — not just the offending line — with a `corrupt line` error when
+ * it meets one (`load` refuses the file). Do not run an older toolkit
+ * version against a sessions directory that holds these lines.
  */
 export const SessionMessageSchema = z
   .object({
@@ -443,10 +447,19 @@ export class SessionStore {
    */
   async remove(sessionId: string): Promise<void> {
     assertSafeSessionId(sessionId);
-    await Promise.all([
-      rm(this.pathFor(sessionId), { force: true }),
-      rm(join(this.sessionsDir, `${sessionId}.cq-cli-session`), { force: true }),
-    ]);
+    // Removal runs ON the write chain (same discipline as appendLine): run
+    // outside it, an `rm` could land after an in-flight append's existence
+    // check and the append would recreate a headerless file that `load`
+    // cannot read.
+    const remove = async (): Promise<void> => {
+      await Promise.all([
+        rm(this.pathFor(sessionId), { force: true }),
+        rm(join(this.sessionsDir, `${sessionId}.cq-cli-session`), { force: true }),
+      ]);
+    };
+    const next = this.tail.then(remove, remove);
+    this.tail = next.catch(() => undefined);
+    await next;
   }
 }
 

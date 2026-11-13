@@ -1,3 +1,4 @@
+import { REPO } from './prWorktree.helpers.js';
 // Split provenance: test/ops/review/prWorktree.test.ts was split into
 // prWorktree.helpers.ts (shared fixtures) and prWorktree.fetchFirst.test.ts,
 // prWorktree.registryConsult.test.ts, prWorktree.scanReuse.test.ts,
@@ -68,9 +69,9 @@ describe('ownership boundary — foreign trees are surfaced, never claimed', () 
     const calls: string[][] = [];
     const registry = memRegistry();
     const foreignPath = '/elsewhere/foreign-pr-7-fix';
-    const ownPath = '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix';
+    const ownPath = `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`;
     const model = mkModel([
-      { path: '/repo', branch: 'main', head: SHA_MAIN },
+      { path: `${REPO}`, branch: 'main', head: SHA_MAIN },
       { path: foreignPath, branch: LABEL, head: SHA_B },
       { path: ownPath, branch: LABEL, head: SHA_B },
     ]);
@@ -99,7 +100,7 @@ describe('ownership boundary — foreign trees are surfaced, never claimed', () 
       const calls: string[][] = [];
       const registry = memRegistry();
       const model = mkModel([
-        { path: '/repo', branch: 'main', head: SHA_MAIN },
+        { path: `${REPO}`, branch: 'main', head: SHA_MAIN },
         { path: '/elsewhere/foreign-pr-7-fix', branch: LABEL, head: SHA_B },
       ]);
       // No in-root candidate can satisfy reuse, and the foreign holder
@@ -157,6 +158,8 @@ describe('domain boundary vs the sweep ops worktree', () => {
         ['-C', repoRoot, 'rev-parse', 'refs/cq-review/pr-7'],
         ['-C', repoRoot, 'worktree', 'list', '--porcelain'],
         ['-C', repoRoot, 'worktree', 'add', '-B', LABEL, expectedPath, SHA_B],
+        ['-C', expectedPath, 'rev-parse', '--absolute-git-dir'],
+        ['-C', expectedPath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
       ]);
       expect(registry.current()).toEqual({
         '7': { path: expectedPath, branch: LABEL, createdAt: NOW },

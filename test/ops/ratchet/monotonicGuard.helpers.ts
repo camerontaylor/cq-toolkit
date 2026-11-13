@@ -57,7 +57,9 @@ function bodyLines(b: string): string[] {
  * section keys are stable fixture names so the single `git diff --cached`
  * can be split without committing any canned output.
  */
-async function realGitDiffCases(): Promise<Record<string, string>> {
+async function realGitDiffCases(
+  extra: Record<string, { before: string | null; after: string | null }> = {},
+): Promise<Record<string, string>> {
   const ws = await mkdtemp(join(tmpdir(), 'cq-gitdiff-'));
   const env = scrubbedGitEnv();
   const run = (args: string[]): void => {
@@ -83,6 +85,7 @@ async function realGitDiffCases(): Promise<Record<string, string>> {
     },
     added: { before: null, after: body('lower-is-better', 3) },
     deleted: { before: body('lower-is-better', 3), after: null },
+    ...extra,
   };
   try {
     run(['init', '-q']);

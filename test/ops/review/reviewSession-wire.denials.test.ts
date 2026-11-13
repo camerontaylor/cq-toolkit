@@ -69,7 +69,9 @@ describe('review session wire hook', () => {
     expect(typeof evidence.driverSessionId).toBe('string');
     expect(evidence.driverSessionId).not.toBe('');
     const transcript = await readFile(
-      join(root, 'sessions', `${evidence.driverSessionId}.jsonl`),
+      // The session binding file lives outside the repo root (Annex A,
+      // issue #1197): the wire factory's sessions sibling, not root/sessions.
+      join(`${root}-sessions`, `${evidence.driverSessionId}.jsonl`),
       'utf8',
     );
     expect(transcript).toContain('"toolName":"read"');

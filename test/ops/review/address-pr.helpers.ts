@@ -388,6 +388,12 @@ export async function world(
       head = sha;
       return ok('');
     }
+    if (a[0] === 'diff' && a.includes('--quiet')) {
+      const dirty = a.includes('--cached')
+        ? [...index].some(([file, text]) => text !== tree.get(file))
+        : changed.length > 0;
+      return { code: a.some((arg) => arg.includes('..')) || dirty ? 1 : 0, stdout: '', stderr: '' };
+    }
     if (a[0] === 'diff' && a[1] !== '--quiet') {
       const indexed = [...index]
         .filter(([file, text]) => text !== tree.get(file))
@@ -462,7 +468,6 @@ export async function world(
       };
     }
     if (a[0] === 'log') return ok(commits.get(a[3]!)?.message ?? '');
-    if (a[0] === 'diff' && a[1] === '--quiet') return { code: 1, stdout: '', stderr: '' };
     if (a[0] === 'remote' && a[1] === 'get-url') return ok('https://github.com/octo/widget.git\n');
     if (a[0] === 'ls-remote') return ok(`${remote}\trefs/heads/feature\n`);
     if (a[0] === 'push') {

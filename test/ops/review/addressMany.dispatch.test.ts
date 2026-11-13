@@ -1,3 +1,4 @@
+import { coordinationRoot } from './addressMany.helpers.js';
 // Split provenance: test/ops/review/addressMany.test.ts was split into this
 // file plus addressMany.helpers.ts, addressMany.registry.test.ts,
 // addressMany.guards.test.ts, addressMany.budget.test.ts,
@@ -28,7 +29,7 @@ test('uses each PR base for isolation and address', async () => {
     }),
   );
   await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     gh: read,
     isolate,
     address,
@@ -43,7 +44,7 @@ test('uses each PR base for isolation and address', async () => {
 test('addresses two independently attributed heads and preserves reports', async () => {
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh,
     address,
@@ -63,7 +64,7 @@ test('known failed leg does not discard a successful sibling', async () => {
       : { status: 'ok' as const, value: report() },
   );
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh,
     address,
@@ -80,7 +81,7 @@ test('unclean summaries retain each PR reason when aggregate accounting is clean
     report: report(),
   }));
   const result = await makeReviewAddressMany({
-    coordinationRoot: '/unused-test-coordination',
+    coordinationRoot: coordinationRoot(),
     isolate: async (root) => root,
     gh,
     address,

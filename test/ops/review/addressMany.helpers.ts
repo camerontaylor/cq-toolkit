@@ -4,7 +4,19 @@
 // addressMany.query.test.ts, addressMany.enrollment.test.ts,
 // addressMany.accounting.test.ts, addressMany.concurrency.test.ts,
 // addressMany.isolation.test.ts and addressMany.usage.test.ts.
-import { vi } from 'vitest';
+import { afterEach, vi } from 'vitest';
+import { rmSync } from 'node:fs';
+import { realTmpDirSync } from '../../helpers/tmp-dir.js';
+
+const roots: string[] = [];
+export function coordinationRoot(): string {
+  const root = realTmpDirSync('cq-address-many-coordination-');
+  roots.push(root);
+  return root;
+}
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 import type { ReviewAddressReport } from '../../../src/ops/review/address.js';
 
 export const head = 'a'.repeat(40);

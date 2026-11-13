@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'vitest';
 import { mainWith, parseVerifyArgs, verifySubject } from '../../src/selfhost/verify-ratchet.js';
-import type { VerifyRatchetInput } from '../../src/ops/ratchet/verifyRatchet.js';
+import {
+  createVerifyRatchet,
+  type VerifyRatchetInput,
+} from '../../src/ops/ratchet/verifyRatchet.js';
+import type { ProtectedPathsConfig } from '../../src/ops/gates/policyConfig.js';
 const TRUST = 'a'.repeat(40);
 const TIP = 'c'.repeat(40);
 const ARGV = [
@@ -82,5 +86,48 @@ describe('PR-only advisory verification', () => {
     expect(await mainWith(['--bogus=1'], { write: (line) => lines.push(line) })).toBe(2);
     expect(lines).toHaveLength(1);
     expect(JSON.parse(lines[0] ?? '')).toMatchObject({ status: 'failed' });
+  });
+});
+
+describe('mainWith posture', () => {
+  test('the entry snapshot, not a later read of the injected env, supplies the posture', async () => {
+    const configs: ProtectedPathsConfig[] = [];
+    let reads = 0;
+    const env = Object.defineProperty({}, 'CQ_MERGE_PROTECTED_PATHS', {
+      enumerable: true,
+      configurable: true,
+      get: () => (++reads === 1 ? 'diff-check' : 'advisory'),
+    }) as Record<string, string | undefined>;
+    const create: typeof createVerifyRatchet = (config) => {
+      configs.push(config);
+      return async () => ({ status: 'failed', error: 'fixture' });
+    };
+    const lines: string[] = [];
+    expect(await mainWith(ARGV, { env, create, write: (line) => lines.push(line) })).toBe(1);
+    expect(configs).toEqual([{ posture: 'diff-check', layer: 'env' }]);
+    expect(reads).toBe(1);
+    expect(JSON.parse(lines[0] ?? '')).toMatchObject({ status: 'failed', error: 'fixture' });
+  });
+
+  test('an invalid injected posture is refused by the entry gate before verifying', async () => {
+    const configs: ProtectedPathsConfig[] = [];
+    const create: typeof createVerifyRatchet = (config) => {
+      configs.push(config);
+      return async () => ({ status: 'failed', error: 'fixture' });
+    };
+    const lines: string[] = [];
+    const errs: string[] = [];
+    expect(
+      await mainWith(ARGV, {
+        env: { CQ_MERGE_PROTECTED_PATHS: 'off' },
+        create,
+        write: (line) => lines.push(line),
+        stderr: (text) => errs.push(text),
+      }),
+    ).toBe(2);
+    expect(configs).toEqual([]);
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0] ?? '')).toMatchObject({ status: 'failed' });
+    expect(errs.join('')).toContain('CQ_MERGE_PROTECTED_PATHS');
   });
 });

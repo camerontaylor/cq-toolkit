@@ -52,12 +52,21 @@ export const registry: OpRegistryEntry[] = [
     importer: async (wiring) => {
       const { makeFixRun } = await import('./runFix.js');
       const { createDriverFactory } = await import('../../driver/factory.js');
-      const drivers = createDriverFactory(
-        wiring?.onDeprecatedAlias === undefined
-          ? {}
-          : { onDeprecatedAlias: wiring.onDeprecatedAlias },
-      );
-      return async (raw) => makeFixRun({ drivers })(raw as FixRunInput);
+      const drivers = createDriverFactory({
+        ...(wiring?.onDeprecatedAlias !== undefined
+          ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+          : {}),
+        ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+      });
+      return async (raw) =>
+        makeFixRun({
+          drivers,
+          // The dispatch wiring's snapshot wins when supplied (a direct
+          // importer call with explicit wiring outside a run); inside a run
+          // the wiring IS the run snapshot. Absent, the composition resolves
+          // the enclosing run snapshot at entry.
+          ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+        })(raw as FixRunInput);
     },
   },
 ];

@@ -1,6 +1,7 @@
 // Split provenance: test/ops/dev/check.test.ts was split by subject into
 // check.input-rules.test.ts, check.adopter.test.ts, check.portable-scan.test.ts,
 // check.selection.test.ts, check.gates.test.ts and check.diff-gates.test.ts.
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { makeDevCheck } from '../../../src/ops/dev/check.js';
@@ -143,6 +144,16 @@ describe('dev.check', () => {
     const result = await makeDevCheck(effects)({ repoRoot: repo.root });
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') expect(result.reason).toContain('cq.json');
+    expect(effects.calls.filter((call) => call.command === 'pnpm')).toEqual([]);
+  });
+
+  test('refuses an unreadable cq.json (EISDIR) instead of falling back to legacy gates', async () => {
+    await mkdir(join(repo.root, 'cq.json')); // present-but-unreadable; only ENOENT means "no config"
+    const effects = effectsFor();
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('dev.check: cq.json could not be read (EISDIR)');
     expect(effects.calls.filter((call) => call.command === 'pnpm')).toEqual([]);
   });
 

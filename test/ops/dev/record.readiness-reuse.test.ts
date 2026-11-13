@@ -18,16 +18,19 @@ describe('assembleReadiness reuse resolution (no-fresh tail)', () => {
       completion: { kind: 'blocked', reason: NO_FRESH_REASON },
     });
 
-  test('a blocked tail with a resolution record settles ready and names the reuse', () => {
-    const result = assemble([
-      cycleRecord(),
-      blockedTail(),
-      reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c002-aaaaaaaa' }),
-      checkRecord(),
-    ]);
-    expect(result.ready).toBe(true);
-    if (result.ready) expect(result.record.reuse).toBe('r001-aaaaaaaa');
-  });
+  test.each([NO_FRESH_REASON, `skipped:no-fresh: ${NO_FRESH_REASON}`])(
+    'a blocked tail with a resolution record settles ready: %s',
+    (reason) => {
+      const result = assemble([
+        cycleRecord(),
+        cycleRecord({ cycleId: 'c002-aaaaaaaa', completion: { kind: 'blocked', reason } }),
+        reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c002-aaaaaaaa' }),
+        checkRecord(),
+      ]);
+      expect(result.ready).toBe(true);
+      if (result.ready) expect(result.record.reuse).toBe('r001-aaaaaaaa');
+    },
+  );
 
   test('the same tail WITHOUT the resolution record stays a latest-review-blocked gap', () => {
     const result = assemble([cycleRecord(), blockedTail(), checkRecord()]);

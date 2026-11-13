@@ -50,7 +50,7 @@ const AssemblePrsPackageSchema = z
  * stay dynamic (this module's top level is import-light by rule); the scanner
  * itself is inert until a forge publication boundary calls it.
  */
-async function loadPublicationScanner(
+export async function loadPublicationScanner(
   repoRoot: string,
   opName: string,
 ): Promise<{ scanner: DiffSecretScanner } | { status: 'failed'; error: string }> {
@@ -226,7 +226,10 @@ export const registry: OpRegistryEntry[] = [
     inputSchema: PrOpenInputSchema,
     // The readiness-ledger reader and the git reads bind from the dispatched
     // repoRoot through the dev family's inert subprocess effects; the gh
-    // half binds through the family's own gh effects. Resolution stays
+    // half binds through the family's own gh effects. The creation, the
+    // adoption refresh, and the dispositions comment all publish to the
+    // forge, so the op gets the same mandatory portable publication scanner
+    // the assembler and the run report carry. Resolution stays
     // inert (closures only — no network, no ledger, no lock touched).
     importer: () =>
       Promise.all([
@@ -235,11 +238,15 @@ export const registry: OpRegistryEntry[] = [
         import('../dev/effects.js'),
       ]).then(
         ([m, ghEffects, devEffects]) =>
-          (async (input: PrOpenInput) =>
-            m.makePrOpen(
+          (async (input: PrOpenInput) => {
+            const loaded = await loadPublicationScanner(input.repoRoot, 'pr.open');
+            if ('status' in loaded) return loaded;
+            return m.makePrOpen(
               devEffects.makeSubprocessDevEffects(input.repoRoot),
               ghEffects.makeSubprocessPrEffects(input.repoRoot),
-            )(input)) as Op<unknown, unknown>,
+              loaded.scanner,
+            )(input);
+          }) as Op<unknown, unknown>,
       ),
   },
 ];

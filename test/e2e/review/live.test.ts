@@ -1,3 +1,4 @@
+import { slotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegistry.js';
 // The LIVE review-loop e2e — E5 (goal E5; ws-e acceptance): the SHIPPED
 // runReviewLoop driven END TO END against a scratch GitHub repo — real gh,
 // real git, a spawned worker subprocess — no fakes anywhere in the loop's
@@ -45,7 +46,6 @@ import { makeFixReviewItem } from '../../../src/ops/review/fixReviewItem.js';
 import { ghJson, makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
 import { FixReviewItemInputSchema } from '../../../src/ops/review/registry.js';
-import { fileWorktreeRegistry } from '../../../src/adapters/git/prWorktree.js';
 import { runReviewLoop } from '../../../src/plans/review-loop.js';
 import type { ReviewLoopOpts } from '../../../src/plans/review-loop.js';
 import { defaultLoopClassifyConfig } from '../../../src/plans/review-loop.js';
@@ -178,7 +178,7 @@ describe.skipIf(!process.env.LIVE_GH)('live review loop e2e (opt-in: LIVE_GH=1)'
       repoRoot: f.cloneDir,
       gh: overrides.gh ?? makeGhRunner(),
       git: makeGhRunner({ bin: 'git' }),
-      registry: fileWorktreeRegistry(`${f.root}/worktree-registry.json`),
+      registry: slotWorktreeRegistry(join(f.cloneDir, '.git')),
       driver: { provider: FIXTURE_ENDPOINT, model: FIXTURE_MODEL },
       // Derives from the LOOP default (defaultLoopClassifyConfig — its
       // auto-generated sticky-comment suppression rides along) with ONLY

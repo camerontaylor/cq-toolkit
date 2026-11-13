@@ -12,6 +12,7 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'config',
     inputSchema: ConfigShowInputSchema,
-    importer: async () => (await import('./show.js')).default as Op<unknown, unknown>,
+    importer: async (wiring) =>
+      (await import('./show.js')).makeConfigShow(wiring?.cqEnv) as Op<unknown, unknown>,
   },
 ];

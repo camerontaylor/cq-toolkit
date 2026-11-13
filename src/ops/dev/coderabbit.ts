@@ -146,6 +146,15 @@ export function parseReviewerStream(stdout: string): ParsedReviewerStream {
     }
     if (parsed.sawComplete) parsed.trailingAfterComplete += 1;
     const type = stringAt(event, 'type');
+    if ('status' in event && type !== 'complete') {
+      const status = event['status'];
+      const progress =
+        (type === 'status' &&
+          typeof status === 'string' &&
+          ['scanning', 'reviewing', 'writing'].includes(status)) ||
+        (type === 'heartbeat' && status === 'reviewing');
+      if (!progress) parsed.unparsedLines += 1;
+    }
     switch (type) {
       case 'finding': {
         const severity = stringAt(event, 'severity');
@@ -292,7 +301,7 @@ export function decideCompletion(exitCode: number, parsed: ParsedReviewerStream)
   if (parsed.completeMessage !== undefined && SKIP_NOTICE_RE.test(parsed.completeMessage)) {
     return {
       kind: 'blocked',
-      reason: `reviewer completed '${parsed.completeStatus}' with an AFFIRMATIVE no-fresh/skipped notice ("${parsed.completeMessage}") — a fresh detailed review never ran`,
+      reason: `skipped:no-fresh: reviewer completed '${parsed.completeStatus}' with an AFFIRMATIVE no-fresh/skipped notice ("${parsed.completeMessage}") — a fresh detailed review never ran`,
     };
   }
   if (parsed.completeStatus !== TERMINAL_COMPLETE_STATUS) {

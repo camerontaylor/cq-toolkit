@@ -71,7 +71,9 @@ describe('aggregateAddressMany truth', () => {
       fixesPerRun: 0,
     });
 
-    // A non-ok result that carries no report at all has no evidence source.
+    // A non-ok result that carries no report at all has no evidence source, so
+    // its debt state is unknown, never `absent`: the leg ran and may have
+    // created durable author debt before it failed.
     const reportless = aggregateAddressMany({
       repo: REPO,
       budget: cleanBudget(),
@@ -83,8 +85,11 @@ describe('aggregateAddressMany truth', () => {
     expect(reportless.aggregate.rows[0]).toMatchObject({
       status: 'settled-failed',
       attribution: 'absent',
-      deferredVendorDebt: 'absent',
+      deferredVendorDebt: 'unknown',
     });
+    expect(reportless.aggregate.reasons.join(' ')).toContain(
+      '#5 returned no report; debt state unknowable',
+    );
   });
 
   test('consumes the value-only report a real successful result carries', () => {

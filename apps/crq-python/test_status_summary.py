@@ -123,6 +123,23 @@ class SummaryTest(unittest.TestCase):
                                  {"max_starts_per_hour": 5}, events, adapter.timestamp("2026-11-06T01:00:00Z"))
         self.assertEqual(data["outcomes_24h"], {"completed": 3, "interrupted": 1, "error": 0})
 
+    def test_review_finished_timestamp_validation(self):
+        now = adapter.timestamp("2026-11-06T01:00:00Z")
+
+        def summarize(event):
+            return adapter.summarize({"generated_at": "2026-11-06T01:00:00Z"},
+                                     {"items": []}, {}, {"max_starts_per_hour": 5}, [event], now)
+
+        event = {"event": "review_finished", "outcome": "completed"}
+        with self.assertRaisesRegex(ValueError, "invalid review_finished timestamp"):
+            summarize({**event, "at": "garbage"})
+        for at in (None, ""):
+            with self.subTest(at=at):
+                candidate = event if at is None else {**event, "at": at}
+                self.assertEqual(summarize(candidate)["outcomes_24h"]["completed"], 0)
+        self.assertEqual(summarize({**event, "at": "2026-11-06T00:00:00Z"})
+                         ["outcomes_24h"]["completed"], 1)
+
     def test_backfill_and_merged_current_pending_are_backlog(self):
         queue = {"items": [
             {"kind": "backfill", "state": "pending"},

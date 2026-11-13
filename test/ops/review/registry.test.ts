@@ -50,19 +50,17 @@ interface LooseResult {
 const ENTRY_NAMES = [
   'review.addressMany',
   'review.submit',
+  'review.history',
   'review.status',
   'review.wait',
   'review.result',
   'review.cancel',
   'review.retry',
-  'review.drain',
-  'review.enqueue',
-  'review.queueStatus',
   'review.queueHealth',
-  'review.report',
   'review.address',
   'review.run',
   'review.fixItem',
+  'review.fixFinding',
   'review.fetchReviewState',
   'review.classifyThreads',
   'review.planReviewBatch',
@@ -114,6 +112,17 @@ const snapshot = (): Record<string, unknown> => ({
 });
 
 /** One minimal valid input per entry (kept loose — mutation tests widen it). */
+const queuedRef = {
+  requestId: 'request-1',
+  binding: {
+    kind: 'merged-current',
+    repo: 'owner/repo',
+    pr: 1,
+    mergeSha: 'a'.repeat(40),
+    targetSelector: 'promoted-main',
+  },
+};
+
 const minimalInputs: Record<string, () => Record<string, unknown>> = {
   'review.addressMany': () => ({
     repoRoot: '/repo',
@@ -124,30 +133,15 @@ const minimalInputs: Record<string, () => Record<string, unknown>> = {
     tokensPerPr: 1,
   }),
   'review.submit': () => ({ repo: 'owner/repo', target: 'main' }),
+  'review.history': () => ({ repo: 'owner/repo', target: 'main' }),
   'review.status': () => ({ requestId: 'request-1' }),
   'review.wait': () => ({ requestId: 'request-1' }),
   'review.result': () => ({ requestId: 'request-1' }),
   'review.cancel': () => ({ requestId: 'request-1' }),
-  'review.enqueue': () => ({
-    requestId: 'request-1',
-    binding: {
-      kind: 'merged-current',
-      repo: 'owner/repo',
-      pr: 1,
-      mergeSha: 'a'.repeat(40),
-      targetSelector: 'promoted-main',
-    },
-  }),
-  'review.retry': () => minimalInputs['review.enqueue']!(),
-  'review.drain': () => ({ requests: [minimalInputs['review.enqueue']!()], waitMs: 0 }),
-  'review.queueStatus': () => minimalInputs['review.enqueue']!(),
+  'review.retry': () => queuedRef,
   'review.queueHealth': () => ({
     requestId: 'health-client',
     binding: { repo: 'owner/repo', targetSelector: 'promoted-main' },
-  }),
-  'review.report': () => ({
-    ...minimalInputs['review.enqueue']!(),
-    evidenceDir: '/tmp/queue-evidence',
   }),
   'review.address': () => ({ repoRoot: '/tmp/cq-review-fixture', source: 'local' }),
   'review.run': () => ({ repoRoot: '/tmp/cq-review-fixture' }),
@@ -156,6 +150,20 @@ const minimalInputs: Record<string, () => Record<string, unknown>> = {
     item: { id: 'T1', path: null, line: null, body: 'fix me', comments: [] },
     worktree: { path: '/tmp/cq-fix-review/pr-1', branch: 'cq-review/pr-1' },
     driver: { model: 'm', provider: 'p' },
+  }),
+  'review.fixFinding': () => ({
+    pr: 1,
+    item: { id: 'T1', path: null, line: null, body: 'fix me', comments: [] },
+    worktree: { path: '/tmp/cq-fix-review/pr-1', branch: 'cq-review/pr-1' },
+    driver: { model: 'm', provider: 'p' },
+    binding: {
+      job: 'repair-job-1',
+      sourceSha: 'a'.repeat(40),
+      sourceBlobSha: 'b'.repeat(40),
+      findingSha256: 'c'.repeat(64),
+      repairBase: 'd'.repeat(40),
+    },
+    instructions: 'Prefer the smallest guard.',
   }),
   'review.fetchReviewState': () => ({ owner: 'octocat', repo: 'hello-world', pr: 1 }),
   'review.classifyThreads': () => ({ state: fetchedState(), nowMs: 0 }),
@@ -287,7 +295,7 @@ describe('review family registry entries', () => {
   test('review.addressMany rejects an unknown key inside an enrollment row', () => {
     const entry = entryByName('review.addressMany');
     const input = minimalInput('review.addressMany');
-    const row = { number: 1, request: minimalInputs['review.enqueue']!() };
+    const row = { number: 1, request: queuedRef };
     input.enrollments = [row];
     expect(entry.inputSchema.safeParse(input).success).toBe(true);
     input.enrollments = [{ ...row, surprise: true }];
@@ -338,6 +346,37 @@ describe('review family registry entries', () => {
     (input as { item: { comments: unknown[] } }).item.comments = [
       { authorLogin: 'review-bot', authorType: 'Bot', body: 'done', createdAt: null },
     ];
+    expect(entry.inputSchema.safeParse(input).success).toBe(true);
+  });
+
+  test('review.fixFinding: the binding hex shapes are strict', () => {
+    const entry = entryByName('review.fixFinding');
+    const input = minimalInput('review.fixFinding');
+    expect(entry.inputSchema.safeParse(input).success).toBe(true);
+    for (const field of ['sourceSha', 'sourceBlobSha', 'repairBase'] as const) {
+      const bad = {
+        ...input,
+        binding: { ...(input['binding'] as Record<string, unknown>), [field]: 'xyz' },
+      };
+      expect(entry.inputSchema.safeParse(bad).success).toBe(false);
+    }
+    const badDigest = {
+      ...input,
+      binding: {
+        ...(input['binding'] as Record<string, unknown>),
+        findingSha256: 'c'.repeat(63),
+      },
+    };
+    expect(entry.inputSchema.safeParse(badDigest).success).toBe(false);
+  });
+
+  test('review.fixFinding: a {kind: finding} item is accepted (the shared union)', () => {
+    const entry = entryByName('review.fixFinding');
+    const input = minimalInput('review.fixFinding');
+    input['item'] = {
+      kind: 'finding',
+      finding: { id: 'F1', source: 'agent', severity: 'minor', text: 't', status: 'open' },
+    };
     expect(entry.inputSchema.safeParse(input).success).toBe(true);
   });
 

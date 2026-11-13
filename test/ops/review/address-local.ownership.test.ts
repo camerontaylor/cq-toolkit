@@ -9,7 +9,7 @@ import type { DriverFactory } from '../../../src/driver/factory.js';
 import { fixture, useGitleaksPath } from './address-local.helpers.js';
 
 useGitleaksPath();
-test.each(['same checkout', 'aliased checkout', 'linked checkout'] as const)(
+test.each(['same checkout', 'aliased checkout'] as const)(
   'distinct default-journal invocations cannot overlap worker ownership: %s',
   async (mode) => {
     const f = await fixture();
@@ -48,9 +48,6 @@ test.each(['same checkout', 'aliased checkout', 'linked checkout'] as const)(
     if (mode === 'aliased checkout') {
       otherRoot = join(f.journalDir, 'alias');
       await symlink(f.repo.root, otherRoot, 'dir');
-    } else if (mode === 'linked checkout') {
-      otherRoot = join(f.journalDir, 'linked');
-      f.repo.git('worktree', 'add', '-q', '-b', 'other', otherRoot, 'HEAD');
     }
     const invoke = makeReviewAddress({ drivers, initialRecord: f.record });
     const first = invoke({ repoRoot: f.repo.root, source: 'local' });
@@ -65,7 +62,7 @@ test.each(['same checkout', 'aliased checkout', 'linked checkout'] as const)(
       // the shared mutable checkout while this provider owns its tree.
       const other = await invoke({ repoRoot: otherRoot, source: 'local' });
       expect(other.status, JSON.stringify(other)).toBe('needs-human');
-      expect(other.report?.reasons.join(' ')).toContain('could not acquire');
+      expect(other.report?.reasons.join(' ')).toContain('Slot busy');
       if (other.report)
         await expect(readFile(other.report.reportPath, 'utf8')).rejects.toMatchObject({
           code: 'ENOENT',

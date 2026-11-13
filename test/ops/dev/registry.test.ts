@@ -4,7 +4,7 @@
 // fails the library boundary BEFORE any effect (zero processes touched).
 import { describe, expect, test, vi } from 'vitest';
 import { registry } from '../../../src/ops/dev/registry.js';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeTestRepo, repoEffects } from './repo.js';
@@ -80,6 +80,24 @@ describe('dev family registry entries', () => {
     },
   );
 
+  test('dev.review: an unreadable cq.json (EISDIR) refuses under needs-human before any leg', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await mkdir(join(repo.root, 'cq.json')); // present-but-unreadable; only ENOENT means "no config"
+      vi.spyOn(effectModule, 'makeSubprocessDevEffects').mockReturnValue(repoEffects(repo));
+      const op = await entryByName('dev.review').importer();
+      const result = (await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' })) as {
+        status: string;
+        reason?: string;
+      };
+      expect(result.status).toBe('needs-human');
+      expect(result.reason).toContain('dev.review: cq.json could not be read (EISDIR)');
+    } finally {
+      vi.restoreAllMocks();
+      await repo.cleanup();
+    }
+  });
+
   test('fresh adopter dispatch scans without the toolkit denylist script or policy file', async () => {
     const repo = await makeTestRepo();
     const bin = await mkdtemp(join(tmpdir(), 'cq-adopter-bin-'));
@@ -133,6 +151,29 @@ describe('dev family registry entries', () => {
       if (priorLog === undefined) delete process.env['CQ_NODE_LOG'];
       else process.env['CQ_NODE_LOG'] = priorLog;
       await repo.cleanup();
+    }
+  });
+
+  test('dev.check parses the dispatched input BEFORE any repository read', async () => {
+    // An SDK caller can dispatch null (or an empty repoRoot) straight at the
+    // op: the setup reads the repository (the scanner probe), so the guard
+    // must answer with the `failed` taxonomy — never a rejected promise, and
+    // never a read of `/cq.json` for a repoRoot it did not parse.
+    const effects = vi.spyOn(effectModule, 'makeSubprocessDevEffects');
+    const scanner = vi.spyOn(denylistModule, 'checkScannerFor');
+    try {
+      const op = (await entryByName('dev.check').importer()) as (input: unknown) => Promise<{
+        status: string;
+        error?: string;
+      }>;
+      const absent = await op(null);
+      expect(absent.status).toBe('failed');
+      expect(absent.error).toContain('dev.check: invalid input');
+      expect((await op({ repoRoot: '' })).status).toBe('failed');
+      expect(effects).not.toHaveBeenCalled();
+      expect(scanner).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
     }
   });
 
