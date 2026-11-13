@@ -40,6 +40,15 @@ The `from-source` companion job below mirrors ci.yml's second job exactly
 (tokens swapped) so a regeneration carries it instead of silently dropping
 it; it is deliberately not a required check — see its comment.
 
+`test:unit` is the exception among those seven steps. It is about 90% of the
+gate's wall time and runs with `fileParallelism: false` because the process
+tests carry real startup deadlines, so this repo hedges it into four separate
+runners: the `unit` matrix job runs `vitest --shard=i/4`, and the required
+`static` job calls the composite with `unit: skip` and waits for all four. The
+check name (`static`) and its job id do not change; a red shard makes `static`
+red. The macOS venue calls the composite without the input, so its non-required
+mirror still runs the suite whole, as one serial run.
+
 ### The macOS venue is a separate workflow, on purpose
 
 This repo's non-required macOS full-gate mirror (`static-macos`) lives in
@@ -136,12 +145,73 @@ jobs:
         run: {{INSTALL_CMD}}
       - name: Compare TypeScript with Python vectors
         run: pnpm exec vitest run --project pure test/policy/crq/vectors.test.ts
+  # The unit suite is the bulk of the static gate (about 20 minutes of the 23),
+  # and it runs with fileParallelism: false because the process tests have real
+  # startup deadlines. Four separate runners do not compete for those budgets,
+  # so the suite runs as one matrix job with four vitest shards. `static` still
+  # needs this job: a red shard is a red run, and the required check name and its
+  # job id do not change. The composite action skips its own unit step when
+  # `static` calls it with `unit: skip`; the macOS venue still runs it whole.
+  unit:
+    runs-on: {{RUNNER}}
+    # Same event and coarse-selection guards as `static`. always() keeps the
+    # full suite (rather than a skip) when the `changes` job failed.
+    needs: changes
+    if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && (needs.changes.result != 'success' || needs.changes.outputs.typescript != 'false') }}
+    # Fail-fast false: every shard reports, so a red run names all failing
+    # shards instead of the first one to finish. (Slice 3 adds per-shard
+    # job-level concurrency here; it is deliberately not in this change.)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - name: Set up Node {{NODE_VERSION}}
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: {{NODE_VERSION}}
+          cache: pnpm
+      - name: Install dependencies
+        run: {{INSTALL_CMD}}
+      # The unit suite runs outside the static-gate composite, so it must
+      # install the same harness dependency the composite's first step does.
+      # Without real ripgrep the search-tool tests fail on CI by design
+      # (test/driver/ai-sdk.rg-floor.test.ts refuses to skip).
+      - name: Install ripgrep for harness search tools
+        uses: ./.github/actions/install-ripgrep
+      # pnpm forwards the flag verbatim; do not add `--` (pnpm 12 forwards a
+      # literal `--`, which vitest reads as end-of-options). Vitest sha1-hashes
+      # each test file's path, sorts the hashes, then slices contiguously, so
+      # the four shards are disjoint and exhaustive and independent of
+      # directory order (not hash-modulo partitioning).
+      - name: Test unit (shard ${{ matrix.shard }}/4)
+        run: pnpm run test:unit --shard=${{ matrix.shard }}/4
   static:
     runs-on: {{RUNNER}}
-    # Every PR, default-branch push, nightly and manual full run.
-    needs: changes
-    if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
+    # Every PR, default-branch push, nightly and manual full run. It now also
+    # waits for the four unit shards: this job id is the required context, so
+    # the aggregation must happen here and nowhere else.
+    needs: [changes, unit]
+    # Fail-closed. A skipped job counts as a SUCCESS for GitHub's required
+    # checks, so `static` must never be skipped on a pull request: when a
+    # shard is cancelled here, static runs and the first step below fails it.
+    # Only a default-branch push may skip static, and only when its shards
+    # were cancelled as superseded (slice 3), so that commit claims nothing.
+    # Every other event runs static so the guard step below can fail it: a
+    # nightly or manual run whose shard was cancelled reports a red static,
+    # not a skipped one (a skipped job is a silent success).
+    if: ${{ always() && !cancelled() && (needs.unit.result != 'cancelled' || github.event_name != 'push') && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
     steps:
+      - name: Unit shards passed
+        if: ${{ needs.unit.result == 'failure' || (github.event_name != 'push' && needs.unit.result == 'cancelled') || needs.changes.result == 'cancelled' }}
+        shell: bash
+        run: exit 1
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
@@ -162,13 +232,19 @@ jobs:
       # steps live in ONE repo-owned composite action, shared with the
       # macOS venue's static-macos mirror (macos-venue.yml), so the two run
       # one step list. Checkout, toolchain and install stay above: a local
-      # action is read from the checked-out workspace.
+      # action is read from the checked-out workspace. `test:unit` was most of
+      # the gate's wall time; it runs in the four `unit` shard jobs above, so
+      # this call skips the composite's own copy of it.
       - name: Check formatting (prose/Python only)
         if: ${{ needs.changes.result == 'success' && needs.changes.outputs.typescript == 'false' }}
         run: pnpm run format:check
       - name: Static gate steps (.github/actions/static-gate)
         if: ${{ (needs.changes.result != 'success' || needs.changes.outputs.typescript != 'false') }}
         uses: ./.github/actions/static-gate
+        with:
+          # The four unit shards already ran the suite; running it again here
+          # would double the cost and hide which shard failed.
+          unit: skip
 
   # Stage-1 self-hosting (T1.7 / ws-k stage 1 item 6): CI runs the toolkit
   # FROM SOURCE — the built artifact drives a real governed plan (two jobs

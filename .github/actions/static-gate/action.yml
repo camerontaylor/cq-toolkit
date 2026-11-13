@@ -12,10 +12,24 @@
 # `protected-path` finding (needs a human under the default `human` posture).
 # An edit here also raises a D11 `required-check` (producer) finding through
 # policyDiff's local-action tracing, which needs a human under every posture.
+#
+# `unit: skip` omits the Test unit step only. ci.yml's required `static` job
+# passes it because four `unit` shard jobs in ci.yml have already run the same
+# suite in separate runners; the macOS venue passes nothing and keeps the whole
+# gate, so this stays the one definition of every step.
 name: static-gate
 description: The static gate's ordered command steps, shared by ci.yml static and macos-venue.yml static-macos.
 
 inputs:
+  unit:
+    description: >-
+      'run' (the default) runs the unit suite as part of this gate. 'skip'
+      omits that one step: ci.yml's required `static` job passes it because four
+      `unit` shard jobs have already run the suite in separate runners, and
+      running it again here would double the cost and hide which shard failed.
+      The macOS venue passes nothing, so its full-gate mirror still runs it.
+    required: false
+    default: 'run'
   vitest-json-dir:
     description: >-
       When non-empty, test:unit and test:e2e also write the vitest JSON report
@@ -53,6 +67,7 @@ runs:
     # json reporter). The input reaches the shell through env, never
     # interpolated into the script.
     - name: Test unit
+      if: ${{ inputs.unit != 'skip' }}
       shell: bash
       env:
         VITEST_JSON_DIR: ${{ inputs.vitest-json-dir }}
