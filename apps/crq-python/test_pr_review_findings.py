@@ -58,7 +58,7 @@ class FakeGh:
                 "nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}}
             return SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
         if ".merge_base_commit.sha" in argv:
-            return SimpleNamespace(returncode=0, stdout=json.dumps(BASE), stderr="")
+            return SimpleNamespace(returncode=0, stdout=BASE + "\n", stderr="")
         target = next(a for a in argv[2:] if a.startswith("repos/"))
         if "--method" in argv:
             code, out, err = self.post.pop(0)

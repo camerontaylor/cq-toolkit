@@ -534,15 +534,6 @@ def deliver(repo: str, pr: int, meta: Dict[str, Any], ndjson: Path,
         if prepared is None:
             return {**result, "state": "skipped-no-verdict"}
         meta = prepared
-        if meta["receipt_verdict"] == "PASS":
-            for old in crq_review_receipt.reviews(sys.modules[__name__], gh, repo, pr):
-                body = old.get("body") or ""
-                verdict = crq_review_receipt.VERDICT.search(body)
-                if (verdict and verdict[1] == "PASS" and verdict[2] == head and
-                        (crq_review_receipt.PREFIX in body or crq_review_receipt.REFRESH in body) and
-                        old.get("user", {}).get("login") in {login, "cq-review[bot]"}):
-                    return {**result, "state": "existing", "review_id": old["id"], "review_url": old.get("html_url"),
-                            "identity": old["user"]["login"], "attested": old["user"]["login"] == "cq-review[bot]"}
     fingerprint = None
     # Independent verdicts keep their reviewer-specific run marker even when
     # their findings match another reviewer's findings.

@@ -2440,7 +2440,8 @@ def deliver_pending_review_refreshes(q: Dict[str, Any]) -> List[str]:
                 item["review_refresh"] = {"state": "abandoned", "error": "malformed CRQ refresh request"}
                 continue
             previous = item.get("review_refresh", {})
-            if previous.get("head") == request["head"] and previous.get("state") in ("created", "existing", "abandoned"):
+            if (previous.get("head") == request["head"] and previous.get("scan_run") == request["run_id"]
+                    and previous.get("state") in ("created", "existing", "abandoned", "skipped-head", "skipped-range")):
                 continue
             candidates.append((item, request))
     candidates.sort(key=lambda pair: pair[0].get("review_refresh_attempt_at") or "")
@@ -2448,7 +2449,8 @@ def deliver_pending_review_refreshes(q: Dict[str, Any]) -> List[str]:
     for item, request in candidates[:PR_REVIEWS_PER_TICK]:
         item["review_refresh_attempt_at"] = iso()
         prior = item.get("review_refresh", {})
-        attempts = prior.get("attempts", 0) if prior.get("head") == request["head"] else 0
+        attempts = (prior.get("attempts", 0) if prior.get("head") == request["head"]
+                    and prior.get("scan_run") == request["run_id"] else 0)
         meta = {key: request[key] for key in ("run_id", "base", "head")}
         meta.update(posting_identity=request.get("posting_identity"), identity_reason=request.get("identity_reason"),
                     identity_checkpoint=lambda login, reason: _checkpoint_review_identity(q, request, login, reason))
@@ -2457,7 +2459,7 @@ def deliver_pending_review_refreshes(q: Dict[str, Any]) -> List[str]:
         except (RuntimeError, OSError, ValueError) as exc:
             attempts += 1
             result = {"state": "abandoned" if attempts >= PR_REVIEW_MAX_ATTEMPTS else "retry", "error": str(exc)[:300]}
-        item["review_refresh"] = {**result, "head": request["head"], "attempts": attempts}
+        item["review_refresh"] = {**result, "head": request["head"], "scan_run": request["run_id"], "attempts": attempts}
         if result["state"] == "created":
             log.append(f"PASS refresh on PR #{request['pr']} ({result['state']})")
     return log

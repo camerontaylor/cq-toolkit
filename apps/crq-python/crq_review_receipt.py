@@ -116,6 +116,15 @@ def open_major(prf, gh, repo, pr, login):
             raise RuntimeError('incomplete PR review threads') from None
 
 
+def current_merge_base(prf, gh, repo, base, head):
+    """gh's scalar --jq output is plain text, not a JSON string."""
+    argv = ['gh', 'api', f'repos/{repo}/compare/{base}...{head}', '--jq', '.merge_base_commit.sha']
+    value = (prf._ok(argv, prf._call(gh, argv)).stdout or '').strip()
+    if not re.fullmatch(r'[0-9a-f]{40}', value):
+        raise RuntimeError('invalid current PR merge base')
+    return value
+
+
 def prepare(prf, gh, repo, pr, meta, ndjson, findings, login):
     """Validate saved scan artifacts, and recompute completeness at delivery."""
     import crq
@@ -144,8 +153,7 @@ def prepare(prf, gh, repo, pr, meta, ndjson, findings, login):
     state = prf.pr_state(gh, repo, pr)
     if state.get('head') != meta['head']:
         return None
-    merge_base = prf._json(gh, ['gh', 'api', f"repos/{repo}/compare/{state['base']}...{meta['head']}",
-                              '--jq', '.merge_base_commit.sha'])
+    merge_base = current_merge_base(prf, gh, repo, state['base'], meta['head'])
     whole = (saved.get('range_policy') == 'full-range-once-v1' and merge_base == meta['base'])
     blocked = any(f['severity'].lower() in BLOCKING for f in findings)
     blocked = open_major(prf, gh, repo, pr, login) or blocked
@@ -161,7 +169,7 @@ VERDICT = re.compile(r'^\*\*Independent review \(CodeRabbit CLI via crq\): (PASS
 def refresh(prf, repo, pr, meta, gh=None, login=None):
     """Refresh a prior whole-PR scan after author resolution, never rescan/resolve.
 
-    A separate per-head PASS marker survives a crash after POST. This namespace
+    A separate per-scan/head PASS marker survives a crash after POST. This namespace
     does not change the immutable original run receipt or schedule another scan.
     """
     injected = gh is not None
@@ -171,6 +179,8 @@ def refresh(prf, repo, pr, meta, gh=None, login=None):
     state = prf.pr_state(gh, repo, pr)
     if state['state'] != 'open' or state.get('merged') or state.get('head') != meta['head']:
         return {'state': 'skipped-head'}
+    if current_merge_base(prf, gh, repo, state['base'], meta['head']) != meta['base']:
+        return {'state': 'skipped-range'}
     rows = reviews(prf, gh, repo, pr)
     own = []
     for row in rows:
@@ -204,8 +214,8 @@ def refresh(prf, repo, pr, meta, gh=None, login=None):
     if open_major(prf, gh, repo, pr, login):
         return {'state': 'pending-threads'}
     wanted = f"{REFRESH}head={meta['head']} scan-run={meta['run_id']} -->"
-    for row, prior_verdict in own:
-        if wanted in row['body'] or prior_verdict == 'PASS':
+    for row, _ in own:
+        if wanted in row['body']:
             return {'state': 'existing', 'review_id': row['id'], 'review_url': row.get('html_url')}
     lines = [wanted,
              f"**Independent review (CodeRabbit CLI via crq): PASS for `{meta['head']}`**"]
