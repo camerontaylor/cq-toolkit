@@ -44,6 +44,16 @@ class RollbackPlanTests(ControllerFixture):
         with self.fake_switch():
             host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
 
+    def test_active_runner_refuses_before_drain_or_switch(self):
+        self.at_target()
+        with mock.patch.object(host, "inactive", side_effect=ValueError("active tick")), \
+             mock.patch.object(dc, "drain_check") as drain, \
+             mock.patch.object(host, "switch") as switch:
+            with self.assertRaisesRegex(dc.Refused, "stopped before checking drain"):
+                dc.rollback_plan(self.effects, host, self.prior, self.overlay_path)
+        drain.assert_not_called()
+        switch.assert_not_called()
+
     def test_old_deploy_journal_refuses_after_a_second_completed_deployment(self):
         # Construct C before exercising the actual A -> B -> C controller path.
         self.command("restore", "--", host.CONFIG)
@@ -185,7 +195,7 @@ class RollbackPlanTests(ControllerFixture):
         self.assertEqual([j["operation"] for j in journals], ["rollback"])
         self.assertEqual(journals[0]["helper_sha256"], "cd" * 32)
 
-    def test_post_journal_author_requests_refuse_before_drain_or_switch(self):
+    def test_post_journal_author_requests_refuse_after_drain_before_switch(self):
         with self.fake_switch():
             dc.deploy_plan(self.effects, host, self.target, self.tag,
                            self.overlay_path)
@@ -195,11 +205,12 @@ class RollbackPlanTests(ControllerFixture):
         self.write_state("queue.json", {"items": [], "starts": [],
                                        "author_requests": {"new-request": {}}})
         queue_bytes = (self.runner / "state/queue.json").read_bytes()
-        with mock.patch.object(dc, "drain_check") as drain:
+        with mock.patch.object(dc, "drain_check",
+                               return_value={"drained": True, "blocked": []}) as drain:
             with mock.patch.object(host, "switch") as helper_switch:
                 with self.assertRaisesRegex(dc.Refused, "current queue state"):
                     dc.rollback_plan(self.effects, host, prior, self.overlay_path)
-                drain.assert_not_called()
+                drain.assert_called_once()
                 helper_switch.assert_not_called()
         self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.target)
         self.assertEqual((self.runner / "state/queue.json").read_bytes(), queue_bytes)

@@ -185,9 +185,14 @@ const UNIT_RE = /"unit"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 // that both accept `\\.`, so a single escape could be claimed by either and
 // the engine re-scanned the tail at every split point — O(n²) per start
 // position on a crafted diff line (PR-author controlled, few hundred KB
-// stalls the gate). Match semantics are unchanged: a key must still contain
-// at least one escape anywhere in its body.
-const ESCAPED_KEY_RE = /(?:^|[,{])\s*"[^"\\]*\\.(?:[^"\\]|\\.)*"\s*:/;
+// stalls the gate). For every body a closing quote can follow (valid JSON),
+// the new shape is a SUPERSET: it fires whenever the body carries any escape
+// at all, and additionally catches the `\\`-escaped bodies the ambiguous
+// form missed (a body pair `\\\\` had no reachable bare `\\`). The only body it
+// stops matching is a DANGLING escape before the quote, which no JSON
+// document can close — there is no key there to decode. (`m`: `^` is a LINE
+// start — the callers join diff lines.)
+const ESCAPED_KEY_RE = /(?:^|[,{])\s*"[^"\\]*\\.(?:[^"\\]|\\.)*"\s*:/m;
 
 /**
  * Decode one captured JSON string body (the capture EXCLUDES the quotes):
@@ -315,7 +320,8 @@ function contentLines(lines: string[]): { minus: string[]; plus: string[]; conte
  */
 function carriesMalformedStringField(minus: string[], plus: string[], context: string[]): boolean {
   for (const lines of [minus, plus, context]) {
-    if (lines.some((l) => ESCAPED_KEY_RE.test(l))) return true;
+    // JSON whitespace may put the colon on a later line than its escaped key.
+    if (ESCAPED_KEY_RE.test(lines.join('\n'))) return true;
   }
   const fields: Array<[RegExp, RegExp]> = [
     [DIRECTION_KEY_RE, DIRECTION_RE],
@@ -789,7 +795,18 @@ export function checkDiffMonotonicity(diff: string): DiffVerdict {
       violations.push({ path, why: 'unparsable baseline diff' });
       continue;
     }
-    if (carriesMalformedStringField(minus, plus, context)) {
+    const sides = [
+      section.filter(
+        (line) => line.startsWith(' ') || (line.startsWith('-') && !line.startsWith('---')),
+      ),
+      section.filter(
+        (line) => line.startsWith(' ') || (line.startsWith('+') && !line.startsWith('+++')),
+      ),
+    ];
+    if (
+      sides.some((side) => ESCAPED_KEY_RE.test(side.map((line) => line.slice(1)).join('\n'))) ||
+      carriesMalformedStringField(minus, plus, context)
+    ) {
       violations.push({ path, why: 'unparsable baseline diff' });
       continue;
     }

@@ -64,6 +64,9 @@ export {
   DEFAULT_TEST_FILE_PATTERNS,
   hackDetector,
 } from './hackDetector.js';
+// The #1198 expectation-change observer: attempt-report evidence, never a gate.
+export type { ExpectationChange } from './expectationChanges.js';
+export { expectationChangesOf } from './expectationChanges.js';
 export { CommitGateInputSchema, HackDetectorInputSchema } from './registry.js';
 // W1.9 (D11) — the protected-path policy check: the op factory and its
 // posture resolver, the override-label record, and the workflow scanner.

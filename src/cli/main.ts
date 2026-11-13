@@ -101,6 +101,7 @@ import {
   narrateOpResult,
   processIo,
   reportError,
+  usageSummaryOfThrown,
   writeResultJson,
   type CliIo,
   type NarrationMode,
@@ -499,12 +500,18 @@ async function dispatchCli(
     const opEntries = await list(opsRoot === undefined ? {} : { opsRoot });
     // A defective plan module must not turn pure help into a failure: degrade
     // to the op-only surface and surface the skip on stderr (the registry's
-    // skippedFamilies visibility posture). Help itself stays exit 0.
+    // skippedFamilies visibility posture). Help itself stays exit 0. The skip is
+    // human narration only: I1 keeps stderr EMPTY in machine mode.
     let planNames: string[] = [];
     try {
       planNames = await listPlanNames(opts?.plansRoot);
     } catch (err) {
-      narrate(io, `plan registry scan failed — help lists op subcommands only: ${messageOf(err)}`);
+      if (rawMode !== 'json') {
+        narrate(
+          io,
+          `plan registry scan failed — help lists op subcommands only: ${messageOf(err)}`,
+        );
+      }
     }
     io.stdout(renderGlobalHelp(subcommandNames(opEntries, planNames)));
     return EXIT_CODES.ok;
@@ -519,8 +526,15 @@ async function dispatchCli(
   let cqEnv: CqEnv | undefined;
   // `cq config` still runs when the snapshot carries errors (the report must reach
   // stdout so the operator sees what failed); it then exits 2 like every other entry.
+  // Its snapshot is RETAINED and rides the importer wiring (and the run context)
+  // exactly like every other op's, so the report describes the entry state even if
+  // the ambient environment changes before the op loads.
   let configErrorLines: readonly string[] = [];
-  if (sub === 'config') configErrorLines = checkEntryEnv().errorLines;
+  if (sub === 'config') {
+    const check = checkEntryEnv();
+    configErrorLines = check.errorLines;
+    cqEnv = check.cqEnv;
+  }
   if (sub !== 'config') {
     const check = checkEntryEnv();
     if (check.errorLines.length > 0) {
@@ -616,7 +630,9 @@ async function dispatchCli(
         ...(cqEnv !== undefined ? { cqEnv } : {}),
       });
     } catch (err) {
-      // Runtime throw → 1; machine mode writes the error artifact instead.
+      // Runtime throw → 1; machine mode writes the error artifact instead —
+      // carrying the throw's validated usage carrier when it settled spend
+      // (#1195: spend on every exit where it is known).
       return reportError(
         io,
         mode,
@@ -624,6 +640,7 @@ async function dispatchCli(
         sub,
         `run-plan threw: ${messageOf(err)}`,
         EXIT_CODES.thrown,
+        usageSummaryOfThrown(err),
       );
     }
   }
@@ -668,7 +685,9 @@ async function dispatchCli(
           ...(cqEnv !== undefined ? { cqEnv } : {}),
         });
       } catch (err) {
-        // Runtime throw → 1; machine mode writes the error artifact instead.
+        // Runtime throw → 1; machine mode writes the error artifact instead —
+        // carrying the throw's validated usage carrier when it settled spend
+        // (#1195: spend on every exit where it is known).
         return reportError(
           io,
           mode,
@@ -676,6 +695,7 @@ async function dispatchCli(
           sub,
           `${sub} threw: ${messageOf(err)}`,
           EXIT_CODES.thrown,
+          usageSummaryOfThrown(err),
         );
       }
     }
@@ -868,7 +888,9 @@ async function dispatchCli(
   } catch (err) {
     // Thrown (uncaught exception) → 1, decided HERE (the caller of the
     // exit-code functions); no RESULT artifact ever existed. Human mode
-    // narrates; machine mode writes the error artifact (mode is known here).
+    // narrates; machine mode writes the error artifact (mode is known here) —
+    // carrying the throw's validated usage carrier when the op settled spend
+    // before rejecting (#1195: spend on every exit where it is known).
     return reportError(
       io,
       mode,
@@ -876,6 +898,7 @@ async function dispatchCli(
       sub,
       `${sub} threw: ${messageOf(err)}`,
       EXIT_CODES.thrown,
+      usageSummaryOfThrown(err),
     );
   }
 }
@@ -906,7 +929,10 @@ export async function runCli(argv: string[], io?: CliIo, opts?: RunCliOptions): 
     code = await dispatchCli(argv, buffered, opts);
   } catch (err) {
     // Last-resort catch (registry scan defect, …): a runtime throw outside a
-    // subcommand's own scope. Preserve an already prepared artifact.
+    // subcommand's own scope. Preserve an already prepared artifact. The
+    // artifact carries the throw's validated usage carrier when the fault
+    // settled spend before rejecting (#1195: spend on every exit where it is
+    // known).
     code = EXIT_CODES.thrown;
     if (artifact === undefined) {
       reportError(
@@ -916,6 +942,7 @@ export async function runCli(argv: string[], io?: CliIo, opts?: RunCliOptions): 
         argv[0] ?? null,
         `threw: ${messageOf(err)}`,
         code,
+        usageSummaryOfThrown(err),
       );
     }
   }

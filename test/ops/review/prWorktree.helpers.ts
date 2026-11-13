@@ -1,3 +1,8 @@
+import type { SlotWorktreeRegistry } from '../../../src/adapters/git/slotWorktreeRegistry.js';
+import { mkdirSync } from 'node:fs';
+import { mkdir, rm } from 'node:fs/promises';
+import { afterEach } from 'vitest';
+import { realTmpDirSync } from '../../helpers/tmp-dir.js';
 // Split provenance: test/ops/review/prWorktree.test.ts was split into
 // prWorktree.helpers.ts (shared fixtures) and prWorktree.fetchFirst.test.ts,
 // prWorktree.registryConsult.test.ts, prWorktree.scanReuse.test.ts,
@@ -56,20 +61,20 @@
 // model with a REAL sha notion (the fetched PR head per fetch, per-path branch+head
 // rev-parse answers, `worktree add -B` moving the branch to the fetched PR head).
 // No spawned process, no real clocks (nowMs injected).
-import { join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
 import { reviewBranchFor } from '../../../src/adapters/git/prWorktree.js';
-import type {
-  PrWorktreeOpts,
-  RegistryMap,
-  WorktreeRegistry,
-  WorktreeRegistryEntry,
-} from '../../../src/adapters/git/prWorktree.js';
+import type { PrWorktreeOpts } from '../../../src/adapters/git/prWorktree.js';
+import type { RegistryMap } from './legacyRegistryTypes.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures + the fake git model
 // ---------------------------------------------------------------------------
 
+export const REPO = realTmpDirSync('cq-resolver-model-');
+afterEach(async () => {
+  await rm(REPO, { recursive: true, force: true });
+});
 export const NOW = 1_750_000_000_000;
 export const PR = 7;
 export const BRANCH = 'pr-7-fix';
@@ -121,11 +126,31 @@ export const mkModel = (
 });
 
 /** Build the injected run (GhFn shape, bin 'git' by convention). */
-export const fakeGit =
-  (model: FakeGit, calls?: string[][]): GhFn =>
-  async (args: string[]): Promise<GhResult> => {
+export const fakeGit = (
+  model: FakeGit,
+  calls?: string[][],
+  options: { commonDir?: string } = {},
+): GhFn => {
+  let commonDir = options.commonDir;
+  let firstCall = true;
+  // Materialize only this harness's temporary checkouts before the resolver
+  // verifies their identity. Foreign model paths remain virtual and untouched.
+  for (const path of Object.keys(model.headOf))
+    if (path.startsWith(dirname(REPO) + sep)) mkdirSync(path, { recursive: true });
+  return async (args: string[]): Promise<GhResult> => {
     calls?.push(args);
+    const initial = firstCall;
+    firstCall = false;
     const sub = args[2];
+    if (sub === 'diff' || sub === 'ls-files') return { code: 0, stdout: '', stderr: '' };
+    if (sub === 'rev-parse' && args.includes('--git-common-dir')) {
+      commonDir ??= initial ? join(args[1]!, '.git') : join(REPO, '.git');
+      await mkdir(commonDir, { recursive: true });
+      return { code: 0, stdout: commonDir, stderr: '' };
+    }
+    if (sub === 'symbolic-ref')
+      return { code: 0, stdout: `refs/heads/${model.headOf[args[1]!]!.branch}`, stderr: '' };
+
     if (sub === 'fetch') {
       if (model.fetchFails !== undefined) {
         return { code: model.fetchFails.code, stdout: '', stderr: model.fetchFails.stderr };
@@ -159,10 +184,10 @@ export const fakeGit =
       const count = ancestor ? '0' : '1';
       return { code: 0, stdout: `${count}\n`, stderr: '' };
     }
-    if (sub === 'rev-parse' && args.includes('--git-common-dir')) {
-      // Real git answers the COMMON git dir: <repoRoot>/.git for a plain
-      // checkout, and still <main>/.git from a linked worktree (its own git
-      // dir is <main>/.git/worktrees/<id>, which the module must NOT use).
+    if (sub === 'rev-parse' && args[3] === '--absolute-git-dir') {
+      await mkdir(join(args[1]!, '.git'), { recursive: true });
+      // Real git resolves a linked-worktree .git FILE to the real dir; the
+      // model answers <repoRoot>/.git like a plain checkout.
       return { code: 0, stdout: `${join(args[1] ?? '', '.git')}\n`, stderr: '' };
     }
     if (sub === 'rev-parse') {
@@ -190,6 +215,7 @@ export const fakeGit =
         };
       }
       if (target === 'HEAD') {
+        if (at.startsWith(REPO)) await mkdir(at, { recursive: true });
         return { code: 0, stdout: `${checkout.head}\n`, stderr: '' };
       }
       if (target === '--abbrev-ref' && args[4] === 'HEAD') {
@@ -252,6 +278,7 @@ export const fakeGit =
           commitish === 'FETCH_HEAD' || commitish.startsWith('refs/cq-review/')
             ? (model.fetchHeadSha ?? SHA_B)
             : commitish;
+        await mkdir(path, { recursive: true });
         model.worktrees.push({ path, branch, head });
         model.headOf[path] = { branch, head };
         return { code: 0, stdout: `Preparing worktree (checking out '${branch}')\n`, stderr: '' };
@@ -263,38 +290,46 @@ export const fakeGit =
         const path = args[4] ?? '';
         model.worktrees = model.worktrees.filter((wt) => wt.path !== path);
         delete model.headOf[path];
+        await rm(path, { recursive: true, force: true });
         return { code: 0, stdout: '', stderr: '' };
       }
     }
     return { code: 2, stdout: '', stderr: `fake git: unexpected argv ${JSON.stringify(args)}` };
   };
+};
 
 /** An in-memory WorktreeRegistry that records load/save/update calls in order. */
 export const memRegistry = (
   initial: RegistryMap = {},
-): WorktreeRegistry & { calls: string[]; current: () => RegistryMap } => {
+): SlotWorktreeRegistry & { calls: string[]; current: () => RegistryMap } => {
   const calls: string[] = [];
   let stored: RegistryMap = { ...initial };
   return {
     calls,
-    load: async () => {
+    read: async (pr) => {
       calls.push('load');
-      return { ...stored };
+      const value = stored[String(pr)];
+      return value
+        ? {
+            version: 1,
+            state: 'bound',
+            incomplete: false,
+            checkoutPath: value.path,
+            checkoutGitDir: join(value.path, '.git'),
+          }
+        : undefined;
     },
-    save: async (map: RegistryMap) => {
-      calls.push('save');
-      stored = { ...map };
-    },
-    update: async (key: string, entry: WorktreeRegistryEntry | null) => {
+    withPrLock: async (_pr, action) => action(),
+    update: async (key, value) => {
+      const entry =
+        value.state === 'bound'
+          ? { path: value.checkoutPath, branch: reviewBranchFor(key), createdAt: NOW }
+          : null;
       calls.push(entry === null ? `update:${key}:null` : `update:${key}`);
-      if (entry === null) {
-        delete stored[key];
-      } else {
-        stored[key] = { ...entry };
-      }
+      if (entry === null) delete stored[key];
+      else stored[key] = entry;
     },
     current: () => ({ ...stored }),
-    withLock: async <T>(fn: () => Promise<T>) => fn(),
   };
 };
 
@@ -303,10 +338,10 @@ export const memRegistry = (
  * and only mkdir/stat touch the real fs. */
 export const baseOpts = (
   model: FakeGit,
-  registry: WorktreeRegistry,
+  registry: SlotWorktreeRegistry,
   over?: Partial<PrWorktreeOpts>,
 ): PrWorktreeOpts => ({
-  repoRoot: '/repo',
+  repoRoot: REPO,
   pr: PR,
   headRefName: BRANCH,
   run: fakeGit(model),

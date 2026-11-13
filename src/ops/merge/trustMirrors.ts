@@ -114,7 +114,11 @@ const sameSet = (a: readonly string[], b: readonly string[]): boolean => {
  * built-in behaviour (nothing returned). When ANY is set, policy mode is on
  * and each unset key INDEPENDENTLY takes its documented default (bots: none;
  * associations: OWNER, MEMBER, COLLABORATOR; states: APPROVED), so setting one
- * key never blanks another. A supplied `config` carrying a field is accepted
+ * key never blanks another. A key set to a comma-only value parses to an empty
+ * list: it ACTIVATES policy mode and takes its own documented default, which
+ * is exactly what the acceptance flow's conservative default resolves to (a
+ * comma-only key must never fall back to the permissive no-policy mode). A
+ * supplied `config` carrying a field is accepted
  * only when it equals the effective value (the in-process self-host twin
  * restates it); otherwise it fails with `config`, naming the field and never
  * echoing a value.
@@ -127,6 +131,7 @@ export function resolveClassifyTrust(
   const snapshot = cqEnv ?? readCqEnv();
   const fields = Object.keys(CLASSIFY_TRUST_KEYS) as ClassifyTrustField[];
   const raws: Partial<Record<ClassifyTrustField, readonly string[]>> = {};
+  let anySet = false;
   for (const field of fields) {
     const key = CLASSIFY_TRUST_KEYS[field];
     const bad = snapshot.errors.filter((d) => d.name === key);
@@ -136,10 +141,17 @@ export function resolveClassifyTrust(
         `${op}: invalid ${key} — ${bad.map((d) => d.message).join('; ')}`,
       );
     }
+    // A comma-only value parses to an empty list. It still activates policy
+    // mode (the key IS set); the empty list only means this field takes its
+    // documented default. Treating it as fully unset would drop the classifier
+    // into its permissive no-policy mode, which trusts EVERY reviewer while
+    // the acceptance flow applies the conservative defaults.
     const raw = snapshot.values[key] as readonly string[] | undefined;
-    if (raw !== undefined) raws[field] = raw;
+    if (raw !== undefined) {
+      anySet = true;
+      if (raw.length > 0) raws[field] = raw;
+    }
   }
-  const anySet = fields.some((f) => raws[f] !== undefined);
   const effective: Partial<Record<ClassifyTrustField, string[]>> = {};
   if (anySet) {
     const up = (v: readonly string[]): string[] => v.map((x) => x.toUpperCase());

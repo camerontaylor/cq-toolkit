@@ -77,9 +77,9 @@ byte equality.
 
 | file | Python sources | covers |
 |---|---|---|
-| `canonical.json` | `review_receipt.canonical+digest`, `review_ledger.canonical+digest` | key order, ASCII vs UTF-8, UTF-16BE key order, Python float repr, integer range, control characters, lone surrogates |
-| `queue-bytes.json` | `crq_repair.atomic` | exact `queue.json` writer bytes: insertion order, `indent=2`, default ASCII escaping, one trailing newline, parse-then-write round trips |
-| `time.json` | `queue_time.parse_utc`, `crq.parse_iso` | Zulu, numeric offsets, naive-as-UTC, compact run suffix, `.000` stripping, refused fractional/offset/date-only forms |
+| `canonical.json` | `review_receipt.canonical+digest`, `review_ledger.canonical+digest` | code-point vs UTF-16BE key order (including astral vs U+FFFF), ASCII vs UTF-8, control/DEL/U+2028 escaping, Python float repr at its fixed/scientific boundaries, integer range, lone surrogates |
+| `queue-bytes.json` | `crq_repair.atomic` | exact `queue.json` writer bytes: insertion order, nested and empty `indent=2` layout, ASCII escaping of keys and values, one trailing newline, float repr boundaries, parse-then-write round trips |
+| `time.json` | `queue_time.parse_utc`, `crq.parse_iso` | Zulu, numeric offsets (hour-only, basic, seconds, fractional), naive-as-UTC, basic/compact dates, ISO week dates, hour-only, 24:00 rollover, comma/dot fractions with microsecond truncation, `.000` stripping, refused fractional/offset/date-only forms |
 | `usage.json` | `usage_slots.parse_usage`, `usage_slots.next_slot` | partial usage, refused shapes, rolling window, full-capacity fallback, reservation lag |
 | `classify.json` | `crq.classify` | completion, findings, rate limit and `waitTime`, auth, action required, malformed streams, missing exit, unknown status, transient exits |
 | `promotion-filter.json` | `crq.live_items` | historical `promotion` items stay out of live scheduling in every state; exact-kind and missing-kind edges |
@@ -100,6 +100,17 @@ records terminal `skipped`; TypeScript records blocked/retriable with an
 explicit `skipped:no-fresh` reason. The two affected `classify` rows carry a
 `note`. A differential runner must whitelist exactly those rows, not loosen the
 comparison generally.
+
+## Python minor
+
+The oracle is Python 3.14, the production minor. `datetime.fromisoformat`
+became stricter in 3.15. Three input families are deliberately absent from
+`time.json` because 3.14 and 3.15 disagree on them: an offset component
+overflow (`+10:60`, `+10:00:60`), an empty fraction separator before an offset
+(`2026-11-08T00:00:00.Z`), and a sub-second offset fraction when the integer
+seconds are zero (`+00:00:00.5`). Keeping them out makes `--check`
+byte-identical on both minors. Every timestamp crq itself writes is
+`strftime`-formatted, so none of these forms can appear in crq-owned state.
 
 ## Gaps
 

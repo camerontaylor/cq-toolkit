@@ -1,5 +1,15 @@
 # Supported author enrollment and shared quota (held, not used)
 
+> **S2b-ii retirement (2026-11-12).** The SDK author-enrollment client route is
+> retired: `dev.review --action=enroll|status|fallback` and the `author-v1`
+> client forced command no longer exist. The Python server surface below is
+> retained because the deployed runner still imports and calls it: `crq.py`
+> imports `author_lease` and `author_quota` and calls `check_queue`,
+> `grant_queue`, `new_lease`/`read` and `fallback`/`decision`, and
+> `author_transport.py` delegates `author_lease_command`. Do not create new v1
+> author requests. The live queue holds one `author` item in `done` state and no
+> pending or running author item, so no recovery work depends on this route.
+
 ## Opt-in lease arbitration (P3; no deployment)
 
 Run these commands from `apps/crq-python` in the monorepo. This ports the

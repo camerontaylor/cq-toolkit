@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { checkpointAddressTerminalEvidence } from '../../../src/ops/review/internal/addressEvidence.js';
 import { expect, test } from 'vitest';
 import * as lifecycle from '../../../src/ops/review/internal/addressRunLifecycle.js';
-import * as compatibility from '../../../src/ops/review/internal/addressOwnership.js';
+import * as compatibility from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 import { fixture } from './addressManyWorktree.helpers.js';
 
 test('compatibility exports share the private capability boundary', async () => {

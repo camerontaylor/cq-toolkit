@@ -29,7 +29,13 @@ function sourceText(sourceNode) {
 function checkSource(context, sourceNode, reportNode) {
   if (!sourceNode) return;
   const source = sourceText(sourceNode);
-  if (source === null) return;
+  if (source === null) {
+    context.report({
+      node: reportNode,
+      messageId: 'computedSource',
+    });
+    return;
+  }
   if (VENDOR_SDK_SOURCE.test(source)) {
     context.report({
       node: reportNode,
@@ -50,6 +56,8 @@ export default {
     messages: {
       vendorSdk:
         "Vendor SDK import source '{{source}}' is banned in kernel code (invariant I10: kernel stays vendor-neutral).",
+      computedSource:
+        'Computed import source is banned in kernel code (invariant I10: kernel stays vendor-neutral; use a static literal source).',
     },
   },
   create(context) {

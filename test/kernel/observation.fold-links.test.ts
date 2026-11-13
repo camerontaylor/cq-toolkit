@@ -64,7 +64,8 @@ describe('T29 unknown evidence', () => {
     try {
       // The kernel v3 headers live in real kernel files (read via
       // readKernelRunDescriptors); written raw — the kernel RunLog's append
-      // stays v1/v2-only until T04.
+      // stays v1/v2-only (T04 landed the descriptor reader, not a v3
+      // header writer).
       const foreignWorkRun = 'plan-x--k--foreign';
       await writeFile(
         join(dir, `${KERNEL_RUN}.ndjson`),
@@ -82,6 +83,9 @@ describe('T29 unknown evidence', () => {
         'plan-x--k--missing',
       ]);
       expect(descriptors).toHaveLength(2); // the missing run never appears
+      // Descriptors are version-discriminated read models of the headers as
+      // written; these fixtures are operator-written v3 headers.
+      expect(descriptors.map((descriptor) => descriptor.journalVersion)).toEqual([3, 3]);
 
       // Stream with three links: resolved, foreign-work, missing.
       const writer = await openObservationWriter({

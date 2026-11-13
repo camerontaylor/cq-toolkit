@@ -81,6 +81,7 @@
 // (`SelfhostDefaults.maxTokens`) exists to be tuned from this evidence.
 import { enterWithCqEnv } from '../config/entry.js';
 import type { CqEnv } from '../config/env.js';
+import { readCqEnv } from '../config/env.js';
 import { stripRefsHeads } from '../config/values.js';
 import { checkedProtectedBranch } from '../ops/merge/trustMirrors.js';
 import { appendFileSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -90,7 +91,8 @@ import type { OpRegistryView } from '../kernel/runner.js';
 import { GhError, ghJson } from '../adapters/forge-github/gh.js';
 import type { GhFn } from '../adapters/forge-github/gh.js';
 import { makeGhRunner } from '../adapters/forge-github/gh.js';
-import { fileWorktreeRegistry } from '../adapters/git/prWorktree.js';
+import { slotWorktreeRegistry } from '../adapters/git/slotWorktreeRegistry.js';
+import { readSlotMetadata } from '../adapters/lock/slotLock.js';
 import { fetchReviewState } from '../adapters/forge-github/fetchReviewState.js';
 import { runReviewLoop, totalTokens } from '../plans/review-loop.js';
 import type { ReviewLoopOutcome, ReviewLoopOpts } from '../plans/review-loop.js';
@@ -193,7 +195,7 @@ const AUDIT_DIRS_KEPT = 5;
  * unreadable journal root (a first run) or a failed removal must never fail
  * an honest run — the next run's prune retries.
  */
-const pruneAuditDirs = (journalRoot: string): void => {
+const pruneAuditDirs = async (journalRoot: string, commonDir: string): Promise<void> => {
   let dirs: string[];
   try {
     dirs = readdirSync(journalRoot, { withFileTypes: true })
@@ -210,6 +212,11 @@ const pruneAuditDirs = (journalRoot: string): void => {
   );
   for (const name of dirs.filter((n) => !keptStamps.has(stampOf(n)))) {
     try {
+      const pr = name.slice(0, name.indexOf('-'));
+      const metadata = await readSlotMetadata(
+        join(commonDir, 'cq-review', 'slots', `pr-${pr}.json`),
+      );
+      if (metadata?.incomplete) continue;
       rmSync(join(journalRoot, name), { recursive: true, force: true });
     } catch {
       // retried by the next run's prune — never a run-failing effect
@@ -273,7 +280,7 @@ export interface SelfReviewLoopCfg {
    * callers get).
    */
   startedAtMs?: number;
-  /** The entry point's CQ_* snapshot; the driver falls back to the process env when absent. */
+  /** The entry point's CQ_* snapshot; direct callers without one are snapshotted from the process env at the resolve site. */
   cqEnv?: CqEnv;
   /** Journal root override; default `<repoRoot>/.selfhost/journal`. */
   journalRoot?: string;
@@ -493,7 +500,6 @@ export async function runSelfReviewLoop(
   // (the real-run path creates the ROOT itself first, see the mkdir below);
   // the direct filesystem touches here are that root creation and
   // pruneAuditDirs' bounded cleanup of the audit dirs prior runs left behind.
-  const registry = fileWorktreeRegistry(join(journalRoot, 'worktree-registry.json'));
   const worktreeRoot = join(cfg.repoRoot, '.selfhost', 'worktrees');
 
   const protectedBranch = checkedProtectedBranch('selfhost.reviewLoop', cfg.cqEnv);
@@ -537,6 +543,23 @@ export async function runSelfReviewLoop(
     };
   }
 
+  const commonResult = await deps.git([
+    '-C',
+    cfg.repoRoot,
+    'rev-parse',
+    '--path-format=absolute',
+    '--git-common-dir',
+  ]);
+  if (commonResult.code !== 0 || !commonResult.stdout.trim())
+    throw new Error('selfhost Git common directory unavailable');
+  const commonDir = commonResult.stdout.trim();
+  const registry = slotWorktreeRegistry(commonDir, {
+    legacySources: [
+      join(commonDir, 'cq-review-address-worktrees.json'),
+      join(journalRoot, 'worktree-registry.json'),
+    ],
+  });
+
   // THE run's start instant: the ENTRY's single clock read when it threaded
   // one through (main() captures it before the credential preflight), so the
   // peak-window decision and this stamp are the same value. A direct caller
@@ -548,7 +571,13 @@ export async function runSelfReviewLoop(
   // — a delayed fire or a manual dispatch resolves at ITS OWN start, never
   // at the slot's nominal time, and a sweep that straddles the window edge
   // does not switch models mid-run.
-  const driver = resolveSelfhostDriver(stamp, cfg.cqEnv);
+  /**
+   * The entry point's CQ_* snapshot; direct callers without one fall back to
+   * a process-env snapshot read HERE (one explicit entry-level read — the
+   * resolvers themselves never touch ambient). Foreign-env behaviour is
+   * untouched: GH_REPOSITORY/GITHUB_* still read at their own seams.
+   */
+  const driver = resolveSelfhostDriver(stamp, cfg.cqEnv ?? readCqEnv());
   // FIRST-RUN JOURNAL ROOT (CodeRabbit round 2, KyA): on a first run / cache
   // miss `<journalRoot>` does not exist, and the registry's first `withLock`
   // needs `<journalRoot>/worktree-registry.json.lock` — the lockfile layer
@@ -656,6 +685,7 @@ export async function runSelfReviewLoop(
       gh: deps.gh,
       git: deps.git,
       registry,
+      legacySources: [join(journalRoot, 'worktree-registry.json')],
       driver,
       // classifyConfig deliberately ABSENT: defaultLoopClassifyConfig rides
       // unchanged (bot-authored suppression ON — see the module doc).
@@ -738,7 +768,7 @@ export async function runSelfReviewLoop(
   // Bounded journal growth: the workflow's cache save persists everything
   // under journalRoot, so drop all but the newest per-run audit dirs before
   // this run's state is saved (the flat dispatch logs ride untouched).
-  pruneAuditDirs(journalRoot);
+  await pruneAuditDirs(journalRoot, commonDir);
   return {
     results,
     failures,
@@ -852,25 +882,15 @@ const STARTED_AT_ENV = 'CQ_SELFHOST_NOW_MS';
 
 /**
  * The run's start instant: the pinned epoch-ms when the deployment set one,
- * else ONE `deps.nowMs()` read. A malformed pin THROWS: a bad clock must
- * fail loud, never silently fall back to a different peak window than the
- * handshake validated.
+ * else ONE `deps.nowMs()` read. A malformed pin never reaches this function:
+ * the entry snapshot's registry epoch-ms parser already failed the process
+ * loud at the entry, so there is no ambient fallback here to disagree with
+ * the snapshot the handshake validated.
  */
-function runStartInstant(deps: SelfReviewLoopDeps, cqEnv?: CqEnv): number {
-  if (cqEnv !== undefined) {
-    // Already parsed (and validated at the entry) by the registry's epoch-ms parser.
-    const pinned = cqEnv.values[STARTED_AT_ENV];
-    return typeof pinned === 'number' ? pinned : deps.nowMs();
-  }
-  const raw = processEnv()[STARTED_AT_ENV];
-  if (raw === undefined || raw === '') return deps.nowMs();
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(
-      `selfhost-review-loop: ${STARTED_AT_ENV} must be a non-negative safe integer epoch-ms — got ${JSON.stringify(raw)}`,
-    );
-  }
-  return value;
+function runStartInstant(deps: SelfReviewLoopDeps, cqEnv: CqEnv): number {
+  // Already parsed (and validated at the entry) by the registry's epoch-ms parser.
+  const pinned = cqEnv.values[STARTED_AT_ENV];
+  return typeof pinned === 'number' ? pinned : deps.nowMs();
 }
 
 /**

@@ -97,7 +97,8 @@ def loads(raw):
 
 
 def timestamp(value):
-    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", value):
+    if not isinstance(value, str) or not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", value):
         raise IntegrityError("expected exact UTC timestamp")
     return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
 
@@ -526,6 +527,7 @@ class GitLedger:
     def publish(self, outbox, attempts=3):
         common = self.git("rev-parse", "--git-common-dir").decode().strip()
         lock = (self.repo / common).resolve() / "review-ledger-publisher.lock"
+        last_error = None
         with locked(lock):
             for _ in range(attempts):
                 head, values = self.fetch()
@@ -592,7 +594,10 @@ class GitLedger:
                         commit = self.git("commit-tree", tree, "-p", head, "-m", "Append review events " + str(len(batch)), env=env).decode().strip()
                     try:
                         self.push(head, commit)
-                    except (subprocess.SubprocessError, OSError, ValueError, RuntimeError):
+                    except IntegrityError:
+                        raise
+                    except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as exc:
+                        last_error = exc
                         break  # Includes timeout after push: next fetch reconciles.
                     head, values = self.fetch()
                     ids = validate_sequence(values)
@@ -600,4 +605,4 @@ class GitLedger:
                         outbox.acknowledge(value, ids)
                 if not outbox.pending():
                     return head
-            raise IntegrityError("publication pending; retain scope ownership and reconcile")
+            raise IntegrityError("publication pending; retain scope ownership and reconcile") from last_error

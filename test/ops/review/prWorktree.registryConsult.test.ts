@@ -1,3 +1,4 @@
+import { REPO } from './prWorktree.helpers.js';
 // Split provenance: test/ops/review/prWorktree.test.ts was split into
 // prWorktree.helpers.ts (shared fixtures) and prWorktree.fetchFirst.test.ts,
 // prWorktree.registryConsult.test.ts, prWorktree.scanReuse.test.ts,
@@ -47,20 +48,33 @@ describe('registry consult', () => {
         baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }),
       );
       expect(result).toEqual({ path: entryDir, reused: true, branch: LABEL, foreign: [] });
-      // fetch → FETCH_HEAD → the entry's branch rev-parse → its sha
-      // rev-parse — no scan, no add.
+      // Fetch truth, reject bad labels, then pin the checkout before fresh
+      // branch/HEAD safety probes. No scan or add.
       expect(calls.map((args) => args[2])).toEqual([
         'rev-parse',
         'fetch',
         'rev-parse',
+        'symbolic-ref',
         'rev-parse',
         'rev-parse',
+        'symbolic-ref',
+        'rev-parse',
+        'rev-parse',
+        'rev-parse',
+        'diff',
+        'diff',
+        'ls-files',
       ]);
       expect(calls[2]).toEqual(['-C', repoRoot, 'rev-parse', 'refs/cq-review/pr-7']);
-      expect(calls[3]).toEqual(['-C', entryDir, 'rev-parse', '--abbrev-ref', 'HEAD']);
-      expect(calls[4]).toEqual(['-C', entryDir, 'rev-parse', 'HEAD']);
-      // A valid hit is not re-registered (the entry already exists).
-      expect(registry.calls).toEqual(['load']);
+      expect(calls.slice(3, 8)).toEqual([
+        ['-C', entryDir, 'symbolic-ref', 'HEAD'],
+        ['-C', entryDir, 'rev-parse', '--absolute-git-dir'],
+        ['-C', entryDir, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+        ['-C', entryDir, 'symbolic-ref', 'HEAD'],
+        ['-C', entryDir, 'rev-parse', 'HEAD'],
+      ]);
+      // Rebinding persists bound/incomplete metadata before reuse.
+      expect(registry.calls).toEqual(['load', 'update:7']);
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
     }
@@ -69,11 +83,11 @@ describe('registry consult', () => {
   test('a STALE entry whose directory is GONE is left un-pruned, and the scan reuse path takes over', async () => {
     const calls: string[][] = [];
     const registry = memRegistry({
-      '7': { path: '/repo/.git/cq-review-worktrees/ghost', branch: LABEL, createdAt: NOW - 1000 },
+      '7': { path: `${REPO}/.git/cq-review-worktrees/ghost`, branch: LABEL, createdAt: NOW - 1000 },
     });
-    const candidate = '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix';
+    const candidate = `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`;
     const model = mkModel([
-      { path: '/repo', branch: 'main', head: SHA_MAIN },
+      { path: `${REPO}`, branch: 'main', head: SHA_MAIN },
       { path: candidate, branch: LABEL, head: SHA_B },
     ]);
     const result = await resolvePrWorktree(
@@ -90,8 +104,13 @@ describe('registry consult', () => {
     // The dead directory short-circuits BEFORE rev-parse (no git call for
     // the ghost); after FETCH_HEAD comes the porcelain scan, then the
     // sha probe against the candidate.
-    expect(calls[3]).toEqual(['-C', '/repo', 'worktree', 'list', '--porcelain']);
-    expect(calls[4]).toEqual(['-C', candidate, 'rev-parse', 'HEAD']);
+    expect(calls[3]).toEqual(['-C', `${REPO}`, 'worktree', 'list', '--porcelain']);
+    expect(calls.slice(4, 8)).toEqual([
+      ['-C', candidate, 'rev-parse', '--absolute-git-dir'],
+      ['-C', candidate, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+      ['-C', candidate, 'symbolic-ref', 'HEAD'],
+      ['-C', candidate, 'rev-parse', 'HEAD'],
+    ]);
   });
 
   test('a registry entry pointing OUTSIDE the current worktreeRoot is stale by definition — resolution recreates INSIDE', async () => {
@@ -106,7 +125,7 @@ describe('registry consult', () => {
       const registry = memRegistry({
         '7': { path: outsidePath, branch: LABEL, createdAt: NOW - 1000 },
       });
-      const model = mkModel([{ path: '/repo', branch: 'main', head: SHA_MAIN }], {
+      const model = mkModel([{ path: `${REPO}`, branch: 'main', head: SHA_MAIN }], {
         headOf: { [outsidePath]: { branch: LABEL, head: SHA_B } },
       });
       const expectedPath = join(repoRoot, '.git', 'cq-review-worktrees', `pr-${PR}-${BRANCH}`);
@@ -129,14 +148,14 @@ describe('registry consult', () => {
     try {
       const calls: string[][] = [];
       // The stale tree EXISTS on disk INSIDE the worktreeRoot but holds the
-      // wrong branch — the rev-parse check is what exposes it (it passes
+      // wrong branch — the symbolic-ref check is what exposes it (it passes
       // the ownership gate first).
       const staleDir = join(repoRoot, '.git', 'cq-review-worktrees', 'stale-tree');
       await mkdir(staleDir, { recursive: true });
       const registry = memRegistry({
         '7': { path: staleDir, branch: LABEL, createdAt: NOW - 1000 },
       });
-      const model = mkModel([{ path: '/repo', branch: 'main', head: SHA_MAIN }], {
+      const model = mkModel([{ path: `${REPO}`, branch: 'main', head: SHA_MAIN }], {
         headOf: { [staleDir]: { branch: 'some-other-branch', head: SHA_A } },
       });
       const result = await resolvePrWorktree(
@@ -149,8 +168,8 @@ describe('registry consult', () => {
       expect(registry.current()['7']?.path).toBe(
         join(repoRoot, '.git', 'cq-review-worktrees', `pr-${PR}-${BRANCH}`),
       );
-      // rev-parse ran against the stale tree and exposed the wrong branch.
-      expect(calls[3]).toEqual(['-C', staleDir, 'rev-parse', '--abbrev-ref', 'HEAD']);
+      // symbolic-ref ran against the stale tree and exposed the wrong branch.
+      expect(calls[3]).toEqual(['-C', staleDir, 'symbolic-ref', 'HEAD']);
       expect(calls.some((args) => args.includes('add'))).toBe(true);
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
@@ -169,7 +188,7 @@ describe('registry consult', () => {
         '7': { path: stalePath, branch: LABEL, createdAt: NOW - 1000 },
       });
       const model = mkModel([
-        { path: '/repo', branch: 'main', head: SHA_MAIN },
+        { path: `${REPO}`, branch: 'main', head: SHA_MAIN },
         { path: stalePath, branch: LABEL, head: SHA_A },
       ]);
       const result = await resolvePrWorktree(
@@ -179,7 +198,7 @@ describe('registry consult', () => {
       expect(result).toEqual({ path: stalePath, reused: false, branch: LABEL, foreign: [] });
       // The stale entry was overwritten by the successful register — load
       // plus ONE save, no up-front prune.
-      expect(registry.calls).toEqual(['load', 'update:7']);
+      expect(registry.calls).toEqual(['load', 'update:7', 'update:7:null', 'update:7']);
       expect(registry.current()).toEqual({
         '7': { path: stalePath, branch: LABEL, createdAt: NOW },
       });
@@ -191,19 +210,29 @@ describe('registry consult', () => {
         ['-C', repoRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
         ['-C', repoRoot, 'fetch', 'origin', `+refs/pull/${PR}/head:refs/cq-review/pr-${PR}`],
         ['-C', repoRoot, 'rev-parse', 'refs/cq-review/pr-7'],
-        ['-C', stalePath, 'rev-parse', '--abbrev-ref', 'HEAD'],
+        ['-C', stalePath, 'symbolic-ref', 'HEAD'],
+        ['-C', stalePath, 'rev-parse', '--absolute-git-dir'],
+        ['-C', stalePath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+        ['-C', stalePath, 'symbolic-ref', 'HEAD'],
         ['-C', stalePath, 'rev-parse', 'HEAD'],
         ['-C', repoRoot, 'worktree', 'list', '--porcelain'],
+        ['-C', stalePath, 'rev-parse', '--absolute-git-dir'],
+        ['-C', stalePath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+        ['-C', stalePath, 'symbolic-ref', 'HEAD'],
         ['-C', stalePath, 'rev-parse', 'HEAD'],
         ['-C', stalePath, 'rev-list', '--count', `${SHA_B}..HEAD`],
+        ['-C', stalePath, 'rev-parse', '--absolute-git-dir'],
+        ['-C', stalePath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
         ['-C', repoRoot, 'worktree', 'remove', stalePath],
         ['-C', repoRoot, 'worktree', 'add', '-B', LABEL, stalePath, SHA_B],
+        ['-C', stalePath, 'rev-parse', '--absolute-git-dir'],
+        ['-C', stalePath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
       ]);
       expect(calls.some((args) => args.includes('--force'))).toBe(false);
       // The hold was cleared by the remove; the new tree sits at the
       // fetched sha (the main tree is untouched).
       expect(model.worktrees).toEqual([
-        { path: '/repo', branch: 'main', head: SHA_MAIN },
+        { path: `${REPO}`, branch: 'main', head: SHA_MAIN },
         { path: stalePath, branch: LABEL, head: SHA_B },
       ]);
     } finally {
@@ -222,7 +251,7 @@ describe('registry consult', () => {
       });
       const model = mkModel(
         [
-          { path: '/repo', branch: 'main', head: SHA_MAIN },
+          { path: `${REPO}`, branch: 'main', head: SHA_MAIN },
           { path: stalePath, branch: LABEL, head: SHA_A },
         ],
         {
@@ -237,11 +266,11 @@ describe('registry consult', () => {
       ).rejects.toThrow(/worktree remove.*failed.*contains modified or untracked files/s);
       // The stale entry was NEVER pruned: the machine-readable pointer
       // survives the wedged run for the next one.
-      expect(registry.calls).toEqual(['load']);
+      expect(registry.calls).toEqual(['load', 'update:7']);
       expect(registry.current()['7']).toEqual({
         path: stalePath,
         branch: LABEL,
-        createdAt: NOW - 1000,
+        createdAt: NOW,
       });
       // The tree itself is untouched — review ops never force-destroys.
       expect(model.worktrees).toHaveLength(2);

@@ -196,8 +196,11 @@ def invoke(config, role, job, wt, directory, judge=False):
     # the child unchanged.
     env = dict(os.environ, GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='remote.origin.pushurl',
                GIT_CONFIG_VALUE_0='/dev/null')
-    argv = [launcher, '--max-tokens', str(role.get('budget', {}).get('max_tokens',
-            config['repair']['budget']['max_tokens'])), '--', 'codex', 'exec', '-C', str(wt), '--sandbox', 'read-only' if judge else 'workspace-write',
+    max_tokens = role.get('budget', {}).get(
+        'max_tokens', config['repair'].get('budget', {}).get('max_tokens'))
+    if max_tokens is None:
+        return _failure(judge, 'configuration', 'Codex token budget (max_tokens) required')
+    argv = [launcher, '--max-tokens', str(max_tokens), '--', 'codex', 'exec', '-C', str(wt), '--sandbox', 'read-only' if judge else 'workspace-write',
             '--skip-git-repo-check', '-m', role['model'],
             '--output-schema', str(schema_path), '-o', str(output), '--json', prompt]
     log_path = directory / 'driver.log'

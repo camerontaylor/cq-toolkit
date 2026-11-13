@@ -42,6 +42,7 @@
 // `failed`/`needs-human`, never a fabricated reading.
 import { execFile, spawn } from 'node:child_process';
 import { lstat, mkdir, readdir, writeFile } from 'node:fs/promises';
+import { devNull } from 'node:os';
 import { dirname, join } from 'node:path';
 import { GIT_HARDEN, HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 
@@ -74,14 +75,30 @@ const SCRUBBED_ENV = [
   'GIT_EXTERNAL_DIFF',
   'GIT_PAGER',
   'GIT_CONFIG',
+  'GIT_CONFIG_GLOBAL',
   'GIT_CONFIG_PARAMETERS',
   'GIT_CONFIG_COUNT',
+  'GIT_EXEC_PATH',
+  'GIT_SSH',
+  'GIT_SSH_COMMAND',
+  'GIT_PROXY_COMMAND',
+  'GIT_TRACE_REDACT',
 ];
 
 /** The hardened child env: inherited, minus redirections, plus the pinned switches. */
 function gitEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of SCRUBBED_ENV) delete env[key];
+  // Preserve a caller's explicit global-config disable: deleting
+  // GIT_CONFIG_GLOBAL=/dev/null would restore the default global config,
+  // whose insteadOf rules could redirect ls-remote/push away from the
+  // intended remote. Only re-pins an explicit disable; unset stays unset.
+  if (
+    process.env['GIT_CONFIG_GLOBAL'] === '/dev/null' ||
+    process.env['GIT_CONFIG_GLOBAL'] === devNull
+  ) {
+    env['GIT_CONFIG_GLOBAL'] = devNull;
+  }
   env['GIT_CONFIG_NOSYSTEM'] = '1';
   env['GIT_TERMINAL_PROMPT'] = '0';
   env['GIT_OPTIONAL_LOCKS'] = '0';
@@ -118,6 +135,9 @@ function assertRev(rev: string, label: string): void {
 
 /** A `.git` path segment, including the forms some filesystems fold onto it (`.git.`, `.git `). */
 const DOT_GIT_SEGMENT = /^\.git[. ]*$/i;
+
+/** A `node_modules` path segment, folded the same way (`Node_Modules`, `node_modules.`, ...). */
+const NODE_MODULES_SEGMENT = /^node_modules[. ]*$/i;
 
 /**
  * Validate a repository-relative POSIX path: non-empty, not absolute, no
@@ -539,7 +559,7 @@ export async function extractTreeAttributeFree(
   const skipped: SkippedEntry[] = [];
   for (const entry of entries) {
     assertRepoRelPath(entry.path, 'tree path');
-    if (entry.path.split('/').includes('node_modules')) {
+    if (entry.path.split('/').some((segment) => NODE_MODULES_SEGMENT.test(segment))) {
       throw new Error(`ratchet git: refusing head-controlled node_modules path '${entry.path}'`);
     }
     if (entry.type === 'blob' && REGULAR_BLOB_MODES.has(entry.mode)) blobs.push(entry);
@@ -810,26 +830,34 @@ export async function gitLsRemoteRef(
   ref: string,
   token: string,
 ): Promise<string | null> {
+  // `ls-remote` arguments are GLOB patterns: an unvalidated `ref` like `ma*`
+  // would let one match pin an oid for a branch that need not exist.
+  assertRev(ref, 'ls-remote');
   const { env, secrets } = gitRemoteEnv(url, token);
   const res = await execGitWithEnv(
     repo,
     ['ls-remote', '--end-of-options', url, `refs/heads/${ref}`],
     env,
   );
-  const output = redactSecrets(`${res.stdout.toString('utf8')}${res.stderr}`.trim(), secrets);
+  // The ref listing is stdout ONLY: git writes non-fatal warnings (e.g.
+  // `warning: redirecting to ...` on a renamed repo) to stderr even when the
+  // call succeeds, and folding those into the parsed text would fake a second
+  // ref row or a bogus oid. The combined text is for error MESSAGES only.
+  const listing = redactSecrets(res.stdout.toString('utf8').trim(), secrets);
+  const output = redactSecrets(`${res.stdout.toString('utf8')}\n${res.stderr}`.trim(), secrets);
   if (res.timedOut) {
     throw new Error(`ratchet git: ls-remote timed out after ${EXEC_TIMEOUT_MS}ms`);
   }
-  if (!res.ok || res.code !== 0) {
+  if (!res.ok) {
     throw new Error(`ratchet git: ls-remote failed: ${output || `exit ${String(res.code)}`}`);
   }
-  if (output === '') return null;
-  if (output.includes('\n')) {
+  if (listing === '') return null;
+  if (listing.includes('\n')) {
     throw new Error(`ratchet git: ls-remote matched multiple refs for '${ref}'`);
   }
-  const oid = output.split('\t', 1)[0] ?? '';
+  const oid = listing.split('\t', 1)[0] ?? '';
   if (!OID.test(oid)) {
-    throw new Error(`ratchet git: ls-remote returned no commit oid ('${output}')`);
+    throw new Error(`ratchet git: ls-remote returned no commit oid ('${listing}')`);
   }
   return oid;
 }

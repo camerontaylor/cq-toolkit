@@ -247,6 +247,8 @@ describe('own-property lookups and malformed rows', () => {
     ['true', true],
     ['[]', []],
     ['a string', 'acp'],
+    ['a Map', new Map([['zai', 'claude-code']])],
+    ['a Date', new Date(0)],
   ])('a %s bindings row is a config error naming the row', (_n, row) => {
     const m = msgOf(() => cfg({ fixer: row }));
     expect(m).toContain("binding table for role 'fixer' must map provider → lane");

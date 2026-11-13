@@ -1,3 +1,4 @@
+import { REPO } from './prWorktree.helpers.js';
 // Split provenance: test/ops/review/prWorktree.test.ts was split into
 // prWorktree.helpers.ts (shared fixtures) and prWorktree.fetchFirst.test.ts,
 // prWorktree.registryConsult.test.ts, prWorktree.scanReuse.test.ts,
@@ -61,21 +62,21 @@ describe('fetch-first — origin branch is truth', () => {
     expect(calls).toHaveLength(2);
     expect(calls[0]).toEqual([
       '-C',
-      '/repo',
+      REPO,
       'rev-parse',
       '--path-format=absolute',
       '--git-common-dir',
     ]);
     expect(calls[1]).toEqual([
       '-C',
-      '/repo',
+      `${REPO}`,
       'fetch',
       'origin',
       '+refs/pull/7/head:refs/cq-review/pr-7',
     ]);
     expect(calls[1]).toEqual([
       '-C',
-      '/repo',
+      `${REPO}`,
       'fetch',
       'origin',
       '+refs/pull/7/head:refs/cq-review/pr-7',
@@ -123,7 +124,7 @@ describe('fetch-first — origin branch is truth', () => {
       // (the fake fetch refuses every bare branch name) — only
       // refs/pull/7/head carries the PR's truth.
       const forkBranch = 'contributor-patch';
-      const model = mkModel([{ path: '/repo', branch: 'main', head: SHA_MAIN }]);
+      const model = mkModel([{ path: `${REPO}`, branch: 'main', head: SHA_MAIN }]);
       const expectedPath = join(repoRoot, '.git', 'cq-review-worktrees', `pr-${PR}-${forkBranch}`);
       const result = await resolvePrWorktree(
         baseOpts(model, registry, {

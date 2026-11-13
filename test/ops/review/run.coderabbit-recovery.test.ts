@@ -1,11 +1,27 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { expect, it, vi } from 'vitest';
+import { expect, it } from 'vitest';
+import type { ManagedReviewSubmit } from '../../../src/ops/dev/managedReview.js';
+import type { ScanComponentInput } from '../../../src/ops/dev/denylist.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
 import { repoEffects, makeTestRepo } from '../dev/repo.js';
 import { scriptedDrivers } from './run.helpers.js';
 
-it('#551: review.run completes after the scripted CodeRabbit rate limit', async () => {
+/**
+ * S2b-i: the CodeRabbit leg rides the managed queue route — queue-side
+ * retries replace the CLI rate-limit retry loop, so #551's CLI backoff has
+ * no managed equivalent (the D11 status wait in managedReview.ts is the
+ * retry surface, covered in managedReview.test.ts). The empty-file-identity
+ * preservation below keeps its intent through the scripted submit outcome.
+ */
+const runWithManaged = (managedSubmit: ManagedReviewSubmit) => ({
+  drivers: scriptedDrivers(),
+  scannerFactory: () => async (components: readonly ScanComponentInput[]) =>
+    components.map((component) => ({ component: component.component, hits: [] })),
+  managedSubmit,
+});
+
+it('S2b-i: review.run completes through the managed queue leg', async () => {
   const repo = await makeTestRepo();
   try {
     await repo.write(
@@ -17,37 +33,21 @@ it('#551: review.run completes after the scripted CodeRabbit rate limit', async 
       }),
     );
     repo.commitAll('configure review');
-    let calls = 0;
-    const effects = repoEffects(repo, (command) =>
-      command !== 'coderabbit'
-        ? undefined
-        : {
-            exitCode: ++calls === 1 ? 1 : 0,
-            stdout: JSON.stringify(
-              calls === 1
-                ? {
-                    type: 'error',
-                    errorType: 'rate_limit',
-                    recoverable: true,
-                    metadata: { waitTime: '1 second' },
-                  }
-                : { type: 'complete', status: 'review_completed' },
-            ),
-            stderr: '',
-            timedOut: false,
-          },
-    );
-    const sleep = vi.fn(async () => undefined);
+    const submit = (async () => ({
+      status: 'completed',
+      value: {
+        receiptId: 'r'.repeat(64),
+        completion: { kind: 'terminal' },
+        findings: [],
+        advisories: [],
+      },
+    })) as ManagedReviewSubmit;
+    const effects = repoEffects(repo);
     const result = await makeReviewRun({
-      drivers: scriptedDrivers(),
+      ...runWithManaged(submit),
       effectsFactory: () => effects,
-      sleep,
-      scannerFactory: () => async (components) =>
-        components.map((c) => ({ component: c.component, hits: [] })),
     })({ repoRoot: repo.root, wallMs: 60_000 });
     expect(result.status).toBe('ok');
-    expect(calls).toBe(2);
-    expect(sleep).toHaveBeenCalledExactlyOnceWith(16_000, expect.any(AbortSignal));
     if (result.status === 'ok') expect(result.value.sources[0]?.status).toBe('terminal');
   } finally {
     await repo.cleanup();
@@ -68,28 +68,22 @@ it.each(['terminal', 'blocked'] as const)(
         }),
       );
       repo.commitAll('configure offline CodeRabbit stream');
-      const effects = repoEffects(repo, (command) =>
-        command === 'coderabbit'
-          ? {
-              exitCode: completion === 'terminal' ? 0 : 1,
-              stdout: [
-                { type: 'finding', severity: 'major', fileName: '', comment: 'empty identity' },
-                ...(completion === 'terminal'
-                  ? [{ type: 'complete', status: 'review_completed' }]
-                  : []),
-              ]
-                .map((event) => JSON.stringify(event))
-                .join('\n'),
-              stderr: '',
-              timedOut: false,
-            }
-          : undefined,
-      );
+      const effects = repoEffects(repo);
+      const submit = (async () => ({
+        status: 'completed',
+        value: {
+          receiptId: 'e'.repeat(64),
+          completion:
+            completion === 'terminal'
+              ? { kind: 'terminal' }
+              : { kind: 'blocked', reason: 'queue blocked' },
+          findings: [{ severity: 'major', fileName: '', excerpt: 'empty identity' }],
+          advisories: [],
+        },
+      })) as ManagedReviewSubmit;
       const result = await makeReviewRun({
-        drivers: scriptedDrivers(),
+        ...runWithManaged(submit),
         effectsFactory: () => effects,
-        scannerFactory: () => async (components) =>
-          components.map((component) => ({ component: component.component, hits: [] })),
       })({ repoRoot: repo.root });
       expect(result.status).toBe(completion === 'terminal' ? 'ok' : 'needs-human');
       const cycle = effects

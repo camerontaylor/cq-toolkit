@@ -19,6 +19,8 @@
 //     stdout carries ONE error artifact instead (writeErrorJson / reportError):
 //     the error artifact REPLACES the empty stream, it never joins a result.
 import { renderHuman } from '../kernel/output.js';
+import { KnownUsageSummarySchema } from '../kernel/schema.js';
+import type { KnownUsageSummary } from '../kernel/types.js';
 import type { OpResult, RunReport } from '../kernel/types.js';
 
 /** The injectable stream seam: every CLI write goes through one of these. */
@@ -55,7 +57,7 @@ export function writeResultJson(io: CliIo, value: unknown): void {
  * stdout artifact is a JSON.stringify of the result; stringify-throwing
  * values (BigInt, circular) are caught by the caller's stringify probe,
  * while this walk catches the SILENTLY lossy ones — Map/Set/Date/RegExp/
- * class instances stringify as `{}` or strings, function members, symbol-keyed or non-enumerable (hidden) members
+ * class instances stringify as `{}` or strings, -0 as `0`, function members, symbol-keyed or non-enumerable (hidden) members
  * vanish, undefined array elements become null — where the emitted artifact
  * would disagree with the value the run produced. One normalization is
  * accepted, matching JSON semantics: an undefined-valued member of a nested
@@ -71,6 +73,13 @@ export function assertJsonLossless(value: unknown): void {
       return;
     case 'number':
       if (!Number.isFinite(value)) throw new Error(`non-finite number ${String(value)}`);
+      // -0 is FINITE so the probe above passes it, yet JSON.stringify writes
+      // it as `0`: the artifact would lose the sign and a re-read would
+      // rebuild 0 instead of the -0 the run produced (Math.round(-0.4) and
+      // 0 * -1 produce it). Reject rather than bless a silent divergence.
+      if (Object.is(value, -0)) {
+        throw new Error("negative zero — JSON.stringify writes it as '0'");
+      }
       return;
     case 'object': {
       if (value === null) return;
@@ -163,6 +172,15 @@ export type CliErrorKind = 'usage' | 'invalid-input' | 'invalid-result' | 'throw
  * The machine-mode ERROR artifact: `{ "error": { kind, subcommand, message,
  * exitCode } }`. `subcommand` is the name the invocation dispatched on, or
  * null when none was known (a missing subcommand).
+ *
+ * The `error` object carries one OPTIONAL envelope, `usageSummary`: the known
+ * spend a THROWN op settled before rejecting (the same typed carrier ops may
+ * attach to a rejection — src/ops/review/run.ts — and the same
+ * `KnownUsageSummary` shape the ok result's envelope uses). Spend is reported
+ * on every exit where it is known (#1195), so the thrown artifact no longer
+ * drops a rejecting driver's settled usage. The envelope rides INSIDE `error`
+ * (the artifact stays single-keyed at the top level), is absent — not null —
+ * when no validated usage is known, and never changes the kind or exit code.
  */
 export interface CliErrorArtifact {
   error: {
@@ -170,7 +188,28 @@ export interface CliErrorArtifact {
     subcommand: string | null;
     message: string;
     exitCode: number;
+    usageSummary?: KnownUsageSummary;
   };
+}
+
+/**
+ * Read the usage carrier a THROWN value may carry (issue #1195 — ops attach
+ * the spend they already settled onto their rejection, e.g. the review op's
+ * usageSummary carrier) and return it ONLY when it passes the kernel's own
+ * `KnownUsageSummarySchema` — the same validator the ok-result envelope is
+ * held to before any artifact is written. Anything else — a primitive, an
+ * error without the carrier, or a carrier the strict schema rejects
+ * (non-negative safe-integer counts, exact keys, lossless JSON) — contributes
+ * nothing: the artifact omits the envelope rather than emitting an unvalidated
+ * shape (#1189's corrupt-attachment rule).
+ */
+export function usageSummaryOfThrown(error: unknown): KnownUsageSummary | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  if (!('usageSummary' in error)) return undefined;
+  const parsed = KnownUsageSummarySchema.safeParse(
+    (error as { usageSummary: unknown }).usageSummary,
+  );
+  return parsed.success ? parsed.data : undefined;
 }
 
 /**
@@ -180,6 +219,11 @@ export interface CliErrorArtifact {
  * existed on these paths (the stream was empty), so the error artifact is the
  * invocation's single stdout artifact (I1). Callers must only use this where
  * no result artifact has been (or will be) written.
+ *
+ * `usageSummary` (optional) is the thrown value's validated spend carrier —
+ * pass `usageSummaryOfThrown(err)` at the thrown sites so a rejecting op's
+ * settled usage reaches the machine-mode artifact; it must already be
+ * validated (or undefined) and changes nothing in human mode.
  */
 export function reportError(
   io: CliIo,
@@ -188,9 +232,18 @@ export function reportError(
   subcommand: string | null,
   message: string,
   exitCode: number,
+  usageSummary?: KnownUsageSummary,
 ): number {
   if (mode === 'json') {
-    const artifact: CliErrorArtifact = { error: { kind, subcommand, message, exitCode } };
+    const artifact: CliErrorArtifact = {
+      error: {
+        kind,
+        subcommand,
+        message,
+        exitCode,
+        ...(usageSummary === undefined ? {} : { usageSummary }),
+      },
+    };
     writeResultJson(io, artifact);
   } else {
     narrate(io, message);

@@ -1,7 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test, vi } from 'vitest';
-import * as addressOwnership from '../../../src/ops/review/internal/addressOwnership.js';
+import * as addressOwnership from '../../../src/ops/review/internal/addressRunLifecycle.js';
+import { withAddressOwnership } from '../../../src/ops/review/internal/addressCheckoutOwnership.js';
 import { makeAddressWorker } from '../../../src/ops/review/addressWorker.js';
 import { finding, fixture } from './addressWorker.helpers.js';
 
@@ -40,7 +41,7 @@ test.each(['commit', 'restore'] as const)(
         originalRelease(binding, attempt);
       });
     try {
-      await addressOwnership.withAddressOwnership(
+      await withAddressOwnership(
         { repoRoot: f.repo.root, git: f.engineDeps.git, source: 'local', production: false },
         async (lease) => {
           const binding = addressOwnership.addressTerminalWorkerBinding(lease);
@@ -86,7 +87,7 @@ test.each(['rejected', 'deferred'] as const)(
       },
     );
     try {
-      await addressOwnership.withAddressOwnership(
+      await withAddressOwnership(
         { repoRoot: f.repo.root, git: f.engineDeps.git, source: 'local', production: false },
         async (lease) => {
           const binding = addressOwnership.addressTerminalWorkerBinding(lease);
@@ -116,7 +117,7 @@ test('a capture release failure after commit does not restore, retain or retry',
       throw new Error('synthetic release failure');
     });
   try {
-    await addressOwnership.withAddressOwnership(
+    await withAddressOwnership(
       { repoRoot: f.repo.root, git: f.engineDeps.git, source: 'local', production: false },
       async (lease) => {
         const binding = addressOwnership.addressTerminalWorkerBinding(lease);

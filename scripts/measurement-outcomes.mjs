@@ -69,7 +69,8 @@ const reviewOk = (r) =>
   Array.isArray(r.findingFingerprints) &&
   r.findingFingerprints.every(fingerprintOk) &&
   typeof r.coverage === 'string' &&
-  (r.initialBlocking === null || r.initialBlocking.every(fingerprintOk)) &&
+  (r.initialBlocking === null ||
+    (Array.isArray(r.initialBlocking) && r.initialBlocking.every(fingerprintOk))) &&
   text(r.reviewerId) &&
   text(r.source) &&
   Number.isSafeInteger(r.round) &&

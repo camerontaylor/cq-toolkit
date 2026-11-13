@@ -1,0 +1,1114 @@
+{
+  "schema": "cq.crq-a1-status-vector/v1",
+  "family": "passthrough-summarize",
+  "note": "lossless numeric passthrough cases",
+  "cases": [
+    {
+      "name": "item-pr-and-generation-bigints",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-09T11:55:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "big",
+              "kind": "merged",
+              "state": "pending",
+              "pr": 9007199254740993,
+              "generation": 9007199254740993,
+              "order": 1,
+              "title": "BIG"
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [],
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": 9007199254740993,
+              "title": "BIG",
+              "kind": "merged",
+              "band": "background",
+              "generation": 9007199254740993,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-09T11:55:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 1,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":9007199254740993,\"title\":\"BIG\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":9007199254740993,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":9007199254740993,\"title\":\"BIG\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":9007199254740993,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+      }
+    },
+    {
+      "name": "subject-pr-bigint-with-zero-item-pr",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-09T11:55:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "subject-big",
+              "kind": "merged",
+              "state": "pending",
+              "pr": 0,
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 9007199254740993
+              },
+              "order": 1,
+              "title": "SUBJECT"
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [],
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": 9007199254740993,
+              "title": "SUBJECT",
+              "kind": "merged",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-09T11:55:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 1,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":9007199254740993,\"title\":\"SUBJECT\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":9007199254740993,\"title\":\"SUBJECT\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+      }
+    },
+    {
+      "name": "zero-item-pr-falls-back-to-float-subject",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-09T11:55:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "float-subject",
+              "kind": "merged",
+              "state": "pending",
+              "pr": 0,
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 5.0
+              },
+              "order": 1
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [],
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": 5.0,
+              "title": null,
+              "kind": "merged",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-09T11:55:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 1,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":5.0,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":5.0,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+      }
+    },
+    {
+      "name": "zero-item-pr-without-subject-is-null",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-09T11:55:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "zero-pr",
+              "kind": "merged",
+              "state": "pending",
+              "pr": 0,
+              "order": 1
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [],
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "merged",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-09T11:55:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 1,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+      }
+    },
+    {
+      "name": "zero-subject-pr-stays-zero",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-09T11:55:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "zero-subject",
+              "kind": "merged",
+              "state": "pending",
+              "subject": {
+                "repo": "owner/repo",
+                "pr": 0
+              },
+              "order": 1
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [],
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": 0,
+              "title": null,
+              "kind": "merged",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-09T11:55:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 1,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":0,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":0,\"title\":null,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+      }
+    },
+    {
+      "name": "adjacent-bigint-order-sorts-exactly",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-09T11:55:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "high",
+              "kind": "merged",
+              "state": "pending",
+              "order": 9007199254740993,
+              "title": "HIGH"
+            },
+            {
+              "id": "low",
+              "kind": "merged",
+              "state": "pending",
+              "order": 9007199254740992,
+              "title": "LOW"
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [],
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": "LOW",
+              "kind": "merged",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            },
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": "HIGH",
+              "kind": "merged",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 2
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-09T11:55:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 2,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":\"LOW\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1},{\"repo\":\"owner/repo\",\"pr\":null,\"title\":\"HIGH\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":2}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":2,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":\"LOW\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1},{\"repo\":\"owner/repo\",\"pr\":null,\"title\":\"HIGH\",\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":2}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":2,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+      }
+    },
+    {
+      "name": "local-review-float-generation",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "1970-01-01T01:00:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "local",
+              "kind": "local-review",
+              "state": "pending",
+              "generation": 2.0,
+              "created_at": "1970-01-01T00:00:00Z",
+              "order": 1
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [],
+        "now": 3600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": null,
+              "kind": "local-review",
+              "band": "interactive",
+              "generation": 2.0,
+              "aging_deadline": 3600.0,
+              "reason": null,
+              "approximate_position": 1
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "1970-01-01T01:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":null,\"kind\":\"local-review\",\"band\":\"interactive\",\"generation\":2.0,\"aging_deadline\":3600.0,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"1970-01-01T01:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":null,\"kind\":\"local-review\",\"band\":\"interactive\",\"generation\":2.0,\"aging_deadline\":3600.0,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"1970-01-01T01:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"1970-01-01T01:00:00Z\"}"
+      }
+    },
+    {
+      "name": "mixed-order-types-raise-type-error",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-09T11:55:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "int",
+              "kind": "merged",
+              "state": "pending",
+              "order": 1
+            },
+            {
+              "id": "str",
+              "kind": "merged",
+              "state": "pending",
+              "order": "1"
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [],
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": false,
+        "error": "TypeError",
+        "message": "'<' not supported between instances of 'str' and 'int'"
+      }
+    },
+    {
+      "name": "numeric-title-passthrough",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-09T11:55:00Z"
+        },
+        "queue": {
+          "items": [
+            {
+              "id": "title",
+              "kind": "merged",
+              "state": "pending",
+              "title": 9007199254740993,
+              "order": 1
+            }
+          ]
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 8
+        },
+        "events": [],
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [
+            {
+              "repo": "owner/repo",
+              "pr": null,
+              "title": 9007199254740993,
+              "kind": "merged",
+              "band": "background",
+              "generation": null,
+              "aging_deadline": null,
+              "reason": null,
+              "approximate_position": 1
+            }
+          ],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-09T11:55:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 8,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 1,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":9007199254740993,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[{\"repo\":\"owner/repo\",\"pr\":null,\"title\":9007199254740993,\"kind\":\"merged\",\"band\":\"background\",\"generation\":null,\"aging_deadline\":null,\"reason\":null,\"approximate_position\":1}],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":8,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":1,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+      }
+    },
+    {
+      "name": "discovery-and-repo-numbers-passthrough",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-11-09T11:55:00Z"
+        },
+        "queue": {
+          "items": [],
+          "merged_reconcile": {
+            "represented": 9007199254740993,
+            "transient_failures": 2.0,
+            "pages_read": 1
+          },
+          "merged_discovery": {
+            "complete": true,
+            "after": "2026-11-08T00:00:00Z"
+          },
+          "push_discovery": {
+            "owner/foreign": {
+              "reviewed_tip": 9007199254740993
+            }
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 5,
+          "repos": [
+            {
+              "repo": "owner/foreign"
+            }
+          ]
+        },
+        "events": [],
+        "now": 1794225600.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {
+              "after": "2026-11-08T00:00:00Z",
+              "complete": true
+            },
+            "discovery": {
+              "represented": 9007199254740993,
+              "pages_read": 1,
+              "transient_failures": 2.0
+            },
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-11-09T11:55:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 5,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {
+            "owner/foreign": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "other": 0,
+              "reviewed_tip": 9007199254740993
+            }
+          }
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{\"after\":\"2026-11-08T00:00:00Z\",\"complete\":true},\"discovery\":{\"represented\":9007199254740993,\"pages_read\":1,\"transient_failures\":2.0},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T11:55:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{\"owner/foreign\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"other\":0,\"reviewed_tip\":9007199254740993}}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{\"after\":\"2026-11-08T00:00:00Z\",\"complete\":true},\"discovery\":{\"represented\":9007199254740993,\"pages_read\":1,\"transient_failures\":2.0},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-11-09T12:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":5,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{\"owner/foreign\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"other\":0,\"reviewed_tip\":9007199254740993}},\"schema_version\":2,\"generated_at\":\"2026-11-09T12:00:00Z\"}"
+      }
+    },
+    {
+      "name": "usage-limit-bigint-passthrough",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 9007199254740993
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 10
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 9007199254740993,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-10-31T00:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":9007199254740993,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-10-31T00:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":9007199254740993,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-10-31T00:00:00Z\"}"
+      }
+    },
+    {
+      "name": "usage-limit-float-falls-back-to-float-config-cap",
+      "source": "status_summary.summarize",
+      "input": {
+        "status": {
+          "generated_at": "2026-10-31T00:00:00Z"
+        },
+        "queue": {
+          "items": [],
+          "usage": {
+            "limit": 5.0
+          }
+        },
+        "heartbeat": {},
+        "config": {
+          "repo": "owner/repo",
+          "max_starts_per_hour": 5.0
+        },
+        "events": [],
+        "now": 1793404800.0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "backfill_reserved_slots": 1,
+          "completed_24h_by_work": {
+            "open": 0,
+            "recent_merge": 0,
+            "backfill": 0,
+            "other": 0
+          },
+          "pending_items": [],
+          "merged_current": {
+            "natural_discovery": {},
+            "discovery": {},
+            "watermark": null,
+            "receipts": {
+              "pending": 0,
+              "reviewing": 0,
+              "blocked": 0,
+              "unverified": 0,
+              "proven_terminal": 0,
+              "no_current_code": 0,
+              "partial_scope": 0,
+              "unsupported": 0
+            },
+            "path_exclusions": {},
+            "captured_targets": [],
+            "additional_captured_targets": 0,
+            "coverage_at_today_target": "unverified",
+            "legacy_done_is_review_proof": false
+          },
+          "last_tick": null,
+          "status_as_of": "2026-10-31T00:00:00Z",
+          "paused": false,
+          "cooldown_until": null,
+          "starts_60m": 0,
+          "starts_cap": 5.0,
+          "in_flight": 0,
+          "outcomes_24h": {
+            "completed": 0,
+            "interrupted": 0,
+            "error": 0
+          },
+          "other_outcomes_24h": 0,
+          "backlog": {
+            "open": 0,
+            "delta": 0,
+            "merged": 0,
+            "coverage": 0,
+            "merged-current": 0,
+            "backfill": 0
+          },
+          "repos": {}
+        },
+        "bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-10-31T00:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":5.0,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{}}",
+        "core_bytes": "{\"backfill_reserved_slots\":1,\"completed_24h_by_work\":{\"open\":0,\"recent_merge\":0,\"backfill\":0,\"other\":0},\"pending_items\":[],\"merged_current\":{\"natural_discovery\":{},\"discovery\":{},\"watermark\":null,\"receipts\":{\"pending\":0,\"reviewing\":0,\"blocked\":0,\"unverified\":0,\"proven_terminal\":0,\"no_current_code\":0,\"partial_scope\":0,\"unsupported\":0},\"path_exclusions\":{},\"captured_targets\":[],\"additional_captured_targets\":0,\"coverage_at_today_target\":\"unverified\",\"legacy_done_is_review_proof\":false},\"last_tick\":null,\"status_as_of\":\"2026-10-31T00:00:00Z\",\"paused\":false,\"cooldown_until\":null,\"starts_60m\":0,\"starts_cap\":5.0,\"in_flight\":0,\"outcomes_24h\":{\"completed\":0,\"interrupted\":0,\"error\":0},\"other_outcomes_24h\":0,\"backlog\":{\"open\":0,\"delta\":0,\"merged\":0,\"coverage\":0,\"merged-current\":0,\"backfill\":0},\"repos\":{},\"schema_version\":2,\"generated_at\":\"2026-10-31T00:00:00Z\"}",
+        "core_only": true
+      }
+    }
+  ]
+}

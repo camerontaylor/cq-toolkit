@@ -218,6 +218,35 @@ describe('buildRunInput (the pure input builder)', () => {
     }
   });
 
+  test('modelSpec resolves from cfg.cqEnv, and hostile ambient cannot move it (issue 1185)', () => {
+    const fromCfg = buildRunInput(
+      [],
+      {
+        repoRoot: '/c',
+        cqEnv: readCqEnv({ CQ_SELFHOST_DRIVER: 'openai/gpt-snap' }),
+      },
+      Date.parse('2026-10-12T12:00:00Z'), // off-peak Monday noon
+    );
+    expect(fromCfg.modelSpec).toEqual({ provider: 'openai', model: 'gpt-snap' });
+    // Hostile ambient AFTER the snapshot was read: the entry-time snapshot
+    // wins, because the resolvers take it explicitly instead of reading the
+    // room at call time.
+    vi.stubEnv('CQ_SELFHOST_DRIVER', 'anthropic/claude-ambient');
+    try {
+      const again = buildRunInput(
+        [],
+        {
+          repoRoot: '/c',
+          cqEnv: readCqEnv({ CQ_SELFHOST_DRIVER: 'openai/gpt-snap' }),
+        },
+        Date.parse('2026-10-12T12:00:00Z'),
+      );
+      expect(again.modelSpec).toEqual({ provider: 'openai', model: 'gpt-snap' });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   test('the resolved trust policy rides the strict JSON twin, not RegExp config', () => {
     const input = buildRunInput(
       [],

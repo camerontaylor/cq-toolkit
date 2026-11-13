@@ -184,8 +184,7 @@
           },
           "counted": false
         }
-      },
-      "note": "D2: the TypeScript port records blocked/retriable skipped:no-fresh instead of Python's terminal skipped"
+      }
     },
     {
       "name": "recoverable-rate-limit-reports-wait-seconds",
@@ -718,7 +717,7 @@
       }
     },
     {
-      "name": "sighup-exit-is-transient",
+      "name": "sighup-exit-is-not-transient",
       "source": "crq.classify",
       "input": {
         "ndjson": "",

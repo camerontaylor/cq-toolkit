@@ -47,6 +47,12 @@ import { processSignalCleanupStarted, registerProcessSignalCleanup } from './pro
 import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
+/** A fresh, PATH-only environment for isolated child executable lookup. */
+export function pathOnlyChildEnv(): { PATH?: string } {
+  const path = process.env.PATH;
+  return path ? { PATH: path } : {};
+}
+
 /** POSIX gets process-group semantics; Windows has no Job Object in v1 (header). */
 const POSIX = process.platform !== 'win32';
 
@@ -366,6 +372,8 @@ interface StreamCollector {
   /** Bytes dropped off the HEAD once the retention cap was hit. */
   readonly droppedBytes: number;
   readonly oversizedLine: boolean;
+  /** The first line-listener throw contained by collection, if any. */
+  readonly listenerError?: unknown;
 }
 
 /**
@@ -386,6 +394,23 @@ function createCollector(
   const restBuf = { text: '', bytes: 0 }; // the pending unterminated line
   let droppedBytes = 0;
   let oversizedLine = false;
+  // Dispatch one line to every listener under isolation (same pattern as
+  // `fireRung`): a driver-supplied listener that throws must neither abort
+  // collection of the remaining lines nor escape the 'close' handler — a
+  // throw from `flush()` there would skip `settleClose` and hang `close`.
+  // The throw is CONTAINED here, not lost: the first one is kept on the
+  // collector so `spawnManaged`'s close handler can report it once as a
+  // process warning (one warning per stream, never one per line).
+  let listenerError: unknown;
+  const emit = (line: string): void => {
+    for (const listener of listeners) {
+      try {
+        listener(line);
+      } catch (error) {
+        listenerError ??= error;
+      }
+    }
+  };
   // Trim a buffer back under the cap, cutting whole CODE POINTS off the
   // head (a cut between the halves of an astral pair would leave a lone
   // surrogate — corruption at the head of retained evidence) and measuring
@@ -422,7 +447,7 @@ function createCollector(
         if (Buffer.byteLength(line) > maxRetainedBytes) oversizedLine = true;
         restBuf.text = restBuf.text.slice(index + 1);
         restBuf.bytes -= Buffer.byteLength(line) + 1; // + the consumed '\n'
-        for (const listener of listeners) listener(line);
+        emit(line);
         index = restBuf.text.indexOf('\n');
       }
       // Bound the PENDING line — a single unterminated line must not grow
@@ -446,7 +471,7 @@ function createCollector(
         if (Buffer.byteLength(finalLine) > maxRetainedBytes) oversizedLine = true;
         restBuf.text = '';
         restBuf.bytes = 0;
-        for (const listener of listeners) listener(finalLine);
+        emit(finalLine);
       }
     },
     get text(): string {
@@ -457,6 +482,9 @@ function createCollector(
     },
     get oversizedLine(): boolean {
       return oversizedLine;
+    },
+    get listenerError(): unknown {
+      return listenerError;
     },
   };
 }
@@ -523,8 +551,23 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
     // A late leader can exit during signal grace while its background children
     // survive. Keep its process-group identity for the executable's final sweep.
     if (!processSignalCleanupStarted()) activeChildren.delete(child);
-    stdout.flush();
-    stderr.flush();
+    // `flush` re-delivers the final unterminated line to the driver's
+    // listeners. A listener THROW must neither skip the other stream's flush
+    // nor leave `close` pending nor escape this handler as an uncaught
+    // exception: both flushes are attempted, the settle always runs, and a
+    // listener failure is reported as a process warning (contract at
+    // `ManagedChild.close`). Collection contains line-listener throws, so the
+    // warning reads the first one it kept as well as anything `flush` threw
+    // before it could be contained.
+    let flushError: unknown;
+    for (const stream of [stdout, stderr]) {
+      try {
+        stream.flush();
+      } catch (error) {
+        flushError ??= error;
+      }
+    }
+    flushError ??= stdout.listenerError ?? stderr.listenerError;
     settleClose({
       code,
       signal,
@@ -534,6 +577,11 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
       droppedBytes: stdout.droppedBytes + stderr.droppedBytes,
       ...(stdout.oversizedLine || stderr.oversizedLine ? { oversizedLine: true } : {}),
     });
+    if (flushError !== undefined) {
+      process.emitWarning(
+        `spawnManaged: a stdout/stderr listener threw while collecting lines: ${String(flushError)}`,
+      );
+    }
   });
 
   // A dead child's full stdin pipe surfaces as EPIPE — a write into a
