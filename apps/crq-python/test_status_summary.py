@@ -380,6 +380,61 @@ class MergedCurrentSummaryTest(unittest.TestCase):
                     self.assertEqual(result["receipts"]["unverified"], 1)
                     self.assertEqual(result["receipts"]["proven_terminal"], 1)
 
+    def test_recent_events_bounds_memory_and_keeps_failure_visibility(self):
+        """Old history never reaches summarize; corrupt records still raise."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            now = adapter.timestamp("2026-11-07T00:00:00Z")
+            lines = [
+                json.dumps({"event": "review_finished", "at": "2026-11-01T00:00:00Z",
+                            "outcome": "completed"}),
+                json.dumps({"event": "review_started", "at": "2026-11-06T23:00:00Z"}),
+                json.dumps({"event": "review_finished", "at": "2026-11-06T23:30:00Z",
+                            "outcome": "completed"}),
+                "{corrupt",
+            ]
+            path.write_text("\n".join(lines) + "\n")
+            # The window keeps only the two in-window events; the generator
+            # stops at the corrupt tail only when pulled past the valid ones.
+            stream = adapter.recent_events(path, now)
+            kept = [next(stream), next(stream)]
+            self.assertEqual([e["event"] for e in kept],
+                             ["review_started", "review_finished"])
+            # An OLD truthy unparsable review_finished still fails visibly.
+            path.write_text(json.dumps({"event": "review_finished", "at": "garbage",
+                                        "outcome": "completed"}) + "\n")
+            with self.assertRaises(ValueError):
+                list(adapter.recent_events(path, now))
+            # A complete corrupt line still raises (read_events semantics).
+            path.write_text("{corrupt\n")
+            with self.assertRaises(json.JSONDecodeError):
+                list(adapter.recent_events(path, now))
+
+    def test_publish_streams_events_and_skips_old_history(self):
+        """publish reads the log once through the windowed helper."""
+        queue = {"items": [], "last_tick": "2026-11-07T00:00:00Z",
+                 "review_requests": {}, "review_notify_outbox": {}}
+        config = {"repo": "owner/repo", "max_starts_per_hour": 8}
+        now = adapter.timestamp("2026-11-07T00:00:00Z")
+        events = [{"event": "review_started", "at": "2026-11-01T00:00:00Z"},
+                  {"event": "review_started", "at": "2026-11-06T23:00:00Z"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "state").mkdir()
+            (root / "state/events.jsonl").write_text(
+                "\n".join(json.dumps(e) for e in events) + "\n")
+            with mock.patch.object(adapter, "read_events",
+                                   wraps=adapter.read_events) as spy, \
+                    mock.patch.object(adapter, "systemd_activity",
+                                      return_value=([], [])):
+                data = adapter.publish(root, queue, config,
+                                       {"status": "systemd"}, home=root, now=now)
+            # The helper saw the whole log, but summarize never did: only the
+            # in-window event is counted, and the log was streamed exactly once.
+            self.assertEqual(data["review_metrics"]["operation_events_24h"],
+                             {"review_started": 1, "spawn_failed": 0})
+            self.assertEqual(spy.call_count, 1)
+
 
 class ReposSummaryTests(unittest.TestCase):
     """Additive per-repo counts for non-primary repos (docs/multi-repo.md)."""

@@ -166,6 +166,11 @@ def repos_summary(queue, primary, configured=()):
 
 def summarize(status, queue, heartbeat, config, events, now):
     primary = config.get("repo")
+    # Callers may pass a streaming iterable (publish passes the windowed
+    # recent_events stream); summarize walks events more than once, so
+    # materialize exactly once. Bounded: publish pre-filters to the window.
+    if not isinstance(events, (list, tuple)):
+        events = list(events)
     # Retired promotion records remain in state/queue.json; keep them out of
     # capacity, backlog and completed-work counts until they are removed.
     items = [i for i in queue["items"] if i.get("kind") != "promotion"]
@@ -578,6 +583,29 @@ def read_events(path):
                     raise  # a complete corrupt record must never become zero outcomes
 
 
+def recent_events(path, now, window=86400):
+    """Stream events once, retaining only the bounded reporting window.
+
+    Memory scales with the window, never with the log. A complete corrupt
+    JSON line still raises (read_events semantics), and a review_finished
+    with a truthy unparsable `at` still fails visibly even when it is old:
+    dropping it silently would hide a corrupt producer.
+    """
+    for event in read_events(path):
+        at = timestamp(event.get("at")) if isinstance(event, dict) else None
+        if at is not None:
+            if now - window <= at <= now:
+                yield event
+        elif isinstance(event, dict) and event.get("event") == "review_finished" \
+                and event.get("at"):
+            # A truthy unparsable `at` on a completed record fails visibly
+            # even when old, exactly as summarize would have raised.
+            raise ValueError("invalid review_finished timestamp")
+        elif isinstance(event, dict):
+            # A missing or empty `at` stays accepted (summarize semantics).
+            yield event
+
+
 def systemd_activity():
     """Observe user units, independently of the configured scheduling backend."""
     timers = ("crq-tick.timer", "crq-watchdog.timer", "crq-slot.timer",
@@ -657,7 +685,7 @@ def publish(root, queue, config, schedule, home=None, now=None):
     now = time.time() if now is None else now
     generated = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     data = summarize({"generated_at": generated}, queue, {"last_tick": queue.get("last_tick")},
-                     config, list(read_events(root / "state/events.jsonl")), now)
+                     config, recent_events(root / "state/events.jsonl", now), now)
     if not data["last_tick"]:
         raise ValueError("no completed tick to publish")
     # Only the bounded public preview is resolved; queue internals stay private.
