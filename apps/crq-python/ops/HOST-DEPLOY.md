@@ -424,6 +424,89 @@ rollback. Rollback reuses the same helper fence with the
 recorded prior target and prior tag; a fresh-target switch to a different
 commit is a new deployment, not a rollback.
 
+## Deploy runbook (crq-efficiency plan slice 4) — tracked, offline-tested
+
+`ops/deploy-runbook.py` is the tracked sequence the audited deploy wrappers
+(`deploy-9e18.py`, the F4-fixed `deploy-ac13-f4fix2.py`) implemented by hand
+on the deploy host. It imports `deploy-controller.py` and `prepare-host.py`
+from the candidate artifact root and owns only the sequence and assertions:
+validate before any host read, observe then split the long triggers, hold
+(marker `O_EXCL`, run-unique bytes), 180-second service drain then a bounded
+controller `drain_check` poll (15 s interval, 900 s deadline, fail safe on
+expiry: hold retained, nothing killed), the controller `switch` subprocess,
+pointer render, F4 restore (start exactly the triggers `self.original`
+recorded active, assert the full pre-run map, verify the map with a second
+read, persist `final_triggers` durably, remove the marker last), then
+`range-note.json` with digest-pinned annotations. Failures before the hold
+acquire restart exactly the triggers the split stopped (no hold, no stopped
+triggers left behind; a failed restart is recorded in the recovery phase
+record). The candidate helper and controller are digest-checked against the
+manifest before either is imported: an import is arbitrary code execution
+and must never run ahead of the reviewed pins.
+
+A production GO names one exact file revision: `--runbook-sha256` must equal
+the digest of the executing file, refusing before any host read, and the
+rehearsal (`--rehearsal`, throwaway clone, fake unit provider and fake
+controller journal in tests) pins the same value. The per-deploy invariant
+manifest (`ops/deploy-invariants.schema.json`, validated by a stdlib checker;
+unknown keys refuse) is reviewed and digest-pinned per deploy
+(`--manifest-sha256`); it carries the assertion semantics that differ
+between deploys: ancestry direction (`must`/`must_not`/`either`), the three
+config relations, the `cq_bin` pointer policy, the trigger inventory, the
+quiescence bounds and the range note.
+
+Historical note on the ac13 ancestry refusal: the check itself
+(`git merge-base --is-ancestor prior target`, and the
+`target_on_origin_main` predicate requiring the target inside
+`origin/main` history) was always correct. Only one refusal message string
+was worded in the wrong direction ("not an ancestor" on a failure whose
+real cause was something else), which misdirected the operator during the
+ac13 incident. The runbook keeps the verified predicate and does not port
+that message; refusals state the failed relation plainly, and the drift
+message is never a substitute for reading the observations.
+
+### Released-flag gate (operator rule)
+
+The marker is the hold; the gate is the flag. `phase.json` is written
+atomically before every systemd action with `phase`, `released`,
+`final_triggers` and `journal`; `release.json` is written only after the
+marker is gone and the original states are verified.
+
+**No `systemctl start` between the hold and the gate passing:**
+
+```sh
+python3 -B apps/crq-python/ops/deploy-runbook.py \
+  --target-sha FULL40SHA --target-tag crq-runner/YYYYMMDD-N \
+  --candidate-root /private/artifacts/candidate \
+  --prior-root /private/artifacts/running --prior-sha PRIOR40SHA \
+  --prior-tag crq-runner/YYYYMMDD-(N-1) \
+  --root /srv/crq-deploy --overlay /private/host.json \
+  --baseline-journal /private/crq-deploy-records/controller-LAST.json \
+  --manifest /private/manifests/deploy-YYYYMMDD.json \
+  --manifest-sha256 REVIEWED_MANIFEST_SHA256 \
+  --runbook-sha256 PINNED_RUNBOOK_SHA256 \
+  --output-dir /private/crq-deploy-records/run-YYYYMMDD \
+  [--annotations /private/notes/annotations.json]
+# Then, before any start:
+python3 -B apps/crq-python/ops/deploy-runbook.py ... \
+  status --output-dir /private/crq-deploy-records/run-YYYYMMDD \
+  --require-released
+```
+
+`status --require-released` re-reads `release.json` and `phase.json` from
+disk and refuses when they disagree, when the recorded `runbook_sha256`
+differs from the digest of the executing file (a stale copy must not report
+on a run it did not perform), when the run recorded no marker path, or when
+`state/runner-disabled` is present again. It prints `final_triggers` and
+`released_at`, not just pass/fail, so the operator's start decision carries
+the nine-state map into the record. Exit 0 is the only permitted basis for
+starting units; exit 1 means do not start.
+
+Tests: `pnpm test:narrow apps/crq-python/test_deploy_runbook.py` (host-free;
+fake unit provider and fake controller journal). They cover orchestration,
+not launch-time re-verification: the operator alone runs the runbook against
+production, and it re-reads live state immediately before each launch.
+
 ## Subsequent deploy and rollback
 
 Stop timers/records and wait for tick inactivity before invoking `switch`.

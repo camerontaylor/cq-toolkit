@@ -1,0 +1,192 @@
+{
+  "$id": "deploy-invariants.schema.json",
+  "title": "Per-deploy invariant manifest (crq-efficiency plan slice 4)",
+  "description": "The reviewed, digest-pinned assertion document one deploy run consumes. Validated at run start, before any host read, by the stdlib checker in deploy-runbook.py; unknown keys refuse anywhere so a typo cannot silently disable an assertion. List lengths for triggers are derived from the live trigger map and cross-checked in preflight, not hard-coded here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "deploy",
+    "identity",
+    "ancestry",
+    "config",
+    "artifacts",
+    "triggers",
+    "quiescence",
+    "marker",
+    "range_note"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "deploy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason", "operator", "approved_by", "approved_at"],
+      "properties": {
+        "reason": {"type": "string", "minLength": 1},
+        "operator": {"type": "string", "minLength": 1},
+        "approved_by": {"type": "string", "minLength": 1},
+        "approved_at": {"type": "string", "minLength": 1}
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prior_sha",
+        "target_sha",
+        "receipt_sha256",
+        "helper_sha256",
+        "controller_file_sha256",
+        "baseline_journal_sha256",
+        "baseline_journal_fields"
+      ],
+      "properties": {
+        "prior_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "target_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "receipt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "helper_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "controller_file_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "baseline_journal_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "baseline_journal_fields": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "Field expectations the baseline journal must satisfy, e.g. {\"outcome\": \"completed\", \"target\": \"<prior 40-hex>\"}. Values must be strings; boolean expectations such as automatic_rollback_permitted false go here as the JSON string \"false\" when an exact string comparison is intended, or are asserted in code."
+        }
+      }
+    },
+    "ancestry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prior_is_ancestor_of_target", "target_on_origin_main"],
+      "properties": {
+        "prior_is_ancestor_of_target": {"type": "boolean"},
+        "target_on_origin_main": {"enum": ["must", "must_not", "either"]}
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "committed_config_sha256",
+        "running_config_sha256",
+        "target_state_config_sha256",
+        "candidate_config_sha256",
+        "render_at_prior_reproduces_live",
+        "head_invariance",
+        "cq_bin_pointer_may_move"
+      ],
+      "properties": {
+        "committed_config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "running_config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "target_state_config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "candidate_config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "render_at_prior_reproduces_live": {"type": "boolean"},
+        "head_invariance": {"type": "boolean"},
+        "cq_bin_pointer_may_move": {"type": "boolean"}
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "running_dist_sha256",
+        "candidate_dist_sha256",
+        "running_deps_sha256",
+        "candidate_deps_sha256"
+      ],
+      "properties": {
+        "running_dist_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "candidate_dist_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "running_deps_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "candidate_deps_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "triggers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected",
+        "long",
+        "services",
+        "restore_target",
+        "release_order"
+      ],
+      "properties": {
+        "expected": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "description": "The full expected trigger name list; count cross-checked against the observed unit inventory in preflight."
+        },
+        "long": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "description": "Long-window triggers stopped before preflight; must be a subset of expected."
+        },
+        "services": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "description": "Expected service unit names for the 180-second first drain bound."
+        },
+        "restore_target": {"const": "original_observed"},
+        "release_order": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "enum": [
+              "start_original_active",
+              "assert_original",
+              "record_final_triggers",
+              "remove_marker"
+            ]
+          },
+          "description": "The F4 release order; exactly this sequence."
+        }
+      }
+    },
+    "quiescence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "service_drain_deadline_s",
+        "mode",
+        "poll_interval_s",
+        "deadline_s",
+        "fail_safe_on_expiry"
+      ],
+      "properties": {
+        "service_drain_deadline_s": {"type": "integer", "minimum": 1},
+        "mode": {"const": "controller_drain_check_owned_runs"},
+        "poll_interval_s": {"type": "integer", "minimum": 1},
+        "deadline_s": {"type": "integer", "minimum": 1},
+        "fail_safe_on_expiry": {"const": true}
+      }
+    },
+    "marker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "never_remove_foreign"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "never_remove_foreign": {"const": true}
+      }
+    },
+    "range_note": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["merges", "files", "insertions", "deletions"],
+      "properties": {
+        "merges": {"type": "integer", "minimum": 0},
+        "files": {"type": "integer", "minimum": 0},
+        "insertions": {"type": "integer", "minimum": 0},
+        "deletions": {"type": "integer", "minimum": 0},
+        "corrections": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Lead/operator corrections recorded so the decision trail shows the true range."
+        }
+      }
+    }
+  }
+}
