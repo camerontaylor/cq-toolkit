@@ -108,6 +108,54 @@ describe('checkDiffMonotonicity', () => {
     expect(checkDiffMonotonicity(diff)).toMatchObject({ ok: false });
   });
 
+  test('a key ending in an escaped backslash fails closed — the linear scan reads the pair', () => {
+    // The key `a\` rendered as JSON is `"a\\"`: VALID (it parses back to the
+    // key `a\`) yet the ambiguous `(?:[^"\\]|\\.)*\\(?:[^"\\]|\\.)*` shape
+    // could not see it — the body's only two backslashes were both
+    // claimable by one `\\.` pair, so no bare `\` was left reachable and the
+    // escaped key escaped detection. Any escaped key fails closed.
+    const injected = body('higher-is-better', 80).replace(
+      '"value": 80',
+      '"value": 80, "a\\\\": 50',
+    );
+    expect(() => JSON.parse(injected)).not.toThrow();
+    expect(
+      checkDiffMonotonicity(
+        modifiedSection(
+          REL,
+          body('higher-is-better', 80).trimEnd().split('\n'),
+          injected.trimEnd().split('\n'),
+        ),
+      ),
+    ).toEqual({
+      ok: false,
+      violations: [{ path: REL, why: 'unparsable baseline diff' }],
+      filesChecked: 1,
+    });
+  });
+
+  test('the escaped-key scan stays LINEAR on a crafted escape run (no O(n²) stall)', () => {
+    // The gate reads PR-author-controlled diff text. A long key body with
+    // many escapes and no colon used to make the scan retry every split
+    // point from the opening quote: ~5s at this size, unbounded growth with
+    // length. The single-escape shape answers in well under a millisecond.
+    const run = `"${'\\a'.repeat(60_000)}`;
+    const started = performance.now();
+    const verdict = checkDiffMonotonicity(
+      modifiedSection(
+        REL,
+        ['  "direction": "higher-is-better",', '  "value": 80,'],
+        ['  "direction": "higher-is-better",', '  "value": 80,', `  ${run},`],
+      ),
+    );
+    const elapsed = performance.now() - started;
+    // The escape run names no key (no colon), so it moves no field: the
+    // section's direction/value pair still judges as unchanged. The time is
+    // the assertion — the scan must not re-walk the tail per split point.
+    expect(verdict).toEqual({ ok: true, violations: [], filesChecked: 1 });
+    expect(elapsed).toBeLessThan(3_000);
+  });
+
   test('a non-finite reconstructed value (1e999 → Infinity) fails closed — parseBaseline would reject the committed file', () => {
     // `1e999` is valid JSON parsing to Infinity, and higher-is-better is the
     // wave-through shape: loosens(80, Infinity, 'higher-is-better') is
