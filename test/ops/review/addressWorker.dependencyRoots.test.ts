@@ -158,6 +158,86 @@ describe('review.address candidate isolation', () => {
     },
   );
   test.each([
+    ['transitive', 'npm run compile', 'compile'],
+    ['npm run-script', 'npm run-script compile', 'compile'],
+    ['quoted npm script', 'npm run "compile"', 'compile'],
+    ['pnpm run', 'pnpm run compile', 'compile'],
+    ['pnpm shorthand', 'pnpm compile', 'compile'],
+    ['yarn run', 'yarn run compile', 'compile'],
+    ['yarn shorthand', 'yarn compile', 'compile'],
+    ['bun run', 'bun run compile', 'compile'],
+    ['bun shorthand', 'bun compile', 'compile'],
+    ['path-qualified run-s', './node_modules/.bin/run-s compile', 'compile'],
+    ['npm argument', 'concurrently "npm:compile"', 'compile'],
+    ['runner options', 'pnpm --silent run compile', 'compile'],
+    ['workspace runner', 'yarn workspace pkg compile', 'compile'],
+    ['quoted shell command', "sh -c 'npm run compile'", 'compile'],
+    ['hook', 'node build.mjs', 'prebuild'],
+    ['hook dependency', 'node build.mjs', 'compile'],
+    ['cycle', 'npm run compile', 'compile'],
+    ['shell indirection', 'script=compile; npm run "$script"', 'compile'],
+  ])(
+    'install hooks compare reachable scripts through %s before dispatch',
+    async (mode, build, changed) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        const scripts = {
+          postinstall: 'pnpm run build',
+          build,
+          prebuild: mode === 'hook dependency' ? 'pnpm compile' : 'node prebuild.mjs',
+          compile: mode === 'cycle' ? 'pnpm run build' : 'node compile.mjs',
+        };
+        await f.repo.write('package.json', JSON.stringify({ scripts }));
+        f.repo.commitAll('transitive install lifecycle metadata');
+        await writeFile(
+          join(f.dependencyRoot, 'package.json'),
+          JSON.stringify({ scripts: { ...scripts, [changed]: 'different installed files' } }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.commit).toBeUndefined();
+        expect(result.reason).toContain('manifests/locks differ');
+        expect(f.calls()).toBe(0);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('a --check argument is not an invocation of the check script', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const scripts = {
+        postinstall: 'pnpm run build',
+        build: 'node scripts/build.mjs --check',
+        check: 'node check.mjs',
+      };
+      await f.repo.write('package.json', JSON.stringify({ scripts }));
+      f.repo.commitAll('install command with unrelated check argument');
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ scripts: { ...scripts, check: 'node different-check.mjs' } }),
+      );
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit, result.reason).toBeTruthy();
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('unchanged cyclic install script graph terminates and reuses dependencies', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const manifest = JSON.stringify({
+        scripts: { postinstall: 'pnpm run build', build: 'pnpm compile', compile: 'npm run build' },
+      });
+      await f.repo.write('package.json', manifest);
+      f.repo.commitAll('cyclic install lifecycle metadata');
+      await writeFile(join(f.dependencyRoot, 'package.json'), manifest);
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit, result.reason).toBeTruthy();
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test.each([
     ['dependencies', { dep: '1' }],
     ['devDependencies', { dep: '1' }],
     ['optionalDependencies', { dep: '1' }],

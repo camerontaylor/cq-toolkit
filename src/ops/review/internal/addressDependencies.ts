@@ -167,18 +167,60 @@ export async function assertAddressDependencyMetadata(
   // and their implicit pre/post hooks. A change to any of these changes what
   // installation executes, even when every lifecycle key itself is identical.
   const invokedScripts = (scripts: Record<string, string>): Set<string> => {
-    const invoked = new Set<string>();
-    for (const [key, command] of Object.entries(scripts)) {
-      if (!installLifecycleScripts.has(key)) continue;
+    const selected = new Set<string>();
+    const worklist = [...installLifecycleScripts].filter((key) => key in scripts);
+    while (worklist.length > 0) {
+      const key = worklist.pop();
+      if (key === undefined || selected.has(key)) continue;
+      selected.add(key);
+      const command = scripts[key] ?? '';
+      const tokens = (command.match(/"[^"]*"|'[^']*'|[^\s;&|()]+/g) ?? []).map((token) =>
+        token.replace(/^(['"])(.*)\1$/, '$2'),
+      );
+      const literal = new Set<string>();
+      // Dynamic shell expressions and unsupported runner syntax stay conservative:
+      // narrowing those to literal names could omit an actual install input.
+      let ambiguous =
+        /[$`\\<>]/.test(command) ||
+        tokens.includes('eval') ||
+        tokens.some((token) => /[\s'"]/.test(token));
+      for (let index = 0; index < tokens.length; index++) {
+        const token = tokens[index] ?? '';
+        if (token.startsWith('npm:')) {
+          const name = token.slice(4);
+          if (!name || /[*?\[]/.test(name)) ambiguous = true;
+          else literal.add(name);
+        }
+        const runner = token.split('/').at(-1) ?? '';
+        // Normalize path-qualified .bin invocations (e.g. ./node_modules/.bin/run-s)
+        // to the runner name so the npm-run-all family stays ambiguous, keeping
+        // the scripts it names reachable.
+        if (['npm-run-all', 'run-s', 'run-p'].includes(runner)) ambiguous = true;
+        if (!['npm', 'pnpm', 'yarn', 'bun'].includes(runner)) continue;
+        let name = tokens[index + 1];
+        if (name === 'run' || name === 'run-script') name = tokens[index + 2];
+        else if (runner === 'npm') {
+          ambiguous = true;
+          continue;
+        }
+        if (!name || !(name in scripts) || name.startsWith('-') || /[*?\[]/.test(name))
+          ambiguous = true;
+        else literal.add(name);
+      }
       for (const target of Object.keys(scripts)) {
-        if (target !== key && command.includes(target)) invoked.add(target);
+        if (
+          target === key ||
+          selected.has(target) ||
+          !(literal.has(target) || (ambiguous && command.includes(target)))
+        )
+          continue;
+        worklist.push(target);
+      }
+      for (const hook of [`pre${key}`, `post${key}`]) {
+        if (hook in scripts && !selected.has(hook)) worklist.push(hook);
       }
     }
-    for (const name of [...invoked]) {
-      if (`pre${name}` in scripts) invoked.add(`pre${name}`);
-      if (`post${name}` in scripts) invoked.add(`post${name}`);
-    }
-    return invoked;
+    return selected;
   };
   const relevant = (text: string | null) => {
     if (text === null) return text;
