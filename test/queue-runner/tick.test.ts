@@ -403,6 +403,41 @@ describe('crq tick: real host probes', () => {
     );
     expect(order).toEqual(['progress', 'usage']);
   });
+
+  it('skips retired promotion rows but keeps raw indices for live runs', async () => {
+    const queue = {
+      items: [
+        {
+          id: 'retired-promotion',
+          kind: 'promotion',
+          state: 'reviewing',
+          run: { legacy_without_run_id: true },
+        },
+        {
+          id: 'live-run',
+          kind: 'delta',
+          state: 'reviewing',
+          run: { run_id: 'run-0001', started_at: '2023-11-14T22:13:20Z' },
+        },
+      ],
+    };
+    const plan = await planTick(
+      '/unused',
+      'tick',
+      [],
+      fakeEffects({
+        readQueue: async () => JSON.stringify(queue),
+        readConfig: async () => JSON.stringify(CONFIG),
+      }),
+    );
+    expect(value(plan).harvest).toEqual({
+      alive: [],
+      ambiguous: ['live-run'],
+      harvestable: [],
+    });
+    expect(targets(plan)).toContain('queue.json#/items/1/wait_reason');
+    expect(targets(plan)).not.toContain('queue.json#/items/0/wait_reason');
+  });
 });
 
 describe('crq tick: timestamps', () => {

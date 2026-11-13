@@ -45,6 +45,7 @@ import {
   AUTHOR_KIND,
   backgroundTurn,
   liveItems,
+  PROMOTION_KIND,
   rank,
   retireSupersededOpen,
   repoRanks,
@@ -412,7 +413,11 @@ export async function planTick(
   const items: unknown[] = rawItems;
   for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
     const item = items[itemIndex];
-    if (!isRecord(item) || item.state !== 'reviewing' || !isRecord(item.run)) continue;
+    // Retired promotion rows stay on disk with historical state; `liveItems`,
+    // reservation scanning and Python's harvest path all exclude them. Skip
+    // them here too, keeping the raw array index for mutation pointers.
+    if (!isRecord(item) || item.kind === PROMOTION_KIND) continue;
+    if (item.state !== 'reviewing' || !isRecord(item.run)) continue;
     runs.push(await observeRun(item, itemIndex, effects));
   }
   // Every reservation candidate, before the progress probe answers: a
