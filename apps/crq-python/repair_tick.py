@@ -1093,8 +1093,23 @@ def fixed_publication_evidence(c, item, run, record, info, evidence):
     job_id = fixed[0]
     job = json.loads(job_path(c.ROOT, job_id).read_text())
     if (job.get('job') != job_id or job.get('item') != item['id'] or job.get('run') != run
-            or job_id not in record.get('jobs', []) or job.get('canonical_finding_id')):
+            or job_id not in record.get('jobs', [])):
         raise ValueError('legacy repair job identity mismatch')
+    fid = job.get('canonical_finding_id')
+    canonical = None
+    if fid:
+        if not isinstance(fid, str) or not re.fullmatch(r'[0-9a-f]{64}', fid):
+            raise ValueError('canonical finding id malformed')
+        row_path = c.STATE / 'backfill/findings/triage' / (fid + '.json')
+        if not row_path.exists():
+            raise ValueError('canonical finding triage row missing')
+        canonical = json.loads(row_path.read_text())
+        if (canonical.get('receipt') or {}).get('repair_task') != job_id:
+            raise ValueError('canonical finding repair task mismatch')
+        if canonical.get('status') != 'delivered':
+            raise ValueError('fixed revalidation binding changed: canonical finding status is not delivered')
+        if canonical.get('canonical_id') != fid:
+            raise ValueError('canonical finding identity mismatch')
     publication = record.get('publication') or {}
     published, actual = publication.get('head'), info.get('headRefOid')
     merge = (info.get('mergeCommit') or {}).get('oid')
@@ -1128,11 +1143,15 @@ def fixed_publication_evidence(c, item, run, record, info, evidence):
         'finding_sha256': identity(job['finding']), 'pr': info['number'], 'published_head': published,
         'actual_head': actual, 'merge_commit': merge, 'source_sha': tip,
         'sources': sources, 'verdict': 'fixed'}))
+    if canonical is not None:
+        expected.update(canonical_finding_id=fid, canonical_status=canonical['status'])
     if not isinstance(evidence, dict) or any(evidence.get(k) != v for k, v in expected.items()):
         raise ValueError('fixed revalidation binding changed')
     if not all(isinstance(evidence.get(k), str) and evidence[k].strip() and len(evidence[k]) <= 4000
                for k in ('reviewer', 'reason')):
         raise ValueError('named revalidation reviewer and concrete reason required')
+    if canonical is not None and not evidence['reason'].startswith('revalidated:'):
+        raise ValueError('canonical fixed revalidation reason must start with revalidated:')
     return expected
 
 
@@ -1268,6 +1287,8 @@ def reconcile_fix_prs(c, q):
                         expected = json.loads((c.STATE / 'repair/inbox' / (job + '.json')).read_text())
                         result = next(v for v in record['verdicts'] if v['job'] == job)
                         if not projected:
+                            if expected.get('canonical_finding_id') and proof and 'fixed_revalidation' in proof:
+                                result = {**result, 'reason': proof['fixed_revalidation']['reason']}
                             mark_finding_outcome(c, expected, result, merge, pr.get('url'))
                         for blocker in item.get('blocking', []):
                             if blocker.get('repair_job') == job:
@@ -1280,7 +1301,13 @@ def reconcile_fix_prs(c, q):
                         if latest.get('fixed_revalidation') != proof['fixed_revalidation']:
                             raise ValueError('fixed revalidation changed before source feedback')
                         fresh = c.pr_info(pr['number'])
-                        fixed_publication_evidence(c, item, run, record, fresh, proof['fixed_revalidation'])
+                        # Our own outcome advances a canonical row to fixed. From here
+                        # terminal ledger truth, not a delivered-row assertion, is authoritative.
+                        terminal = canonical_fixed_events(c, record, fresh)
+                        if terminal is None:
+                            fixed_publication_evidence(c, item, run, record, fresh, proof['fixed_revalidation'])
+                        elif fresh != info:
+                            raise ValueError('repair PR changed during revalidation')
                         record['publication'] = latest
                     pending = publish_source_resolution(c, record, merge)
                 except Exception as exc:
