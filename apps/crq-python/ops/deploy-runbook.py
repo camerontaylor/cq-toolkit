@@ -16,12 +16,16 @@ requirement, a baseline controller journal assertion, a rehearsal mode with
 its own fake controller journal, and a released-flag gate over five durable
 artifacts. That ceremony was written for a freeze/nomination process the
 owner retired on 2026-11-14: CRQ is a dogfooded alpha, code is reviewed once
-at PR merge, and any merged main SHA is deployable. None of it made a
-deploy safer than the four things below, which are kept:
+at PR merge, and any merged main SHA shipping the tagless helper contract is
+deployable. None of it made a deploy safer than the properties below, which
+are kept:
 
 * **Shared queue bytes are never written.** ``state/queue.json`` and the
   completion heartbeat are hashed before and after the switch and after a
   rollback; any difference is a failed deploy, never a migration.
+* **Whole deploys are serialized.** An advisory ``state/deploy.lock`` is held
+  from before the first measurement through the released health window and
+  recovery, so two runs cannot switch the checkout under each other.
 * **Admission is held and work is drained.** The ``state/runner-disabled``
   marker is claimed with ``O_EXCL`` and run-unique bytes before any unit is
   stopped. Triggers stop, services settle, and the controller's own
@@ -39,8 +43,13 @@ deploy safer than the four things below, which are kept:
   deploy; the target render must keep both. Rollback switches back to the
   measured prior SHA with the same helper fence, requires the live config
   bytes to equal the pre-deploy bytes (pointer included), requires the queue
-  bytes to be unchanged, and restarts exactly the triggers observed active
-  before the run.
+  bytes to survive the rollback switch (re-measured after its own drain when
+  a completed health tick may have advanced them), and restarts exactly the
+  triggers observed active before the run.
+
+The target's own helper and controller are extracted and executed. A target
+whose ``verify_target`` still requires an annotated tag is refused before the
+hold: it cannot support a tagless switch or the tagless automatic rollback.
 
 Only a failure *after* the switch triggers automatic rollback: a failed
 verification or a failed health check. A failure before the switch restarts
@@ -60,8 +69,10 @@ Python stdlib only.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -376,6 +387,44 @@ class Hold:
         self.acquired = False
 
 
+class DeployLock:
+    """A host-wide advisory lock for the whole deploy, health window and
+    recovery.
+
+    The admission marker cannot be this lock: it must be released for the
+    runner to advance a tick, and two overlapping deploys must not switch the
+    checkout under each other while the first waits for its health
+    observations. The lock file lives in the ignored state directory, is held
+    from before the first measurement, and is released by the kernel if the
+    process dies.
+    """
+
+    def __init__(self, root):
+        self.path = Path(root) / "apps/crq-python/state/deploy.lock"
+        self.handle = None
+
+    def acquire(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.close()
+            raise Refused(
+                "another deploy holds the deployment lock " + str(self.path)
+                + "; wait for it to finish before starting another") from exc
+        self.handle = handle
+
+    def release(self):
+        if self.handle is None:
+            return
+        try:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.handle.close()
+            self.handle = None
+
+
 # ------------------------------------------------------------------- driver
 
 
@@ -396,6 +445,7 @@ class Run:
         self.clock = clock
         self.sleep = sleep
         self.hold = None
+        self.lock = DeployLock(self.root)
         self.run_dir = None
         self.target = None
         self.prior_sha = None
@@ -464,6 +514,16 @@ class Run:
         if self.controller is None:
             self.controller = load_module("crq_deploy_runbook_controller",
                                           ops_dir / "deploy-controller.py")
+        verify = getattr(self.helper, "verify_target", None)
+        if verify is not None:
+            parameter = inspect.signature(verify).parameters.get("tag")
+            require(parameter is not None
+                    and parameter.default is not inspect.Parameter.empty,
+                    "the target revision's prepare-host.verify_target still "
+                    "requires an annotated tag, so a tagless deploy and its "
+                    "automatic rollback are impossible with it; deploy a "
+                    "target that contains the tagless-helper change first. "
+                    "Nothing has been switched.")
 
     # -- steps ---------------------------------------------------------
     def _run(self):
@@ -471,6 +531,7 @@ class Run:
                 "--root must name the deployment checkout")
         require(self.args.overlay and Path(self.args.overlay).is_file(),
                 "--overlay must name the private host overlay")
+        self.lock.acquire()
         self.prior_sha = self.git("rev-parse", "HEAD")
         require(SHA_RE.match(self.prior_sha),
                 "live HEAD is not a full commit SHA: " + repr(self.prior_sha))
@@ -572,11 +633,11 @@ class Run:
                     + json.dumps(observed, sort_keys=True))
             self.sleep(5)
 
-    def drain_queue(self):
+    def drain_queue(self, record_name="drain.json"):
         if self.drain_fn is not None:
             polls = [self.drain_fn()]
             result = polls[0]
-            durable_write(Path(self.run_dir) / "drain.json",
+            durable_write(Path(self.run_dir) / record_name,
                           {"polls": polls,
                            "drained": bool(result.get("drained")),
                            "deadline_s": None})
@@ -596,7 +657,7 @@ class Run:
                 if result["drained"]:
                     break
                 if self.clock() >= deadline:
-                    durable_write(Path(self.run_dir) / "drain.json",
+                    durable_write(Path(self.run_dir) / record_name,
                                   {"polls": polls,
                                    "drained": False,
                                    "deadline_s": self.args.drain_deadline_s})
@@ -608,7 +669,7 @@ class Run:
                 self.sleep(self.args.drain_interval_s)
         result = polls[-1]
         if self.drain_fn is None:
-            durable_write(Path(self.run_dir) / "drain.json",
+            durable_write(Path(self.run_dir) / record_name,
                           {"polls": polls,
                            "drained": bool(result.get("drained")),
                            "deadline_s": self.args.drain_deadline_s})
@@ -736,6 +797,20 @@ class Run:
     def rollback_to_prior(self, reason):
         """Automatic rollback after a failed switch, verification or health
         check. Refuses when the queue no longer grants it."""
+        # Admission was released for the health window. Reclaim it before any
+        # refusal can fail-stop, or a disabled rollback would leave the failed
+        # target's triggers running with no marker holding them.
+        if self.hold is None or not getattr(self.hold, "acquired", False):
+            hold = Hold(self.root)
+            try:
+                hold.acquire()
+            except Refused as exc:
+                self.fail_stop(
+                    "cannot reacquire admission for rollback: " + str(exc)
+                    + "; the failed target is still installed and its triggers "
+                    "may be running (after: " + reason[:200] + ")")
+            self.hold = hold
+        require(self.hold.owns(), "hold lost before rollback")
         record = getattr(self, "post_compatibility", None)
         if record is None:
             record = self.controller.compatibility_record(self.effects,
@@ -753,17 +828,19 @@ class Run:
                 + compatibility_reason(compatibility) + "; the hold is retained"
                 + " (after: " + reason[:200] + ")")
         narrate("rolling back to " + self.prior_sha[:12] + ": " + reason)
-        if self.hold is None or not getattr(self.hold, "acquired", False):
-            self.hold = Hold(self.root)
-            self.hold.acquire()
-        require(self.hold.owns(), "hold lost before rollback")
         self.units.stop(sorted(self.triggers))
         observed = {unit: self.units.state(unit) for unit in self.triggers}
         require(all(state in DEAD_STATES for state in observed.values()),
                 "rollback trigger stop did not settle: "
                 + json.dumps(observed, sort_keys=True))
         self.drain_services()
-        self.drain_queue()
+        self.drain_queue(record_name="rollback-drain.json")
+        # If admission was released, a completed health tick legitimately
+        # advanced the queue and heartbeat. Re-measure after the rollback
+        # drain and require the rollback switch to preserve those bytes;
+        # before release, the pre-deploy baseline is still the invariant.
+        baseline = (self.controller.preserved_digests(self.effects)
+                    if self.released else self.preserved)
         self.helper.switch(self.root, self.overlay, self.overlay_raw,
                            self.prior_sha, None)
         self.switched = False
@@ -774,8 +851,8 @@ class Run:
                 "rolled-back config bytes differ from the measured pre-deploy "
                 "bytes; the cq_bin pointer was not restored exactly")
         observed = self.controller.preserved_digests(self.effects)
-        changed = sorted(key for key in self.preserved
-                         if observed.get(key) != self.preserved[key])
+        changed = sorted(key for key in baseline
+                         if observed.get(key) != baseline[key])
         require(not changed,
                 "shared queue state changed during rollback: "
                 + ", ".join(changed))
@@ -915,6 +992,8 @@ class Run:
             if outcome == "rolled_back":
                 return self.document("rolled_back", reason=str(exc)[:400])
             raise Refused(str(exc)) from exc
+        finally:
+            self.lock.release()
 
 
 class HealthFailed(Refused):

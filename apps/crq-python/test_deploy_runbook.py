@@ -248,6 +248,10 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertTrue((Path(run.run_dir) / "health.json").is_file())
         self.assertTrue((Path(run.run_dir) / "candidate-ops/prepare-host.py")
                         .is_file())
+        # The deployment lock is released when the run ends, success included.
+        probe = rb.DeployLock(self.root)
+        probe.acquire()
+        probe.release()
 
     def test_unmerged_target_refuses_before_any_mutation(self):
         self.command("commit", "--allow-empty", "-qm", "unmerged")
@@ -312,6 +316,36 @@ class DeployTests(DeployFixture, unittest.TestCase):
                          ["crq-tick.timer", "crq-watchdog.timer"])
         self.assertEqual(self.record(run)["outcome"], "refused")
 
+    def test_overlapping_deploy_refuses_on_the_deployment_lock(self):
+        blocker = rb.DeployLock(self.root)
+        blocker.acquire()
+        self.addCleanup(blocker.release)
+        run = self.build()
+        with self.assertRaisesRegex(rb.Refused, "another deploy holds"):
+            run.run()
+        self.assertFalse(self.marker().exists())
+        self.assertEqual(self.head(), self.prior)
+        self.assertEqual(self.units.stopped, [])
+
+    def test_historical_target_helper_that_requires_a_tag_refuses_early(self):
+        class OldHelper:
+            def load_overlay(self, path):
+                return host.load_overlay(path)
+
+            def root_check(self, root, overlay):
+                return host.root_check(root, overlay)
+
+            def verify_target(self, root, target, tag):
+                return None
+
+        run = self.build(helper=OldHelper())
+        with self.assertRaisesRegex(rb.Refused,
+                                    "still requires an annotated tag"):
+            run.run()
+        self.assertFalse(self.marker().exists())
+        self.assertEqual(self.head(), self.prior)
+        self.assertEqual(self.units.stopped, [])
+
     def test_health_failure_rolls_back_to_prior_and_pointer(self):
         run = self.build(health=lambda: {"healthy": False,
                                          "reason": "no advancing tick"})
@@ -332,6 +366,54 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertIn("no advancing tick", record["reason"])
         self.assertEqual(record["rollback"]["to"], self.prior)
         self.assertEqual(record["rollback"]["cq_bin"]["pointer"], self.pointer)
+
+    def test_health_failure_after_a_completed_tick_rolls_back(self):
+        # A first health tick legitimately advances the queue and heartbeat.
+        # The rollback must preserve those post-tick bytes, not the pre-deploy
+        # ones, or a healthy tick looks like queue corruption.
+        tick_queue = (b'{"items": [], "starts": [], '
+                      b'"last_tick": "2026-11-14T00:00:00Z"}\n')
+
+        def completed_tick_then_fail():
+            (self.runner / "state/queue.json").write_bytes(tick_queue)
+            heartbeat = (Path(os.environ["XDG_STATE_HOME"])
+                         / "crq/heartbeat.json")
+            heartbeat.parent.mkdir(parents=True, exist_ok=True)
+            heartbeat.write_text('{"at": "2026-11-14T00:00:00Z"}\n')
+            return {"healthy": False, "reason": "second observation missing"}
+
+        run = self.build(health=completed_tick_then_fail)
+        document = run.run()
+        self.assertEqual(document["outcome"], "rolled_back")
+        self.assertEqual(self.head(), self.prior)
+        self.assertFalse(self.marker().exists())
+        self.assertEqual((self.runner / "config.json").read_bytes(),
+                         self.original_config)
+        self.assertEqual((self.runner / "state/queue.json").read_bytes(),
+                         tick_queue)
+        self.assertEqual({unit: self.units.state(unit)
+                          for unit in TRIGGERS}, self.original)
+        self.assertTrue((Path(run.run_dir) / "rollback-drain.json").is_file())
+        self.assertEqual(self.record(run)["outcome"], "rolled_back")
+
+    def test_rollback_disabled_after_release_holds_and_stops(self):
+        # The health window runs with admission released. If the queue loses
+        # rollback permission there and health fails, recovery must reacquire
+        # the hold and stop the failed target before refusing to roll back.
+        def tick_marks_incompatible_then_fails():
+            (self.runner / "state/queue.json").write_text(
+                '{"schema_version": 3, "items": []}\n')
+            return {"healthy": False, "reason": "no advancing tick"}
+
+        run = self.build(health=tick_marks_incompatible_then_fails)
+        with self.assertRaisesRegex(rb.RecoveryRequired,
+                                    "automatic rollback is disabled"):
+            run.run()
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.head(), self.target)
+        self.assertTrue(all(self.units.state(unit) in ("inactive", "failed")
+                            for unit in TRIGGERS))
+        self.assertEqual(self.record(run)["outcome"], "recovery_required")
 
     def test_moved_cq_bin_pointer_is_refused_before_restart(self):
         # The pointer is measured from the live config and the target render
@@ -371,6 +453,7 @@ class DeployTests(DeployFixture, unittest.TestCase):
         helper = mock.Mock(wraps=None)
         helper.load_overlay = host.load_overlay
         helper.root_check = host.root_check
+        helper.verify_target = host.verify_target
         helper.switch = mutating_switch
         run = self.build(helper=helper)
         with self.assertRaises(rb.RecoveryRequired):
@@ -412,6 +495,7 @@ class DeployTests(DeployFixture, unittest.TestCase):
         helper = mock.Mock(wraps=None)
         helper.load_overlay = host.load_overlay
         helper.root_check = host.root_check
+        helper.verify_target = host.verify_target
         helper.switch = dirtying_switch
         run = self.build(helper=helper, health=lambda: {
             "healthy": False, "reason": "no advancing tick"})

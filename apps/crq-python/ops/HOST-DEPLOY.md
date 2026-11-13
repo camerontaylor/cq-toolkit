@@ -443,7 +443,10 @@ python3 -B apps/crq-python/ops/deploy-runbook.py deploy \
 The sequence:
 
 1. **Resolve the target.** Fetch `origin/main` and require a full SHA
-   contained in `refs/remotes/origin/main`. A tag is optional.
+   contained in `refs/remotes/origin/main`. A tag is optional. The target's
+   own `prepare-host.py` must accept a tagless switch; a historical target
+   whose helper still requires a tag is refused before the hold, because its
+   automatic rollback could never pass `None`.
 2. **Measure before touching anything.** Record the live `repair.cq_bin`
    pointer, its entry bytes and mode, and hash `state/queue.json` plus the
    completion heartbeat. Require the controller's rollback-compatibility
@@ -455,7 +458,9 @@ The sequence:
    900 s deadline). An expired drain is a fail-stop: hold retained, nothing
    killed. Once quiescent it re-measures the config, pointer and queue
    digests and re-proves rollback compatibility, so a tick that ran during
-   the hold cannot leave the switch with no fallback.
+   the hold cannot leave the switch with no fallback. A separate advisory
+   lock (`state/deploy.lock`, held from before the first measurement) serializes
+   whole deploys, including the released health window.
 4. **Switch** through the audited helper fence (`prepare-host.switch`:
    root/overlay binding, merged-main ancestry, clean checkout, tick lock,
    atomic config render).
@@ -471,8 +476,11 @@ The sequence:
    drain, switch back to the measured prior SHA, require the live config
    bytes to equal the pre-deploy bytes (the `cq_bin` pointer included) and
    the queue bytes to be unchanged, restart the original triggers, and exit
-   1. If the queue no longer grants rollback or the rollback itself fails,
-   keep the hold and exit 3 (recovery required).
+   1. A failure inside the released health window may follow a completed
+   tick, so rollback re-measures the queue and heartbeat after its own drain
+   and requires the rollback switch to preserve those bytes. If the queue no
+   longer grants rollback or the rollback itself fails, keep the hold and
+   exit 3 (recovery required).
 
 A failure before the switch restarts what this run stopped and releases only
 its own marker (exit 2). A foreign marker is never removed.
