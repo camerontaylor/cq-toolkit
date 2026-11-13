@@ -31,6 +31,18 @@ COOLDOWN_STAMP = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z')
 OPERATOR_RECOVERY_PAUSE = 'operator recovery required (corrupt provider-cooldowns.json)'
 
 
+def narrate(message):
+    """I1: status narration and worker messages go to stderr; stdout stays the
+    machine-readable channel."""
+    print(message, file=sys.stderr, flush=True)
+
+
+def write_result(result):
+    """The one CLI result writer: exactly one JSON artifact on stdout, never
+    a prefixed or narrated line a consumer cannot parse."""
+    print(json.dumps(result), flush=True)
+
+
 @contextlib.contextmanager
 def cooldown_write():
     # Same canonical state/tick.lock used by fetch_clone and the tick. Never
@@ -685,7 +697,7 @@ def triage_phase(config, dry_run=False):
     result = phase(inbox, repo, tip, judge, transport, utc(),
                    maximum=max(0, min(6, int(options.get('max_per_pass', 6)))),
                    seconds=config['repair']['budget']['wall_clock_min'] * 60, dry_run=dry_run)
-    print('backfill triage: ' + json.dumps(result))
+    write_result(result)
     if result.get('stopped') == 'rate-limit' and not dry_run:
         rate_limit_pause(result.get('stop_report', {}), 'backfill-triage')
     return result
@@ -698,18 +710,18 @@ def drain(config):
     worker_limit(config)  # validate before triage or any provider spend
     until = dispatch_paused(config)
     if until:
-        print('repair drain paused: provider rate limit until ' + until)
+        narrate('repair drain paused: provider rate limit until ' + until)
         return
     # Stale checks read origin refs; refresh them first. Fetch only: the worker
     # never pushes or calls the GitHub API. A failed fetch skips this pass.
     error = fetch_clone(config)
     if error is not None:
-        print('repair drain skipped: ' + error[:200])
+        narrate('repair drain skipped: ' + error[:200])
         return
     try:
         triage_phase(config)
     except Exception as exc:  # backfill deferral must not starve existing repair jobs
-        print('backfill triage deferred: ' + str(exc)[:300])
+        narrate('backfill triage deferred: ' + str(exc)[:300])
     if dispatch_paused(config):
         return
     groups = {}  # item -> job ids, items in order of their oldest job
@@ -749,19 +761,19 @@ def drain_item(config, item, job_ids):
             continue
         if status == 'stale':
             mark_stale(job, reason)
-            print('repair ' + job_id + ': stale, not dispatched: ' + reason)
+            narrate('repair ' + job_id + ': stale, not dispatched: ' + reason)
             # It stays in its run's chain; process() returns the terminal result.
             jobs.append(job)
         elif status == 'run':
             jobs.append(job)
         elif reason != 'no queued tick-owned repair run':
-            print('repair ' + job_id + ': skipped: ' + reason)
+            narrate('repair ' + job_id + ': skipped: ' + reason)
     if not any(pending(job['job']) for job in jobs):
         return None
     try:
         return process_item(config, jobs)
     except Exception as exc:  # a failed item must not stop other items
-        print('repair item ' + item + ' failed: ' + str(exc)[:300], flush=True)
+        narrate('repair item ' + item + ' failed: ' + str(exc)[:300])
         return None
 
 
@@ -838,7 +850,7 @@ def reap_completed(active):
                 message = ('provider pause; stopping new admission' if code == 2 else
                            'worker exited with code ' + str(code) if code >= 0 else
                            'worker terminated by signal ' + str(-code))
-                print('repair item ' + item + ': ' + message, flush=True)
+                narrate('repair item ' + item + ': ' + message)
                 failed = True
     return failed, reaped
 
@@ -865,7 +877,7 @@ def process_item(config, jobs):
         try:
             require_canonical_delivery(ROOT, job)
         except ValueError as exc:
-            print('repair ' + job['job'] + ': skipped: ' + str(exc))
+            narrate('repair ' + job['job'] + ': skipped: ' + str(exc))
             continue
         base = bases.get(job['run'], job['repair_base'])
         job['repair_base'] = base
@@ -988,17 +1000,17 @@ def main(argv=None):
     repair = config.get('repair', {})
     authorization = repair.get('spend_authorization')
     if repair.get('enabled') is not True or not isinstance(authorization, str) or not authorization.strip():
-        print('repair dispatch disabled: repair.enabled and a recorded spend_authorization are required')
+        narrate('repair dispatch disabled: repair.enabled and a recorded spend_authorization are required')
         return
     if args.triage_dry_run:
         triage_phase(config, dry_run=True)
         return
     selectors = (args.job, args.source_sha, args.finding_sha256)
     if args.recover_job and (any(selectors) or args.triage_dry_run):
-        print('repair dispatch refused: recovery selects exactly one job')
+        narrate('repair dispatch refused: recovery selects exactly one job')
         return 2
     if any(selectors) and not all(selectors):
-        print('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
+        narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
         return 2
     # Validate all configured paid lanes before any A0 spend. Missing hard
     # budget support is an activation prerequisite, never a soft prompt promise.
@@ -1006,20 +1018,20 @@ def main(argv=None):
     for driver in ('codex', 'paseo'):
         if driver in drivers and (not repair.get(driver + '_budget_launcher') or
                                   not repair.get(driver + '_budget_launcher_verified')):
-            print('repair dispatch disabled: verified ' + driver + ' budget launcher required')
+            narrate('repair dispatch disabled: verified ' + driver + ' budget launcher required')
             return
     if 'paseo' in drivers and (not repair.get('paseo_host') or not repair.get('paseo_read_only_mode')):
-        print('repair dispatch disabled: verified Paseo endpoint and read-only mode required')
+        narrate('repair dispatch disabled: verified Paseo endpoint and read-only mode required')
         return
     # A missing key would otherwise turn every attempt into a FAILED verdict.
     if any(role['driver'] == 'cq' and role['model'].startswith('zai/') for role in repair['roles'].values()) \
             and not os.environ.get('ZAI_API_KEY') and not any(
                 provider_ready(candidate) for role in repair['roles'].values()
                 for candidate in fallback_roles(config, role)[1:]):
-        print('repair dispatch disabled: ZAI_API_KEY is not in the service environment')
+        narrate('repair dispatch disabled: ZAI_API_KEY is not in the service environment')
         return
     if blocked(repair):
-        print('repair dispatch paused: GLM peak blackout')
+        narrate('repair dispatch paused: GLM peak blackout')
         return
     directory = ROOT / 'state/repair'
     directory.mkdir(parents=True, exist_ok=True)
@@ -1031,16 +1043,16 @@ def main(argv=None):
         if args.recover_job:
             until = dispatch_paused(config)
             if until:
-                print('repair recovery paused: provider rate limit until ' + until)
+                narrate('repair recovery paused: provider rate limit until ' + until)
                 return
             error = fetch_clone(config)
             if error:
-                print('repair recovery deferred: ' + error[:200])
+                narrate('repair recovery deferred: ' + error[:200])
                 return
             result = recover_job(config, args.recover_job)
             if result.get('report', {}).get('stop') == 'rate-limit':
                 rate_limit_pause(result['report'], args.recover_job)
-            print('repair recovery: ' + json.dumps(result))
+            write_result(result)
             return
         if all(selectors):
             job = select_job(ROOT, config, args.job, args.source_sha, args.finding_sha256)
