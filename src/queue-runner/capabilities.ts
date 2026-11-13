@@ -9,4 +9,4 @@ export const CAPABILITY_SCHEMA_VERSION = 1;
  * adapter reads it only after the whole artifact inventory and source proof
  * have been verified.
  */
-export const LIVE_UNIT_COMMANDS = ['watchdog'] as const;
+export const LIVE_UNIT_COMMANDS = ['watchdog', 'publish'] as const;

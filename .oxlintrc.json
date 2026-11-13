@@ -154,6 +154,7 @@
         "src/adapters/forge-github/gh.ts",
         "src/adapters/forge-github/ghEffects.ts",
         "src/adapters/forge-github/ratchetEffects.ts",
+        "src/adapters/crq/publishSource.ts",
         "src/adapters/git/ratchetGit.ts",
         "src/driver/acp/index.ts",
         "src/driver/ai-sdk/index.ts",
