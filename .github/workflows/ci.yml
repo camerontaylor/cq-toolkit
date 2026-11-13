@@ -120,9 +120,10 @@ jobs:
       - name: Install ripgrep for harness search tools
         uses: ./.github/actions/install-ripgrep
       # pnpm forwards the flag verbatim; do not add `--` (pnpm 12 forwards a
-      # literal `--`, which vitest reads as end-of-options). Vitest shards the
-      # selection by hashing each test file's path, so the four shards are
-      # disjoint and exhaustive.
+      # literal `--`, which vitest reads as end-of-options). Vitest sha1-hashes
+      # each test file's path, sorts the hashes, then slices contiguously, so
+      # the four shards are disjoint and exhaustive and independent of
+      # directory order (not hash-modulo partitioning).
       - name: Test unit (shard ${{ matrix.shard }}/4)
         run: pnpm run test:unit --shard=${{ matrix.shard }}/4
   static:
