@@ -50,6 +50,10 @@ jobs:
           CHANGE_BASE: ${{ github.event.pull_request.base.sha }}
           CHANGE_HEAD: ${{ github.event.pull_request.head.sha }}
         run: node scripts/ci-select-checks.mjs
+      # Scratch probe (branch scratch/crq-eff-changes-fail only): force the
+      # selection job to fail so the changes-failure fallback is observed.
+      - name: Force changes failure (scratch probe)
+        run: exit 1
   crq-python:
     runs-on: ubuntu-latest
     needs: changes
