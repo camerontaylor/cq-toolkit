@@ -1420,10 +1420,10 @@ class Run:
 def build_arg_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     # Deploy arguments are declared without argparse-level required=True so
-    # the status subcommand parses standalone (the documented gate invocation
-    # passes only --output-dir/--require-released); main() enforces the
-    # deploy set explicitly and exits 2 on a missing one, preserving the
-    # argparse error shape for deploy invocations.
+    # the status subcommand parses standalone: status takes its own required
+    # --output-dir and --root, and HOST-DEPLOY.md's gate line passes both.
+    # main() enforces the deploy set explicitly and exits 2 on a missing one,
+    # preserving the argparse error shape for deploy invocations.
     parser.add_argument("--target-sha", metavar="SHA40")
     parser.add_argument("--target-tag", metavar="TAG")
     parser.add_argument("--candidate-root", type=Path)
@@ -1503,11 +1503,12 @@ def validate_manifest_root(manifest, args):
     manifest carries the absolute deployment root the deploy was approved
     against and this compares it.
 
-    Pure: it reads only the manifest already in hand and the path the caller
-    passed, so execute() calls it immediately after the manifest validation and
-    therefore before the systemctl probe, before every candidate import and
-    before any marker operation. Not an approval: the approved value is
-    compared, and the comparison is the whole mechanism."""
+    It resolves both paths (Path.resolve() follows symlinks, so it does touch
+    the filesystem), but it reads no host state, executes no candidate code and
+    touches no marker, so execute() calls it immediately after the manifest
+    validation and therefore before the systemctl probe, before every
+    candidate import and before any marker operation. Not an approval: the
+    approved value is compared, and the comparison is the whole mechanism."""
     approved_root = (manifest.get("marker") or {}).get("root")
     require(isinstance(approved_root, str) and approved_root
             and Path(approved_root).is_absolute(),
@@ -1551,6 +1552,14 @@ def check_active_trigger_authorization(args):
     # a fabricated `active active running ...` line. Parsed by column now,
     # and a line too short to be a listing refuses rather than being skipped:
     # silence is exactly the failure this guard had.
+    #
+    # Scope, narrowed to what it is: this refuses the exact `active` state.
+    # `activating`, `reloading` and `deactivating` pass it, the candidate
+    # modules import, and Run.split_long_triggers then refuses with "unstable
+    # trigger state in original observation" (its ACTIVE_STATES check) before
+    # any unit is stopped - fail-safe, one layer later. Refusing transient
+    # states here would change behaviour and needs its own decision, so this
+    # guard does not.
     active = []
     for line in listing.stdout.splitlines():
         if not line.strip():
@@ -1745,10 +1754,11 @@ def cmd_status(args, units=None) -> int:
                           "verify the hold is released")
     # Finding (frozen-range review F5): the record holds an absolute host
     # path, so a copied output dir on another host - or under another root -
-    # could report released while this host's marker is elsewhere. With an
-    # explicit --root the recorded path must be that checkout's own marker;
-    # without it the same-host/same-output-dir precondition is documented on
-    # the subcommand rather than assumed silently.
+    # could report released while this host's marker is elsewhere. --root is
+    # required (the parser refuses a status line without it) and every marker
+    # path derives from it, so the recorded path must be that checkout's own
+    # marker. There is no branch in which the same-host/same-output-dir
+    # precondition is assumed instead.
     if marker_refusal is None and recorded_marker is not None:
         expected = marker_path(args.root)
         if Path(recorded_marker).resolve() != expected.resolve():
@@ -1851,9 +1861,11 @@ def main(argv=None, effects_factory=None, status_units=None) -> int:
                              "checkout's own marker")
     # Accepted for compatibility, and redundant by construction: status is
     # always a require-released gate - it refuses any record that does not
-    # say released, so the flag cannot loosen it and is never read. Kept so
-    # existing operator command lines stay valid; the help says so rather
-    # than implying a behaviour switch that does not exist.
+    # say released, so the flag cannot loosen it and is never read. It is
+    # accepted so a line that still spells it out is not rejected for that
+    # alone, but the line must also pass --root: every marker path derives
+    # from it, so a status command line predating the flag is refused rather
+    # than silently bound to whatever checkout wrote the record.
     status.add_argument("--require-released", action="store_true",
                         dest="status_require_released", default=False,
                         help="accepted for compatibility; status always "
@@ -1868,9 +1880,16 @@ def main(argv=None, effects_factory=None, status_units=None) -> int:
         print(json.dumps({"error": {"kind": "argument_error",
                                      "message": str(message)[:400]}},
                          indent=2, sort_keys=True))
-        parser.exit(2, "deploy-runbook: error: " + str(message) + "\n")
+        # Usage first, as argparse itself does: the human half of the boundary
+        # says which command line was wrong and what it accepts.
+        parser.exit(2, parser.format_usage()
+                    + "deploy-runbook: error: " + str(message) + "\n")
 
     parser.error = parser_error
+    # The subparser has its own handler: without this, "status --root" missing
+    # exits 2 with empty stdout while every other argument error emits the
+    # document. Machine mode must not depend on which parser noticed.
+    status.error = parser_error
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     if args.operation == "status":
         return cmd_status(args, units=status_units)
@@ -2001,9 +2020,15 @@ def install_rehearsal_journal(run):
     return original_switch
 
 
-if __name__ == "__main__":
+def run_cli(main_fn=None):
+    """Run the operation and translate terminal exceptions into the envelope.
+
+    One JSON document per failure on stderr and a distinct non-zero status, so
+    a caller can tell a refusal, a timeout, a failed host command and an I/O
+    error apart without parsing prose. ``main_fn`` is the test seam.
+    """
     try:
-        raise SystemExit(main())
+        return main() if main_fn is None else main_fn()
     except Refused as exc:
         print(json.dumps({"error": {"kind": "refused", "message": str(exc)[:400]}},
                          indent=2, sort_keys=True), file=sys.stderr)
@@ -2012,5 +2037,17 @@ if __name__ == "__main__":
         print(json.dumps({"error": {"kind": "timeout", "message": str(exc)[:400]}},
                          indent=2, sort_keys=True), file=sys.stderr)
         raise SystemExit(3) from None
-    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+    except subprocess.CalledProcessError as exc:
+        # A host with no user bus lands here after the candidate imports: it is
+        # the environment refusing, not a refusal this file decided, so it gets
+        # the same envelope shape as a timeout rather than a bare string.
+        print(json.dumps({"error": {"kind": "host_command_failed",
+                                     "message": str(exc)[:400]}},
+                         indent=2, sort_keys=True), file=sys.stderr)
+        raise SystemExit(4) from None
+    except (OSError, ValueError) as exc:
         raise SystemExit(str(exc)[:400]) from None
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_cli())
