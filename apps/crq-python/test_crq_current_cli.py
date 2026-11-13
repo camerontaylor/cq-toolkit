@@ -147,12 +147,75 @@ class CurrentTest(CurrentFixture, unittest.TestCase):
         self.assertIs(seen['budget'], own)
         self.assertTrue(seen['budget'].available())
 
+    def test_reconcile_reports_starved_runs_instead_of_silence(self):
+        """A pass that read nothing must not look like a pass that found nothing.
+
+        The six-hour silence of 2026-11-13 was a starved reconcile that reported
+        nothing because RefreshExhausted was swallowed with the rest. The counts
+        are the difference between 'nothing to do' and 'nothing attempted'.
+        """
+        record = {'fix_pr': {'number': 7}, 'jobs': [], 'verdicts': []}
+        item = {'id': 'item-starved', 'kind': 'repair-run', 'repair_runs': {'run-1': record}}
+
+        class Starved:
+            def pr_info(self, number):
+                raise crq.deferred_refresh.RefreshExhausted('aggregate forge budget exhausted')
+
+        stats = crq.repair_tick.reconcile_fix_prs(Starved(), {'items': [item]})
+        self.assertEqual(1, stats['examined'])
+        self.assertEqual(0, stats['projected'])
+        self.assertEqual(1, stats['starved'])
+        self.assertEqual(0, stats['deferred'])
+        self.assertEqual(1, len(stats['errors']))
+        self.assertIn('RefreshExhausted', stats['errors'][0]['error'])
+        self.assertNotIn('fix_merged', record)
+
+    def test_reconcile_counts_a_projected_run(self):
+        record = {'fix_pr': {'number': 7, 'url': 'u'}, 'jobs': [], 'verdicts': [],
+                  'publication': {'head': 'published'}}
+        item = {'id': 'item-projected', 'kind': 'repair-run', 'repair_runs': {'run-1': record}}
+
+        class Merged:
+            def pr_info(self, number):
+                return {'state': 'MERGED', 'mergeCommit': {'oid': 'merge'}, 'headRefOid': 'actual'}
+
+            def is_ancestor(self, ancestor, descendant):
+                return True
+
+            def git(self, *args):
+                return 'tip'
+
+            def iso(self):
+                return 'now'
+
+        with mock.patch.object(crq.repair_tick, 'canonical_fixed_events', return_value={'check': 1}), \
+             mock.patch.object(crq.repair_tick, 'publish_source_resolution', return_value=None):
+            stats = crq.repair_tick.reconcile_fix_prs(Merged(), {'items': [item]})
+        self.assertEqual(1, stats['examined'])
+        self.assertEqual(1, stats['projected'])
+        self.assertEqual(0, stats['starved'])
+        self.assertEqual('now', record['fix_merged'])
+
+    def test_tick_reports_a_starved_reconcile_pass(self):
+        """The digest line is what makes a starved pass visible without a probe."""
+        stats = {'examined': 3, 'projected': 0, 'starved': 3, 'deferred': 0, 'errors': []}
+        with mock.patch.object(crq, 'fetch'), mock.patch.object(crq, 'write_status'), \
+             mock.patch.object(crq, 'write_heartbeat'), mock.patch.object(crq, 'notify_owner'), \
+             mock.patch.object(crq, 'event') as recorded, \
+             mock.patch.object(crq, 'enroll', return_value=[]), \
+             mock.patch.object(crq, 'discover_merged', return_value=[]), \
+             mock.patch.object(crq.repair_tick, 'reconcile_fix_prs', return_value=stats):
+            log = crq.tick()
+        self.assertTrue(any('reconcile: 3 examined, 0 projected, 3 starved' in line for line in log))
+        self.assertTrue(any(call.args and call.args[0] == 'reconcile_incomplete'
+                            for call in recorded.call_args_list))
+
     def test_selective_start_refuses_and_caps_prevent_capture(self):
         item = self.enroll()
         with mock.patch.object(crq, "fetch"), mock.patch.object(crq, "enroll", return_value=[]), \
              mock.patch.object(crq, "discover_merged", return_value=[]), \
              mock.patch.object(crq, "write_status"), mock.patch.object(crq, "write_heartbeat"), \
-             mock.patch.object(crq.repair_tick, "reconcile_fix_prs"), \
+             mock.patch.object(crq.repair_tick, "reconcile_fix_prs", return_value={}), \
              mock.patch.object(crq, "prepare_current") as planner:
             log = crq.with_lock(crq.tick, False, item["id"])
             self.assertTrue(any("selective start refused" in line for line in log))
