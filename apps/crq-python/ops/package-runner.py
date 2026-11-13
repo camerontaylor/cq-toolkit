@@ -519,8 +519,19 @@ def _first_difference(expected, actual):
     return None
 
 
+def _resolve_node(node):
+    """Resolve an explicit node path against the invocation directory.
+
+    Bare names stay unchanged for PATH lookup; explicit paths are made
+    absolute before any subprocess changes its working directory.
+    """
+    if node is None or os.path.basename(node) == node:
+        return node
+    return str(Path(node).resolve())
+
+
 def smoke_fs_ext(root, node=None):
-    node = node or shutil.which('node')
+    node = _resolve_node(node or shutil.which('node'))
     if not node:
         raise ArtifactError('node executable not found for fs-ext smoke')
     script = r'''
@@ -575,7 +586,7 @@ process.stdout.write(JSON.stringify({
 
 
 def smoke_runner(root, node=None):
-    node = node or shutil.which('node')
+    node = _resolve_node(node or shutil.which('node'))
     if not node:
         raise ArtifactError('node executable not found for runner smoke')
     runner = Path(root) / 'dist/queue-runner/crq.js'
