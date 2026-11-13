@@ -798,6 +798,11 @@ def drain_items(config, groups, order):
             with cooldown_write():
                 if dispatch_paused(config):
                     break
+                # Fork duplicates this parent's stdout/stderr buffers; the child
+                # flushes its copy, so flush here or buffered parent lines (such
+                # as the backfill triage report) are written again per child.
+                sys.stdout.flush()
+                sys.stderr.flush()
                 pid = os.fork()
             if pid == 0:
                 try:
