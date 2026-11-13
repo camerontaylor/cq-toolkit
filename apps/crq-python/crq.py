@@ -3432,12 +3432,12 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         log += deliver_pending_review_refreshes(q)
         repair_tick.backfill(sys.modules[__name__], q)
         repair_tick.archive_legacy(sys.modules[__name__], q)
-        # Reconciliation runs last. The shard budget opened above is closed by
-        # now, and the 24 requests it allowed were spent inside its window by
-        # deferred refresh (limit 20) and merged/push discovery, so reconcile
-        # used to get nothing. It gets its own allowance, and reports what it
-        # managed below, because a starved pass and a quiet pass used to look
-        # identical in the tick log.
+        # Reconciliation runs last and used to get nothing: the 24-request shard
+        # budget is spent before this point by deferred refresh (limit 20) and
+        # merged discovery (page_budget 4, same budget object), and reconcile
+        # swallowed the resulting exhaustion per run. It gets its own allowance
+        # and reports what it managed below, because a starved pass and a quiet
+        # pass used to look identical in the tick log.
         with forge_window(ForgeBudget(requests=80, seconds=60)):
             reconciled = repair_tick.reconcile_fix_prs(sys.modules[__name__], q)
         # Only a counts dict is a report. A caller or test double that returns

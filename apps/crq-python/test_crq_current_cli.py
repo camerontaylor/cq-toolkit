@@ -196,6 +196,17 @@ class CurrentTest(CurrentFixture, unittest.TestCase):
         self.assertEqual(0, stats['starved'])
         self.assertEqual('now', record['fix_merged'])
 
+    def test_receipt_lane_starvation_is_counted_not_swallowed(self):
+        """A starved receipt is not the receipt's fault, and not silence either."""
+        item = {'id': 'receipt-item', 'kind': crq.review_receipt.KIND, 'remediation_state': 'fixed'}
+        with mock.patch.object(crq.repair_tick, 'reconcile_current_fix',
+                               side_effect=crq.deferred_refresh.RefreshExhausted('exhausted')):
+            stats = crq.repair_tick.reconcile_fix_prs(object(), {'items': [item]})
+        self.assertEqual(1, stats['examined'])
+        self.assertEqual(1, stats['starved'])
+        self.assertEqual('fixed', item['remediation_state'])
+        self.assertNotIn('repair_error', item)
+
     def test_tick_reports_a_starved_reconcile_pass(self):
         """The digest line is what makes a starved pass visible without a probe."""
         stats = {'examined': 3, 'projected': 0, 'starved': 3, 'deferred': 0, 'errors': []}

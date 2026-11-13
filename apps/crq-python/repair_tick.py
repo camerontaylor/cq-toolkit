@@ -773,6 +773,10 @@ def reconcile_current_fix(c, item):
         if not info:
             try:
                 info = c.pr_info(pr['number'])
+            except deferred_refresh.RefreshExhausted:
+                # Let the pass count this as starvation rather than skipping the
+                # receipt in silence; nothing here has written state yet.
+                raise
             except Exception:
                 continue
         if (info.get('state') == 'CLOSED' or
@@ -1230,6 +1234,9 @@ def reconcile_fix_prs(c, q):
     and a pass that found nothing were indistinguishable - which is how six
     hours of non-projection passed as healthy ticks on 2026-11-13. The returned
     counts make that difference visible instead of inferable.
+
+    `examined` counts every entry the pass tried, receipt items included, so a
+    pass that only had receipt work to do still reports itself.
     """
     stats = {'examined': 0, 'projected': 0, 'starved': 0, 'deferred': 0, 'errors': []}
 
@@ -1247,8 +1254,13 @@ def reconcile_fix_prs(c, q):
 
     for item in q['items']:
         if item['kind'] == review_receipt.KIND:
+            stats['examined'] += 1
             try:
                 reconcile_current_fix(c, item)
+            except deferred_refresh.RefreshExhausted as exc:
+                # Starvation is not the item's fault: count it and leave the
+                # remediation state alone, unlike a genuine reconcile error.
+                swallowed(exc, item, item.get('run') or '')
             except Exception as exc:
                 item.pop('remediation', None)
                 if item.get('remediation_state') == 'fixed':

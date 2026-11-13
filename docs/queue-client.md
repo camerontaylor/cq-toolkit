@@ -344,7 +344,7 @@ repair outcomes and errors are recorded separately.
 
 Fix-PR polling runs under its own aggregate ForgeBudget (80 requests, 60-second
 window), not the tick's shared one, because it runs last and the shared allowance is
-spent by then; a pass that is starved or blocked reports its counts and raises a
+already spent by deferred refresh and merged discovery; a pass that is starved or blocked reports its counts and raises a
 `reconcile_incomplete` event instead of appearing quiet. This fails
 safe: deferred or unavailable evidence earns no fresh fixed credit. Closed-unmerged PRs
 and merged PRs whose head differs from the prepared publication are terminal
