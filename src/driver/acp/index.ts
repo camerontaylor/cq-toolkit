@@ -264,7 +264,7 @@ import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { messageOf } from '../../shared/messageOf.js';
 import { computeCostUSD } from '../pricing/index.js';
 import { boundedErrorText, redactSensitiveText } from '../error-text.js';
-import { DispatchError } from '../errors.js';
+import { DispatchError, SessionBoundError } from '../errors.js';
 import { assertStrictTokenBudgetSupported } from '../common/strict-budget.js';
 import {
   assertSessionsDirOutsideWorkspace,
@@ -922,11 +922,24 @@ export class AcpDriver implements Driver {
         : await resumedRecordOrThrow(store, sessionRef, boundWorkspace, 'acp driver');
     const workspace = record.workspace;
 
-    await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
+    // Post-creation setup failure = OWNERSHIP evidence: the record exists, so
+    // withReapOnSettle may reap it — but only when the rejection is marked as
+    // owned by this lane (SessionBoundError). A bare rethrow would leave the
+    // fresh record and its transcript on disk.
+    try {
+      await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
+    } catch (error) {
+      throw new SessionBoundError(error, record.sessionId);
+    }
 
     // --- Protocol-level resume handle: the ACP session id a prior run
     // recorded in the workspace sidecar (absent → workspace-only continuation).
-    const resumeAcpSessionId = await readAcpSessionId(sessionsDir, record.sessionId);
+    let resumeAcpSessionId: string | undefined;
+    try {
+      resumeAcpSessionId = await readAcpSessionId(sessionsDir, record.sessionId);
+    } catch (error) {
+      throw new SessionBoundError(error, record.sessionId);
+    }
 
     // --- The one spawn. From here on, run() NEVER throws past the seam.
     const observation = newObservation();
