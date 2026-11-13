@@ -13,7 +13,7 @@ import re
 import sys
 import time
 from zoneinfo import ZoneInfo
-from crq_repair import atomic, command, git, hack_detector, utc, verify
+from crq_repair import DetectorUnavailable, atomic, command, git, hack_detector, utc, verify
 from crq_repair.drivers import cq, codex, paseo
 from crq_repair.retain import retain
 from crq_repair.bounded import drain_job, drain_order, require_canonical_delivery, select_job, source_snapshot
@@ -345,7 +345,7 @@ def process(config, job, wt):
     resume_progress = progress_path.exists() and (not result_path.exists() or progress_path.stat().st_mtime_ns > result_path.stat().st_mtime_ns)
     if resume_progress:
         result = json.loads(progress_path.read_text())
-    if result.get('dispatch_pending') or result.get('pending_judge'):
+    if result.get('dispatch_pending') or result.get('pending_judge') or result.get('pending_mechanical'):
         wt = resume_worktree(result, wt)
     if (result.get('pending_judge') and result.get('worktree')
             and Path(result['worktree']).resolve() != Path(wt).resolve()):
@@ -393,6 +393,17 @@ def process(config, job, wt):
         try:
             if result.get('pending_judge'):
                 reason = result['pending_judge']['fixer_reason']
+            elif result.get('pending_mechanical'):
+                # A committed candidate whose detector verification was
+                # deferred: resume mechanical verification over the preserved
+                # tree without repeating this rung's fixer.
+                pending_mechanical = result['pending_mechanical']
+                reason = pending_mechanical['fixer_reason']
+                result['attempts'][-1]['mechanical'] = mechanical(
+                    config, wt, base, pending_mechanical['commits'], job['job'], attempt_dir)
+                result.pop('pending_mechanical', None)
+                result.update(verdict='FIXED', reason=reason, commits=pending_mechanical['commits'])
+                break
             else:
                 if blocked(repair):
                     result['next_rung'] = rung
@@ -444,7 +455,16 @@ def process(config, job, wt):
                 if report.get('truncated'):
                     raise ValueError('driver failure or truncated context')
                 if report.get('changed'):
-                    attempt['mechanical'] = mechanical(config, wt, base, report.get('commits'), job['job'], attempt_dir)
+                    try:
+                        attempt['mechanical'] = mechanical(config, wt, base, report.get('commits'), job['job'], attempt_dir)
+                    except DetectorUnavailable as exc:
+                        # No verdict was rendered over this committed candidate;
+                        # keep it for a mechanical-only retry (deferred in the
+                        # handler below) instead of spending another fixer rung.
+                        attempt['mechanical'] = {'failure': str(exc)[:1000], 'tests': 'suspended'}
+                        result['pending_mechanical'] = {'rung': rung, 'commits': report['commits'],
+                                                        'fixer_reason': report.get('summary', '')}
+                        raise
                     result.update(verdict='FIXED', reason=report.get('summary', ''), commits=report['commits'])
                     break
                 if git(wt, 'status', '--porcelain') or git(wt, 'rev-parse', 'HEAD') != base:
@@ -536,6 +556,18 @@ def process(config, job, wt):
                 result.pop('pending_judge', None)
                 result['reason'] = 'judge outcome unavailable; needs human'
                 break
+            if isinstance(exc, DetectorUnavailable) and result.get('pending_mechanical'):
+                # The detector outage hit this rung's committed candidate:
+                # preserve it and resume mechanical verification alone instead
+                # of advancing to another fixer rung during the outage.
+                try:
+                    retain(wt, base, attempt_dir)
+                except Exception as capture_error:
+                    result['reason'] = 'worktree retention failed: ' + str(capture_error)[:600]
+                    break
+                result['evidence'] = evidence
+                result['next_rung'] = rung
+                return defer('hack detector unavailable; resume mechanical verification without repeating fixer')
             if not result['attempts'] or result['attempts'][-1]['rung'] != 'A' + str(rung):
                 result['attempts'].append({'rung': 'A' + str(rung), 'driver': role['driver'],
                                            'model': role['model'], 'stop': 'error', 'changed': False})
