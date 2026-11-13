@@ -111,7 +111,13 @@ def hack_detector(cq_bin, diff, cwd):
     if len(diff.encode()) > MAX_HACK_DETECTOR_DIFF_BYTES:
         raise DetectorRejection('hack detector did not pass: repair diff too large to scan (%d bytes)'
                                 % len(diff.encode()))
-    p = command(['node', cq_bin, 'gates.hackDetector', '--diff=' + diff, '--json'], cwd=cwd)
+    try:
+        p = command(['node', cq_bin, 'gates.hackDetector', '--diff=' + diff, '--json'], cwd=cwd)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        # A detector that never completed (timeout, launch failure) is an
+        # outage, not a verdict: translate it so callers take the
+        # DetectorUnavailable path instead of treating it as a job error.
+        raise DetectorUnavailable('hack detector did not complete: ' + str(exc)[:300]) from exc
     try:
         data = json.loads(p.stdout)
     except ValueError:
