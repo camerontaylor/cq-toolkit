@@ -40,7 +40,8 @@ class RecordTransportBase:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.state = Path(self.tmp.name)
-        self.runner = SimpleNamespace(STATE=self.state, iso=lambda: AT)
+        self.runner = SimpleNamespace(STATE=self.state, REPO="camerontaylor/cq-toolkit",
+                                      iso=lambda: AT)
 
 
 def spool_all(runner_ns, values, reports=()):
@@ -68,12 +69,15 @@ def spool_all(runner_ns, values, reports=()):
 class RecordNormalizationTests(unittest.TestCase):
     def test_record_visible_with_reviewer_and_scope_never_vendor_completion(self):
         """A-20: imported agent PASS shows reviewer/scope, no CodeRabbit slot."""
-        value, digest = review_record.normalize_record(submission(), AT)
+        value, digest = review_record.normalize_record(
+            submission(claimed_scope=[{"path": "src/x.py", "blob": "c" * 64,
+                                       "intervals": [[1, 2]]}]), AT)
         ledger.validate(value)
         self.assertFalse(ledger.creditable(value))
         self.assertEqual(value["payload"]["source"]["type"], "agent")
-        self.assertEqual(value["payload"]["source"]["producer"], "helper-agent")
+        self.assertEqual(value["payload"]["source"]["producer"], "agent")
         self.assertFalse(value["payload"]["source"]["authenticated"])
+        self.assertTrue(value["payload"]["source"]["id"].startswith("local:agent-pass-1:"))
         provenance = value["payload"]["provenance"]
         self.assertEqual(provenance["authenticated_submitter"], "queue-client")
         self.assertEqual(provenance["claimed_reviewer"], "helper-agent")
@@ -88,17 +92,28 @@ class RecordNormalizationTests(unittest.TestCase):
         self.assertIsNotNone(provenance["completion_evidence"])
         self.assertIn("APPROVED", provenance["completion_evidence"])
         self.assertEqual(value["payload"]["reviewed_scope"], [])
+        self.assertEqual(value["payload"]["requested_scope"],
+                         [{"path": "src/x.py", "blob": "c" * 64, "intervals": [[1, 2]]}])
         self.assertEqual(value["payload"]["findings"], [])
         artifact = value["payload"]["artifacts"][0]
         self.assertEqual(artifact["kind"], "report")
         self.assertEqual(artifact["sha256"], digest)
 
     def test_incomplete_scope_stays_unknown_and_unverified(self):
+        # No claimed_scope rows: the report carries no scope metadata, so the
+        # coverage stays unknown (spec §12), not claimed.
         value, _ = review_record.normalize_record(submission(head=None, verdict=None), AT)
         ledger.validate(value)
         self.assertEqual(value["payload"]["outcome"], "unverified")
         self.assertFalse(value["payload"]["completion"]["terminal"])
+        self.assertEqual(value["payload"]["provenance"]["scope_confidence"], "unknown")
+
+    def test_claimed_scope_rows_report_claimed_confidence(self):
+        value, _ = review_record.normalize_record(
+            submission(claimed_scope=[{"path": "src/x.py", "blob": "c" * 64,
+                                       "intervals": [[1, 2]]}]), AT)
         self.assertEqual(value["payload"]["provenance"]["scope_confidence"], "claimed")
+        self.assertFalse(value["payload"]["completion"]["scope_verified"])
 
     def test_completed_claim_requires_completion_evidence(self):
         # A claimed verdict is completion evidence in provenance; the outcome
@@ -198,6 +213,34 @@ class ImportIdempotencyTests(unittest.TestCase):
         self.assertEqual(len(retained), 2)
         self.assertIn(retained_before[0]["id"], {r["id"] for r in retained})
 
+    def test_correction_and_original_coexist_in_ledger_sequence(self):
+        # The digest-discriminated source identity lets a correction and its
+        # original coexist: validate_sequence (the publication gate) accepts
+        # both, so the correction flow cannot poison the shared ledger.
+        original, _ = review_record.import_record(submission(), AT, [])
+        self.spool(original)
+        retained_before = self.retained()
+        corrected = submission(report_bytes=b"corrected report body",
+                               supersedes=retained_before[0]["id"])
+        events, action = review_record.import_record(corrected, AT, retained_before)
+        self.assertTrue(action.startswith("record:"))
+        sequence = [retained_before[0], events[0]]
+        ledger.validate_sequence(sequence)
+        self.assertNotEqual(retained_before[0]["source_key"], events[0]["source_key"])
+
+    def test_repeated_quarantine_is_one_sequence_event(self):
+        # The same malformed import twice yields one quarantine event per
+        # (digest, reason): the sequence stays valid, the ledger is not
+        # flooded by retries of a bad import.
+        first_events, first_action = review_record.import_record(
+            submission(producer="coderabbit-cli"), AT, [])
+        second_events, second_action = review_record.import_record(
+            submission(producer="coderabbit-cli"), AT, [])
+        self.assertTrue(first_action.startswith("quarantined:"))
+        self.assertTrue(second_action.startswith("quarantined:"))
+        ledger.validate_sequence(first_events + second_events)
+        self.assertEqual(first_events[0]["id"], second_events[0]["id"])
+
     def test_superseding_unknown_record_is_refused_without_event(self):
         original, _ = review_record.import_record(submission(), AT, [])
         events, action = review_record.import_record(
@@ -258,7 +301,7 @@ class HistoricalAdapterTests(unittest.TestCase):
     def test_a22_partial_receipt_keeps_digest_and_disclaims_coverage(self):
         record = self.a22_receipt()
         ledger.validate(record)
-        view = review_record.historical_receipt(record)
+        view = review_record.historical_view(record)
         self.assertEqual(view["digest"], record["id"])
         self.assertEqual(view["producer"], "crq-runner-app")
         self.assertFalse(view["full_branch_coverage"])
@@ -268,7 +311,69 @@ class HistoricalAdapterTests(unittest.TestCase):
     def test_adapter_refuses_report_records(self):
         value, _ = review_record.normalize_record(submission(), AT)
         with self.assertRaises(review_record.RecordRefused):
-            review_record.historical_receipt(value)
+            review_record.historical_view(value)
+
+
+class CollectorSeamTests(unittest.TestCase):
+    """The GitHub collector seam (backfill_history.import_source) feeds S3b."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = ledger.ArtifactStore(Path(self.tmp.name) / "artifacts")
+
+    def test_github_agent_review_imports_as_uncredited_record(self):
+        import backfill_history
+        review = {"id": "PRR_kw_1", "user": {"login": "helper-agent", "type": "User"},
+                  "body": "Looks good from the agent lane.", "state": "APPROVED",
+                  "commit_id": "a" * 40, "submitted_at": "2026-11-01T00:00:00Z"}
+        envelope = {"review": {"id": "PRR_kw_1", "authorLogin": "helper-agent",
+                               "authorType": "User", "body": review["body"],
+                               "state": "APPROVED", "commitOid": "a" * 40,
+                               "submittedAt": review["submitted_at"]},
+                    "owner_repo": ledger.REPO, "pr": 7}
+        raw = json.dumps(review, sort_keys=True).encode()
+        events, disposition = backfill_history.import_source(
+            None, self.store, "github-agent-review", "PRR_kw_1", raw, envelope, AT, [])
+        self.assertEqual(disposition["payload"]["result"], "unverified")
+        record = next(v for v in events if v["event_type"] == "review")
+        ledger.validate(record)
+        self.assertFalse(ledger.creditable(record))
+        self.assertEqual(record["payload"]["source"]["type"], "manual")
+        self.assertEqual(record["payload"]["provenance"]["claimed_reviewer"], "helper-agent")
+        self.assertEqual(record["payload"]["provenance"]["forge_evidence"],
+                         review_record.PROVENANCE_FORGE_EVIDENCE)
+        self.assertEqual(record["payload"]["provenance"]["scope_confidence"], "unknown")
+        # Re-importing the same source is one idempotent disposition.
+        again_events, again = backfill_history.import_source(
+            None, self.store, "github-agent-review", "PRR_kw_1", raw, envelope, AT, events)
+        self.assertEqual(again_events, [])
+        self.assertEqual(again["source_key"], disposition["source_key"])
+
+    def test_collector_routes_human_reviews_to_github_agent_review(self):
+        import backfill_history
+        reviews = [
+            {"id": 1, "node_id": "PRR_b", "user": {"login": "coderabbitai[bot]", "type": "Bot"},
+             "body": "vendor", "state": "COMMENTED", "commit_id": None, "submitted_at": None},
+            {"id": 2, "node_id": "PRR_c", "user": {"login": "helper-agent", "type": "User"},
+             "body": "agent pass", "state": "APPROVED", "commit_id": "a" * 40,
+             "submitted_at": "2026-11-01T00:00:00Z"},
+        ]
+        sources = backfill_history.collect_sources(
+            {}, Path(self.tmp.name), self.store,
+            github=lambda: iter([{"raw": json.dumps(r, sort_keys=True).encode(),
+                                  "class": "github-agent-review",
+                                  "metadata": {"review": {"id": r["node_id"],
+                                               "authorLogin": r["user"]["login"],
+                                               "authorType": r["user"]["type"],
+                                               "body": r["body"], "state": r["state"],
+                                               "commitOid": r["commit_id"],
+                                               "submittedAt": r["submitted_at"]},
+                                               "owner_repo": ledger.REPO, "pr": 1}}
+                                 for r in reviews if r["user"]["login"] != "coderabbitai[bot]"]))
+        classes = {s["class"] for s in sources["sources"]}
+        self.assertIn("github-agent-review", classes)
+        self.assertIn("github-agent-review", sources["acquisition"]["source_classes"])
 
 
 class UnifiedSummaryFixtureTests(unittest.TestCase):
@@ -317,12 +422,13 @@ class UnifiedSummaryFixtureTests(unittest.TestCase):
 
 
 class TransportRecordTests(RecordTransportBase, unittest.TestCase):
+    PRINCIPAL = "queue-client"
+
     def call(self, req):
-        return transport.record_import({}, req, self.runner)
+        return transport.record_import({}, req, self.PRINCIPAL, self.runner)
 
     def test_record_duplicate_and_quarantine_dispositions(self):
         req = dict(v=1, op="record", producer="agent", source_id="agent-1",
-                   authenticated_submitter="queue-client",
                    forge_evidence="off-forge-import",
                    report=dict(encoding="utf8", data=REPORT.decode()))
         result = self.call(req)
@@ -335,24 +441,50 @@ class TransportRecordTests(RecordTransportBase, unittest.TestCase):
         self.assertEqual(again["action"], "duplicate")
         self.assertEqual(again["duplicate_of"], result["record_digest"])
         bad = dict(v=1, op="record", producer="agent", source_id="bad-1",
-                   report=dict(encoding="utf8", data="missing submitter"))
+                   report=dict(encoding="utf8", data="x" * (257 * 1024)))
         quarantined = self.call(bad)
         operation.validate("response", quarantined)
         self.assertEqual(quarantined["action"], "quarantined")
-        self.assertIn("authenticated submitter", quarantined["reason"])
+        self.assertIn("256 KiB", quarantined["reason"])
+
+    def test_authenticated_submitter_is_the_trusted_principal(self):
+        # The client cannot choose the authenticated submitter; provenance
+        # records the server-authenticated principal and the claimed reviewer
+        # stays client metadata that earns no credit.
+        req = dict(v=1, op="record", producer="agent", source_id="principal-1",
+                   authenticated_submitter="spoofed-identity",
+                   reviewer="helper-agent",
+                   forge_evidence="off-forge-import",
+                   report=dict(encoding="utf8", data=REPORT.decode()))
+        result = self.call(req)
+        self.assertEqual(result["action"], "recorded")
+        record = json.loads(
+            (self.state / "record-outbox" / "pending" /
+             (result["record_digest"] + ".json")).read_text())
+        provenance = record["payload"]["provenance"]
+        self.assertEqual(provenance["authenticated_submitter"], self.PRINCIPAL)
+        self.assertEqual(provenance["claimed_reviewer"], "helper-agent")
+
+    def test_unknown_repo_is_refused_without_an_event(self):
+        req = dict(v=1, op="record", producer="agent", source_id="elsewhere-1",
+                   repo="other-org/other-repo",
+                   report=dict(encoding="utf8", data=REPORT.decode()))
+        result = self.call(req)
+        operation.validate("response", result)
+        self.assertEqual(result["action"], "refused")
+        self.assertEqual(result["reason"], "unsupported-repo")
 
     def test_one_bad_import_does_not_stop_scheduling(self):
         self.call(dict(v=1, op="record", producer="agent", source_id="broken",
                        report=dict(encoding="utf8", data="x")))
         result = self.call(dict(v=1, op="record", producer="manual",
-                                source_id="after-bad", authenticated_submitter="op",
+                                source_id="after-bad",
                                 report=dict(encoding="utf8", data="a clean report")))
         operation.validate("response", result)
         self.assertEqual(result["action"], "recorded")
 
     def test_retained_report_bytes_are_verified_before_spool(self):
         req = dict(v=1, op="record", producer="manual", source_id="retained-1",
-                   authenticated_submitter="op",
                    report=dict(encoding="utf8", data="retained body"))
         result = self.call(req)
         reference = json.loads(
@@ -361,6 +493,62 @@ class TransportRecordTests(RecordTransportBase, unittest.TestCase):
         store = ledger.ArtifactStore(self.state / "record-artifacts")
         store.verify(reference["payload"]["artifacts"][0])
         self.assertEqual(reference["payload"]["artifacts"][0]["kind"], "report")
+
+
+class PublicationWireTests(RecordTransportBase, unittest.TestCase):
+    """With a durable rollout configured, imports reach the publication outbox.
+
+    The rollout record satisfies backfill_runtime.settings() prerequisites;
+    publication itself is only requested (backfill_runtime.publish), never
+    executed: no Git push, no network.
+    """
+
+    def setUp(self):
+        super().setUp()
+        (self.state / "backfill-rollout.json").write_text(json.dumps({
+            "operational_ruling": "ruling-on-file",
+            "no_live_run_verification": "verified",
+            "owner_branch_ruleset_evidence": "ruleset-evidence",
+            "durable_artifact_root": str(self.state / "record-artifacts"),
+            "runner_identity": "crq-runner-app",
+            "publisher_spool": {"ssh_alias": "publisher@spool.invalid",
+                                "key": "spool-key"},
+        }))
+
+    def call(self, req):
+        return transport.record_import({}, req, "queue-client", self.runner)
+
+    def test_record_reaches_publication_outbox_and_requests_publication(self):
+        req = dict(v=1, op="record", producer="manual", source_id="pub-1",
+                   report=dict(encoding="utf8", data="durable import"))
+        result = self.call(req)
+        operation.validate("response", result)
+        self.assertEqual(result["action"], "recorded")
+        self.assertEqual(result["publication"], "spooled")
+        # The record event sits in the publication worker's outbox pending
+        # side, the same spool backfill_publisher drains.
+        pending = self.state / "backfill" / "publication" / "pending"
+        spooled = json.loads((pending / (result["record_digest"] + ".json")).read_text())
+        self.assertEqual(spooled["event_type"], "review")
+        # The artifact reference points into the configured durable store.
+        store = ledger.ArtifactStore(self.state / "record-artifacts")
+        store.verify(spooled["payload"]["artifacts"][0])
+        # The durable publication request marker was queued for the worker.
+        self.assertTrue((self.state / "backfill" / "publish-request.json").is_file())
+        # A repeat import is a duplicate against the publication-outbox copy.
+        again = self.call(req)
+        self.assertEqual(again["action"], "duplicate")
+        self.assertEqual(again["duplicate_of"], result["record_digest"])
+
+    def test_quarantine_reaches_publication_outbox_without_request_when_disabled(self):
+        # Without a rollout, the disposition answers honestly: events stay in
+        # the legacy local spool and the response says publication disabled.
+        (self.state / "backfill-rollout.json").unlink()
+        req = dict(v=1, op="record", producer="agent", source_id="local-1",
+                   report=dict(encoding="utf8", data="x"))
+        result = self.call(req)
+        self.assertEqual(result["publication"], "disabled")
+        self.assertFalse((self.state / "backfill" / "publish-request.json").exists())
 
 
 class CapabilityTests(unittest.TestCase):

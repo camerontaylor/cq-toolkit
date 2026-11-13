@@ -125,10 +125,15 @@ class HistoryTest(unittest.TestCase):
                 self.f.store.verify(ref)
 
     def test_all_three_classes_report_gaps_and_github_requires_exact_authenticated_scope(self):
-        catalog = [{"class": kind, "id": str(i), "raw": b"{}", "envelope": {}} for i, kind in enumerate(history.CLASSES)]
+        catalog = [{"class": kind, "id": str(i), "raw": b"{}", "envelope": {"review": {"id": str(i), "body": "x", "authorLogin": "u"}}}
+                   for i, kind in enumerate(history.CLASSES)]
         events, report = history.import_catalog(self.f.repo, self.f.store, catalog, AT, [])
-        self.assertEqual(set(report), set(history.CLASSES)); self.assertEqual(len(events), 3)
+        self.assertEqual(set(report), set(history.CLASSES)); self.assertEqual(len(events), 5)
+        # The github-agent-review class also emits its report record (the
+        # body "x" row normalizes), so the sequence carries 2 review events
+        # and 3 import results; none of them earns credit.
         self.assertTrue(all(r["sources"] == 1 for r in report.values()))
+        self.assertFalse(any(ledger.creditable(v) for v in events))
         envelope = self.envelope(); envelope["producer"] = "coderabbitai[bot]"
         raw = ledger.canonical({"id": 123, "commit_id": self.value["payload"]["head"], "user": {"login": "coderabbitai[bot]", "type": "Bot"}})
         _, gap = history.import_source(self.f.repo, self.f.store, "github-app-review", "123", raw, envelope, AT, [])
@@ -177,13 +182,15 @@ class HistoryTest(unittest.TestCase):
                  "promotion_audit": {"records": [{"at": AT, "head": self.t}]}}
         prs = ledger.canonical([[{"number": 1, "merged_at": AT}], [{"number": 2, "merged_at": None}]])
         api = {"id": 123, "commit_id": self.t, "submitted_at": AT, "user": {"login": "coderabbitai[bot]", "type": "Bot"}}
-        reviews = ledger.canonical([[], [api]])
+        human = {"id": 9, "node_id": "PRR_h", "commit_id": self.t, "submitted_at": AT,
+                 "body": "agent lane pass", "state": "COMMENTED",
+                 "user": {"login": "helper-agent", "type": "User"}}
+        reviews = ledger.canonical([[], [api, human]])
         with mock.patch.object(history.subprocess, "run", side_effect=[SimpleNamespace(stdout=prs), SimpleNamespace(stdout=reviews)]) as fetch:
             result = history.collect_sources(queue, state, self.f.store, github=lambda: history.github_sources(self.f.store))
         self.assertEqual(fetch.call_count, 2)
         self.assertTrue(all("--paginate" in call.args[0] and "--slurp" in call.args[0] for call in fetch.call_args_list))
         self.assertEqual({s["class"] for s in result["sources"]}, set(history.CLASSES))
-        self.assertNotIn("promotion-range", {s["class"] for s in result["sources"]})
         catalog = []
         for source in result["sources"]:
             self.f.store.verify(source["raw_artifact"])
