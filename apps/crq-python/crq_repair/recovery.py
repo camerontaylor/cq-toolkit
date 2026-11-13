@@ -120,6 +120,11 @@ def recover(root, config, job_id, scan, judge, prepare):
                   and saved.get('reason') == ANCHOR_REFUSAL
                   and isinstance(saved.get('report'), dict)
                   and saved['report'].get('stop') == 'ok' and saved['report'].get('verdict') == 'valid')
+        # A blackout deferral made no model call and reuses no judgment, so a
+        # default-branch tip that moved during the pause resumes by rebuilding
+        # current-source evidence in the deferred path below; every other
+        # retained state must still match its recorded binding exactly.
+        paused = saved.get('state') == 'deferred' and blackout_deferral(saved.get('report'))
         if replay and isinstance(old_binding, dict):
             old_tip = check_sha(old_binding.get('source_sha'))
             try:
@@ -134,7 +139,7 @@ def recover(root, config, job_id, scan, judge, prepare):
             ancestor = command(['git', 'merge-base', '--is-ancestor', old_tip, tip], cwd=config['clone'])
             if not (same_binding and old_context == expected_context and same_contract and ancestor.returncode == 0):
                 raise ValueError('recovery evidence or source changed; retained recovery requires inspection')
-        elif old_binding != binding:
+        elif not paused and old_binding != binding:
             raise ValueError('recovery evidence or source changed; retained recovery requires inspection')
         if saved.get('state') == 'dispatching':
             return {'state': 'unknown', 'reason': 'recovery judge outcome unavailable; retained for inspection'}
