@@ -44,7 +44,7 @@ def thread(severity='major', resolved=False, own=True):
     if own:
         body += '<!-- crq-review-thread run=old head=' + 'c' * 40 + ' finding=' + 'd' * 64 + ' -->'
     return {'id': 'thread1', 'isResolved': resolved,
-            'comments': {'nodes': [{'body': body, 'author': {'login': 'cq-review'}}]}}
+            'comments': {'nodes': [{'body': body, 'author': {'login': 'cq-review', '__typename': 'Bot'}}]}}
 
 
 class ReceiptTest(unittest.TestCase):
@@ -114,6 +114,13 @@ class ReceiptTest(unittest.TestCase):
             gh = ReceiptGh(threads=[{'nodes': [root], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}])
             self.deliver(gh=gh)
             self.assertIn(expected + ' for', gh.posts()[0]['body'])
+
+    def test_bare_cq_review_user_is_not_the_graphql_app(self):
+        root = thread()
+        root['comments']['nodes'][0]['author'] = {'login': 'cq-review', '__typename': 'User'}
+        gh = ReceiptGh(threads=[{'nodes': [root], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}])
+        self.deliver(gh=gh)
+        self.assertIn('PASS for', gh.posts()[0]['body'])
 
     def test_foreign_marked_threads_cannot_hold_pass(self):
         for legacy in (False, True):
@@ -378,6 +385,60 @@ class RefreshTest(unittest.TestCase):
                 self.assertEqual(receipt.refresh(prf, REPO, 7, self.meta,
                     gh=ReceiptGh(pages=[[original, earlier]]), login='cq-review[bot]')['state'], 'created')
 
+    def test_expected_inline_majors_require_visible_resolved_owned_threads(self):
+        first = ReceiptGh()
+        self.deliver([ANCHORED, {**ANCHORED, 'title': 'Second major'}], first)
+        original = {'id': 77, 'body': first.posts()[0]['body'], 'user': {'login': 'cq-review[bot]'},
+                    'submitted_at': '2026-01-01T00:00:01Z'}
+        roots = [{'id': str(n), 'isResolved': True, 'comments': {'nodes': [
+            {'body': comment['body'], 'author': {'login': 'cq-review', '__typename': 'Bot'}}]}}
+                 for n, comment in enumerate(first.posts()[0]['comments'])]
+        for visible in ([], roots[:1]):
+            with self.subTest(visible=len(visible)):
+                gh = ReceiptGh(pages=[[original]], threads=[{'nodes': visible,
+                              'pageInfo': {'hasNextPage': False, 'endCursor': None}}])
+                with self.assertRaises(receipt.ThreadsNotVisible):
+                    receipt.refresh(prf, REPO, 7, self.meta, gh=gh, login='cq-review[bot]')
+                self.assertEqual(gh.posts(), [])
+        incomplete = ReceiptGh(pages=[[original]], threads=[{'nodes': roots[:1],
+                    'pageInfo': {'hasNextPage': True, 'endCursor': None}}])
+        with self.assertRaises(receipt.ThreadsNotVisible):
+            receipt.refresh(prf, REPO, 7, self.meta, gh=incomplete, login='cq-review[bot]')
+        self.assertEqual(incomplete.posts(), [])
+        # All visible but one open is still ITERATE; edited severity cannot erase the expected major.
+        roots[0]['isResolved'] = False
+        roots[0]['comments']['nodes'][0]['body'] = roots[0]['comments']['nodes'][0]['body'].replace('[major]', '[minor]')
+        gh = ReceiptGh(pages=[[original]], threads=[{'nodes': roots, 'pageInfo': {'hasNextPage': False, 'endCursor': None}}])
+        self.assertEqual(receipt.refresh(prf, REPO, 7, self.meta, gh=gh, login='cq-review[bot]')['state'], 'pending-threads')
+        self.assertEqual(gh.posts(), [])
+        roots[0]['isResolved'] = True
+        gh = ReceiptGh(pages=[[original]], threads=[{'nodes': roots[:1], 'pageInfo': {'hasNextPage': True, 'endCursor': 'p2'}},
+            {'nodes': roots[1:], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}])
+        self.assertEqual(receipt.refresh(prf, REPO, 7, self.meta, gh=gh, login='cq-review[bot]')['state'], 'created')
+        # A later clean scan must also wait for earlier receipts' expected majors before initial PASS.
+        self.meta = {**self.meta, 'run_id': 'later-clean'}
+        (self.root / 'meta.json').write_text(json.dumps({**self.meta, 'range_policy': 'full-range-once-v1'}))
+        missing = ReceiptGh(pages=[[original]])
+        with self.assertRaises(receipt.ThreadsNotVisible):
+            self.deliver(gh=missing)
+        self.assertEqual(missing.posts(), [])
+        visible = ReceiptGh(pages=[[original]], threads=[{'nodes': roots, 'pageInfo': {'hasNextPage': False, 'endCursor': None}}])
+        self.deliver(gh=visible)
+        self.assertIn('PASS for', visible.posts()[0]['body'])
+        later = {'id': 78, 'body': visible.posts()[0]['body'].replace('PASS for', 'ITERATE for'),
+                 'user': {'login': 'cq-review[bot]'}, 'submitted_at': '2026-01-01T00:00:02Z'}
+        for pages in ([[later], [original]], [[original, later]]):
+            gh = ReceiptGh(pages=pages)
+            with self.assertRaises(receipt.ThreadsNotVisible):
+                receipt.refresh(prf, REPO, 7, self.meta, gh=gh, login='cq-review[bot]')
+            self.assertEqual(gh.posts(), [])
+        foreign = [{**root, 'comments': {'nodes': [{**root['comments']['nodes'][0],
+                    'author': {'login': 'unrelated', '__typename': 'User'}}]}} for root in roots]
+        gh = ReceiptGh(pages=[[original, later]], threads=[{'nodes': foreign, 'pageInfo': {'hasNextPage': False, 'endCursor': None}}])
+        with self.assertRaises(receipt.ThreadsNotVisible):
+            receipt.refresh(prf, REPO, 7, self.meta, gh=gh, login='cq-review[bot]')
+        self.assertEqual(gh.posts(), [])
+
     def test_unresolved_major_and_incomplete_scope_do_not_refresh(self):
         original = self.original()
         gh = ReceiptGh(pages=[[original]], threads=[{'nodes': [thread()], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}])
@@ -477,6 +538,27 @@ class RefreshDeliveryTest(unittest.TestCase):
             for prefix in ('pr_review', 'clean_review'):
                 self.assertEqual(item[prefix + '_refresh']['state'], 'abandoned' if failure else 'skipped-head')
                 self.assertEqual(item[prefix + '_refresh']['attempts'], expected if failure else 0)
+
+    def test_visibility_wait_keeps_both_delivery_channels_pending_without_exhausting_attempts(self):
+        item = {'id': 'pr7', 'kind': 'open', 'state': 'done'}
+        for prefix in ('pr_review', 'clean_review'):
+            item[prefix + '_request'] = {**META, 'pr': 7, 'ndjson': '/runs/r/review.ndjson'}
+            item[prefix + '_pending'] = True
+        with mock.patch.object(prf, 'deliver', side_effect=receipt.ThreadsNotVisible('expected thread missing')), \
+             mock.patch.object(crq, 'event'):
+            for _ in range(crq.PR_REVIEW_MAX_ATTEMPTS + 2):
+                crq._deliver_pr_review(item)
+                crq.deliver_pending_clean_reviews({'items': [item]})
+        for prefix in ('pr_review', 'clean_review'):
+            self.assertTrue(item[prefix + '_pending'])
+            self.assertEqual(item[prefix + '_attempts'], 0)
+            item[prefix] = {'state': 'created', 'verdict': 'ITERATE', 'whole_pr_scan': True}
+        with mock.patch.object(receipt, 'refresh', side_effect=receipt.ThreadsNotVisible('expected thread missing')):
+            for _ in range(crq.PR_REVIEW_MAX_ATTEMPTS + 2):
+                crq.deliver_pending_review_refreshes({'items': [item]})
+        for prefix in ('pr_review', 'clean_review'):
+            self.assertEqual(item[prefix + '_refresh']['state'], 'waiting-threads')
+            self.assertEqual(item[prefix + '_refresh']['attempts'], 0)
 
     def test_422_delivery_keeps_findings_debt_for_retry_without_cleaning_it(self):
         item = {'id': 'pr7', 'kind': 'open', 'pr_review_pending': True,

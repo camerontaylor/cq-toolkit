@@ -37,15 +37,55 @@ def reviews(prf, gh, repo, pr):
     return rows
 
 
+INLINE_PREFIX = '<!-- crq-review-inline-major '
+THREAD = re.compile(r'\n<!-- crq-review-thread run=([A-Za-z0-9._-]+) head=([0-9a-f]{40}) finding=([0-9a-f]{64}) -->$')
+
+
+class ThreadsNotVisible(RuntimeError):
+    """Expected receipt evidence has no visible thread yet; keep delivery pending."""
+
+
+def owned_receipt(row, login):
+    author, body = row.get('user', {}).get('login') or '', row['body']
+    return author in {login, 'cq-review[bot]'} or (
+        'Unattested: App identity unavailable; posted with the host account.' in body
+        and author and not author.endswith('[bot]')
+        and row.get('author_association') in {'OWNER', 'MEMBER', 'COLLABORATOR'})
+
+
+def expected_inline_major(rows, pr, head, login):
+    """Read immutable per-scan finding ids; absence of visibility is never resolution."""
+    expected = set()
+    for row in rows:
+        if not owned_receipt(row, login):
+            continue
+        body = row['body']
+        for match in re.finditer(re.escape(PREFIX) + r'(.*?) -->', body):
+            try:
+                bound = json.loads(match[1])
+                if bound.get('pr') != pr or bound.get('head') != head:
+                    continue
+                proof = re.search(re.escape(INLINE_PREFIX) + r'(.*?) -->', body)
+                if proof is None:
+                    raise ThreadsNotVisible('CRQ inline-major receipt proof unavailable; retry')
+                value = json.loads(proof[1])
+                if (value['run_id'] != bound['run_id'] or value['head'] != head
+                        or not isinstance(value['findings'], list)
+                        or any(not isinstance(key, str) or not re.fullmatch(r'[0-9a-f]{64}', key)
+                               for key in value['findings'])):
+                    raise ValueError()
+                expected.update((bound['run_id'], head, key) for key in value['findings'])
+            except (ValueError, KeyError, TypeError, AttributeError):
+                raise ValueError('invalid CRQ inline-major receipt proof') from None
+    return expected
+
+
 def body_major_at_head(rows, pr, head, login):
     """Only post-change CRQ receipt evidence holds a head across later scans."""
     for row in rows:
-        author, body = row.get('user', {}).get('login') or '', row['body']
-        fallback = ('Unattested: App identity unavailable; posted with the host account.' in body
-                    and author and not author.endswith('[bot]')
-                    and row.get('author_association') in {'OWNER', 'MEMBER', 'COLLABORATOR'})
-        if author not in {login, 'cq-review[bot]'} and not fallback:
+        if not owned_receipt(row, login):
             continue
+        body = row['body']
         for match in re.finditer(re.escape(PREFIX) + r'(.*?) -->', body):
             try:
                 found = json.loads(match[1])
@@ -91,15 +131,16 @@ def prior_receipt(prf, gh, repo, pr, meta, login):
     return None
 
 
-def open_major(prf, gh, repo, pr, login):
+def open_major(prf, gh, repo, pr, login, expected=None):
     """Paginate own namespaced threads; never resolve from absence in this run."""
     owner, name = repo.split('/')
     cursor = None
     seen = set()
+    visible, has_open = set(), False
     while True:
         query = '''query($owner:String!,$name:String!,$pr:Int!,$cursor:String){
           repository(owner:$owner,name:$name){pullRequest(number:$pr){reviewThreads(first:100,after:$cursor){
-            pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{body author{login} pullRequestReview{body authorAssociation author{login}}}}}
+            pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{body author{login __typename} pullRequestReview{body authorAssociation author{login __typename}}}}}
           }}}}'''
         args = ['gh', 'api', 'graphql', '-f', 'query=' + query, '-f', 'owner=' + owner,
                 '-f', 'name=' + name, '-F', 'pr=' + str(pr)]
@@ -124,27 +165,40 @@ def open_major(prf, gh, repo, pr, login):
                 # cq-review-post summaries have a different explicit label.
                 legacy = (review_body.startswith('<!-- crq-findings run=') and
                           '### crq findings (CodeRabbit CLI, local run ' in review_body)
-                trusted = {login, 'cq-review[bot]', 'cq-review'}
+                trusted = {login, 'cq-review[bot]'}
+                # GitHub GraphQL returns the App as Bot/cq-review (verified on PR1690);
+                # REST uses cq-review[bot]. A bare User/cq-review is not the App.
                 author = (first[0].get('author') or {}).get('login') or ''
                 review_author = (review.get('author') or {}).get('login')
                 fallback = (author and not author.endswith('[bot]') and author == review_author
                             and review.get('authorAssociation') in {'OWNER', 'MEMBER', 'COLLABORATOR'}
                             and 'Unattested: App identity unavailable; posted with the host account.' in review_body)
-                authored = author in trusted or fallback
-                legacy = legacy and (review_author in trusted or fallback)
-                own = authored and (bool(re.search(r'\n<!-- crq-review-thread run=[A-Za-z0-9._-]+ head=[0-9a-f]{40} finding=[0-9a-f]{64} -->$', body)) or legacy)
+                root_app = author == 'cq-review' and (first[0].get('author') or {}).get('__typename') == 'Bot'
+                review_app = review_author == 'cq-review' and (review.get('author') or {}).get('__typename') == 'Bot'
+                authored = author in trusted or root_app or fallback
+                legacy = legacy and (review_author in trusted or review_app or fallback)
+                marker = THREAD.search(body)
+                own = authored and (marker is not None or legacy)
                 if type(thread['isResolved']) is not bool:
                     raise ValueError()
+                if own and marker:
+                    visible.add(marker.groups())
+                    if marker.groups() in (expected or set()) and not thread['isResolved']:
+                        has_open = True
                 if own and not thread['isResolved'] and re.search(r'^\*\*crq finding F\d+ \[(major|critical|blocker|fatal)\]\*\*', body, re.I):
-                    return True
+                    has_open = True
             if not page['hasNextPage']:
-                return False
+                if (expected or set()) - visible:
+                    raise ThreadsNotVisible('expected CRQ major thread not visible; retry')
+                return has_open
             next_cursor = page['endCursor']
             if not next_cursor or next_cursor in seen:
                 raise ValueError()
             seen.add(next_cursor)
             cursor = next_cursor
         except (KeyError, TypeError, ValueError, AttributeError):
+            if expected:
+                raise ThreadsNotVisible('expected CRQ thread inventory incomplete; retry') from None
             raise RuntimeError('incomplete PR review threads') from None
 
 
@@ -188,8 +242,9 @@ def prepare(prf, gh, repo, pr, meta, ndjson, findings, login):
     merge_base = current_merge_base(prf, gh, repo, state['base'], meta['head'])
     whole = (saved.get('range_policy') == 'full-range-once-v1' and merge_base == meta['base'])
     blocked = any(f['severity'].lower() in BLOCKING for f in findings)
-    blocked = (body_major_at_head(reviews(prf, gh, repo, pr), pr, meta['head'], login)
-               or open_major(prf, gh, repo, pr, login) or blocked)
+    rows = reviews(prf, gh, repo, pr)
+    threads_block = open_major(prf, gh, repo, pr, login, expected_inline_major(rows, pr, meta['head'], login))
+    blocked = body_major_at_head(rows, pr, meta['head'], login) or threads_block or blocked
     verdict = 'PASS' if whole and not blocked else 'ITERATE'
     return {**meta, 'receipt_header': f"**Independent review (CodeRabbit CLI via crq): {verdict} for `{meta['head']}`**",
             'receipt_binding': binding_marker(binding(meta, pr)), 'whole_pr_scan': whole, 'receipt_verdict': verdict}
@@ -246,7 +301,7 @@ def refresh(prf, repo, pr, meta, gh=None, login=None):
         return {'state': 'body-major'}
     if (binding_marker(binding(meta, pr)) not in body or proof not in body):
         return {'state': 'no-whole-pr-proof'}
-    if open_major(prf, gh, repo, pr, login):
+    if open_major(prf, gh, repo, pr, login, expected_inline_major(rows, pr, meta['head'], login)):
         return {'state': 'pending-threads'}
     wanted = f"{REFRESH}head={meta['head']} scan-run={meta['run_id']} -->"
     for row, _ in own:

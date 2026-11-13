@@ -296,7 +296,7 @@ def build_review(meta: Dict[str, Any], findings: List[Dict[str, Any]],
                  hunks: Optional[Dict[str, List[Tuple[int, int]]]]) -> Dict[str, Any]:
     """Review payload. `hunks=None` means no diff is known: body-only, no commit_id."""
     run_id, base, head = meta["run_id"], meta["base"], meta["head"]
-    comments, unanchored = [], []
+    comments, unanchored, inline_major = [], [], []
     for number, finding in enumerate(findings, 1):
         position = anchor(finding, hunks) if hunks is not None and (meta.get("crq_receipt") or len(comments) < MAX_INLINE) else None
         intended = ""
@@ -315,6 +315,8 @@ def build_review(meta: Dict[str, Any], findings: List[Dict[str, Any]],
             if meta.get("receipt_binding"):
                 identity = hashlib.sha256(json.dumps(finding, sort_keys=True).encode()).hexdigest()
                 note += f"\n<!-- crq-review-thread run={run_id} head={head} finding={identity} -->"
+                if finding['severity'].lower() in crq_review_receipt.BLOCKING:
+                    inline_major.append(identity)
             comments.append({**position, "body": _clip(f"{heading}\n\n{text}", MAX_COMMENT) + note})
         else:
             unanchored.append((number, finding, heading, text))
@@ -332,6 +334,8 @@ def build_review(meta: Dict[str, Any], findings: List[Dict[str, Any]],
         suffix = " body-major=1" if body_major else ""
         scope = "whole-pr-success" if meta.get("whole_pr_scan") else "narrow-success"
         lines += [f"<!-- crq-review-scan run={run_id} {scope}{suffix} -->"]
+        lines += [crq_review_receipt.INLINE_PREFIX + json.dumps(
+            {'run_id': run_id, 'head': head, 'findings': inline_major}, sort_keys=True, separators=(',', ':')) + ' -->']
         lines += [meta["receipt_header"]]
         if meta.get("unattested"):
             lines += ["Unattested: App identity unavailable; posted with the host account."]

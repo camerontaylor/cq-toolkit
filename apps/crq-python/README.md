@@ -283,7 +283,10 @@ or an earlier unresolved major/critical CRQ thread produce ITERATE.
   The agents helper owns the existing `CQ_REVIEW_KEY_DIR` / XDG credential paths;
   the publisher passes the token only through its `gh` child's environment.
   A missing or older helper or failed credential setup selects an explicitly
-  unattested host-login review before posting. The existing request checkpoints
+  unattested host-login review before posting. Unattested receipts count as evidence
+  on the same trust/association terms as the merge bar accepts those reviews;
+  an accepted owner-credential receipt can therefore also hold the head at ITERATE.
+  The existing request checkpoints
   that selected identity before the POST, so a lost response retries with the
   same identity. No ambiguous App POST falls back to a second account. Receipt
   results record the safe identity/reason and attested boolean, never credentials.
@@ -305,8 +308,14 @@ or an earlier unresolved major/critical CRQ thread produce ITERATE.
   reviewed-range refusal nor run/base/head binding changes. The advisory source
   readout selects the latest exact-head CRQ verdict by submission timestamp;
   other independent reviewer evidence is preserved.
-- Legacy body-only findings, including major ones, do not hold the verdict and
-  are not claimed covered or resolved. Minor thread counts are not dispositions;
+- Each post-change scan receipt records its inline major finding IDs in the
+  `crq-review-inline-major` marker. Before PASS, expected IDs across all scans of
+  that head must map to visible, resolved owned GitHub threads. Missing or partial
+  visibility (including lag or deletion) keeps delivery pending for a later tick;
+  absence never proves resolution. Receipts and GraphQL supply this evidence.
+- Pre-marker legacy body-only findings, including majors, do not hold the verdict
+  and are not claimed covered or resolved. Cumulative body-major evidence applies
+  only to post-change receipts carrying the scan marker. Minor thread counts are not dispositions;
   minors do not hold PASS, while the merge bar still requires their disposition.
 - Python is the production PR publisher. The TS policy mirror
   `src/policy/crq/prReviewFindings.ts` deliberately retains its legacy contract;

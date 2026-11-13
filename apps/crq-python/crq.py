@@ -2334,6 +2334,10 @@ def _deliver_pr_review(item: Dict[str, Any], q=None) -> Optional[str]:
             meta.update(posting_identity=request.get("posting_identity"), identity_reason=request.get("identity_reason"),
                         identity_checkpoint=lambda login, reason: _checkpoint_review_identity(q, request, login, reason))
         result = pr_review_findings.deliver(item_repo(item), pr, meta, ndjson)
+    except pr_review_findings.crq_review_receipt.ThreadsNotVisible as exc:
+        item['pr_review_attempts'] -= 1
+        item['pr_review_error'] = str(exc)
+        return None
     except ValueError as exc:
         return _settle_pr_review(item, str(exc))
     except (RuntimeError, OSError) as exc:
@@ -2412,6 +2416,9 @@ def deliver_pending_clean_reviews(q: Dict[str, Any]) -> List[str]:
                         posting_identity=request.get("posting_identity"), identity_reason=request.get("identity_reason"),
                         identity_checkpoint=lambda login, reason: _checkpoint_review_identity(q, request, login, reason))
             result = pr_review_findings.deliver(item_repo(item), request["pr"], meta, Path(request["ndjson"]))
+        except pr_review_findings.crq_review_receipt.ThreadsNotVisible as exc:
+            item['clean_review_attempts'] -= 1
+            item['clean_review_error'] = str(exc)
         except (KeyError, TypeError, ValueError) as exc:
             item["clean_review_error"] = str(exc)[:300]
             item["clean_review_pending"] = False
@@ -2460,6 +2467,8 @@ def deliver_pending_review_refreshes(q: Dict[str, Any]) -> List[str]:
                     identity_checkpoint=lambda login, reason: _checkpoint_review_identity(q, request, login, reason))
         try:
             result = pr_review_findings.crq_review_receipt.refresh(pr_review_findings, item_repo(item), request["pr"], meta)
+        except pr_review_findings.crq_review_receipt.ThreadsNotVisible:
+            result = {'state': 'waiting-threads'}
         except (RuntimeError, OSError, ValueError) as exc:
             attempts += 1
             result = {"state": "abandoned" if attempts >= PR_REVIEW_MAX_ATTEMPTS else "retry", "error": str(exc)[:300]}

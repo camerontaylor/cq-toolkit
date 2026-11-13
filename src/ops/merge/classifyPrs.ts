@@ -314,7 +314,9 @@ const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContex
   // never the automation identity or an excluded login. Those guards bind THAT
   // alternative only: the cq-review App's PASS is independent acceptance, so an
   // automation-authored or excluded-author PR must still be able to earn it.
-  // DISMISSED evidence is void on both paths.
+  // Recognized CRQ receipts also admit explicitly unattested host User reviews
+  // on the configured trusted-association terms; excluded/automation logins stay out.
+  // DISMISSED evidence is void on every path.
   const prAuthor = candidate.authorLogin;
   const authorSharesAccount =
     prAuthor !== null &&
