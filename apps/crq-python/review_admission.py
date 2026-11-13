@@ -57,6 +57,8 @@ def status(q, request_id):
         result["next_action"] = "resubmit"
     if item.get("wait_reason") or item.get("last_error"):
         result["reason"] = item.get("wait_reason") or item["last_error"]
+    if item.get("receipt_unavailable"):
+        result.update(next_action="resubmit", reason="receipt-unavailable")
     return result
 
 
@@ -84,6 +86,9 @@ def admit(q, *, request_id, inputs, resolved, profile, at, repeat=False,
         item = next((i for i in reversed(candidates) if adequate(i) and verify_receipt(i)), None)
         if item:
             action = "reused"
+            # The receipt verifies again, so a persisted receipt-unavailable
+            # condition from an earlier observed admission is stale.
+            item.pop("receipt_unavailable", None)
         else:
             item = next((i for i in reversed(candidates) if i["state"] in ACTIVE), None)
             if item:
@@ -111,9 +116,11 @@ def admit(q, *, request_id, inputs, resolved, profile, at, repeat=False,
     q.setdefault("review_requests", {})[request_id] = binding
     if item["state"] in ACTIVE:
         item["observers"].append(request_id)
-    result = status(q, request_id)
     if action == "observed" and adequate(item) and not verify_receipt(item):
-        result.update(next_action="resubmit", reason="receipt-unavailable")
+        # Persist the failed verification: adequate() trusts the stored receipt
+        # id, so later status() and retry() responses must keep the recovery cue.
+        item["receipt_unavailable"] = True
+    result = status(q, request_id)
     return result if result["action"] == "no-changes" else {**result, "action": action}
 
 
