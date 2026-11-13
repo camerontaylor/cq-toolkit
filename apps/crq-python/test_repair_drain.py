@@ -948,6 +948,26 @@ class RepairDrainTest(unittest.TestCase):
             snapshot.assert_not_called()
             provider.assert_not_called()
 
+    def test_marker_mid_item_stops_the_remaining_jobs(self):
+        # The plan's slice 5 acceptance is per job: the in-flight job finishes
+        # and the next does not start. A marker seen between serial jobs of one
+        # item must stop them, not only the next item's admission.
+        self.worktree()
+        jobs = [json.loads((self.root / 'state/repair/inbox' / (j + '.json')).read_text())
+                for j in ('crq-run1-F1', 'crq-run1-F2')]
+
+        def process(*args):
+            (self.root / 'state/runner-disabled').write_text('handover\n')
+            return {'verdict': 'NOT-FIXED'}
+
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'process', side_effect=process) as model:
+            outcome = service.process_item(self.config, jobs)
+        self.assertEqual(model.call_count, 1)
+        self.assertEqual(model.call_args.args[1]['job'], 'crq-run1-F1')
+        self.assertEqual(outcome, service.RUNNER_DISABLED_OUTCOME)
+
     def test_recovery_job_uses_separate_worktree_and_preserves_original(self):
         original = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
         (original / 'src/kept.ts').write_text('retained staged edit\n')

@@ -963,6 +963,12 @@ def process_item(config, jobs):
     jobs.sort(key=finding_order)
     bases = {}  # run -> tip of that run's successful chain
     for job in jobs:
+        # Per-job admission: the plan's slice 5 acceptance is that the
+        # in-flight job finishes and the next does not start, so a marker seen
+        # between serial jobs of one item stops the rest of that item too.
+        if runner_disabled():
+            narrate(RUNNER_DISABLED + ': job ' + str(job['job']) + ' not admitted')
+            return RUNNER_DISABLED_OUTCOME
         if blocked(config['repair']):
             break  # never start a new finding inside the GLM peak window
         if dispatch_paused(config):
