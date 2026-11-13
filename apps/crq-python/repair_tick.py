@@ -49,6 +49,9 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence, *, preserve_work
     old_record = item.get('repair_runs', {}).get(old['run'])
     if not old_record or old_job_id not in old_record.get('jobs', []):
         raise ValueError('historical finding lacks tick-owned repair evidence')
+    if (item.get('kind') == review_receipt.KIND
+            and old_record.get('receipt_id') != item.get('receipt_id')):
+        raise ValueError('historical finding belongs to a different receipt')
     binding = {'origin_job': old_job_id, 'source_sha': source_sha, 'evidence': evidence}
     if preserve_worktree:
         binding['preserve_worktree'] = True
