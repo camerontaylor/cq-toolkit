@@ -19,8 +19,11 @@ const allow = [
   /^policy\/denylist\/patterns\.yml$/,
 ];
 export interface ReviewScannerEffects {
-  /** Must implement Python re.compile/search semantics, or throw. Never use JS regex as a parity substitute. */
-  compile(pattern: string): (text: string) => boolean;
+  /** Compile all rules, then return strictly ordered [line, rule] matches, or throw. */
+  match(input: {
+    rules: readonly { regex: string; path: string | null }[];
+    lines: readonly { path: string; text: string }[];
+  }): Promise<readonly (readonly [number, number])[]>;
   /** Missing binary is explicit. Errors or missing reports cannot become clean. */
   gitleaks(diff: string): Promise<
     | { kind: 'not-run' }
@@ -55,29 +58,13 @@ export async function scanReviewDiff(
   }
   const selected = classes ? parsed.rules.filter((rule) => classes.has(rule.id)) : parsed.rules;
   if (!selected.length) throw new Error('empty scan class set');
-  let rules: {
-    id: string;
-    match: (text: string) => boolean;
-    path: ((text: string) => boolean) | null;
-  }[];
-  try {
-    rules = selected.map((rule) => ({
-      id: rule.id,
-      match: effects.compile(rule.regex),
-      path: rule.path === undefined ? null : effects.compile(rule.path),
-    }));
-    if (
-      rules.some(
-        (rule) =>
-          typeof rule.match !== 'function' ||
-          (rule.path !== null && typeof rule.path !== 'function'),
-      )
-    )
-      throw new Error('invalid matcher');
-  } catch {
-    throw new Error('review scan matcher unavailable');
-  }
+  const rules = selected.map((rule) => ({
+    id: rule.id,
+    regex: rule.regex,
+    path: rule.path ?? null,
+  }));
   const hits: { rule: string; file: string; diff_line: number }[] = [];
+  const candidates: { path: string; text: string; diffLine: number }[] = [];
   let path: string | null = null;
   let header = false;
   const lines = pythonSplitlines(input.diff);
@@ -102,18 +89,34 @@ export async function scanReviewDiff(
     if (!line || (line[0] !== '+' && line[0] !== '-') || path === null) continue;
     const currentPath = path;
     if (allow.some((p) => p.test(currentPath))) continue;
-    for (const rule of rules) {
-      try {
-        const inPath = rule.path === null ? true : rule.path(path);
-        if (typeof inPath !== 'boolean') throw new Error('invalid matcher result');
-        if (!inPath) continue;
-        const matched = rule.match(line.slice(1));
-        if (typeof matched !== 'boolean') throw new Error('invalid matcher result');
-        if (matched) hits.push({ rule: rule.id, file: path, diff_line: index + 1 });
-      } catch {
-        throw new Error('review scan matcher unavailable');
-      }
+    candidates.push({ path, text: line.slice(1), diffLine: index + 1 });
+  }
+  try {
+    const matches = await effects.match({ rules, lines: candidates });
+    if (!Array.isArray(matches)) throw new Error('invalid matcher result');
+    let previous = -1;
+    for (const pair of matches as unknown[]) {
+      if (!Array.isArray(pair) || pair.length !== 2) throw new Error('invalid matcher result');
+      const lineIndex: unknown = pair[0];
+      const ruleIndex: unknown = pair[1];
+      if (typeof lineIndex !== 'number' || typeof ruleIndex !== 'number')
+        throw new Error('invalid matcher result');
+      const candidate = candidates[lineIndex];
+      const rule = rules[ruleIndex];
+      const order = lineIndex * rules.length + ruleIndex;
+      if (
+        !Number.isSafeInteger(lineIndex) ||
+        !Number.isSafeInteger(ruleIndex) ||
+        !candidate ||
+        !rule ||
+        order <= previous
+      )
+        throw new Error('invalid matcher result');
+      previous = order;
+      hits.push({ rule: rule.id, file: candidate.path, diff_line: candidate.diffLine });
     }
+  } catch {
+    throw new Error('review scan matcher unavailable');
   }
   let gl: Awaited<ReturnType<ReviewScannerEffects['gitleaks']>>;
   try {
