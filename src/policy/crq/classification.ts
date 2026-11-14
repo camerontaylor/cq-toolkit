@@ -169,7 +169,7 @@ export function classify(bytes: Uint8Array | null, exitCode: number | null): Jso
         // Python regex whitespace includes C0 separators and excludes the BOM.
         const waitPattern =
           // eslint-disable-next-line no-control-regex
-          /^(\p{Decimal_Number}+)([\s\x1c-\x1f]*)(second|minute|hour)s?$(?![\s\S])/u;
+          /^(\p{Decimal_Number}+)([\s\x1c-\x1f\x85]*)(second|minute|hour)s?$(?![\s\S])/u;
         const m = typeof value === 'string' ? waitPattern.exec(value) : null;
         if (m && !m[2]!.includes('\ufeff'))
           waits.push(
