@@ -44,13 +44,16 @@ an interrupted inventory can otherwise mix ranked rows with older provenance.
   unknown ownership on bind failure. On any thrown launch, reload under the
   same lock, reconcile the exact item and attempt, and never retry the spawn or
   overwrite a durable run with the pre-launch queue. The caller still owns
-  launch, live effects and exception recovery. Positive
-  pre-vendor cancellation is not exposed here: it requires the complete terminal
-  transition and durable refusal-event replay. A binding identity-guard failure
-  conservatively retains unknown ownership, unlike Python's non-reviewing
-  refusal path. The future caller must route positively proven pre-vendor
-  refusals through the complete terminal path, never retry a spawn from this
-  guard. No seam is wired to a live executor.
+  launch, live effects and exception recovery. The pure terminal transition is
+  `src/policy/crq/backfillTerminal.ts`; counters and retry seconds are required
+  to be integral, stricter than Python on malformed float state. The injected
+  `src/ops/crq/internal/backfillRefusal.ts` reloads and validates the exact
+  unbound attempt, then saves quarantine plus a replay marker before spooling
+  the idempotent event and clearing the marker. Its caller must hold `tick.lock`
+  and reload on failure. It requires positive pre-spawn evidence: a child exit,
+  even exit 3 with `pre_vendor_refusal`, or an absent PID is not such proof and
+  must never release the reservation. A binding identity-guard failure still
+  conservatively retains unknown ownership. No seam is wired to a live executor.
   For the next slice, use
   `apps/crq-python/backfill_runtime.py` at main commit
   `0cb627ebf38dafb3089b2fe7eb4f1e153665f307`: `usage_context` reflects or
