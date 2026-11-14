@@ -364,6 +364,44 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["foreign"], [])
         self.assertIsNone(evidence["error"])
 
+    def test_co_installed_declared_dropins_are_supported(self):
+        target = self.base / ".local/infra/systemd/crq-messaging.conf"
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            "[Service]\nEnvironmentFile=%h/.local/state/paseo/env\n")
+
+        tick = self.declare()
+        tick_dropin = self.unit_dir / "crq-tick.service.d"
+        tick_dropin.mkdir()
+        (tick_dropin / "20-paseo-env.conf").symlink_to(target)
+        (tick_dropin / "coderabbit-managed.conf").write_text(
+            "[Service]\nEnvironment=CODERABBIT_CLI_DISABLE_AUTO_UPDATE=true\n")
+
+        watchdog_service = self.write(
+            "crq-watchdog.service", "[Service]\nExecStart=/bin/true\n")
+        watchdog_timer = self.write(
+            "crq-watchdog.timer", "[Timer]\nOnCalendar=*:0/12\n")
+        watchdog_wants = self.link(
+            "timers.target.wants/crq-watchdog.timer",
+            self.unit_dir / "crq-watchdog.timer")
+        watchdog_dropin = self.unit_dir / "crq-watchdog.service.d"
+        watchdog_dropin.mkdir()
+        (watchdog_dropin / "20-paseo-env.conf").symlink_to(target)
+
+        cases = (
+            ("crq-tick.service", tick),
+            ("crq-watchdog.service",
+             [watchdog_service, watchdog_timer, watchdog_wants]),
+        )
+        for unit, declared in cases:
+            with self.subTest(unit=unit):
+                evidence = self.port().discover(
+                    unit, [str(path) for path in declared])
+                self.assertEqual(evidence["complete"], True)
+                self.assertEqual(evidence["supported"], True)
+                self.assertEqual(evidence["foreign"], [])
+                self.assertIsNone(evidence["error"])
+
     def test_undeclared_dropin_entry_is_unsupported(self):
         declared = self.declare()
         dropin = self.unit_dir / "crq-tick.service.d"

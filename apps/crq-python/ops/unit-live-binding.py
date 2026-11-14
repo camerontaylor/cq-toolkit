@@ -413,6 +413,11 @@ class SubprocessSystemd:
                 declared[str(self.unit_dir / (name + ".d"))] = names
         return declared
 
+    def _all_declared_dropin_dirs(self):
+        """Every declared drop-in directory, including co-installed units."""
+        return {str(self.unit_dir / (name + ".d")): names
+                for name, names in adapter.DECLARED_DROPINS.items()}
+
     @staticmethod
     def _declared_dropin_error(path, declared):
         """Check the declared drop-in shape without reading entry contents."""
@@ -564,6 +569,7 @@ class SubprocessSystemd:
         units, units_error = self._expected_units(unit, declared)
         units = units or set()
         declared_dropins = self._declared_dropin_dirs(units)
+        all_dropins = self._all_declared_dropin_dirs()
         foreign = []
         unsupported = []
         error = units_error
@@ -614,6 +620,10 @@ class SubprocessSystemd:
                 if dropin_error is not None:
                     foreign.append(dropin_error)
                 continue
+            if str(entry) in all_dropins:
+                # A declared environment drop-in for another co-installed CRQ
+                # unit is not part of this unit's topology and is not scanned.
+                continue
             if name.startswith(prefix) and str(entry) not in declared_set:
                 foreign.append("unexpected installed entry: " + str(entry))
             is_dir, probe_failure = _directory_probe(entry)
@@ -637,7 +647,7 @@ class SubprocessSystemd:
                                        + str(child))
 
         scan_error = self._scan_dependencies(
-            self.unit_dir, units, declared, foreign, declared_dropins)
+            self.unit_dir, units, declared, foreign, all_dropins)
         if scan_error is not None:
             error = error or scan_error
 
