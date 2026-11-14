@@ -429,6 +429,32 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("crq-tick.service", " ".join(evidence["foreign"]))
 
+    def test_co_installed_dropin_continuation_is_unsupported(self):
+        good = self.base / ".local/infra/systemd/crq-messaging.conf"
+        good.parent.mkdir(parents=True)
+        good.write_text(
+            "[Service]\nEnvironmentFile=%h/.local/state/paseo/env\n")
+        bad = self.base / ".local/infra/systemd/evil.conf"
+        bad.write_text("[Unit]\nWants=\\\n crq-tick.service\n")
+
+        tick = self.declare()
+        tick_dropin = self.unit_dir / "crq-tick.service.d"
+        tick_dropin.mkdir()
+        (tick_dropin / "20-paseo-env.conf").symlink_to(good)
+        (tick_dropin / "coderabbit-managed.conf").write_text(
+            "[Service]\nEnvironment=CODERABBIT_CLI_DISABLE_AUTO_UPDATE=true\n")
+
+        self.write("crq-watchdog.service", "[Service]\nExecStart=/bin/true\n")
+        self.write("crq-watchdog.timer", "[Timer]\nOnCalendar=*:0/12\n")
+        watchdog_dropin = self.unit_dir / "crq-watchdog.service.d"
+        watchdog_dropin.mkdir()
+        (watchdog_dropin / "20-paseo-env.conf").symlink_to(bad)
+
+        evidence = self.port().discover(
+            "crq-tick.service", [str(path) for path in tick])
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("continuation", evidence["error"] or "")
+
     def test_undeclared_dropin_entry_is_unsupported(self):
         declared = self.declare()
         dropin = self.unit_dir / "crq-tick.service.d"

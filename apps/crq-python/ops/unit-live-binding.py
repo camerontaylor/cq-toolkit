@@ -514,6 +514,10 @@ class SubprocessSystemd:
                             data = _read_file(path, max_bytes=MAX_UNIT_BYTES)
                         except LiveBindingRefused as exc:
                             return str(exc)
+                        declared_file = (
+                            str(path.parent) in declared_dropins
+                            and path.name
+                            in declared_dropins[str(path.parent)])
                         source_declared = str(path) in declared_paths
                         if not source_declared:
                             try:
@@ -523,6 +527,10 @@ class SubprocessSystemd:
                         text = _text(data, str(path))
                         for number, line in enumerate(text.splitlines(), 1):
                             stripped = line.strip()
+                            if declared_file and stripped.endswith("\\"):
+                                return ("dependency scan found a line "
+                                        "continuation in a declared drop-in: "
+                                        + str(path))
                             if not stripped or stripped.startswith(("#", ";")):
                                 continue
                             match = DEPENDENCY_RE.match(stripped)
