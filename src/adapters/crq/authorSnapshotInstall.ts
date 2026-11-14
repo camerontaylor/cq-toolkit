@@ -46,6 +46,8 @@ const SUPPORTED_MODES = new Set(['100644', '100755', '120000']);
 export interface InstallSnapshotInput {
   readonly pool: GitPool;
   readonly clone: string;
+  /** Trusted clone that supplies `policy/denylist/patterns.yml` (defaults to clone). */
+  readonly scanClone?: string;
   readonly snapshot: JsonObject;
   readonly binding: { readonly base: string; readonly head: string };
   readonly original: boolean;
@@ -158,8 +160,10 @@ export async function installAuthorSnapshot(input: InstallSnapshotInput): Promis
     )) {
       blobData.set(oid, data);
     }
-    const rules = await readRules(clone);
-    const scanParts: string[] = [Buffer.from(diff).toString('utf8')];
+    const rules = await readRules(input.scanClone ?? clone);
+    const diffText = Buffer.from(diff).toString('utf8');
+    scanPatch(diffText, rules);
+    const scanParts: string[] = [diffText];
     let scanBytes = diff.length;
     if (input.original) {
       for (const object of decoded.objects) {
@@ -230,6 +234,47 @@ async function readRules(
     throw error;
   }
   return parseDenylistPatterns(text, 'policy/denylist/patterns.yml').rules;
+}
+
+/** Project-rule scan over the patch, including removed lines (`secret_scan_diff`). */
+function scanPatch(diff: string, rules: ReturnType<typeof parseDenylistPatterns>['rules']): void {
+  const compiled = rules.map((rule) => ({
+    regex: new RegExp(rule.regex),
+    path: rule.path === undefined ? null : new RegExp(rule.path),
+  }));
+  let path: string | null = null;
+  let inHeader = false;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      const match = /^diff --git a\/(.*) b\/(.*)$/.exec(line);
+      path = match === null ? null : (match[2] ?? null);
+      inHeader = true;
+      continue;
+    }
+    if (line.startsWith('@@')) {
+      inHeader = false;
+      continue;
+    }
+    if (inHeader) {
+      if (line.startsWith('+++ ') || line.startsWith('--- ')) {
+        const candidate = line.slice(4);
+        if (candidate !== '/dev/null') {
+          path =
+            candidate.startsWith('a/') || candidate.startsWith('b/')
+              ? candidate.slice(2)
+              : candidate;
+        }
+      }
+      continue;
+    }
+    if (line === '' || (line[0] !== '+' && line[0] !== '-') || path === null) continue;
+    if (ALLOWLIST_PATHS.some((pattern) => pattern.test(path as string))) continue;
+    const content = line.slice(1);
+    for (const rule of compiled) {
+      if (rule.path !== null && !rule.path.test(path)) continue;
+      if (rule.regex.test(content)) throw new AuthorRefused('snapshot secret scan refused');
+    }
+  }
 }
 
 async function writeObjects(

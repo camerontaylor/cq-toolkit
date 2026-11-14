@@ -8,7 +8,7 @@
  * input, snapshot refusal, unavailable result) or the opaque forced-command
  * refusal the entrypoint emits.
  */
-import { fromPlainJson } from '../../policy/crq/queueDoc.js';
+import { fromPlainJson, pythonValueEqual } from '../../policy/crq/queueDoc.js';
 import { JsonNumber, JsonObject } from '../../policy/crq/jsonValue.js';
 import { parseJsonValue, toPlainJson } from '../../policy/crq/jsonValue.js';
 import { receiptJsonText, sha256Hex } from '../../policy/crq/pythonJson.js';
@@ -378,11 +378,6 @@ async function submit(
   const binding = readRequest(queue, requestId);
   if (binding === null) throw new ValueError('unknown review request');
   const itemId = stringRequired(binding, 'item');
-  const excluded = await historyProjection(
-    queue,
-    effects,
-    historyDefaults(historyQuery(queue, binding)),
-  );
   let nextBinding = withField(binding, 'principal', principal);
   for (const field of ['task', 'branch', 'predecessor', 'observed'] as const) {
     if (request.has(field))
@@ -408,6 +403,13 @@ async function submit(
     );
   }
   queue = replaceRequest(queue, requestId, nextBinding);
+  // Project only after the supplied task/branch/predecessor/observed context
+  // is on the binding, so a status poll and this response agree.
+  const excluded = await historyProjection(
+    queue,
+    effects,
+    historyDefaults(historyQuery(queue, nextBinding)),
+  );
   const notifyStatus = nextBinding.get('notify_status');
   if (notifyStatus !== undefined) result = withField(result, 'notify', notifyStatus);
   await effects.saveQueue(queue);
@@ -753,6 +755,7 @@ async function recordImport(
     ['supersedes', submitted.supersedes],
     ['publication', 'disabled'],
   ]);
+  let retainedEventId: string | null = null;
   if (imported.events.length > 0) {
     const settings = await effects.rolloutSettings();
     const retainedRef = await effects.putReport(submitted.reportBytes);
@@ -788,6 +791,7 @@ async function recordImport(
         return { queue, result: quarantined };
       }
       if (event.get('event_type') === 'review') {
+        retainedEventId = typeof event.get('id') === 'string' ? (event.get('id') as string) : null;
         seen.push(event);
       }
       await effects.spoolEvent(event);
@@ -797,7 +801,7 @@ async function recordImport(
       await effects.requestPublication();
     }
   }
-  if (kind === 'record') result = withField(result, 'record_digest', detail);
+  if (kind === 'record') result = withField(result, 'record_digest', retainedEventId ?? detail);
   else if (kind === 'duplicate') result = withField(result, 'duplicate_of', detail);
   else if (kind === 'quarantined' || kind === 'refused') {
     result = withField(result, 'reason', detail.slice(0, 500));
@@ -1036,24 +1040,5 @@ function withFields(
 }
 
 function sameJson(left: unknown, right: unknown): boolean {
-  return JsonValueEquality.compare(left, right);
+  return pythonValueEqual(left, right);
 }
-
-const JsonValueEquality = {
-  compare(left: unknown, right: unknown): boolean {
-    if (left === right) return true;
-    if (left instanceof JsonObject && right instanceof JsonObject) {
-      if (left.entries.length !== right.entries.length) return false;
-      return left.entries.every(
-        ([key, value]) => right.has(key) && JsonValueEquality.compare(value, right.get(key)),
-      );
-    }
-    if (Array.isArray(left) && Array.isArray(right)) {
-      return (
-        left.length === right.length &&
-        left.every((value, index) => JsonValueEquality.compare(value, right[index]))
-      );
-    }
-    return false;
-  },
-};

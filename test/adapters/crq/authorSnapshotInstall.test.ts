@@ -70,6 +70,23 @@ function snapshotFor(base: string, content: string, corruptBlob = false): Fixtur
   };
 }
 
+function emptySnapshotFor(base: string): Fixture {
+  const treeOid = sha1('tree 0\0', new Uint8Array(0));
+  const commit = commitBytes(base, treeOid);
+  const head = sha1(`commit ${String(commit.length)}\0`, commit);
+  const objects = [
+    { oid: treeOid, type: 'tree', data: '' },
+    { oid: head, type: 'commit', data: Buffer.from(commit).toString('base64') },
+  ].sort((left, right) => (left.oid < right.oid ? -1 : left.oid > right.oid ? 1 : 0));
+  const digest = createHash('sha256');
+  for (const value of objects) digest.update(`${value.oid}\0${value.type}\0${value.data}\n`);
+  return {
+    snapshot: object({ v: 1, tree: treeOid, objects, sha256: digest.digest('hex') }),
+    head,
+    blob: '',
+  };
+}
+
 const PATTERNS = [
   'rules:',
   '  - id: test:token',
@@ -94,6 +111,32 @@ async function clone(): Promise<{ dir: string; base: string; pool: GitPool }> {
     'commit',
     '-q',
     '--allow-empty',
+    '-m',
+    'base',
+  ]);
+  const base = (await run('git', ['-C', dir, 'rev-parse', 'HEAD'])).stdout.trim();
+  await mkdir(join(dir, 'policy/denylist'), { recursive: true });
+  await writeFile(join(dir, 'policy/denylist/patterns.yml'), PATTERNS);
+  return { dir, base, pool: new GitPool() };
+}
+
+async function cloneWithFile(
+  path: string,
+  content: string,
+): Promise<{ dir: string; base: string; pool: GitPool }> {
+  const dir = await mkdtemp(join(tmpdir(), 'cq-author-install-'));
+  await run('git', ['init', '-q', dir]);
+  await writeFile(join(dir, path), content);
+  await run('git', ['-C', dir, 'add', path]);
+  await run('git', [
+    '-C',
+    dir,
+    '-c',
+    'user.email=a@b',
+    '-c',
+    'user.name=a',
+    'commit',
+    '-q',
     '-m',
     'base',
   ]);
@@ -173,6 +216,19 @@ describe('installAuthorSnapshot', () => {
         'snapshot secret scan refused',
       );
       expect(await objectExists(repo.dir, fixture.blob)).toBe(false);
+      expect(await objectExists(repo.dir, fixture.head)).toBe(false);
+    } finally {
+      repo.pool.killAll();
+    }
+  });
+
+  test('refuses a removed denylisted line', async () => {
+    const repo = await cloneWithFile('.env', 'SECRET_TOKEN\n');
+    try {
+      const fixture = emptySnapshotFor(repo.base);
+      await expect(installAuthorSnapshot(input(repo, fixture))).rejects.toThrow(
+        'snapshot secret scan refused',
+      );
       expect(await objectExists(repo.dir, fixture.head)).toBe(false);
     } finally {
       repo.pool.killAll();

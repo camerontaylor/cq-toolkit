@@ -226,6 +226,21 @@ describe('author-v1 pure handler', () => {
     );
   });
 
+  test('a snapshot-sized canonical base64 object decodes without regex recursion', () => {
+    const data = Buffer.alloc(3_500_000, 7);
+    const oid = sha1(`blob ${String(data.length)}\0`, data);
+    const tree = 'c'.repeat(40);
+    const commit = commitBytes(BASE, tree);
+    const head = sha1(`commit ${String(commit.length)}\0`, commit);
+    const objects = [{ oid, type: 'blob', data: data.toString('base64') }];
+    const digest = createHash('sha256');
+    for (const value of objects) {
+      digest.update(`${value.oid}\0${value.type}\0${value.data}\n`);
+    }
+    const snapshot = object({ v: 1, tree, objects, sha256: digest.digest('hex') });
+    expect(() => decodeSnapshot(snapshot, { base: BASE, head }, false)).not.toThrow();
+  });
+
   test('a v2 frame with a status operation is refused by the decoder', async () => {
     const h = harness();
     await expect(

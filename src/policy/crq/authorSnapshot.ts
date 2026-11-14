@@ -18,7 +18,7 @@ export const SNAPSHOT_MAX_ORIGINAL_BYTES = 3 * 1024 * 1024;
 export const SNAPSHOT_MAX_OBJECTS = 4096;
 
 const SHA40 = /^[0-9a-f]{40}$/;
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const BASE64_CHARS = /^[A-Za-z0-9+/]*$/;
 
 export interface SnapshotObject {
   readonly oid: string;
@@ -34,7 +34,12 @@ export interface DecodedSnapshot {
 }
 
 function strictBase64(encoded: string): Uint8Array {
-  if (encoded.length % 4 !== 0 || !BASE64.test(encoded)) {
+  // Validate the quartet/padding grammar without a recursive group: V8
+  // exhausts its regex stack on a valid snapshot-sized string.
+  let end = encoded.length;
+  if (encoded[end - 1] === '=') end--;
+  if (encoded[end - 1] === '=') end--;
+  if (encoded.length % 4 !== 0 || !BASE64_CHARS.test(encoded.slice(0, end))) {
     throw new AuthorRefused('snapshot object data is not canonical base64');
   }
   const decoded = Buffer.from(encoded, 'base64');

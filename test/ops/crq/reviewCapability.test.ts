@@ -53,7 +53,13 @@ const inputs = {
 
 interface Harness {
   readonly effects: ReviewCapabilityEffects;
-  state: { queue: JsonObject; saves: number; locked: boolean; busy: boolean };
+  state: {
+    queue: JsonObject;
+    saves: number;
+    locked: boolean;
+    busy: boolean;
+    events: JsonObject[];
+  };
   call(body: unknown, overrides?: { policy?: unknown; principal?: string }): Promise<JsonObject>;
   gitCalls: string[][];
 }
@@ -64,6 +70,7 @@ function harness(options: { queue?: JsonObject; receipt?: Uint8Array } = {}): Ha
     saves: 0,
     locked: false,
     busy: false,
+    events: [] as JsonObject[],
   };
   const gitCalls: string[][] = [];
   const receipts = new Map<string, Uint8Array>();
@@ -122,7 +129,9 @@ function harness(options: { queue?: JsonObject; receipt?: Uint8Array } = {}): Ha
     retainedRecords: async () => [],
     rolloutSettings: async () => null,
     putReport: async () => object({ sha256: 'f'.repeat(64), location: '/store' }),
-    spoolEvent: async () => undefined,
+    spoolEvent: async (event) => {
+      state.events.push(event);
+    },
     requestPublication: async () => undefined,
     audit: async () => undefined,
   };
@@ -335,6 +344,26 @@ describe('review-v1 pure handler', () => {
     });
     expect(result.get('action')).toBe('refused');
     expect(result.get('reason')).toBe('unsupported-repo');
+  });
+
+  test('record returns the rewritten retained event id', async () => {
+    const h = harness();
+    const result = await h.call({
+      v: 1,
+      op: 'record',
+      producer: 'agent',
+      source_id: 'local:agent-pass-1',
+      reviewer: 'helper-agent',
+      head_commit: HEAD,
+      base_commit: BASE,
+      target: 'main',
+      verdict: 'APPROVED',
+      forge_evidence: 'off-forge-import',
+      independence: 'agent lane: separate session, unverified',
+      report: { encoding: 'utf8', data: 'Independent agent review passed.' },
+    });
+    expect(result.get('action')).toBe('recorded');
+    expect(result.get('record_digest')).toBe(h.state.events[0]?.get('id'));
   });
 
   test('a malformed frame is invalid input with the typed wire error', async () => {

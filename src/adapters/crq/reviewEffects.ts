@@ -167,6 +167,7 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
       await installAuthorSnapshot({
         pool,
         clone: cloneFor(repo),
+        scanClone: cloneFor(options.repo),
         snapshot,
         binding,
         original: true,
