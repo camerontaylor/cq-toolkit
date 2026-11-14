@@ -10,6 +10,7 @@ import { fileReviewPreparationEffects } from '../../../src/adapters/crq/reviewPr
 import { GitPool as SourceGitPool } from '../../../src/adapters/crq/gitExec.js';
 import { JsonNumber, JsonObject } from '../../../src/policy/crq/jsonValue.js';
 import { prepareOrdinaryReview } from '../../../src/queue-runner/reviewPreparation.js';
+import { decodeReviewScanGit } from '../../../src/adapters/crq/reviewScanSource.js';
 import type { fileOrdinaryReviewScanner as ScannerFactory } from '../../../src/adapters/crq/reviewScanSource.js';
 
 const exec = promisify(execFile);
@@ -75,6 +76,18 @@ async function fixture() {
 }
 
 describe('inactive ordinary review scanner file binding', () => {
+  it('rejects successful exits with overflow and normalizes Python text semantics', () => {
+    const encode = (s: string) => new TextEncoder().encode(s);
+    expect(() =>
+      decodeReviewScanGit({ code: 0, stdout: new Uint8Array(), stderr: 'output exceeded bound' }),
+    ).toThrow('review scan git unavailable');
+    expect(
+      decodeReviewScanGit({ code: 0, stdout: encode('\u001c\r\n+a\r\n+b\r\n\u0085'), stderr: '' }),
+    ).toBe('+a\n+b');
+    expect(decodeReviewScanGit({ code: 0, stdout: encode('\ufeffx\ufeff'), stderr: '' })).toBe(
+      '\ufeffx\ufeff',
+    );
+  });
   it('scans target Git diff using primary committed policy and persists redacted blocked result before event', async () => {
     const f = await fixture();
     const scan = fileOrdinaryReviewScanner(f.options);
@@ -224,6 +237,57 @@ describe('inactive ordinary review scanner file binding', () => {
     expect(JSON.parse(text)).toMatchObject({ gitleaks: 'exit 0' });
     await expect(scan(request)).rejects.toThrow('artifact already exists');
     expect(await readFile(join(f.root, 'runs', 'run-1', 'secret-scan.json'), 'utf8')).toBe(text);
+  });
+  it('passes normalized patch bytes to gitleaks and records Python character count', async () => {
+    const f = await fixture();
+    await writeFile(join(f.clone, 'a.env'), 'one\r\ntwo\r\n');
+    await f.git('add', 'a.env');
+    await f.git(
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.invalid',
+      'commit',
+      '-qm',
+      'crlf',
+    );
+    const head = await f.git('rev-parse', 'HEAD');
+    const captured = join(f.root, 'gitleaks-stdin');
+    await writeFile(
+      join(f.bin, 'gitleaks'),
+      `#!/bin/sh\nwhile [ "$1" != "--report-path" ]; do shift; done\n/bin/cat > "${captured}"\nprintf '[]' > "$2"\n`,
+    );
+    await chmod(join(f.bin, 'gitleaks'), 0o755);
+    await mkdir(join(f.root, 'runs', 'run-1'));
+    await fileOrdinaryReviewScanner(f.options)({ runId: 'run-1', repo: 'o/r', base: f.base, head });
+    const stdin = await readFile(captured, 'utf8');
+    expect(stdin).not.toContain('\r');
+    expect(stdin.endsWith('\n')).toBe(false);
+    const report: unknown = JSON.parse(
+      await readFile(join(f.root, 'runs', 'run-1', 'secret-scan.json'), 'utf8'),
+    );
+    expect(report).toMatchObject({ diff_bytes: Array.from(stdin).length, gitleaks: 'exit 0' });
+  });
+  it('scans raw file content despite binary attributes and never runs textconv', async () => {
+    const f = await fixture();
+    const scan = fileOrdinaryReviewScanner(f.options);
+    await mkdir(join(f.root, 'runs', 'binary'));
+    await writeFile(join(f.clone, '.gitattributes'), '*.env -diff\n');
+    expect(await scan({ runId: 'binary', repo: 'o/r', base: f.base, head: f.head })).toMatchObject({
+      clean: false,
+      denylistHits: 2,
+    });
+    const marker = join(f.root, 'textconv-ran');
+    const converter = join(f.root, 'converter');
+    await writeFile(converter, `#!/bin/sh\nprintf invoked > "${marker}"\nprintf sanitized\n`);
+    await chmod(converter, 0o755);
+    await f.git('config', 'diff.hide.textconv', converter);
+    await writeFile(join(f.clone, '.gitattributes'), '*.env diff=hide\n');
+    await mkdir(join(f.root, 'runs', 'textconv'));
+    expect(
+      await scan({ runId: 'textconv', repo: 'o/r', base: f.base, head: f.head }),
+    ).toMatchObject({ clean: false, denylistHits: 2 });
+    await expect(readFile(marker)).rejects.toMatchObject({ code: 'ENOENT' });
   });
   it('refuses malformed gitleaks output without writing a report', async () => {
     const f = await fixture();
