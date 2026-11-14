@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -83,6 +84,41 @@ describe('live backfill inventory route', () => {
     expect(JSON.parse(await readFile(join(stateRoot, 'queue.json'), 'utf8'))).toHaveProperty(
       'backfill_last_manifest',
     );
+    const rankedPath = join(stateRoot, 'backfill/latest-ranked.json');
+    const rankedBytes = await readFile(rankedPath);
+    const ranked = JSON.parse(rankedBytes.toString()) as Record<string, unknown>;
+    await writeFile(rankedPath, JSON.stringify({ ...ranked, manifest_id: 'interrupted' }));
+    const mismatch = await runBackfillUnit(['baseline'], { stateRoot, cloneRoot, runnerRoot });
+    expect(mismatch.exitCode).toBe(3);
+    if (mismatch.artifact.status === 'failed')
+      expect(mismatch.artifact.error).toContain('does not match queue manifest');
+    await expect(readFile(join(stateRoot, 'backfill/baseline.json'))).rejects.toThrow();
+    await writeFile(rankedPath, rankedBytes);
+    const configPath = join(stateRoot, 'backfill-rollout.json');
+    const configBytes = await readFile(configPath);
+    const config = JSON.parse(configBytes.toString()) as Record<string, unknown>;
+    const blocked = join(root, 'blocked-store');
+    await writeFile(blocked, 'not a directory');
+    await writeFile(configPath, JSON.stringify({ ...config, durable_artifact_root: blocked }));
+    const failedStore = await runBackfillUnit(['baseline'], { stateRoot, cloneRoot, runnerRoot });
+    expect(failedStore.exitCode).toBe(3);
+    await expect(readFile(join(stateRoot, 'backfill/baseline.json'))).rejects.toThrow();
+    await writeFile(configPath, configBytes);
+    const pins = await Promise.all([
+      runBackfillUnit(['baseline'], { stateRoot, cloneRoot, runnerRoot }),
+      runBackfillUnit(['baseline'], { stateRoot, cloneRoot, runnerRoot }),
+    ]);
+    expect(pins.map((pin) => pin.exitCode).sort()).toEqual([0, 3]);
+    const refused = pins.find((pin) => pin.exitCode === 3)?.artifact;
+    expect(refused?.status).toBe('failed');
+    if (refused?.status === 'failed') expect(refused.error).toContain('already pinned');
+    const pinned = await readFile(join(stateRoot, 'backfill', 'baseline.json'));
+    const digest = createHash('sha256').update(pinned).digest('hex');
+    expect(await readFile(join(root, 'artifacts', 'sha256', digest))).toEqual(pinned);
+    expect(JSON.parse(pinned.toString())).toMatchObject({
+      schema: 'cq.backfill-baseline/v1',
+      tree: git(cloneRoot, 'rev-parse', 'HEAD^{tree}'),
+    });
     const enqueued = await runBackfillUnit(['inventory'], { stateRoot, cloneRoot, runnerRoot });
     if (enqueued.artifact.status === 'failed') throw new Error(enqueued.artifact.error);
     expect(enqueued.exitCode).toBe(0);
@@ -154,6 +190,21 @@ describe('live backfill inventory route', () => {
       runnerRoot: stateRoot,
     });
     expect(result.exitCode).toBe(2);
+    expect(
+      (await runBackfillUnit(['baseline', '--extra'], { stateRoot, cloneRoot: stateRoot }))
+        .exitCode,
+    ).toBe(2);
     await expect(readFile(join(stateRoot, 'tick.lock'))).rejects.toThrow();
+  });
+  it('refuses baseline without rollout configuration and preserves queue bytes', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'backfill-baseline-'));
+    const queue = '{"items":[],"unknown":1.0}';
+    await writeFile(join(stateRoot, 'queue.json'), queue);
+    const result = await runBackfillUnit(['baseline'], { stateRoot, cloneRoot: stateRoot });
+    expect(result.exitCode).toBe(3);
+    if (result.artifact.status === 'failed')
+      expect(result.artifact.error).toContain('rollout configuration is absent');
+    expect(await readFile(join(stateRoot, 'queue.json'), 'utf8')).toBe(queue);
+    await expect(readFile(join(stateRoot, 'backfill/baseline.json'))).rejects.toThrow();
   });
 });

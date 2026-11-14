@@ -18,7 +18,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseJsonValue } from '../../policy/crq/jsonValue.js';
 import { JsonObject } from '../../policy/crq/jsonValue.js';
-import { ledgerLoads } from '../../policy/crq/ledger.js';
+import { ledgerCanonicalBytes, ledgerLoads, ledgerSubscript } from '../../policy/crq/ledger.js';
+import { baseline } from '../../policy/crq/backfillReport.js';
 import { enqueue as enqueueJob } from '../../policy/crq/backfillJobs.js';
 import { fromPlainJson, isJsonRecord, recordGet } from '../../policy/crq/queueDoc.js';
 import { compareCodePoints } from '../../policy/crq/pythonJson.js';
@@ -112,6 +113,66 @@ export async function runBackfillUnit(
     readonly runnerRoot?: string;
   },
 ): Promise<BackfillRouteResult> {
+  if (argv[0] === 'baseline') {
+    if (argv.length !== 1)
+      return { artifact: { status: 'failed', error: 'invalid baseline arguments' }, exitCode: 2 };
+    try {
+      if (options.cloneRoot === undefined) throw new Error('backfill clone root is required');
+      const clone = options.cloneRoot;
+      const transaction = createBackfillTransactionEffects({
+        stateRoot: options.stateRoot,
+        async prepare() {
+          throw new Error('unexpected inventory preparation');
+        },
+      });
+      const value = await transaction.withLock(30, async () => {
+        const queue = await transaction.loadQueue();
+        const rollout = await readOptional(join(options.stateRoot, 'backfill-rollout.json'));
+        if (rollout === null) throw new Error('owner-provisioned rollout configuration is absent');
+        const config = rolloutSettings(ledgerLoads(Buffer.from(rollout)));
+        const filename = join(options.stateRoot, 'backfill', 'baseline.json');
+        if ((await readOptional(filename)) !== null)
+          throw new Error('baseline already pinned; never overwrite T0');
+        const ranked = ledgerLoads(
+          await readFile(join(options.stateRoot, 'backfill', 'latest-ranked.json')),
+        );
+        const target = ledgerSubscript(ranked, 'target');
+        const manifest = ledgerSubscript(queue, 'backfill_last_manifest');
+        const manifestId = ledgerSubscript(manifest, 'id');
+        if (typeof manifestId !== 'string' || ledgerSubscript(ranked, 'manifest_id') !== manifestId)
+          throw new Error('ranked inventory does not match queue manifest; retry inventory');
+        const digest = ledgerSubscript(
+          ledgerSubscript(ledgerSubscript(manifest, 'snapshots'), 'tiers'),
+          'sha256',
+        );
+        const head = ledgerSubscript(manifest, 'ledger_head');
+        if (typeof target !== 'string' || typeof digest !== 'string' || typeof head !== 'string')
+          throw new Error('invalid baseline provenance');
+        const repo = new GitAccountingRepository({ repo: clone, runGit: runGitIn(clone) });
+        const result = baseline({
+          ranked,
+          tree: await repo.tree(target),
+          policyDigest: digest,
+          ledgerHead: head,
+          at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+        });
+        const bytes = ledgerCanonicalBytes(fromPlainJson(result));
+        await fileArtifactStore(config.durableArtifactRoot).put(bytes);
+        await atomicWrite(filename, bytes);
+        return result;
+      });
+      if (value === null) throw new Error('queue lock busy; retry');
+      return { artifact: { status: 'ok', value }, exitCode: 0 };
+    } catch (error) {
+      return {
+        artifact: {
+          status: 'failed',
+          error: error instanceof Error ? error.message : String(error),
+        },
+        exitCode: error instanceof AccountingGitError ? 1 : 3,
+      };
+    }
+  }
   if (argv[0] !== 'inventory') {
     return {
       artifact: {
