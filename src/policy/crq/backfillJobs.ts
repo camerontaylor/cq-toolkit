@@ -8,6 +8,7 @@ import {
 } from './ledger.js';
 import { pyTruthy, pythonValueEqual, withObjectKeys } from './queueDoc.js';
 import { compareCodePoints } from './pythonJson.js';
+import { appendAdmission } from './admissionHistory.js';
 
 const empty = (): JsonObject => new JsonObject([]);
 const required = (object: JsonObject, key: string): JsonValue => {
@@ -181,4 +182,224 @@ export function enqueue(
   if (result.histories.some((h) => pyTruthy(required(h, 'quarantined'))))
     job = withObjectKeys(job, [['state', 'quarantined']]);
   return { queue: withObjectKeys(result.queue, [['items', [...rawItems, job]]]), item: job };
+}
+
+/** Eligibility creates the same missing family and lineage histories as Python. */
+export function eligible(
+  queue: JsonObject,
+  item: JsonObject,
+  at: string,
+): {
+  readonly queue: JsonObject;
+  readonly eligible: boolean;
+} {
+  if (item.get('state') !== 'pending' || isExecutionOwner(item)) return { queue, eligible: false };
+  ledgerTimestamp(at);
+  const future = (value: JsonValue | undefined): boolean => {
+    if (!pyTruthy(value)) return false;
+    ledgerTimestamp(value);
+    return (value as string) > at;
+  };
+  try {
+    if (future(item.get('not_before')) || future(queue.get('cooldown_until')))
+      return { queue, eligible: false };
+  } catch {
+    return { queue, eligible: false };
+  }
+  const result = history(queue, item);
+  try {
+    return {
+      queue: result.queue,
+      eligible: !result.histories.some(
+        (row) => pyTruthy(required(row, 'quarantined')) || future(row.get('next_eligible_at')),
+      ),
+    };
+  } catch (error) {
+    if (error instanceof LedgerKeyError || error instanceof LedgerTypeError) throw error;
+    return { queue: result.queue, eligible: false };
+  }
+}
+
+/** Decision and resulting queue; callers must durably save under tick.lock before launching. */
+export interface BackfillAdmissionResult {
+  readonly queue: JsonObject;
+  readonly item: JsonObject;
+  readonly decision: JsonObject;
+}
+
+/** `backfill_jobs.admission`: one-slot reserve and shared rank-4 execution cap. */
+export function admission(
+  queue: JsonObject,
+  itemIndex: number,
+  at: string,
+  observation: JsonObject | null,
+  ordinaryEligible: boolean,
+  reserve = true,
+): BackfillAdmissionResult {
+  ledgerTimestamp(at);
+  const items = queue.has('items') ? queue.get('items') : [];
+  if (!Array.isArray(items)) throw new LedgerTypeError('items must be an array');
+  const item = object(items[itemIndex], 'item');
+  const id = text(required(item, 'id'), 'item id');
+  const holds = object(
+    queue.has('backfill_reservations') ? queue.get('backfill_reservations') : empty(),
+    'backfill_reservations',
+  );
+  let resultQueue = queue.has('backfill_reservations')
+    ? queue
+    : withObjectKeys(queue, [['backfill_reservations', holds]]);
+  let reason: string | null = null;
+  let effective: bigint | null = null;
+  if (ordinaryEligible) reason = 'ordinary-eligible';
+  else if (observation === null || !pyTruthy(observation.get('successful')))
+    reason = 'usage-unknown';
+  else {
+    let age = -1;
+    try {
+      const observed = observation.get('observed_at');
+      ledgerTimestamp(observed);
+      age = (Date.parse(at) - Date.parse(observed as string)) / 1000;
+    } catch {
+      // Invalid observation timestamps fail closed, as the oracle does.
+    }
+    const remaining = observation.get('remaining');
+    if (
+      !Number.isFinite(age) ||
+      age < 0 ||
+      age > 180 ||
+      !(remaining instanceof JsonNumber) ||
+      remaining.kind !== 'int' ||
+      remaining.integer === null ||
+      remaining.integer < 0n
+    )
+      reason = 'usage-stale-or-invalid';
+    else {
+      const reflectedValue = observation.has('reflected_reservations')
+        ? observation.get('reflected_reservations')
+        : [];
+      if (!Array.isArray(reflectedValue))
+        throw new LedgerTypeError('reflected reservations must be an array');
+      const reflected = new Set(reflectedValue.map((value) => text(value, 'reservation id')));
+      let unreflected = 0n;
+      for (const [key, value] of holds.entries) {
+        const hold = object(value, 'reservation');
+        if (
+          !reflected.has(key) &&
+          hold.get('quota_state') !== 'released' &&
+          hold.get('quota_state') !== 'expired'
+        )
+          unreflected++;
+      }
+      effective = remaining.integer - unreflected;
+      if (effective < 2n) reason = 'one-slot-reserve';
+    }
+  }
+  const inflight = items.filter((value) => {
+    const row = object(value, 'item');
+    return (
+      (row.get('kind') === 'backfill' || row.get('kind') === 'coverage') && isExecutionOwner(row)
+    );
+  });
+  if (reason === null && inflight.length >= 2) reason = 'rank4-inflight-cap';
+  const decision = new JsonObject([
+    ['at', at],
+    ['item', id],
+    ['ordinary_eligible', ordinaryEligible],
+    ['observation', observation],
+    ['reservations', holds],
+    ['effective_remaining', effective === null ? null : JsonNumber.int(effective)],
+    ['decision', reason ?? 'admit'],
+  ]);
+  const appended = appendAdmission(resultQueue, decision);
+  resultQueue = appended.queue;
+  if (reason !== null || !reserve) return { queue: resultQueue, item, decision: appended.row };
+  const attempt = item.has('attempt') ? item.get('attempt') : JsonNumber.int(0);
+  if (!(attempt instanceof JsonNumber) || attempt.kind !== 'int' || attempt.integer === null)
+    throw new LedgerTypeError('attempt must be an integer');
+  const nextAttempt = attempt.integer + 1n;
+  const job = item.has('job_id') ? text(required(item, 'job_id'), 'job_id') : id;
+  const attemptId = `${job}:${nextAttempt}`;
+  const updatedItem = withObjectKeys(item, [
+    ['attempt', JsonNumber.int(nextAttempt)],
+    ['attempt_id', attemptId],
+    ['vendor_state', 'unknown'],
+    ['state', 'launch-unknown'],
+  ]);
+  const hold = new JsonObject([
+    ['item', id],
+    ['at', at],
+    ['quota_state', 'reserved'],
+    ['vendor_run_id', null],
+  ]);
+  const updatedItems = items.map((row, index) => (index === itemIndex ? updatedItem : row));
+  resultQueue = withObjectKeys(resultQueue, [
+    ['items', updatedItems],
+    ['backfill_reservations', withObjectKeys(holds, [[attemptId, hold]])],
+  ]);
+  return { queue: resultQueue, item: updatedItem, decision: appended.row };
+}
+
+/** Bind a reserved attempt to the observed vendor run without replacing an identity. */
+export function bindRun(
+  queue: JsonObject,
+  itemIndex: number,
+  vendorRunId: string,
+): BackfillEnqueueResult {
+  const items = queue.get('items');
+  if (!Array.isArray(items)) throw new LedgerTypeError('items must be an array');
+  const item = object(items[itemIndex], 'item');
+  const attemptId = text(required(item, 'attempt_id'), 'attempt_id');
+  const holds = object(required(queue, 'backfill_reservations'), 'backfill_reservations');
+  const hold = object(required(holds, attemptId), 'reservation');
+  const existing = hold.get('vendor_run_id');
+  if (pyTruthy(existing) && existing !== vendorRunId)
+    throw new LedgerIntegrityError('vendor identity conflict');
+  const updatedItem = withObjectKeys(item, [
+    ['vendor_state', 'live'],
+    ['state', 'reviewing'],
+  ]);
+  return {
+    item: updatedItem,
+    queue: withObjectKeys(queue, [
+      ['items', items.map((row, index) => (index === itemIndex ? updatedItem : row))],
+      [
+        'backfill_reservations',
+        withObjectKeys(holds, [
+          [attemptId, withObjectKeys(hold, [['vendor_run_id', vendorRunId]])],
+        ]),
+      ],
+    ]),
+  };
+}
+
+/** Release only a positively known pre-vendor refusal, never a recorded run. */
+export function cancelBeforeVendor(queue: JsonObject, itemIndex: number): BackfillEnqueueResult {
+  const items = queue.get('items');
+  if (!Array.isArray(items)) throw new LedgerTypeError('items must be an array');
+  const item = object(items[itemIndex], 'item');
+  if (pyTruthy(item.get('run')))
+    throw new LedgerIntegrityError('cannot cancel a run with recorded ownership');
+  const holds = object(
+    queue.has('backfill_reservations') ? queue.get('backfill_reservations') : empty(),
+    'backfill_reservations',
+  );
+  const attemptId = item.get('attempt_id');
+  const holdValue = typeof attemptId === 'string' ? holds.get(attemptId) : undefined;
+  let nextQueue = queue;
+  if (pyTruthy(holdValue) && typeof attemptId === 'string') {
+    const hold = object(holdValue, 'reservation');
+    nextQueue = withObjectKeys(queue, [
+      [
+        'backfill_reservations',
+        withObjectKeys(holds, [[attemptId, withObjectKeys(hold, [['quota_state', 'released']])]]),
+      ],
+    ]);
+  }
+  const updatedItem = withObjectKeys(item, [['vendor_state', 'terminal']]);
+  return {
+    item: updatedItem,
+    queue: withObjectKeys(nextQueue, [
+      ['items', items.map((row, index) => (index === itemIndex ? updatedItem : row))],
+    ]),
+  };
 }
