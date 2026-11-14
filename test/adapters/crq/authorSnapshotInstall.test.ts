@@ -37,11 +37,16 @@ interface Fixture {
   readonly blob: string;
 }
 
-function snapshotFor(base: string, content: string, corruptBlob = false): Fixture {
+function snapshotFor(
+  base: string,
+  content: string,
+  corruptBlob = false,
+  shape: { readonly path?: string; readonly mode?: string } = {},
+): Fixture {
   const blob = Buffer.from(content, 'utf8');
   const blobOid = sha1(`blob ${String(blob.length)}\0`, blob);
   const entry = Buffer.concat([
-    Buffer.from(`100644 hello.txt\0`, 'utf8'),
+    Buffer.from(`${shape.mode ?? '100644'} ${shape.path ?? 'hello.txt'}\0`, 'utf8'),
     Buffer.from(blobOid, 'hex'),
   ]);
   const treeOid = sha1(`tree ${String(entry.length)}\0`, entry);
@@ -281,6 +286,54 @@ describe('installAuthorSnapshot', () => {
           scanClasses: ['class:key-material-env'],
         }),
       ).resolves.toBeUndefined();
+    } finally {
+      repo.pool.killAll();
+    }
+  });
+
+  test('refuses paths the worktree filesystem cannot check out', async () => {
+    const repo = await clone();
+    try {
+      const component = snapshotFor(repo.base, 'hello\n', false, {
+        path: 'abcdefghijklmnop.txt',
+      });
+      await expect(
+        installAuthorSnapshot({
+          ...input(repo, component),
+          worktreeRoot: '/tmp/cq',
+          limits: { nameMax: 10, pathMax: 4096 },
+        }),
+      ).rejects.toThrow('snapshot path too long to check out');
+      const longPath = snapshotFor(repo.base, 'hello\n', false, { path: 'a'.repeat(41) });
+      await expect(
+        installAuthorSnapshot({
+          ...input(repo, longPath),
+          worktreeRoot: '/tmp',
+          limits: { nameMax: 255, pathMax: 300 },
+        }),
+      ).rejects.toThrow('snapshot path too long to check out');
+      expect(await objectExists(repo.dir, component.blob)).toBe(false);
+      expect(await objectExists(repo.dir, longPath.head)).toBe(false);
+    } finally {
+      repo.pool.killAll();
+    }
+  });
+
+  test('refuses a symlink target larger than the filesystem path bound', async () => {
+    const repo = await clone();
+    try {
+      const fixture = snapshotFor(repo.base, 'x'.repeat(4096), false, {
+        mode: '120000',
+        path: 'link',
+      });
+      await expect(
+        installAuthorSnapshot({
+          ...input(repo, fixture),
+          worktreeRoot: '/tmp',
+          limits: { nameMax: 255, pathMax: 4096 },
+        }),
+      ).rejects.toThrow('snapshot symlink target is not representable');
+      expect(await objectExists(repo.dir, fixture.head)).toBe(false);
     } finally {
       repo.pool.killAll();
     }

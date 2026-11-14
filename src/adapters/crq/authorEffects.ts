@@ -43,6 +43,7 @@ export function createAuthorEffects(options: AuthorEffectsOptions): AuthorEffect
   if (typeof clone !== 'string' || clone.length === 0) {
     throw new Error('runner clone is not configured');
   }
+  const worktreeRoot = options.config.get('worktree_root');
   const env = currentEntryEnv();
   const roots: StatusStateRoots & SummaryStateRoots = {
     runnerRoot: options.root,
@@ -73,6 +74,7 @@ export function createAuthorEffects(options: AuthorEffectsOptions): AuthorEffect
       await installAuthorSnapshot({
         pool: options.pool,
         clone,
+        ...(typeof worktreeRoot === 'string' && worktreeRoot.length > 0 ? { worktreeRoot } : {}),
         snapshot,
         binding: { base: binding.base, head: binding.head },
         original: false,

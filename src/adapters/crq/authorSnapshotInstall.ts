@@ -10,14 +10,15 @@
  * The scan is path-aware and byte-complete over the incoming closure: every
  * head entry's blob goes through the project denylist rules and, when
  * available, gitleaks. The original commit metadata is scanned with the
- * path-less rules. Path-length representability checks are left to the worker's
- * eventual `git worktree add`; they are the one decode-time check this port
- * does not reproduce.
+ * path-less rules. Materialized paths and symlink targets must fit the worktree
+ * filesystem's `NAME_MAX`/`PATH_MAX`, exactly as the worker's eventual
+ * `git worktree add` would require.
  */
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import type { JsonObject } from '../../policy/crq/jsonValue.js';
 import {
   makeGitleaksDefaultsScanner,
@@ -30,6 +31,9 @@ import { GitPool, gitCall, gitOk } from './gitExec.js';
 
 const SNAPSHOT_REF_PREFIX = 'refs/crq/author-snapshots/v1/';
 const MAX_WIRE_BYTES = 6 * 1024 * 1024;
+const FALLBACK_NAME_MAX = 255;
+const FALLBACK_PATH_MAX = 4096;
+const execFileAsync = promisify(execFile);
 
 /** `crq.ALLOWLIST_PATHS`, verbatim (kept local so the scan policy is explicit). */
 const ALLOWLIST_PATHS: readonly RegExp[] = [
@@ -46,6 +50,10 @@ const SUPPORTED_MODES = new Set(['100644', '100755', '120000']);
 export interface InstallSnapshotInput {
   readonly pool: GitPool;
   readonly clone: string;
+  /** `runner.WT_ROOT`: the filesystem a later `git worktree add` must satisfy. */
+  readonly worktreeRoot?: string;
+  /** Injected limits; production probes the worktree root with `getconf`. */
+  readonly limits?: { readonly nameMax: number; readonly pathMax: number };
   /** Trusted clone that supplies `policy/denylist/patterns.yml` (defaults to clone). */
   readonly scanClone?: string;
   /** Authoritative ref for the scan policy (defaults to `origin/main`). */
@@ -67,6 +75,11 @@ interface Entry {
 export async function installAuthorSnapshot(input: InstallSnapshotInput): Promise<void> {
   const decoded = decodeSnapshot(input.snapshot, input.binding, input.original);
   const clone = input.clone;
+  const limits = await snapshotLimits(input);
+  const pathMax =
+    limits === null || input.worktreeRoot === undefined
+      ? null
+      : limits.pathMax - Buffer.byteLength(input.worktreeRoot, 'utf8') - 256;
   const type = await gitCall(input.pool, clone, ['cat-file', '-t', input.binding.base]);
   if (type.code !== 0 || Buffer.from(type.stdout).toString('utf8').trim() !== 'commit') {
     throw new AuthorRefused('snapshot base must already be available');
@@ -196,8 +209,20 @@ export async function installAuthorSnapshot(input: InstallSnapshotInput): Promis
       if (materialized && !safePath(path)) throw new AuthorRefused('unsafe snapshot path');
       const data = blobData.get(entry.oid);
       if (data === undefined) throw new AuthorRefused('snapshot entry blob is missing');
+      if (
+        materialized &&
+        limits !== null &&
+        pathMax !== null &&
+        (entry.path.length > pathMax || longestComponent(entry.path) > limits.nameMax)
+      ) {
+        throw new AuthorRefused('snapshot path too long to check out');
+      }
       if (materialized && entry.mode === '120000') {
-        if (data.length === 0 || data.includes(0)) {
+        if (
+          data.length === 0 ||
+          data.includes(0) ||
+          (limits !== null && data.length >= limits.pathMax)
+        ) {
           throw new AuthorRefused('snapshot symlink target is not representable');
         }
       }
@@ -423,6 +448,48 @@ function safePath(path: string): boolean {
   return !path
     .split('/')
     .some((part) => part === '.' || part === '..' || part.toLowerCase() === '.git');
+}
+
+/** `os.pathconf(WT_ROOT, PC_NAME_MAX/PC_PATH_MAX)`; fail closed to POSIX minima. */
+async function snapshotLimits(
+  input: InstallSnapshotInput,
+): Promise<{ readonly nameMax: number; readonly pathMax: number } | null> {
+  if (input.worktreeRoot === undefined || input.worktreeRoot.length === 0) return null;
+  if (input.limits !== undefined) return input.limits;
+  try {
+    const [name, path] = await Promise.all([
+      execFileAsync('getconf', ['NAME_MAX', input.worktreeRoot], { timeout: 5000 }),
+      execFileAsync('getconf', ['PATH_MAX', input.worktreeRoot], { timeout: 5000 }),
+    ]);
+    const nameMax = Number.parseInt(name.stdout.trim(), 10);
+    const pathMax = Number.parseInt(path.stdout.trim(), 10);
+    if (
+      Number.isSafeInteger(nameMax) &&
+      nameMax > 0 &&
+      Number.isSafeInteger(pathMax) &&
+      pathMax > 0
+    ) {
+      return { nameMax, pathMax };
+    }
+  } catch {
+    // `getconf` is unavailable: POSIX minima keep every accepted path legal.
+  }
+  return { nameMax: FALLBACK_NAME_MAX, pathMax: FALLBACK_PATH_MAX };
+}
+
+/** Length of the longest slash-delimited byte component. */
+function longestComponent(path: Uint8Array): number {
+  let longest = 0;
+  let length = 0;
+  for (const byte of path) {
+    if (byte === 0x2f) {
+      if (length > longest) longest = length;
+      length = 0;
+    } else {
+      length += 1;
+    }
+  }
+  return length > longest ? length : longest;
 }
 
 /** Refuse on any gitleaks hit; an unavailable binary is skipped like Python. */
