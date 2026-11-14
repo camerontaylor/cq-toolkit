@@ -405,19 +405,51 @@ describe('reconcile-merged route', () => {
     });
   });
 
-  test('the rolling method uses its own key and its unported adapter refuses', async () => {
+  test('rolling scans refuse when no REST effect or page override is supplied', async () => {
+    const h = harness();
+    await expect(
+      reconcileMerged({ after: A, before: B, pageBudget: 1, recent: true }, h.effects),
+    ).rejects.toThrow('rolling closed-updated-v1 discovery requires a REST page effect');
+    expect(h.forgeCalls).toEqual([]);
+  });
+
+  test('the rolling route reads closed PRs through its REST effect', async () => {
+    const h = harness();
+    const calls: [number, number][] = [];
+    const effects: ReconcileMergedEffects = {
+      ...h.effects,
+      async forgeClosedPage(size, page) {
+        calls.push([size, page]);
+        return [
+          {
+            number: 1,
+            updated_at: '2026-10-02T00:00:00Z',
+            merged_at: '2026-10-02T00:00:00Z',
+            merge_commit_sha: sha(1),
+            head: { sha: sha(1001) },
+            base: { ref: 'main' },
+          },
+        ];
+      },
+    };
+    const result = await reconcileMerged(
+      { after: A, before: B, pageBudget: 1, recent: true },
+      effects,
+    );
+    expect(result.get('complete')).toBe(true);
+    expect(calls).toEqual([[100, 1]]);
+    expect(h.forgeCalls).toEqual([]);
+    expect((h.queue() as { items: unknown[] }).items).toHaveLength(1);
+    await reconcileMerged({ after: A, before: B, pageBudget: 1, recent: true }, effects);
+    expect(calls).toEqual([[100, 1]]);
+  });
+
+  test('the rolling method uses its own key and supports an injected page adapter', async () => {
     const h = harness();
     const interval = normalizeInterval(A, B);
     expect(reconcileWrapperKey(REPO, interval, RECONCILE_METHOD_CLOSED_UPDATED)).not.toBe(
       reconcileWrapperKey(REPO, interval),
     );
-    await expect(
-      reconcileMerged(
-        { after: A, before: B, pageBudget: 1, recent: true, dryRun: true },
-        h.effects,
-      ),
-    ).rejects.toThrow(/closed-updated-v1 discovery page adapter is not ported/);
-
     const page = fromPlainJson({
       records: [
         {

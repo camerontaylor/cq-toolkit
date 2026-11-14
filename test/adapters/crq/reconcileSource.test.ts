@@ -12,6 +12,7 @@ import {
   runReconcileMergedUnit,
 } from '../../../src/adapters/crq/reconcileSource.js';
 import { ForgeBudget } from '../../../src/policy/crq/forgeBudget.js';
+import { parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
 import { BudgetExhausted, PageFailed } from '../../../src/policy/crq/reconcileInventory.js';
 import {
   normalizeInterval,
@@ -138,6 +139,65 @@ describe('reconcile file adapter', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  test('REST pages use the shared request budget and the expected endpoint', async () => {
+    const gh = vi
+      .fn<GhFn>()
+      .mockResolvedValue({ code: 0, stdout: '[{"number":9007199254740993,"x":1.0}]', stderr: '' });
+    const effects = fileReconcileMergedEffects({
+      repo: REPO,
+      stateRoot: '/unused',
+      gh,
+      budget: new ForgeBudget({ requests: 2, seconds: 30, clock: () => 0 }),
+    });
+    await expect(effects.forgeClosedPage!(50, 2)).resolves.toEqual(
+      parseJsonValue('[{"number":9007199254740993,"x":1.0}]'),
+    );
+    expect(gh).toHaveBeenCalledWith([
+      'api',
+      'repos/org/repo/pulls?state=closed&sort=updated&direction=desc&per_page=50&page=2',
+    ]);
+    gh.mockResolvedValue({ code: 0, stdout: '{}', stderr: '' });
+    await effects.forgeQuery('query { x }');
+    await expect(effects.forgeClosedPage!(100, 1)).rejects.toBeInstanceOf(BudgetExhausted);
+    expect(gh).toHaveBeenCalledTimes(2);
+  });
+
+  test('REST transport failures, malformed JSON and timeouts retain the cursor', async () => {
+    for (const result of [
+      { code: 1, stdout: '', stderr: 'failed' },
+      { code: 0, stdout: '{', stderr: '' },
+    ]) {
+      const effects = fileReconcileMergedEffects({
+        repo: REPO,
+        stateRoot: '/unused',
+        gh: () => Promise.resolve(result),
+      });
+      await expect(effects.forgeClosedPage!(50, 1)).rejects.toBeInstanceOf(PageFailed);
+    }
+    vi.useFakeTimers();
+    try {
+      const effects = fileReconcileMergedEffects({
+        repo: REPO,
+        stateRoot: '/unused',
+        gh: () => new Promise(() => {}),
+        budget: new ForgeBudget({ requests: 1, seconds: 0.05, clock: () => 0 }),
+      });
+      const failure = expect(effects.forgeClosedPage!(50, 1)).rejects.toBeInstanceOf(PageFailed);
+      await vi.advanceTimersByTimeAsync(50);
+      await failure;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+    const bug = new TypeError('broken REST transport');
+    const effects = fileReconcileMergedEffects({
+      repo: REPO,
+      stateRoot: '/unused',
+      gh: () => Promise.reject(bug),
+    });
+    await expect(effects.forgeClosedPage!(50, 1)).rejects.toBe(bug);
   });
 
   test('wrapper reads distinguish absent from unparsable storage', async () => {
