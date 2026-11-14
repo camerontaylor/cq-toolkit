@@ -2235,11 +2235,18 @@ def main(argv=None) -> int:
             print("refused: " + str(exc), file=sys.stderr)
         return 2
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        message = str(exc)[:400] or type(exc).__name__
         if args.operation == "health":
-            raise  # keep the health observation exit-1 contract
+            # Keep the health observation exit-1 contract, but inside the I1
+            # JSON path: re-raising would reach the string SystemExit below
+            # and leave stdout empty with the message on stderr.
+            print(json.dumps(_error_artifact("thrown", args.operation, message, 1),
+                             indent=2, sort_keys=True))
+            if not parser.json_mode:
+                print("health: " + message, file=sys.stderr)
+            return 1
         # Escaped outside mutation_record: the helper was never entered, so the
         # deployment surfaces are unchanged and this is a refusal (exit 2).
-        message = str(exc)[:400] or type(exc).__name__
         print(json.dumps(_error_artifact("refused", args.operation, message, 2),
                          indent=2, sort_keys=True))
         if not parser.json_mode:
