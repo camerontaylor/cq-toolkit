@@ -176,7 +176,6 @@ function window(offset: bigint): [number, number, bigint] {
 interface Row {
   number: bigint;
   updated: string;
-  raw: ReturnType<typeof fromPlainJson>;
   merged: unknown;
   base: unknown;
   head: unknown;
@@ -195,7 +194,6 @@ function rowsOf(value: unknown, size: number): Row[] {
     return {
       number,
       updated: updated as string,
-      raw: fromPlainJson(item),
       merged: recordGet(item, 'merged_at'),
       base: recordGet(item, 'base'),
       head: recordGet(item, 'head'),

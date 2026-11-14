@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { recentMergedPage } from '../../../src/policy/crq/recentDiscovery.js';
+import { JsonNumber, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
 import {
   isJsonInt,
   isJsonRecord,
@@ -101,6 +102,79 @@ describe('rolling closed PR discovery', () => {
     f.bump(150);
     f.hooks.set(1, () => f.bump(151));
     expect(await f.scan()).toEqual(f.expected);
+  });
+
+  test('a GitHub inversion below the floor is still read', async () => {
+    const f = fixture(30);
+    for (const row of f.rows.values()) row.updated_at = '2026-09-30T23:00:00Z';
+    f.rows.get(28)!.updated_at = LATER;
+    f.rows.get(28)!.sort = '2026-09-30T23:00:00Z';
+    expect(await f.scan()).toEqual(new Set([28]));
+  });
+
+  test('stale anchor rows changed and reopened during continuation retain all merges', async () => {
+    const f = fixture(250, [152]);
+    for (const n of [151, 152, 153]) f.bump(n);
+    f.hooks.set(1, () => {
+      f.rows.get(151)!.updated_at = '2026-10-03T00:00:01Z';
+      f.rows.delete(152);
+    });
+    expect(await f.scan()).toEqual(f.expected);
+  });
+
+  test('stale row inside a same-second group survives concurrent changes', async () => {
+    const f = fixture(400);
+    for (let n = 100; n < 250; n += 1) f.rows.get(n)!.updated_at = '2026-10-02T00:15:00Z';
+    f.bump(180);
+    f.hooks.set(1, () => {
+      f.bump(120);
+      f.move(200);
+    });
+    expect(await f.scan()).toEqual(f.expected);
+  });
+
+  test('oversized head group completes without losing merges', async () => {
+    const f = fixture(300);
+    for (const row of f.rows.values()) row.updated_at = '2026-10-02T00:10:00Z';
+    expect(await f.scan()).toEqual(f.expected);
+    expect(f.calls.length).toBeLessThanOrEqual(12);
+  });
+
+  test('large identifiers force cursor trimming while preserving all outcomes', async () => {
+    const base = 10n ** 30n;
+    const at = '2026-10-02T00:10:00Z';
+    const rows = Array.from({ length: 250 }, (_, i) => ({
+      number: JsonNumber.int(base + BigInt(249 - i)),
+      updated_at: at,
+      merged_at: at,
+      merge_commit_sha: 'abc',
+      base: { ref: 'main' },
+      head: { sha: 'abc' },
+    }));
+    const found = new Set<bigint>();
+    let cursor: string | null = null;
+    let trimmed = false;
+    for (let i = 0; i < 40; i += 1) {
+      const page = await recentMergedPage(
+        async (size, index) => rows.slice((index - 1) * size, index * size),
+        cursor,
+        AFTER,
+      );
+      for (const row of page.records) {
+        if (!isJsonRecord(row)) throw new Error('invalid record');
+        const number = recordGet(row, 'number');
+        if (!isJsonInt(number)) throw new Error('invalid number');
+        found.add(jsonIntValue(number));
+      }
+      cursor = page.next_cursor;
+      if (cursor === null) break;
+      expect(Buffer.byteLength(cursor)).toBeLessThanOrEqual(4096);
+      const state = parseJsonValue(cursor);
+      if (i === 0 && isJsonRecord(state) && recordGet(state, 'ha') === true) trimmed = true;
+    }
+    expect(cursor).toBeNull();
+    expect(trimmed).toBe(true);
+    expect(found).toEqual(new Set(Array.from({ length: 250 }, (_, i) => base + BigInt(i))));
   });
 
   test('reopens and moves between page requests do not lose merges', async () => {
