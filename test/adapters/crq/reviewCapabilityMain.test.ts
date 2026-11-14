@@ -3,6 +3,7 @@
 // it against a real Git clone and queue file, and the client parses the reply.
 // A queue shaped like the Python runner's retained state is served too.
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +15,8 @@ import {
 } from '../../../src/ops/review/internal/queueClient.js';
 import type { QueueTransport } from '../../../src/ops/review/internal/queueProtocol.js';
 import { runReviewCapabilityMain } from '../../../src/adapters/crq/reviewCapabilityMain.js';
+import { createReviewEffects } from '../../../src/adapters/crq/reviewEffects.js';
+import { GitPool } from '../../../src/adapters/crq/gitExec.js';
 import { queueBytes } from '../../../src/adapters/crq/queueEffects.js';
 import { JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
 import { withObjectKeys } from '../../../src/policy/crq/queueDoc.js';
@@ -154,6 +157,37 @@ function object(value: unknown): JsonObject {
   return parsed;
 }
 
+function sha1(header: string, data: Uint8Array): string {
+  return createHash('sha1').update(header).update(data).digest('hex');
+}
+
+function longPathSnapshot(base: string): { snapshot: JsonObject; head: string } {
+  const blob = Buffer.from('hello\n', 'utf8');
+  const blobOid = sha1(`blob ${String(blob.length)}\0`, blob);
+  const path = 'a'.repeat(300);
+  const entry = Buffer.concat([
+    Buffer.from(`100644 ${path}\0`, 'utf8'),
+    Buffer.from(blobOid, 'hex'),
+  ]);
+  const tree = sha1(`tree ${String(entry.length)}\0`, entry);
+  const commit = Buffer.from(
+    `tree ${tree}\nparent ${base}\nauthor cq snapshot <snapshot@localhost> 0 +0000\ncommitter cq snapshot <snapshot@localhost> 0 +0000\n\ncq author snapshot v1\n`,
+    'utf8',
+  );
+  const head = sha1(`commit ${String(commit.length)}\0`, commit);
+  const objects = [
+    { oid: blobOid, type: 'blob', data: blob.toString('base64') },
+    { oid: tree, type: 'tree', data: entry.toString('base64') },
+    { oid: head, type: 'commit', data: commit.toString('base64') },
+  ].sort((left, right) => (left.oid < right.oid ? -1 : left.oid > right.oid ? 1 : 0));
+  const digest = createHash('sha256');
+  for (const value of objects) digest.update(`${value.oid}\0${value.type}\0${value.data}\n`);
+  return {
+    snapshot: object({ v: 1, tree, objects, sha256: digest.digest('hex') }),
+    head,
+  };
+}
+
 function pythonShapedQueue(f: Fixture): JsonObject {
   const identity = 'a'.repeat(64);
   return object({
@@ -257,6 +291,59 @@ describe('review-v1 forced command over the TypeScript client', () => {
         message: 'review worker outcome unavailable; retry the same request id',
       },
     });
+  });
+
+  test('a review snapshot path too long for the worktree is refused before install', async () => {
+    const f = await fixture();
+    await mkdir(join(f.clone, 'policy/denylist'), { recursive: true });
+    await writeFile(
+      join(f.clone, 'policy/denylist/patterns.yml'),
+      [
+        'rules:',
+        '  - id: class:key-material-env',
+        '    description: universal env material',
+        "    regex: 'NEVER_MATCH_[A-Z]+'",
+        "    sample: 'NEVER_MATCH_TOKEN'",
+        'clean_probes:',
+        "  - 'ordinary text'",
+        '',
+      ].join('\n'),
+    );
+    await git(f.clone, 'add', 'policy/denylist/patterns.yml');
+    await run('git', [
+      '-C',
+      f.clone,
+      '-c',
+      'user.email=cq@example.test',
+      '-c',
+      'user.name=CQ',
+      'commit',
+      '-q',
+      '-m',
+      'scan policy',
+    ]);
+    await git(f.clone, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    const { snapshot, head } = longPathSnapshot(f.base);
+    const pool = new GitPool();
+    const bundle = createReviewEffects({
+      root: f.root,
+      repo: REPO,
+      config: object({
+        repo: REPO,
+        clone: f.clone,
+        repos: [],
+        worktree_root: join(f.root, 'worktrees'),
+        worktree_prefix: 'cq-wt-',
+      }),
+      pool,
+    });
+    try {
+      await expect(
+        bundle.effects.installSnapshot(REPO, snapshot, { base: f.base, head }),
+      ).rejects.toThrow('snapshot path too long to check out');
+    } finally {
+      bundle.terminate();
+    }
   });
 
   test('capabilities, submit, replay, status and cancel round-trip', async () => {

@@ -80,6 +80,7 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
   const paths = queueEffectPaths(options.root);
   const state = paths.stateRoot;
   const pool = options.pool;
+  const worktreeRoot = options.config.get('worktree_root');
   const repos = arrayOrEmpty(options.config.get('repos'))
     .map(objectOrNull)
     .filter((entry): entry is JsonObject => entry !== null);
@@ -186,6 +187,7 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
         pool,
         clone: cloneFor(repo),
         scanClone: cloneFor(options.repo),
+        ...(typeof worktreeRoot === 'string' && worktreeRoot.length > 0 ? { worktreeRoot } : {}),
         ...(scanClasses === undefined ? {} : { scanClasses }),
         snapshot,
         binding,
