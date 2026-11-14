@@ -1,7 +1,8 @@
 /** Non-launching portion of backfill_runtime.select. Caller holds tick.lock.
- * Effects read already-published ledger/snapshots and write only refresh hints.
- * The returned queue is a replacement and must be persisted by the caller.
- * A candidate is not a reservation or authorization to launch.
+ * Effects read already-published ledger/snapshots, write refresh hints and may
+ * durably reserve via the optional real gate. Gate effects must retain item
+ * indices. The returned queue is a replacement and must be persisted by the caller.
+ * A candidate alone is not authorization to launch.
  */
 import { JsonNumber, JsonObject, type JsonValue } from '../../../policy/crq/jsonValue.js';
 import {
@@ -22,6 +23,11 @@ export interface BackfillSelectionEffects {
   now(): string;
   /** Must perform rank4Gate with dry=true and return its replacement queue. */
   probeGate(
+    queue: JsonObject,
+    itemIndex: number,
+  ): Promise<{ queue: JsonObject; admitted: boolean }>;
+  /** Non-dry gate must persist the reservation before returning admitted. */
+  admitGate?(
     queue: JsonObject,
     itemIndex: number,
   ): Promise<{ queue: JsonObject; admitted: boolean }>;
@@ -124,8 +130,9 @@ function remaining(item: JsonObject, coverage: CoverageLoad): JsonObject[] {
     });
 }
 
-/** Selects a candidate without admitting, reserving, spawning or saving it.
+/** Selects without launching. A supplied non-dry gate may durably reserve.
  * Unpublished refusal events must be flushed by the caller before this pass.
+ * A reserved candidate must be completed or recovered while retaining ownership.
  */
 export async function reconcileBackfillSelection(
   initial: JsonObject,
@@ -136,7 +143,7 @@ export async function reconcileBackfillSelection(
     only?: string;
   },
   effects: BackfillSelectionEffects,
-): Promise<{ queue: JsonObject; candidate: number | null; available: boolean }> {
+): Promise<{ queue: JsonObject; candidate: number | null; available: boolean; reserved: boolean }> {
   let queue = initial;
   if (
     options.halted ||
@@ -144,7 +151,7 @@ export async function reconcileBackfillSelection(
     pyTruthy(queue.get('backfill_publication_error')) ||
     !options.dispatchEnabled
   )
-    return { queue, candidate: null, available: false };
+    return { queue, candidate: null, available: false, reserved: false };
   const raw = queue.get('items');
   if (!Array.isArray(raw)) throw new LedgerTypeError('items must be an array');
   const indices = raw
@@ -162,12 +169,12 @@ export async function reconcileBackfillSelection(
     queue = result.queue;
     if (result.eligible) pending.push(index);
   }
-  if (!pending.length) return { queue, candidate: null, available: false };
+  if (!pending.length) return { queue, candidate: null, available: false, reserved: false };
   const first = pending[0]!;
   const before = itemAt(queue, first).get('wait_reason');
   const probe = await effects.probeGate(queue, first);
   queue = probe.queue;
-  const refused = probe.admitted
+  let refused = probe.admitted
     ? null
     : text(itemAt(queue, first).get('wait_reason') || 'rank4-gate-refused', 'wait_reason');
   let restored = itemAt(queue, first);
@@ -188,7 +195,7 @@ export async function reconcileBackfillSelection(
       if (item.get('wait_reason') !== MISSING_EVIDENCE)
         queue = putItem(queue, index, withObjectKeys(item, [['wait_reason', refused]]));
     }
-    return { queue, candidate: null, available: pyTruthy(last.get('available')) };
+    return { queue, candidate: null, available: pyTruthy(last.get('available')), reserved: false };
   }
   const snapshots = new Map<string, CoverageLoad | null>();
   const stale = new Set<string>();
@@ -268,6 +275,20 @@ export async function reconcileBackfillSelection(
       queue = putItem(queue, index, withObjectKeys(item, [['wait_reason', refused]]));
       continue;
     }
+    if (!options.dry && effects.admitGate !== undefined) {
+      // A failed refresh hint must not conceal a durable reservation.
+      if (stale.size) await effects.requestCoverage(head, [...stale].sort(compareCodePoints));
+      const admission = await effects.admitGate(queue, index);
+      queue = admission.queue;
+      if (!admission.admitted) {
+        refused = text(
+          itemAt(queue, index).get('wait_reason') || 'rank4-gate-refused',
+          'wait_reason',
+        );
+        continue;
+      }
+      return { queue, candidate: index, available, reserved: true };
+    }
     candidate = index;
     break;
   }
@@ -283,5 +304,5 @@ export async function reconcileBackfillSelection(
         ]),
       ],
     ]);
-  return { queue, candidate, available };
+  return { queue, candidate, available, reserved: false };
 }
