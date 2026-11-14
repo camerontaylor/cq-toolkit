@@ -650,6 +650,37 @@ class DiscoveryTests(PortFixture):
         self.assertIn("Wants names crq-tick.service",
                       " ".join(evidence["foreign"]))
 
+    def test_cotenant_symlink_blank_line_ends_a_continuation(self):
+        declared = self.declare()
+        outside = self.base / "repos/blank.service"
+        outside.parent.mkdir(parents=True)
+        # A blank line flushes the accumulated line, so Wants is parsed on its
+        # own and the dependency is visible (systemd-analyze verify confirms).
+        outside.write_text(
+            "[Unit]\nDescription=wrapped \\\n\nWants=crq-tick.service\n")
+        (self.unit_dir / "blank.service").symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Wants names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_cotenant_symlink_escaped_backslash_is_not_a_continuation(self):
+        declared = self.declare()
+        outside = self.base / "repos/escaped.service"
+        outside.parent.mkdir(parents=True)
+        # An even trailing run of backslashes does not continue the line, so
+        # Wants must be scanned independently rather than swallowed into
+        # Description (systemd-analyze verify confirms).
+        outside.write_text(
+            "[Unit]\nDescription=escaped \\\\\nWants=crq-tick.service\n")
+        (self.unit_dir / "escaped.service").symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Wants names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
     def test_cotenant_directory_symlink_is_not_followed(self):
         declared = self.declare()
         held = self.base / "repos/held.service.d"

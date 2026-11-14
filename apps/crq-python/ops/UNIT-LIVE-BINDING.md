@@ -95,8 +95,10 @@ is a regular file, whether it stays inside the unit directory or points into a
 cotenant repository or config tree; cotenant units are routinely installed
 that way. The target text is scanned like any other source, so a cotenant unit
 naming an expected unit is still foreign, and systemd continuations are joined
-so a wrapped directive cannot hide a dependency. A `/dev/null` mask is
-skipped, and a symlinked directory or special file is not followed. A
+with `config_parse` semantics (only an odd trailing backslash continues, a
+comment line is ignored, a blank line flushes the accumulated line) so a
+wrapped directive cannot hide a dependency. A `/dev/null` mask is skipped, and
+a symlinked directory or special file is not followed. A
 dangling, looping, unreadable or oversized target, or an unreadable directory
 including a descendant, makes `complete` false rather than silently skipping
 evidence. No ownership or mode gate is added for a cotenant target: its text

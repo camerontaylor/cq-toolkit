@@ -38,9 +38,10 @@ directives, so a co-installed drop-in cannot introduce an unaccounted incoming
 activator. A cotenant unit installed as a symlink into a repository or config
 tree is read the same way: its resolved regular-file target is bounded and
 dependency-scanned, so an outside unit naming an expected unit remains
-foreign, and systemd continuations are joined so a wrapped directive cannot
-hide a dependency. Symlinked directories and special files are not followed.
-It never follows an ``EnvironmentFile`` target.
+foreign, and systemd continuations are joined with ``config_parse`` semantics
+so a wrapped directive cannot hide a dependency. Symlinked directories and
+special files are not followed. It never follows an ``EnvironmentFile``
+target.
 """
 from __future__ import annotations
 
@@ -118,27 +119,33 @@ def _read_file(path: Path, *, max_bytes: int) -> bytes:
 def _logical_lines(text):
     """Yield ``(line_number, line, continued)`` with systemd continuations.
 
-    ``systemd.syntax`` concatenates a line ending in a backslash with the next
-    line, replacing the backslash with a space. A comment or blank block that
-    follows a continuation is ignored and the joined line continues after it.
-    ``continued`` is true when the logical line absorbed at least one
-    continuation, so a declared drop-in can still refuse the shape outright
-    while a cotenant unit's dependency text is scanned truthfully.
+    ``config_parse`` continues a line only when the trailing run of
+    backslashes is odd, replacing the last backslash with a space. A comment
+    line inside a continuation is ignored, while a blank line flushes the
+    accumulated line and ends the continuation. ``continued`` is true when the
+    yielded line absorbed a continuation, so a declared drop-in can still
+    refuse the shape outright while a cotenant unit's dependency text is
+    scanned truthfully.
     """
     pending = None
     start = 0
     continued = False
     for number, line in enumerate(text.splitlines(), 1):
         stripped = line.strip()
-        if not stripped or stripped.startswith(("#", ";")):
+        if stripped.startswith(("#", ";")):
+            continue
+        if not stripped:
+            if pending is not None:
+                yield start, pending, continued
+                pending = None
             continue
         if pending is None:
             pending = ""
             start = number
             continued = False
         pending += line
-        if pending.rstrip().endswith("\\"):
-            pending = pending.rstrip()[:-1] + " "
+        if (len(pending) - len(pending.rstrip("\\"))) % 2 == 1:
+            pending = pending[:-1] + " "
             continued = True
             continue
         yield start, pending, continued
