@@ -33,10 +33,12 @@ import { drainableStemsFromQueue } from '../../policy/crq/publishEffects.js';
 import { readSummaryCore, type ReadOnlyStatusEffects } from '../../ops/crq/readOnlyStatus.js';
 import { fileReadOnlyStatusEffects, type StatusStateRoots } from './statusSource.js';
 import {
+  jsonScalar,
   writeStatus,
   type CrqDocuments,
   type StatusWriterEffects,
 } from '../../ops/crq/statusWriter.js';
+import { pythonJsonText } from '../../policy/crq/pythonJson.js';
 
 export type { StatusStateRoots } from './statusSource.js';
 
@@ -130,10 +132,29 @@ export function fileStatusWriterEffects(
       // transient — the next `crq status` republishes from a consistent
       // snapshot — and Python has the same window between `save_queue` and
       // `publish`. The validated documents still drive the effect snapshot.
+      // The core composer re-reads through the injected text effects, so the
+      // route's already-validated bytes are re-serialized deterministically
+      // (pythonJsonText over the lossless documents) and the composer sees
+      // exactly the queue/config the route validated, not a newer revision
+      // a concurrent tick may have swapped in.
       void documents.scheduleProbe;
+      const queueText = pythonJsonText(jsonScalar(documents.queueExact ?? documents.queue), {
+        asciiOnly: true,
+        sortKeys: false,
+        keyOrder: 'insertion',
+        indent: 2,
+        trailingNewline: true,
+      });
+      const configText = pythonJsonText(jsonScalar(documents.config), {
+        asciiOnly: true,
+        sortKeys: false,
+        keyOrder: 'insertion',
+        indent: 2,
+        trailingNewline: true,
+      });
       const coreEffects: ReadOnlyStatusEffects = {
-        readQueue: readOnly.readQueue,
-        readConfig: readOnly.readConfig,
+        readQueue: async () => queueText,
+        readConfig: async () => configText,
         readEvents: readOnly.readEvents,
         readReceipt: readOnly.readReceipt,
         now,
