@@ -138,6 +138,9 @@ export async function runBackfillUnit(
         );
         const target = ledgerSubscript(ranked, 'target');
         const manifest = ledgerSubscript(queue, 'backfill_last_manifest');
+        const manifestId = ledgerSubscript(manifest, 'id');
+        if (typeof manifestId !== 'string' || ledgerSubscript(ranked, 'manifest_id') !== manifestId)
+          throw new Error('ranked inventory does not match queue manifest; retry inventory');
         const digest = ledgerSubscript(
           ledgerSubscript(ledgerSubscript(manifest, 'snapshots'), 'tiers'),
           'sha256',
@@ -154,8 +157,8 @@ export async function runBackfillUnit(
           at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
         });
         const bytes = ledgerCanonicalBytes(fromPlainJson(result));
-        await atomicWrite(filename, bytes);
         await fileArtifactStore(config.durableArtifactRoot).put(bytes);
+        await atomicWrite(filename, bytes);
         return result;
       });
       if (value === null) throw new Error('queue lock busy; retry');

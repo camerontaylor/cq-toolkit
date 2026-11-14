@@ -84,6 +84,26 @@ describe('live backfill inventory route', () => {
     expect(JSON.parse(await readFile(join(stateRoot, 'queue.json'), 'utf8'))).toHaveProperty(
       'backfill_last_manifest',
     );
+    const rankedPath = join(stateRoot, 'backfill/latest-ranked.json');
+    const rankedBytes = await readFile(rankedPath);
+    const ranked = JSON.parse(rankedBytes.toString()) as Record<string, unknown>;
+    await writeFile(rankedPath, JSON.stringify({ ...ranked, manifest_id: 'interrupted' }));
+    const mismatch = await runBackfillUnit(['baseline'], { stateRoot, cloneRoot, runnerRoot });
+    expect(mismatch.exitCode).toBe(3);
+    if (mismatch.artifact.status === 'failed')
+      expect(mismatch.artifact.error).toContain('does not match queue manifest');
+    await expect(readFile(join(stateRoot, 'backfill/baseline.json'))).rejects.toThrow();
+    await writeFile(rankedPath, rankedBytes);
+    const configPath = join(stateRoot, 'backfill-rollout.json');
+    const configBytes = await readFile(configPath);
+    const config = JSON.parse(configBytes.toString()) as Record<string, unknown>;
+    const blocked = join(root, 'blocked-store');
+    await writeFile(blocked, 'not a directory');
+    await writeFile(configPath, JSON.stringify({ ...config, durable_artifact_root: blocked }));
+    const failedStore = await runBackfillUnit(['baseline'], { stateRoot, cloneRoot, runnerRoot });
+    expect(failedStore.exitCode).toBe(3);
+    await expect(readFile(join(stateRoot, 'backfill/baseline.json'))).rejects.toThrow();
+    await writeFile(configPath, configBytes);
     const pins = await Promise.all([
       runBackfillUnit(['baseline'], { stateRoot, cloneRoot, runnerRoot }),
       runBackfillUnit(['baseline'], { stateRoot, cloneRoot, runnerRoot }),
