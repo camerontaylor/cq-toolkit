@@ -45,11 +45,12 @@ import {
   fileFindingInbox,
   type ArtifactStore,
 } from '../../adapters/crq/findingStore.js';
-import { GitLedger, type RunGit } from '../../adapters/crq/ledgerGit.js';
+import { GitLedger, LedgerTransportError, type RunGit } from '../../adapters/crq/ledgerGit.js';
+import { publisherSpoolPushCommit, SpoolConfigError } from '../../adapters/crq/publisherSpool.js';
 import { FindingInbox } from '../review/internal/crq/findingInbox.js';
 import type { FindingInboxFiles } from '../review/internal/crq/findingInbox.js';
 import { Outbox, type OutboxFiles } from '../review/internal/crq/outbox.js';
-import { publish as publishOutbox } from '../review/internal/crq/publisher.js';
+import { publish as publishOutbox, PublicationPushError } from '../review/internal/crq/publisher.js';
 import { JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
 import {
   LedgerIntegrityError,
@@ -59,9 +60,6 @@ import {
   ledgerValidateSequence,
 } from '../../policy/crq/ledger.js';
 import { removeKeys, setKeys } from './internal/publishJsonEdit.js';
-
-/** The coverage slice stays Python-side; the key is always reported. */
-export const PUBLISH_COVERAGE_STUB = 'coverage port pending (Python side owns it)' as const;
 
 /** Truncation bound Python applies to persisted error text. */
 const ERROR_CHARS = 300;
@@ -83,13 +81,24 @@ function truncated(error: unknown): string {
   return [...text].slice(0, ERROR_CHARS).join('');
 }
 
+/** Python `bool(value)` over the JSON domain: 0, "", empty containers are false. */
+function truthy(value: JsonValue | undefined): boolean {
+  if (value === undefined || value === null || value === false) return false;
+  if (value === true) return true;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') return value.length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (value instanceof JsonObject) return value.entries.length > 0;
+  return false;
+}
+
 /** `backfill_jobs.is_execution_owner`: a live/unknown vendor run owns the item. */
 function isExecutionOwner(item: JsonObject): boolean {
   const vendorState = item.get('vendor_state');
   return (
     vendorState === 'live' ||
     vendorState === 'unknown' ||
-    item.get('run') !== undefined ||
+    truthy(item.get('run')) ||
     item.get('state') === 'reviewing' ||
     item.get('state') === 'launch-unknown'
   );
@@ -131,9 +140,7 @@ export interface PublishRunEffects {
 /** The route's JSON outcome, Python's `run()` keys. */
 export interface PublishRunResult {
   readonly ledger_head?: string;
-  readonly publication: 'reconciled' | 'reconciliation-pending' | 'idle';
-  /** Set by the caller's `main` wrapper, never by `run` itself. */
-  readonly notifications?: string;
+  readonly publication: 'reconciled' | 'reconciliation-pending' | 'idle' | 'disabled';
 }
 
 interface Services {
@@ -250,8 +257,8 @@ async function workerServices(effects: PublishRunEffects): Promise<Services> {
 /**
  * `backfill-rollout.json` settings, reduced to what the publish path reads.
  * An absent file disables publication; present-but-incomplete prerequisites
- * are Python's integrity refusal. The dispatch-side validations (reviewer
- * limits, spool alias shape) belong to the dispatch slice.
+ * are Python's integrity refusal, including the dispatch-side `publisher_spool`
+ * shape check Python's `settings()` runs on every read.
  */
 async function readRollout(effects: PublishRunEffects): Promise<JsonObject> {
   const filename = join(effects.stateRoot, 'backfill-rollout.json');
@@ -278,6 +285,26 @@ async function readRollout(effects: PublishRunEffects): Promise<JsonObject> {
   if (value.get('runner_identity') !== 'crq-runner-app') {
     throw integrity('backfill rollout prerequisites incomplete');
   }
+  const spool = value.get('publisher_spool');
+  if (!(spool instanceof JsonObject)) {
+    throw integrity('backfill rollout publisher_spool incomplete or invalid');
+  }
+  const keys = spool.entries.map(([key]) => key);
+  if (keys.some((key) => key !== 'ssh_alias' && key !== 'ssh_key' && key !== 'key')) {
+    throw integrity('backfill rollout publisher_spool incomplete or invalid');
+  }
+  const alias = spool.get('ssh_alias');
+  if (typeof alias !== 'string' || !SPOOL_ALIAS.test(alias)) {
+    throw integrity('backfill rollout publisher_spool incomplete or invalid');
+  }
+  const key = spool.get('ssh_key') ?? spool.get('key');
+  if (
+    typeof key !== 'string' ||
+    key.trim() === '' ||
+    /\n|\r|\0/.test(key)
+  ) {
+    throw integrity('backfill rollout publisher_spool incomplete or invalid');
+  }
   return value;
 }
 
@@ -285,6 +312,9 @@ async function readRollout(effects: PublishRunEffects): Promise<JsonObject> {
 export class PublishRolloutDisabled extends Error {
   override readonly name = 'PublishRolloutDisabled';
 }
+
+/** Python's `settings()` spool alias shape: `re.fullmatch` of that pattern. */
+const SPOOL_ALIAS = /^[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.:-]*$/;
 
 /**
  * `backfill_publisher.run` over injected effects. Throws after persisting
@@ -319,7 +349,19 @@ export async function runPublish(effects: PublishRunEffects): Promise<PublishRun
       await publishOutbox(
         {
           fetch: () => services.ledger.fetch(),
-          publish: (batch, baseHead) => services.ledger.publishBatch(batch, baseHead),
+          publish: async (batch, baseHead) => {
+            try {
+              return await services.ledger.publishBatch(batch, baseHead);
+            } catch (error) {
+              // GitLedger's transport class maps to the driver's retry class;
+              // integrity and validation failures propagate unchanged, so a
+              // local defect is never retried as a push failure.
+              if (error instanceof LedgerTransportError) {
+                throw new PublicationPushError(error.message, { cause: error });
+              }
+              throw error;
+            }
+          },
         },
         services.outbox,
         {
@@ -409,10 +451,10 @@ async function reconcileQueue(
         throw integrity('publication acknowledgement is not a review');
       }
       const updated = publishedTransition(candidate, value, queue);
-      const replaced = itemsOf(queue).map((item): JsonValue =>
-        item === candidate ? updated : item,
+      const replaced = itemsOf(updated.queue).map((item): JsonValue =>
+        item === candidate ? updated.item : item,
       );
-      queue = setKeys(queue, [['items', replaced]]);
+      queue = setKeys(updated.queue, [['items', replaced]]);
     }
   }
   queue = setKeys(queue, [['review_ledger_head', head]]);
@@ -435,8 +477,22 @@ async function reconcileQueue(
   return true;
 }
 
+/**
+ * `backfill_jobs.published` result: the updated item plus the updated queue
+ * document (scope-failure removal and family release live at queue level).
+ */
+interface PublishedTransition {
+  readonly item: JsonObject;
+  readonly queue: JsonObject;
+}
+
 /** `backfill_jobs.published`: scope-satisfied completion flips the item. */
-function publishedTransition(item: JsonObject, review: JsonObject, queue: JsonObject): JsonObject {
+function publishedTransition(
+  item: JsonObject,
+  review: JsonObject,
+  queueInput: JsonObject,
+): PublishedTransition {
+  let queue = queueInput;
   const payload = review.get('payload');
   if (!(payload instanceof JsonObject)) throw integrity('publication payload missing');
   const reviewedScope = payload.get('reviewed_scope');
@@ -480,15 +536,27 @@ function publishedTransition(item: JsonObject, review: JsonObject, queue: JsonOb
     const family = item.get('family');
     const families = queue.get('backfill_families');
     if (typeof family === 'string' && families instanceof JsonObject) {
-      // Python keeps the family while any non-terminal sibling remains.
-      const hasSibling = itemsOf(queue).some(
-        (candidate) =>
-          candidate instanceof JsonObject &&
-          candidate !== item &&
-          candidate.get('family') === family &&
-          candidate.get('state') !== 'done' &&
-          candidate.get('state') !== 'skipped',
-      );
+      // Python keeps the family while any non-terminal, non-superseded
+      // sibling remains: a superseded sibling (blocked/failed, not an
+      // execution owner, same scope_digest, lower generation) never retains
+      // the family's failure history against a successful replan.
+      const itemGeneration = numericOr(item.get('generation'), 0);
+      const itemDigest = item.get('scope_digest');
+      const hasSibling = itemsOf(queue).some((candidate) => {
+        if (!(candidate instanceof JsonObject) || candidate === item) return false;
+        if (candidate.get('family') !== family) return false;
+        const state = candidate.get('state');
+        if (state === 'done' || state === 'skipped') return false;
+        if (
+          (state === 'blocked' || state === 'failed') &&
+          !isExecutionOwner(candidate) &&
+          candidate.get('scope_digest') === itemDigest &&
+          numericOr(candidate.get('generation'), 0) < itemGeneration
+        ) {
+          return false;
+        }
+        return true;
+      });
       if (!hasSibling) {
         queue = setKeys(queue, [['backfill_families', removeKeys(families, [family])]]);
       }
@@ -498,12 +566,17 @@ function publishedTransition(item: JsonObject, review: JsonObject, queue: JsonOb
     updated = setKeys(updated, [['state', 'partial']]);
   }
   updated = setKeys(updated, [['published_event_id', remoteId]]);
-  return updated;
+  return { item: updated, queue };
 }
 
 function isSubset(subset: ReadonlySet<number>, superset: ReadonlySet<number>): boolean {
   for (const line of subset) if (!superset.has(line)) return false;
   return true;
+}
+
+/** Python's `value.get(key, default)` for the numeric fields of the sibling rule. */
+function numericOr(value: JsonValue | undefined, fallback: number): number {
+  return typeof value === 'number' ? value : fallback;
 }
 
 /** `runtime.clear_operation_halt`: only the owning operation clears its halt. */

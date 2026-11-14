@@ -137,6 +137,10 @@ function pipedGit(
     const stderr: Buffer[] = [];
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    // The child exits once it has read its input; a late write to the closed
+    // pipe (EPIPE) must not crash the process. The close handler below is the
+    // single completion authority.
+    child.stdin.on('error', () => undefined);
     child.on('error', () => {
       resolve({ args, code: null, stdout: new Uint8Array(0), stderr: 'spawn failed' });
     });
@@ -182,14 +186,17 @@ export function filePublishEffects(roots: PublisherRoots): PublishRunEffects {
       const lock = join(roots.stateRoot, 'tick.lock');
       const { mkdir } = await import('node:fs/promises');
       await mkdir(roots.stateRoot, { recursive: true });
-      // Python with_lock: wait up to lock_wait seconds, then report busy as null.
+      // Python with_lock: wait up to lock_wait seconds, then report busy as
+      // null. A callback that throws under a held lock propagates: only
+      // exhausted contention is contention.
       const waitMs = (options?.lockWait ?? 0) * 1000;
       const deadline = Date.now() + waitMs;
       for (;;) {
         try {
           return await withLock(lock, { wait: false }, fn);
         } catch (error) {
-          if (!(error instanceof SlotBusyError) || Date.now() >= deadline) return null;
+          if (!(error instanceof SlotBusyError)) throw error;
+          if (Date.now() >= deadline) return null;
           await new Promise((resolve) => setTimeout(resolve, 250));
         }
       }
