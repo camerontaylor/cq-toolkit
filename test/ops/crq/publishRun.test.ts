@@ -1,6 +1,6 @@
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
   GitLedger,
@@ -18,7 +18,13 @@ import {
   parseJsonValue,
   type JsonValue,
 } from '../../../src/policy/crq/jsonValue.js';
-import { LedgerIntegrityError, ledgerCanonicalBytes } from '../../../src/policy/crq/ledger.js';
+import {
+  LedgerIntegrityError,
+  ledgerCanonicalBytes,
+  ledgerDigestOf,
+  ledgerEvent,
+  ledgerLoads,
+} from '../../../src/policy/crq/ledger.js';
 import {
   arrayAt,
   loadPublisherVectors,
@@ -71,7 +77,9 @@ class FakeGit {
         return { code: 128, stdout: new Uint8Array(0) };
       case 'rev-parse': {
         // `rev-parse --git-common-dir` probes for a repository in
-        // ensureBareRepo; an empty repo directory answers with `.`.
+        // ensureBareRepo; the fake is not nested inside a checkout, so the
+        // bare clone's own git dir is the answer (real git prints an absolute
+        // path for a bare repository).
         if (args.includes('--git-common-dir')) {
           return { code: 0, stdout: text('.') };
         }
@@ -709,9 +717,17 @@ describe('publisher route: fixture replay through the run composition', () => {
 function gitRunner(repo: string): RunGit {
   const { execFile, spawn } = require('node:child_process') as typeof import('node:child_process');
   return async (args, options) => {
+    // Forward the caller's injected environment (publishBatch pins
+    // GIT_AUTHOR_*/GIT_COMMITTER_*); without it the commit identity comes
+    // from whatever ambient global git config the host happens to have, so
+    // CI (no global identity) fails while workstations pass.
+    const env = { ...process.env, ...options?.env };
     if (options?.input !== undefined && options.input.length > 0) {
       return new Promise((resolve) => {
-        const child = spawn('git', ['-C', repo, ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
+        const child = spawn('git', ['-C', repo, ...args], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env,
+        });
         const stdout: Buffer[] = [];
         child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
         child.on('error', () =>
@@ -732,7 +748,7 @@ function gitRunner(repo: string): RunGit {
       execFile(
         'git',
         ['-C', repo, ...args],
-        { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, timeout: 120_000 },
+        { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, timeout: 120_000, env },
         (error, stdout, stderr) => {
           const rawCode = error === null ? 0 : (error as { code?: unknown }).code;
           resolve({
@@ -747,12 +763,13 @@ function gitRunner(repo: string): RunGit {
   };
 }
 
-describe('git ledger transport: fetch refuses a non-descendant head', () => {
-  test('the validated checkpoint blocks rollback', async () => {
+describe('git ledger transport: empty remote refuses the initial fetch', () => {
+  test('an unseeded remote rejects the fetch like real git', async () => {
     const fake = new FakeGit();
     const ledger = new GitLedger({ repo: '/unused', runGit: fakeRunGit(fake) });
-    // With no remote branch the fetch refuses; the checkpoint protection is
-    // exercised in the real-git test above.
+    // The checkpoint CAS/ancestry refusal itself is covered by the route
+    // test "a checkpoint ahead of the remote ref blocks a rewound
+    // publication"; this pins only the unseeded-remote behavior.
     await expect(ledger.fetch()).rejects.toBeInstanceOf(Error);
   });
 });
@@ -1199,6 +1216,642 @@ describe('CAS rollback refusal through the route', () => {
     }
   });
 });
+
+describe('round-2 coverage: publisher clone ownership and durable transitions', () => {
+  function scopeOf(review: JsonObject): JsonValue {
+    const payload = review.get('payload');
+    if (!(payload instanceof JsonObject)) throw new Error('review has no payload');
+    const scope = payload.get('requested_scope');
+    if (scope === undefined) throw new Error('review has no requested_scope');
+    return scope;
+  }
+
+  /**
+   * A state root nested inside a git checkout (the production default, Python's
+   * `STATE = ROOT / "state"`): `git rev-parse --git-common-dir` from the bare
+   * clone directory would answer with the enclosing checkout's git dir. The
+   * clone must still be initialized as its own bare repository and the
+   * enclosing checkout's `remote.origin.url` must stay untouched.
+   */
+  test('a state root inside a checkout initializes its own bare clone (no origin rewrite)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-nested-'));
+    try {
+      const { execFileSync } = await import('node:child_process');
+      // Identity is pinned per repository: CI hosts have no ambient git
+      // identity and the enclosing checkout's seed commit needs one.
+      const git = (...args: string[]): Buffer =>
+        execFileSync('git', args, {
+          stdio: 'pipe',
+          encoding: 'buffer',
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: 'crq-fixture',
+            GIT_AUTHOR_EMAIL: 'crq-fixture@localhost',
+            GIT_COMMITTER_NAME: 'crq-fixture',
+            GIT_COMMITTER_EMAIL: 'crq-fixture@localhost',
+          },
+        });
+      // Enclosing checkout with a distinct origin, plus the scheduler clone
+      // whose origin URL the publisher pins into its own bare clone.
+      const enclosing = join(root, 'checkout');
+      const enclosingOrigin = join(root, 'elsewhere.git');
+      git('init', '--bare', enclosingOrigin);
+      git('init', enclosing);
+      git('-C', enclosing, 'remote', 'add', 'origin', enclosingOrigin);
+      git('-C', enclosing, 'commit', '--allow-empty', '-m', 'seed');
+
+      const effects = await makeEffects(join(enclosing, 'state'));
+      await seedRollout(effects);
+      // A scheduler clone whose origin points at the real ledger remote; the
+      // nested state root sits inside the enclosing checkout.
+      const scheduler = join(root, 'scheduler');
+      const ledgerRemote = join(root, 'ledger.git');
+      git('init', '--bare', '--initial-branch=cq/review-ledger', ledgerRemote);
+      git('init', scheduler);
+      git('-C', scheduler, 'remote', 'add', 'origin', ledgerRemote);
+      const originUrl = git('-C', scheduler, 'remote', 'get-url', 'origin').toString().trim();
+      const effectsWithScheduler: PublishRunEffects = {
+        ...effects,
+        runSchedulerGit: gitRunner(scheduler),
+        // The clone initialization itself must run over real git: the fake
+        // runner cannot reproduce the enclosing-checkout discovery this
+        // regression targets.
+        runPublisherGit: gitRunner(join(effects.stateRoot, 'backfill', 'publisher.git')),
+        pushCommit: async () => {
+          throw new Error('the fetch refuses before any push');
+        },
+      };
+
+      // Unseeded remote: the run halts on the fetch, but the clone
+      // initialization has already happened by then.
+      const { pending } = seedCase('finding-event-causal-order');
+      await writeSeeds(effectsWithScheduler, pending);
+      let message = '';
+      try {
+        await runPublish(effectsWithScheduler);
+      } catch (error) {
+        message = error instanceof Error ? error.message : '';
+      }
+      expect(message).toContain('ledger git fetch failed');
+
+      // The bare clone exists inside the state root and owns the pin.
+      const cloneDir = join(effectsWithScheduler.stateRoot, 'backfill', 'publisher.git');
+      const cloneOrigin = execFileSync(
+        'git',
+        ['-C', cloneDir, 'config', '--get', 'remote.origin.url'],
+        { encoding: 'utf8' },
+      ).trim();
+      expect(cloneOrigin).toBe(originUrl);
+      const cloneCommonDir = execFileSync(
+        'git',
+        ['-C', cloneDir, 'rev-parse', '--git-common-dir'],
+        { encoding: 'utf8' },
+      ).trim();
+      expect(resolve(cloneDir, cloneCommonDir)).toBe(resolve(cloneDir));
+      // The enclosing checkout's origin is untouched.
+      const enclosingUrl = execFileSync(
+        'git',
+        ['-C', enclosing, 'config', '--get', 'remote.origin.url'],
+        { encoding: 'utf8' },
+      ).trim();
+      expect(enclosingUrl).toBe(enclosingOrigin);
+      // Nothing was acknowledged: the records are still pending.
+      const pendingDir = join(effectsWithScheduler.stateRoot, 'backfill', 'publication', 'pending');
+      expect((await readdir(pendingDir)).length).toBe(pending.length);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The positive verification half: a creditable review whose evidence bundle
+   * restores the target/head commits and whose claimed lines sit inside the
+   * changed intervals is accepted and published. The synthetic oids of the
+   * fixture vectors are unknown to any clone, so this builds a real git
+   * history for the review to describe.
+   */
+  test('a creditable review backed by a restoring bundle is verified and published', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-verif-ok-'));
+    try {
+      const { execFileSync } = await import('node:child_process');
+      const git = (...args: string[]): string =>
+        execFileSync('git', args, {
+          stdio: 'pipe',
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: 'crq-fixture',
+            GIT_AUTHOR_EMAIL: 'crq-fixture@localhost',
+            GIT_COMMITTER_NAME: 'crq-fixture',
+            GIT_COMMITTER_EMAIL: 'crq-fixture@localhost',
+          },
+        });
+      // Build base and head commits with one changed line in src/a.ts.
+      const work = join(root, 'seedwork');
+      git('init', work);
+      git('-C', work, 'config', 'user.name', 'crq-fixture');
+      git('-C', work, 'config', 'user.email', 'crq-fixture@localhost');
+      await mkdir(join(work, 'src'), { recursive: true });
+      await writeFile(join(work, 'src', 'a.ts'), 'line one\n');
+      git('-C', work, 'add', '.');
+      git('-C', work, 'commit', '-m', 'base');
+      const base = git('-C', work, 'rev-parse', 'HEAD').trim();
+      await writeFile(join(work, 'src', 'a.ts'), 'line one changed\n');
+      git('-C', work, 'commit', '--all', '-m', 'head');
+      const head = git('-C', work, 'rev-parse', 'HEAD').trim();
+      const targetTree = git('-C', work, 'rev-parse', `${head}^{tree}`).trim();
+
+      // The evidence bundle carries the head commit with its full history (a
+      // revision range would need refs, which this work tree never creates).
+      const bundlePath = join(root, 'evidence.bundle');
+      git('-C', work, 'bundle', 'create', bundlePath, 'HEAD');
+      const { createHash } = await import('node:crypto');
+      const bundleSha = createHash('sha256')
+        .update(await readFile(bundlePath))
+        .digest('hex');
+      const durableArtifactRoot = join(root, 'artifacts');
+      await mkdir(join(durableArtifactRoot, 'sha256'), { recursive: true });
+      await writeFile(join(durableArtifactRoot, 'sha256', bundleSha), await readFile(bundlePath));
+
+      // Bundle-restore writes objects into the publisher clone, so this test
+      // runs against the real-git publisher clone, like the live-path test.
+      const stateRoot = join(root, 'state');
+      await import('node:fs/promises').then((fs) => fs.mkdir(stateRoot, { recursive: true }));
+      await writeFile(join(stateRoot, 'queue.json'), '{"items":[]}\n');
+      const remote = join(root, 'remote.git');
+      const scheduler = join(root, 'scheduler');
+      git('init', '--bare', '--initial-branch=cq/review-ledger', remote);
+      git('init', scheduler);
+      git('-C', scheduler, 'config', 'user.name', 'crq-fixture');
+      git('-C', scheduler, 'config', 'user.email', 'crq-fixture@localhost');
+      git('-C', scheduler, 'remote', 'add', 'origin', remote);
+      git('-C', scheduler, 'commit', '--allow-empty', '-m', 'seed');
+      git('-C', scheduler, 'push', 'origin', 'HEAD:cq/review-ledger');
+
+      const blobA = git('-C', work, 'rev-parse', `HEAD:src/a.ts`).trim();
+      const review = verifiableReview({
+        base,
+        head,
+        targetTree,
+        blob: blobA,
+        // The default store verify resolves the recorded location against
+        // the durable store, so the record cites the real file path.
+        bundleLocation: join(durableArtifactRoot, 'sha256', bundleSha),
+        bundleSha,
+      });
+      const effects: PublishRunEffects = {
+        stateRoot,
+        durableArtifactRoot,
+        runSchedulerGit: gitRunner(scheduler),
+        runPublisherGit: gitRunner(join(stateRoot, 'backfill', 'publisher.git')),
+        // The default store keeps the bundle bytes under sha256/<sha>; the
+        // record cites that real path, so verification resolves it.
+        async verifyArtifact(reference) {
+          const stored = await readFile(join(durableArtifactRoot, 'sha256', reference.sha256));
+          expect(reference.location).toBe(join(durableArtifactRoot, 'sha256', reference.sha256));
+          expect(stored.length).toBeGreaterThan(0);
+        },
+        pushCommit: async (_base, pushedHead) => {
+          execFileSync(
+            'git',
+            [
+              '-C',
+              join(stateRoot, 'backfill', 'publisher.git'),
+              'push',
+              'origin',
+              `${pushedHead}:refs/heads/cq/review-ledger`,
+            ],
+            { stdio: 'pipe' },
+          );
+        },
+        async withTickLock(fn) {
+          return fn();
+        },
+        async readQueue() {
+          return new Uint8Array(await readFile(join(stateRoot, 'queue.json')));
+        },
+        async writeQueue(queue) {
+          await writeFile(join(stateRoot, 'queue.json'), ledgerQueueText(queue));
+        },
+      };
+      await writeSeeds(effects, [review]);
+      await writeFile(
+        join(stateRoot, 'backfill-rollout.json'),
+        `${JSON.stringify({
+          operational_ruling: 'fixture',
+          no_live_run_verification: 'fixture',
+          owner_branch_ruleset_evidence: 'fixture',
+          durable_artifact_root: durableArtifactRoot,
+          runner_identity: 'crq-runner-app',
+          publisher_spool: { ssh_alias: 'crq@spool.invalid', ssh_key: '/unused/key' },
+        })}\n`,
+      );
+
+      const result = await runPublish(effects);
+      expect(result.publication).toBe('reconciled');
+      const ackDir = join(stateRoot, 'backfill', 'publication', 'ack');
+      expect((await readdir(ackDir)).length).toBe(1);
+      // The review record is on the remote branch.
+      const listing = execFileSync(
+        'git',
+        ['-C', remote, 'ls-tree', '-r', '--name-only', 'cq/review-ledger'],
+        { encoding: 'utf8' },
+      );
+      expect(listing.split('\n').filter((line) => line.startsWith('records/'))).toHaveLength(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  /** The reject half: claimed lines outside the changed intervals refuse. */
+  test('a creditable review claiming lines outside the diff refuses publication', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-verif-no-'));
+    try {
+      const { execFileSync } = await import('node:child_process');
+      const git = (...args: string[]): string =>
+        execFileSync('git', args, {
+          stdio: 'pipe',
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: 'crq-fixture',
+            GIT_AUTHOR_EMAIL: 'crq-fixture@localhost',
+            GIT_COMMITTER_NAME: 'crq-fixture',
+            GIT_COMMITTER_EMAIL: 'crq-fixture@localhost',
+          },
+        });
+      const work = join(root, 'seedwork');
+      git('init', work);
+      git('-C', work, 'config', 'user.name', 'crq-fixture');
+      git('-C', work, 'config', 'user.email', 'crq-fixture@localhost');
+      await mkdir(join(work, 'src'), { recursive: true });
+      await writeFile(join(work, 'src', 'a.ts'), 'line one\n');
+      git('-C', work, 'add', '.');
+      git('-C', work, 'commit', '-m', 'base');
+      const base = git('-C', work, 'rev-parse', 'HEAD').trim();
+      await writeFile(join(work, 'src', 'a.ts'), 'line one changed\n');
+      git('-C', work, 'commit', '--all', '-m', 'head');
+      const head = git('-C', work, 'rev-parse', 'HEAD').trim();
+      const targetTree = git('-C', work, 'rev-parse', `${head}^{tree}`).trim();
+      const bundlePath = join(root, 'evidence.bundle');
+      // Bundle the head commit with its full history (a revision range would
+      // need refs, which this work tree never creates).
+      git('-C', work, 'bundle', 'create', bundlePath, 'HEAD');
+      const { createHash } = await import('node:crypto');
+      const bundleSha = createHash('sha256')
+        .update(await readFile(bundlePath))
+        .digest('hex');
+      const durableArtifactRoot = join(root, 'artifacts');
+      await mkdir(join(durableArtifactRoot, 'sha256'), { recursive: true });
+      await writeFile(join(durableArtifactRoot, 'sha256', bundleSha), await readFile(bundlePath));
+
+      const stateRoot = join(root, 'state');
+      await import('node:fs/promises').then((fs) => fs.mkdir(stateRoot, { recursive: true }));
+      await writeFile(join(stateRoot, 'queue.json'), '{"items":[]}\n');
+      const remote = join(root, 'remote.git');
+      const scheduler = join(root, 'scheduler');
+      git('init', '--bare', '--initial-branch=cq/review-ledger', remote);
+      git('init', scheduler);
+      git('-C', scheduler, 'config', 'user.name', 'crq-fixture');
+      git('-C', scheduler, 'config', 'user.email', 'crq-fixture@localhost');
+      git('-C', scheduler, 'remote', 'add', 'origin', remote);
+      git('-C', scheduler, 'commit', '--allow-empty', '-m', 'seed');
+      git('-C', scheduler, 'push', 'origin', 'HEAD:cq/review-ledger');
+
+      const blobA = git('-C', work, 'rev-parse', `HEAD:src/a.ts`).trim();
+      // The diff changed line 1 only; the review claims line 3.
+      const review = verifiableReview({
+        base,
+        head,
+        targetTree,
+        blob: blobA,
+        // The diff changed line 1 only; the review claims line 3.
+        claimedLine: 3,
+        bundleLocation: join(durableArtifactRoot, 'sha256', bundleSha),
+        bundleSha,
+      });
+      const effects: PublishRunEffects = {
+        stateRoot,
+        durableArtifactRoot,
+        runSchedulerGit: gitRunner(scheduler),
+        runPublisherGit: gitRunner(join(stateRoot, 'backfill', 'publisher.git')),
+        async verifyArtifact() {
+          return undefined;
+        },
+        pushCommit: async () => {
+          throw new Error('the push must never run: verification refuses first');
+        },
+        async withTickLock(fn) {
+          return fn();
+        },
+        async readQueue() {
+          return new Uint8Array(await readFile(join(stateRoot, 'queue.json')));
+        },
+        async writeQueue(queue) {
+          await writeFile(join(stateRoot, 'queue.json'), ledgerQueueText(queue));
+        },
+      };
+      await writeSeeds(effects, [review]);
+      await writeFile(
+        join(stateRoot, 'backfill-rollout.json'),
+        `${JSON.stringify({
+          operational_ruling: 'fixture',
+          no_live_run_verification: 'fixture',
+          owner_branch_ruleset_evidence: 'fixture',
+          durable_artifact_root: durableArtifactRoot,
+          runner_identity: 'crq-runner-app',
+          publisher_spool: { ssh_alias: 'crq@spool.invalid', ssh_key: '/unused/key' },
+        })}\n`,
+      );
+      let message = '';
+      try {
+        await runPublish(effects);
+      } catch (error) {
+        message = error instanceof Error ? error.message : '';
+      }
+      expect(message).toBe('credit outside head-side changed intervals');
+      const pendingDir = join(stateRoot, 'backfill', 'publication', 'pending');
+      expect((await readdir(pendingDir)).length).toBe(1);
+      // No acknowledgements exist, so the ack directory was never created.
+      await expect(stat(join(stateRoot, 'backfill', 'publication', 'ack'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  /** The ack transition mints one durable job-state event with its id recorded. */
+  test('acknowledgement spools one job-state event and records it once', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-transition-'));
+    try {
+      const effects = await makeEffects(root);
+      await seedRollout(effects);
+      const { pending } = seedCase('finding-event-causal-order');
+      const review = pending.find((value) => recordEventType(value) === 'review');
+      if (!(review instanceof JsonObject)) throw new Error('fixture has no review');
+      await writeSeeds(effects, pending);
+      await seedRemoteBranch(effects);
+      await writeFile(
+        join(effects.stateRoot, 'queue.json'),
+        ledgerQueueText(
+          new JsonObject([
+            [
+              'items',
+              [
+                new JsonObject([
+                  ['kind', 'backfill'],
+                  ['family', 'review-ledger'],
+                  ['subject_id', 'subject'],
+                  ['job_id', 'subject:0'],
+                  ['state', 'publication-pending'],
+                  ['publication_event_id', recordId(review)],
+                  ['scope', scopeOf(review)],
+                  ['scope_digest', 'digest-1'],
+                  ['generation', JsonNumber.int(1)],
+                  ['attempt', JsonNumber.int(1)],
+                  ['not_before', null],
+                ]),
+              ],
+            ],
+            ['backfill_scope_failures', new JsonObject([])],
+            ['backfill_families', new JsonObject([['review-ledger', JsonNumber.int(1)]])],
+          ]),
+        ),
+      );
+      const result = await runPublish(effects);
+      expect(result.publication).toBe('reconciled');
+
+      // Exactly one durable job-state record for the transition, retained in
+      // the outbox (pending/ keeps the canonical bytes; ack/ keeps markers).
+      const outboxDir = join(effects.stateRoot, 'backfill', 'publication', 'pending');
+      const retained = await readdir(outboxDir);
+      const jobStates: JsonObject[] = [];
+      const allTypes: string[] = [];
+      for (const name of retained) {
+        const value = ledgerLoads(await readFile(join(outboxDir, name)));
+        const eventType = value instanceof JsonObject ? value.get('event_type') : undefined;
+        allTypes.push(typeof eventType === 'string' ? eventType : String(eventType));
+        if (value instanceof JsonObject && eventType === 'job-state') {
+          jobStates.push(value);
+        }
+      }
+      expect({
+        retained: retained.length,
+        types: allTypes.sort(),
+        jobStates: jobStates.length,
+      }).toEqual({
+        retained: 3,
+        types: ['finding-event', 'job-state', 'review'],
+        jobStates: 1,
+      });
+      const payload = jobStates[0]!.get('payload');
+      if (!(payload instanceof JsonObject)) throw new Error('job-state has no payload');
+      expect(payload.get('reason')).toBe('remote publication acknowledged');
+      expect(payload.get('state')).toBe('done');
+      expect(payload.get('job_id')).toBe('subject:0');
+      // The queue records the transition id under backfill_state_events.
+      const queue = parseJsonValue(await readFile(join(effects.stateRoot, 'queue.json'), 'utf8'));
+      if (!(queue instanceof JsonObject)) throw new Error('queue not an object');
+      const events = queue.get('backfill_state_events');
+      if (!(events instanceof JsonObject)) throw new Error('no backfill_state_events');
+      const recorded = events.entries.map(([, value]) => value);
+      expect(recorded).toContain(jobStates[0]!.get('id'));
+      // A full replay (same retained record still acknowledged) adds nothing:
+      // the rerun publishes the ack-spooled job-state record, then a third
+      // run is idle and the map keeps exactly that one id.
+      const second = await runPublish(effects);
+      expect(second.publication).toBe('reconciled');
+      const third = await runPublish(effects);
+      expect(third).toEqual({ publication: 'idle' });
+      const queueAfter = parseJsonValue(
+        await readFile(join(effects.stateRoot, 'queue.json'), 'utf8'),
+      );
+      const eventsAfter = (queueAfter as JsonObject).get('backfill_state_events');
+      expect(eventsAfter).toEqual(events);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  /** The other half of the queue-level transition: failure history is erased. */
+  test('reconciliation removes covered entries from backfill_scope_failures', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-scopefail-'));
+    try {
+      const effects = await makeEffects(root);
+      await seedRollout(effects);
+      const { pending } = seedCase('finding-event-causal-order');
+      const review = pending.find((value) => recordEventType(value) === 'review');
+      if (!(review instanceof JsonObject)) throw new Error('fixture has no review');
+      await writeSeeds(effects, pending);
+      await seedRemoteBranch(effects);
+      // Python keys the failure map by path lineage; the reconciled item
+      // completes unit src/a.ts, so that entry must disappear while the
+      // untouched sibling stays.
+      const lineage = 'src/a.ts';
+      await writeFile(
+        join(effects.stateRoot, 'queue.json'),
+        ledgerQueueText(
+          new JsonObject([
+            [
+              'items',
+              [
+                new JsonObject([
+                  ['kind', 'backfill'],
+                  ['family', 'review-ledger'],
+                  ['subject_id', 'subject'],
+                  ['job_id', 'subject:0'],
+                  ['state', 'publication-pending'],
+                  ['publication_event_id', recordId(review)],
+                  ['scope', scopeOf(review)],
+                  ['scope_digest', 'digest-1'],
+                  ['generation', JsonNumber.int(1)],
+                  ['path_lineages', new JsonObject([[lineage, lineage]])],
+                ]),
+              ],
+            ],
+            [
+              'backfill_scope_failures',
+              new JsonObject([
+                [lineage, JsonNumber.int(2)],
+                ['other/unit', JsonNumber.int(5)],
+              ]),
+            ],
+            ['backfill_families', new JsonObject([['review-ledger', JsonNumber.int(1)]])],
+          ]),
+        ),
+      );
+      const result = await runPublish(effects);
+      expect(result.publication).toBe('reconciled');
+      const queue = parseJsonValue(await readFile(join(effects.stateRoot, 'queue.json'), 'utf8'));
+      if (!(queue instanceof JsonObject)) throw new Error('queue not an object');
+      const failures = queue.get('backfill_scope_failures');
+      if (!(failures instanceof JsonObject)) throw new Error('no backfill_scope_failures');
+      expect(failures.has(lineage)).toBe(false);
+      expect(failures.get('other/unit')).toEqual(JsonNumber.int(5));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  /** The unit path (queue-runner CLI): absent rollout is ok/disabled, exit 0. */
+  test('runPublishUnit maps an absent rollout to disabled, not failure', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-unit-'));
+    try {
+      const stateRoot = join(root, 'state');
+      await import('node:fs/promises').then((fs) => fs.mkdir(stateRoot, { recursive: true }));
+      await writeFile(join(stateRoot, 'queue.json'), '{"items":[]}\n');
+      const clone = join(root, 'clone');
+      await import('node:fs/promises').then((fs) => fs.mkdir(clone, { recursive: true }));
+      const { runPublishUnit } = await import('../../../src/adapters/crq/publishSource.js');
+      const outcome = await runPublishUnit({
+        stateRoot,
+        cloneRoot: clone,
+        durableArtifactRoot: join(root, 'artifacts'),
+      });
+      // Python: {"publication": "disabled"}, a unit success with exit 0.
+      expect(outcome).toEqual({ status: 'ok', value: { publication: 'disabled' } });
+      // No failure marker was written.
+      await expect(
+        stat(join(stateRoot, 'backfill', 'publication-failure.json')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * Build a creditable review record over real git history. The bundle artifact
+ * restores base..head into the publisher clone; `claimedLine` defaults to the
+ * changed line so the scope verifies.
+ */
+function verifiableReview(options: {
+  base: string;
+  head: string;
+  targetTree: string;
+  blob: string;
+  bundleLocation: string;
+  bundleSha: string;
+  claimedLine?: number;
+}): JsonObject {
+  const A = options.blob;
+  const claimedLine = options.claimedLine ?? 1;
+  const scopeRow = (): JsonObject =>
+    new JsonObject([
+      ['path', 'src/a.ts'],
+      ['blob', A],
+      ['intervals', [[JsonNumber.int(claimedLine), JsonNumber.int(claimedLine)]]],
+    ]);
+  const scopeRows = [scopeRow()];
+  const payload = new JsonObject([
+    ['repo', 'camerontaylor/cq-toolkit'],
+    ['subject_id', 'subject'],
+    ['job_id', 'subject:0'],
+    ['attempt_id', 'subject:0:1'],
+    [
+      'source',
+      new JsonObject([
+        ['repo', 'camerontaylor/cq-toolkit'],
+        ['producer', 'crq-runner-app'],
+        ['type', 'crq-run'],
+        ['id', 'verify'],
+        ['authenticated', true],
+      ]),
+    ],
+    ['base', options.base],
+    ['head', options.head],
+    ['head_tree', options.targetTree],
+    ['target', options.head],
+    ['target_tree', options.targetTree],
+    ['policy_digest', 'b'.repeat(64)],
+    ['scope_digest', ledgerDigestOf(scopeRows)],
+    [
+      'paths',
+      [
+        new JsonObject([
+          ['path', 'src/a.ts'],
+          ['blob', A],
+          ['mode', '100644'],
+          ['disposition', 'included'],
+          ['reason', 'verified'],
+          ['baseline', new JsonObject([])],
+        ]),
+      ],
+    ],
+    ['requested_scope', scopeRows],
+    ['input_scope', scopeRows],
+    ['reviewed_scope', scopeRows],
+    [
+      'completion',
+      new JsonObject([
+        ['terminal', true],
+        ['skipped', false],
+        ['scope_verified', true],
+        ['exit_code', JsonNumber.int(0)],
+        ['errors', []],
+      ]),
+    ],
+    ['findings', []],
+    [
+      'artifacts',
+      [
+        new JsonObject([
+          ['sha256', options.bundleSha],
+          ['location', options.bundleLocation],
+          ['kind', 'git-bundle'],
+        ]),
+      ],
+    ],
+    ['outcome', 'completed'],
+  ]);
+  return ledgerEvent(
+    'review',
+    'camerontaylor/cq-toolkit:crq-runner-app:verify',
+    '2026-11-01T00:00:00Z',
+    payload,
+  );
+}
 
 void stringAt;
 void requireObject;

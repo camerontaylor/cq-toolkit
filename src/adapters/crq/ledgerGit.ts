@@ -34,7 +34,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
 import {
   LedgerIntegrityError,
@@ -48,6 +48,13 @@ import {
 /** A push/transport failure that a fresh fetch can reconcile: retry class. */
 export class LedgerTransportError extends Error {
   override readonly name = 'LedgerTransportError';
+  /** The git subcommand whose failure produced this error (`push`, ...). */
+  readonly operation: string;
+
+  constructor(message: string, operation = '') {
+    super(message);
+    this.operation = operation;
+  }
 }
 
 /** One executed git invocation: exactly what Python's `git()` returned. */
@@ -107,6 +114,7 @@ function decode(out: Uint8Array): string {
 function transport(name: string, call: GitCall): LedgerTransportError {
   return new LedgerTransportError(
     `ledger git ${name} failed: ${call.stderr.trim() || decode(call.stdout).trim()}`,
+    name,
   );
 }
 
@@ -319,9 +327,10 @@ export class GitLedger {
     for (const name of ordered) {
       const batch = batches.get(name) ?? [];
       batch.sort((left, right) => {
+        // Python sorts by `(event_type != "review", id)`: reviews first.
         const leftReview = left instanceof JsonObject && left.get('event_type') === 'review';
         const rightReview = right instanceof JsonObject && right.get('event_type') === 'review';
-        if (leftReview !== rightReview) return leftReview ? 1 : -1;
+        if (leftReview !== rightReview) return leftReview ? -1 : 1;
         const leftId = left instanceof JsonObject ? decodeId(left) : '';
         const rightId = right instanceof JsonObject ? decodeId(right) : '';
         // Python sorts by the id string's code points.
@@ -432,12 +441,22 @@ export class GitLedger {
   /**
    * Ensure the publisher-owned bare clone exists, then pin the publication
    * remote's URL (Python's `worker_services`: `git init --bare` once, then
-   * `git config remote.origin.url <scheduler clone origin>`).
+   * `git config remote.origin.url <scheduler clone origin>`). The probe
+   * requires the discovered repository to be the intended one: a state root
+   * nested inside a checkout makes `rev-parse --git-common-dir` succeed
+   * against the enclosing checkout, and trusting it would rewrite the
+   * enclosing `remote.origin.url` and publish from the wrong repository.
    */
   async ensureBareRepo(url: string): Promise<void> {
     await mkdir(this.repo, { recursive: true });
     const probe = await this.git('rev-parse', '--git-common-dir');
-    if (probe.code !== 0) {
+    let initialized = false;
+    if (probe.code === 0) {
+      const commonDir = decode(probe.stdout).trim();
+      const resolved = resolve(this.repo, commonDir);
+      initialized = resolved === this.repo || resolved.startsWith(this.repo + sep);
+    }
+    if (!initialized) {
       const init = await this.runGit(['init', '--bare', '--quiet', this.repo]);
       if (init.code !== 0) throw transport('init', init);
     }

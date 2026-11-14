@@ -133,6 +133,67 @@ function runSsh(
 }
 
 /**
+ * The exact ssh argv for one publication. Exported as the reviewed seam: the
+ * unit tests pin argv construction (`-F none`, the pinned key options, the
+ * literal `ledger-publish <base> <head>` remote command) without spawning a
+ * process.
+ */
+export function publisherSshArgv(
+  config: PublisherSpoolConfig,
+  keyPath: string,
+  base: string,
+  head: string,
+): string[] {
+  return [
+    '-F',
+    'none',
+    '-i',
+    keyPath,
+    '-o',
+    'IdentitiesOnly=yes',
+    '-o',
+    'IdentityAgent=none',
+    '-o',
+    'ControlMaster=no',
+    '-o',
+    'ControlPath=none',
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    'ConnectTimeout=10',
+    '-o',
+    'ServerAliveInterval=5',
+    '-o',
+    'ServerAliveCountMax=2',
+    config.sshAlias,
+    `ledger-publish ${base} ${head}`,
+  ];
+}
+
+/**
+ * The signer reply gate: exactly `{"published": <head>}` (modulo surrounding
+ * whitespace) is accepted; unreadable JSON and any other acknowledgement are
+ * transport defects, matching Python's `publish_ledger` acceptance.
+ */
+export function parseSignerReply(reply: string, head: string): void {
+  let acknowledgement: unknown;
+  try {
+    acknowledgement = JSON.parse(reply) as unknown;
+  } catch {
+    throw new LedgerTransportError('signer reply unreadable; retain publication outbox');
+  }
+  const exact =
+    typeof acknowledgement === 'object' &&
+    acknowledgement !== null &&
+    !Array.isArray(acknowledgement) &&
+    Object.keys(acknowledgement).length === 1 &&
+    (acknowledgement as Record<string, unknown>)['published'] === head;
+  if (!exact) {
+    throw new LedgerTransportError('signer did not acknowledge the exact ledger commit');
+  }
+}
+
+/**
  * Build the `PushCommit` for the rollout's spool config. The key path is
  * `~`-expanded (Python's `os.path.expanduser`) against the process home.
  */
@@ -152,30 +213,7 @@ export function publisherSpoolPushCommit(config: PublisherSpoolConfig): PushComm
           ? `${homedir()}${rawKey.slice(1)}`
           : rawKey;
     const keyPath = await realpath(expanded).catch(() => expanded);
-    const argv = [
-      '-F',
-      'none',
-      '-i',
-      keyPath,
-      '-o',
-      'IdentitiesOnly=yes',
-      '-o',
-      'IdentityAgent=none',
-      '-o',
-      'ControlMaster=no',
-      '-o',
-      'ControlPath=none',
-      '-o',
-      'BatchMode=yes',
-      '-o',
-      'ConnectTimeout=10',
-      '-o',
-      'ServerAliveInterval=5',
-      '-o',
-      'ServerAliveCountMax=2',
-      config.sshAlias,
-      `ledger-publish ${base} ${head}`,
-    ];
+    const argv = publisherSshArgv(config, keyPath, base, head);
     const result = await runSsh(argv, bundle, SSH_TIMEOUT_MS);
     if (result.code !== 0) {
       // Python maps reachability defects to an OSError("signer transport
@@ -185,22 +223,6 @@ export function publisherSpoolPushCommit(config: PublisherSpoolConfig): PushComm
         'ledger signer transport unavailable; retain publication outbox',
       );
     }
-    const reply = result.stdout.toString('utf8');
-    let acknowledgement: unknown;
-    try {
-      acknowledgement = JSON.parse(reply) as unknown;
-    } catch {
-      throw new LedgerTransportError('signer reply unreadable; retain publication outbox');
-    }
-    // Exactly `{"published": <head>}` and nothing else.
-    const exact =
-      typeof acknowledgement === 'object' &&
-      acknowledgement !== null &&
-      !Array.isArray(acknowledgement) &&
-      Object.keys(acknowledgement).length === 1 &&
-      (acknowledgement as Record<string, unknown>)['published'] === head;
-    if (!exact) {
-      throw new LedgerTransportError('signer did not acknowledge the exact ledger commit');
-    }
+    parseSignerReply(result.stdout.toString('utf8'), head);
   };
 }

@@ -71,8 +71,10 @@ if (command === 'queue-capability') {
           if (roots === null) {
             // An absent rollout is Python's {"publication": "disabled"}: the
             // unit reports disabled (exit 0) instead of failing. Only a
-            // missing config.json/clone is a genuine unavailability.
-            if (await isRolloutAbsent(join(root, 'state', 'backfill-rollout.json'))) {
+            // missing config.json/clone is a genuine unavailability. Probe
+            // the state root the same way readPublisherRoots derives it
+            // (config.state_root, default <root>/state).
+            if (await isRolloutAbsent(await publisherStateRoot(root))) {
               return { status: 'ok', value: { publication: 'disabled' } };
             }
             return {
@@ -102,6 +104,21 @@ async function isRolloutAbsent(path: string): Promise<boolean> {
   } catch {
     return true;
   }
+}
+
+/** The state root `readPublisherRoots` would use: config.state_root or default. */
+async function publisherStateRoot(runnerRoot: string): Promise<string> {
+  try {
+    const config = JSON.parse(await readFile(join(runnerRoot, 'config.json'), 'utf8')) as unknown;
+    const stateRoot =
+      typeof config === 'object' && config !== null && !Array.isArray(config)
+        ? (config as Record<string, unknown>)['state_root']
+        : undefined;
+    if (typeof stateRoot === 'string' && stateRoot !== '') return stateRoot;
+  } catch {
+    // fall through to the default
+  }
+  return join(runnerRoot, 'state');
 }
 
 async function readPublisherRoots(runnerRoot: string) {

@@ -62,6 +62,7 @@ import {
 import {
   parsePublisherSpool,
   publisherSpoolPushCommit,
+  SpoolConfigError,
 } from '../../adapters/crq/publisherSpool.js';
 import { FindingInbox } from '../review/internal/crq/findingInbox.js';
 import type { FindingInboxFiles } from '../review/internal/crq/findingInbox.js';
@@ -75,6 +76,8 @@ import { JsonObject, JsonNumber, type JsonValue } from '../../policy/crq/jsonVal
 import {
   LedgerIntegrityError,
   ledgerCanonicalBytes,
+  ledgerDigestOf,
+  ledgerEvent,
   ledgerLoads,
   ledgerScope,
   ledgerValidateSequence,
@@ -105,6 +108,10 @@ function truncated(error: unknown): string {
 function truthy(value: JsonValue | undefined): boolean {
   if (value === undefined || value === null || value === false) return false;
   if (value === true) return true;
+  if (value instanceof JsonNumber) {
+    if (value.integer !== null) return value.integer !== 0n;
+    return value.float !== 0;
+  }
   if (typeof value === 'number') return value !== 0;
   if (typeof value === 'string') return value.length > 0;
   if (Array.isArray(value)) return value.length > 0;
@@ -367,10 +374,13 @@ export async function runPublish(effects: PublishRunEffects): Promise<PublishRun
             try {
               return await services.ledger.publishBatch(batch, baseHead);
             } catch (error) {
-              // GitLedger's transport class maps to the driver's retry class;
-              // integrity and validation failures propagate unchanged, so a
-              // local defect is never retried as a push failure.
-              if (error instanceof LedgerTransportError) {
+              // Python retries only the push; a local failure (index, commit,
+              // bundle staging) must surface immediately as an integrity
+              // failure, not spin through three attempts as "pending".
+              if (
+                error instanceof LedgerTransportError &&
+                (error.operation === '' || error.operation === 'push')
+              ) {
                 throw new PublicationPushError(error.message, { cause: error });
               }
               throw error;
@@ -387,12 +397,16 @@ export async function runPublish(effects: PublishRunEffects): Promise<PublishRun
             });
           },
           // Python's publish loop: repository.restore + Repository.verify_review
-          // over the review clone for every creditable record, before the push.
+          // over the publisher-owned clone (`accounting.Repository(self.repo)`,
+          // the publication worker's bare repository) for every creditable
+          // record, before the push. Bounding verification to the publisher
+          // clone keeps the scheduler clone scheduler-only and refuses commits
+          // no retained evidence bundle backs.
           verifyCreditableReview: (value) => {
             if (!(value instanceof JsonObject)) {
               return Promise.reject(integrity('creditable record is not an object'));
             }
-            return verifyReview(effects.runSchedulerGit, value, (reference) =>
+            return verifyReview(effects.runPublisherGit, value, (reference) =>
               services.verifyArtifact(reference),
             ).then(() => undefined);
           },
@@ -413,7 +427,8 @@ export async function runPublish(effects: PublishRunEffects): Promise<PublishRun
       // Queue reconciliation under the caller's tick lock. A busy lock is
       // routine (spools happen under it): never a failure marker.
       const merged = await effects.withTickLock(
-        () => reconcileQueue(effects, config, head, ids, requestPath, failurePath, requested),
+        () =>
+          reconcileQueue(effects, services, config, head, ids, requestPath, failurePath, requested),
         { lockWait: 30 },
       );
       if (merged !== true) {
@@ -430,6 +445,63 @@ export async function runPublish(effects: PublishRunEffects): Promise<PublishRun
 function itemsOf(queue: JsonObject): readonly JsonValue[] {
   const items = queue.get('items');
   return Array.isArray(items) ? items : [];
+}
+
+/**
+ * `runtime.state_event(..., "remote publication acknowledged")`: spool one
+ * durable `job-state` record for the acknowledged transition and record its
+ * id under `backfill_state_events`, keyed by the payload digest so a replay
+ * (same item seen again after a partial merge) never spools twice. A record
+ * already retained in the outbox with the same source key is reused verbatim.
+ */
+async function spoolAcknowledgedEvent(
+  effects: PublishRunEffects,
+  services: Services,
+  queue: JsonObject,
+  item: JsonObject,
+  review: JsonObject,
+): Promise<JsonObject> {
+  if (item.get('kind') !== JOB_KIND) return queue;
+  const family = item.get('family');
+  const subjectId = item.get('subject_id');
+  const jobId = item.get('job_id');
+  if (typeof family !== 'string' || typeof subjectId !== 'string' || typeof jobId !== 'string') {
+    return queue;
+  }
+  const occurredAt = review.get('occurred_at');
+  if (typeof occurredAt !== 'string') return queue;
+  const payload = new JsonObject([
+    ['family', family],
+    ['subject_id', subjectId],
+    ['job_id', jobId],
+    ['generation', item.get('generation') ?? JsonNumber.int(0)],
+    ['attempt', item.get('attempt') ?? JsonNumber.int(0)],
+    ['state', item.get('state') ?? ''],
+    ['failures', item.get('family_failures') ?? JsonNumber.int(0)],
+    ['next_eligible_at', item.get('not_before') ?? null],
+    ['reason', 'remote publication acknowledged'],
+  ]);
+  const events = queue.get('backfill_state_events');
+  const byKey = events instanceof JsonObject ? events : new JsonObject([]);
+  const sourceKey = `job:${jobId}:${digestJson(payload)}`;
+  const saved = byKey.get(sourceKey);
+  if (saved !== undefined && saved !== null && saved !== false && saved !== '') return queue;
+  // Reuse an already-retained record with the same source key; otherwise mint
+  // the canonical event (validate + derive id like Python's ledger.event).
+  let value: JsonObject | undefined;
+  for (const retained of await services.outbox.retained()) {
+    if (retained instanceof JsonObject && retained.get('source_key') === sourceKey) {
+      value = retained;
+      break;
+    }
+  }
+  if (value === undefined) {
+    value = ledgerEvent('job-state', sourceKey, occurredAt, payload);
+    await services.outbox.spool(value);
+  }
+  const kept = byKey.entries.filter(([key]) => key !== sourceKey);
+  kept.push([sourceKey, value.get('id') ?? '']);
+  return setKeys(queue, [['backfill_state_events', new JsonObject(kept)]]);
 }
 
 /** A required string field on a parsed artifact reference. */
@@ -463,6 +535,7 @@ async function publisherLockPath(effects: PublishRunEffects): Promise<string> {
  */
 async function reconcileQueue(
   effects: PublishRunEffects,
+  services: Services,
   config: JsonObject,
   head: string,
   ids: ReadonlyMap<string, JsonValue>,
@@ -479,6 +552,7 @@ async function reconcileQueue(
   } catch (error) {
     if (
       error instanceof PublishRolloutDisabled ||
+      error instanceof SpoolConfigError ||
       (error instanceof LedgerIntegrityError && /publisher_spool/.test(error.message))
     ) {
       throw integrity('publication configuration changed; retry reconciliation');
@@ -509,6 +583,10 @@ async function reconcileQueue(
         item === candidate ? updated.item : item,
       );
       queue = setKeys(updated.queue, [['items', replaced]]);
+      // Python's state_event: spool the durable "remote publication
+      // acknowledged" job-state transition and record its id at queue level,
+      // keyed so a replay never spools twice.
+      queue = await spoolAcknowledgedEvent(effects, services, queue, updated.item, value);
     }
   }
   queue = setKeys(queue, [['review_ledger_head', head]]);
@@ -631,6 +709,11 @@ function isSubset(subset: ReadonlySet<number>, superset: ReadonlySet<number>): b
 function jsonEqual(a: JsonValue | undefined, b: JsonValue | undefined): boolean {
   if (a === b) return true;
   if (a === undefined || b === undefined) return false;
+  if (a instanceof JsonNumber || b instanceof JsonNumber) {
+    if (!(a instanceof JsonNumber) || !(b instanceof JsonNumber)) return false;
+    if (a.integer !== null && b.integer !== null) return a.integer === b.integer;
+    return a.raw === b.raw;
+  }
   if (Array.isArray(a) || Array.isArray(b)) {
     if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
     return a.every((item, index) => jsonEqual(item, b[index]));
@@ -644,6 +727,11 @@ function jsonEqual(a: JsonValue | undefined, b: JsonValue | undefined): boolean 
     });
   }
   return false;
+}
+
+/** `review_ledger.digest`: canonical bytes hashed over the payload domain. */
+function digestJson(value: JsonValue): string {
+  return ledgerDigestOf(value);
 }
 
 /** Python's `value.get(key, default)` for the numeric fields of the sibling rule. */

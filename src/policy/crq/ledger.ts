@@ -45,8 +45,8 @@ export class LedgerIntegrityError extends Error {
   /** The Python exception class the vector differential compares. */
   readonly pythonError: string = 'IntegrityError';
 
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
   }
 }
 
