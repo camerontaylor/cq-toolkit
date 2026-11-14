@@ -38,7 +38,15 @@ function fixture(kind = 'open') {
     },
     scan: async () => {
       calls.push('scan');
-      return true;
+      return {
+        clean: true,
+        denylistHits: 0,
+        gitleaksHits: 0,
+        artifactPath: '/state/runs/pr-1/secret-scan.json',
+      };
+    },
+    blocked: async () => {
+      calls.push('blocked');
     },
     checkout: async () => {
       calls.push('checkout');
@@ -122,16 +130,24 @@ describe('inactive ordinary review preparation', () => {
     const f = fixture();
     f.effects.scan = async () => {
       f.calls.push('scan');
-      return false;
+      return {
+        clean: false,
+        denylistHits: 1,
+        gitleaksHits: 0,
+        artifactPath: '/state/runs/pr-1/secret-scan.json',
+      };
     };
-    await expect(
-      prepareOrdinaryReview(
-        f.queue,
-        { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
-        f.effects,
-      ),
-    ).rejects.toThrow('scan refused');
-    expect(f.calls).toEqual(['allocate', 'scan']);
+    const result = await prepareOrdinaryReview(
+      f.queue,
+      { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
+      f.effects,
+    );
+    expect(result.outcome).toBe('blocked');
+    const items = result.queue.get('items');
+    expect(Array.isArray(items) && items[0] instanceof JsonObject && items[0].get('state')).toBe(
+      'blocked',
+    );
+    expect(f.calls).toEqual(['allocate', 'scan', 'blocked']);
   });
   it('does not reserve or spawn after checkout fails', async () => {
     const f = fixture('delta');

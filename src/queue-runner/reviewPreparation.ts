@@ -1,13 +1,26 @@
 /** Inactive ordinary PR review preparation. Caller holds tick.lock throughout. */
 import { JsonObject, type JsonValue } from '../policy/crq/jsonValue.js';
-import { pyTruthy } from '../policy/crq/queueDoc.js';
+import { pyTruthy, withObjectKeys } from '../policy/crq/queueDoc.js';
 import { reserveAndSpawnReview, type ReviewLaunchEffects } from './reviewLaunch.js';
+
+export interface ReviewScanDecision {
+  readonly clean: boolean;
+  readonly denylistHits: number;
+  readonly gitleaksHits: number;
+  readonly artifactPath: string;
+}
 
 export interface ReviewPreparationEffects {
   /** Exclusively create the run directory, refusing collisions. */
   allocate(itemId: string): Promise<string>;
-  /** Mandatory real scan boundary. Only literal true permits checkout. */
-  scan(input: { runId: string; repo: string; base: string; head: string }): Promise<boolean>;
+  /** A completed scan and persisted redacted report, never an implicit clean result. */
+  scan(input: {
+    runId: string;
+    repo: string;
+    base: string;
+    head: string;
+  }): Promise<ReviewScanDecision>;
+  blocked(itemId: string, reason: string): Promise<void>;
   /** Must never replace an existing path or branch. */
   checkout(input: {
     runId: string;
@@ -30,7 +43,7 @@ export async function prepareOrdinaryReview(
   queue: JsonObject,
   input: { itemIndex: number; plan: JsonObject; repo: string; band: 'interactive' | 'background' },
   effects: ReviewPreparationEffects,
-): Promise<{ queue: JsonObject; runId: string }> {
+): Promise<{ queue: JsonObject; runId: string; outcome: 'blocked' | 'launched' }> {
   const items = queue.get('items');
   if (!Array.isArray(items) || !Number.isSafeInteger(input.itemIndex) || input.itemIndex < 0)
     throw new Error('invalid item');
@@ -84,8 +97,30 @@ export async function prepareOrdinaryReview(
   const runId = await effects.allocate(id);
   if (!runId.startsWith(`${id}-`) || !/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(runId))
     throw new Error('invalid allocated run identity');
-  if ((await effects.scan({ runId, repo, base, head })) !== true)
-    throw new Error('review secret scan refused');
+  const scan = await effects.scan({ runId, repo, base, head });
+  if (
+    !scan ||
+    typeof scan.clean !== 'boolean' ||
+    !Number.isSafeInteger(scan.denylistHits) ||
+    scan.denylistHits < 0 ||
+    !Number.isSafeInteger(scan.gitleaksHits) ||
+    scan.gitleaksHits < 0 ||
+    typeof scan.artifactPath !== 'string' ||
+    !scan.artifactPath ||
+    scan.clean !== (scan.denylistHits === 0 && scan.gitleaksHits === 0)
+  )
+    throw new Error('invalid review scan decision');
+  if (!scan.clean) {
+    const reason = `secret scan failed before upload: ${scan.denylistHits} denylist + ${scan.gitleaksHits} gitleaks hit(s) — see ${scan.artifactPath}`;
+    const nextItems = [...items];
+    nextItems[input.itemIndex] = withObjectKeys(item, [
+      ['state', 'blocked'],
+      ['last_error', reason],
+    ]);
+    const blockedQueue = withObjectKeys(queue, [['items', nextItems]]);
+    await effects.blocked(id, reason);
+    return { queue: blockedQueue, runId, outcome: 'blocked' };
+  }
   const worktree = await effects.checkout({ runId, repo, head });
   const startedAt = effects.nowIso();
   const meta = new JsonObject([
@@ -120,9 +155,10 @@ export async function prepareOrdinaryReview(
         ] as const)
       : []),
   ]);
-  return reserveAndSpawnReview(
+  const result = await reserveAndSpawnReview(
     queue,
     { itemIndex: input.itemIndex, runId, startedAt, band: input.band, meta },
     effects.launch,
   );
+  return { ...result, outcome: 'launched' };
 }

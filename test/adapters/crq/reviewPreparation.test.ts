@@ -117,8 +117,14 @@ describe('review preparation filesystem', () => {
       now: () => new Date('2026-11-14T17:00:00Z'),
       scan: async () => {
         order.push('scan');
-        return true;
+        return {
+          clean: true,
+          denylistHits: 0,
+          gitleaksHits: 0,
+          artifactPath: join(root, 'runs', 'pr-1', 'secret-scan.json'),
+        };
       },
+      blocked: async () => {},
       launch: {
         writeMeta: async (_id, meta) => {
           order.push('meta');

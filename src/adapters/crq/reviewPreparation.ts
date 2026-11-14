@@ -89,6 +89,7 @@ export function fileReviewPreparationEffects(options: {
   repositories: readonly { repo: string; clone: string }[];
   pool: GitPool;
   scan: ReviewPreparationEffects['scan'];
+  blocked: ReviewPreparationEffects['blocked'];
   launch: ReviewPreparationEffects['launch'];
   now?: () => Date;
 }): ReviewPreparationEffects {
@@ -107,6 +108,7 @@ export function fileReviewPreparationEffects(options: {
       cloneFor(request.repo);
       return options.scan(request);
     },
+    blocked: options.blocked,
     checkout: ({ runId, repo, head }) =>
       checkoutReviewWorktree({
         clone: cloneFor(repo),
