@@ -222,6 +222,7 @@ export async function reconcileMerged(
     try {
       await effects.writeWrapperText(path, atomicJsonText(sealed));
     } catch (error) {
+      if (error instanceof ReconcileStorageFailed) throw error;
       throw new ReconcileStorageFailed('wrapper-save', error);
     }
     wrapper = sealed;

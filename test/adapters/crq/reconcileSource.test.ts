@@ -5,7 +5,7 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
 import {
   fileReconcileMergedEffects,
@@ -15,6 +15,7 @@ import { ForgeBudget } from '../../../src/policy/crq/forgeBudget.js';
 import { BudgetExhausted, PageFailed } from '../../../src/policy/crq/reconcileInventory.js';
 import {
   normalizeInterval,
+  readReconcileWrapper,
   reconcileWrapperKey,
 } from '../../../src/policy/crq/reconcileCheckpoint.js';
 
@@ -147,8 +148,43 @@ describe('reconcile file adapter', () => {
       expect(await effects.readWrapperText(path)).toBeNull();
       await effects.writeWrapperText(path, '{"a":1.0}\n');
       expect(await effects.readWrapperText(path)).toBe('{"a":1.0}\n');
+      await writeFile(path, Buffer.from([0x7b, 0xff, 0x7d]));
+      await expect(effects.readWrapperText(path)).rejects.toThrow('wrapper-decode: invalid text');
+      await writeFile(path, Buffer.from([0xef, 0xbb, 0xbf, 0x7b, 0x7d]));
+      const text = await effects.readWrapperText(path);
+      expect(text).toBe('\ufeff{}');
+      expect(() => readReconcileWrapper(text!, normalizeInterval(A, B), 1, REPO)).toThrow(
+        'wrapper-decode: invalid JSON',
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('bounds an injected transport by remaining budget without hiding programming errors', async () => {
+    vi.useFakeTimers();
+    try {
+      const stuck = fileReconcileMergedEffects({
+        repo: REPO,
+        stateRoot: '/unused',
+        gh: () => new Promise(() => {}),
+        budget: new ForgeBudget({ requests: 1, seconds: 0.05, clock: () => 0 }),
+      });
+      const call = stuck.forgeQuery('query { x }');
+      const failure = expect(call).rejects.toBeInstanceOf(PageFailed);
+      await vi.advanceTimersByTimeAsync(50);
+      await failure;
+
+      const bug = new TypeError('broken fake');
+      const broken = fileReconcileMergedEffects({
+        repo: REPO,
+        stateRoot: '/unused',
+        gh: () => Promise.reject(bug),
+      });
+      await expect(broken.forgeQuery('query { x }')).rejects.toBe(bug);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

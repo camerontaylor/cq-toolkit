@@ -18,6 +18,7 @@ import {
   reconcileWrapperKey,
 } from '../../../src/policy/crq/reconcileCheckpoint.js';
 import {
+  ReconcileStorageFailed,
   parseReconcileArgv,
   reconcileMerged,
   runReconcileMerged,
@@ -184,6 +185,16 @@ function plainRecord(value: unknown): Record<string, unknown> {
 }
 
 describe('reconcile-merged route', () => {
+  test('preserves an already typed wrapper write failure and its original cause', async () => {
+    const diskError = new Error('disk full');
+    const failure = new ReconcileStorageFailed('wrapper-save', diskError);
+    const h = harness({ failWrapperWrite: 1, writeWrapperError: failure });
+    await expect(reconcileMerged({ after: A, before: B, pageBudget: 1 }, h.effects)).rejects.toBe(
+      failure,
+    );
+    expect(failure.cause).toBe(diskError);
+  });
+
   test('a complete scan enrolls every represented PR and writes canonical wrapper bytes', async () => {
     const h = harness({ prs: prs(3) });
     const result = await runReconcileMerged(argv(), h.effects);

@@ -7,21 +7,22 @@
  *   durable atomic write (temp file, file fsync, rename, directory fsync);
  * - the forge is the existing `gh` transport (`api graphql -f query=…`) bounded
  *   by a {@link ForgeBudget}; exhaustion becomes `BudgetExhausted` and every
- *   other transport failure becomes `PageFailed`, exactly as Python maps
- *   `RefreshExhausted` and `(OSError, RuntimeError, TimeoutExpired, ValueError)`;
+ *   expected transport failures become `PageFailed`, while programming errors
+ *   from an injected transport remain visible;
  * - the queue is the lossless document writer the queue-v1 capability uses, so
  *   the reconcile route and the rest of the runner cannot disagree on bytes;
  * - the operator invocation holds the persistent `tick.lock` inode.
  */
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { makeGhRunner, ghJson, type GhFn } from '../forge-github/gh.js';
+import { GhError, makeGhRunner, ghJson, type GhFn } from '../forge-github/gh.js';
 import { atomicWrite } from './atomic.js';
 import { withLock } from './lock.js';
 import { SlotBusyError } from '../lock/slotLock.js';
 import { isoUtc, loadQueueDocument, queueBytes } from './queueEffects.js';
 import { ForgeBudget, RefreshExhausted } from '../../policy/crq/forgeBudget.js';
 import { BudgetExhausted, PageFailed } from '../../policy/crq/reconcileInventory.js';
+import { ReconcileRefused } from '../../policy/crq/reconcileCheckpoint.js';
 import { fromPlainJson } from '../../policy/crq/queueDoc.js';
 import {
   ReconcileStorageFailed,
@@ -35,7 +36,7 @@ export interface ReconcileSourceOptions {
   readonly repo: string;
   /** `<runner>/state`. */
   readonly stateRoot: string;
-  /** The forge transport; defaults to the real `gh` CLI. */
+  /** The forge transport; defaults to the real `gh` CLI. Injected calls time out but cannot be cancelled. */
   readonly gh?: GhFn;
   /** The aggregate allowance; defaults to the shared 24/30 recovery window. */
   readonly budget?: ForgeBudget;
@@ -54,15 +55,23 @@ export function fileReconcileMergedEffects(
     nowIso: () => isoUtc(options.now?.() ?? new Date()),
     async readWrapperText(path) {
       try {
-        return await readFile(path, 'utf8');
+        const bytes = await readFile(path);
+        try {
+          // Keep a BOM as U+FEFF: Python's utf-8 decoder retains it and its
+          // JSON parser refuses it rather than silently stripping it.
+          return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+        } catch {
+          throw new ReconcileRefused('wrapper-decode: invalid text');
+        }
       } catch (error) {
+        if (error instanceof ReconcileRefused) throw error;
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
         throw new ReconcileStorageFailed('wrapper-read', error);
       }
     },
     async writeWrapperText(path, text) {
-      await mkdir(dirname(path), { recursive: true });
       try {
+        await mkdir(dirname(path), { recursive: true });
         await atomicWrite(path, text);
       } catch (error) {
         throw new ReconcileStorageFailed('wrapper-save', error);
@@ -79,17 +88,37 @@ export function fileReconcileMergedEffects(
         }
         throw error;
       }
-      // Python bounds the spawned read with the budget's remaining seconds.
-      // With an injected transport the caller owns that bound; the default
-      // spawn gets a fresh per-call timeout.
+      const timeoutMs = Math.max(1, Math.ceil(timeoutSeconds * 1000));
+      // The real runner kills its child. An injected GhFn has no cancellation
+      // contract, so bound the wait and leave its eventual settlement observed.
       const run: GhFn =
-        options.gh ?? makeGhRunner({ timeoutMs: Math.max(1, Math.ceil(timeoutSeconds * 1000)) });
+        options.gh === undefined
+          ? makeGhRunner({ timeoutMs })
+          : async (args) => {
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              try {
+                return await Promise.race([
+                  options.gh!(args),
+                  new Promise<never>((_, reject) => {
+                    timer = setTimeout(
+                      () => reject(new PageFailed('forge read unavailable; cursor retained')),
+                      timeoutMs,
+                    );
+                  }),
+                ]);
+              } finally {
+                if (timer !== undefined) clearTimeout(timer);
+              }
+            };
       try {
         // `ghJson` parses with JSON.parse; the policy layer needs the lossless
         // model so a Python `1.0` lexeme is never rewritten as `1`.
         return fromPlainJson(await ghJson(run, ['api', 'graphql', '-f', `query=${query}`]));
-      } catch {
-        throw new PageFailed('forge read unavailable; cursor retained');
+      } catch (error) {
+        if (error instanceof PageFailed) throw error;
+        if (error instanceof GhError)
+          throw new PageFailed('forge read unavailable; cursor retained');
+        throw error;
       }
     },
     loadQueue: () => loadQueueDocument(queuePath),
