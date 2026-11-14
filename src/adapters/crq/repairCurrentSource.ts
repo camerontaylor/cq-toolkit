@@ -7,7 +7,7 @@ import {
   RECONCILE_FORGE_REQUESTS,
   RECONCILE_FORGE_SECONDS,
 } from '../../policy/crq/forgeBudget.js';
-import type { CurrentRepairEffects } from '../../ops/crq/reconcileCurrentRepair.js';
+import type { CurrentRepairEffects } from '../../ops/crq/internal/reconcileCurrentRepair.js';
 import { makeGhRunner, type GhFn } from '../forge-github/gh.js';
 import { runGitIn } from './publishSource.js';
 import type { RunGit } from './ledgerGit.js';

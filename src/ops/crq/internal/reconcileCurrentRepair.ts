@@ -1,14 +1,14 @@
 /** Revalidate merged-current repair evidence against the current target tip. */
-import { JsonObject, parseJsonValue, type JsonValue } from '../../policy/crq/jsonValue.js';
-import { receiptJsonDigest, sha256Hex } from '../../policy/crq/pythonJson.js';
+import { JsonObject, parseJsonValue, type JsonValue } from '../../../policy/crq/jsonValue.js';
+import { receiptJsonDigest, sha256Hex } from '../../../policy/crq/pythonJson.js';
 import {
   pyTruthy,
   pythonValueEqual,
   withObjectKeys,
   withoutObjectKey,
-} from '../../policy/crq/queueDoc.js';
-import { remediationFixed } from '../../policy/crq/queueReceipt.js';
-import { RefreshExhausted } from '../../policy/crq/forgeBudget.js';
+} from '../../../policy/crq/queueDoc.js';
+import { remediationFixed } from '../../../policy/crq/queueReceipt.js';
+import { RefreshExhausted } from '../../../policy/crq/forgeBudget.js';
 
 export interface CurrentRepairEffects {
   readReceipt(id: string): Promise<Uint8Array | null>;

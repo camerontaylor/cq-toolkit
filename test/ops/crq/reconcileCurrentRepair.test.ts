@@ -6,7 +6,7 @@ import { fileCurrentRepairEffects } from '../../../src/adapters/crq/repairCurren
 import {
   reconcileCurrentRepair,
   type CurrentRepairEffects,
-} from '../../../src/ops/crq/reconcileCurrentRepair.js';
+} from '../../../src/ops/crq/internal/reconcileCurrentRepair.js';
 import { JsonObject, parseJsonValue, toPlainJson } from '../../../src/policy/crq/jsonValue.js';
 import { reviewReceiptBytes, reviewReceiptDigest } from '../../../src/policy/crq/reviewReceipt.js';
 import { RefreshExhausted } from '../../../src/policy/crq/forgeBudget.js';
