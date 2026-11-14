@@ -149,6 +149,60 @@ describe('inactive ordinary review preparation', () => {
     );
     expect(f.calls).toEqual(['allocate', 'scan', 'blocked']);
   });
+  it('rejects inconsistent scan decisions before checkout', async () => {
+    const f = fixture();
+    f.effects.scan = async () => ({
+      clean: true,
+      denylistHits: 1,
+      gitleaksHits: 0,
+      artifactPath: '/state/runs/pr-1/secret-scan.json',
+    });
+    await expect(
+      prepareOrdinaryReview(
+        f.queue,
+        { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
+        f.effects,
+      ),
+    ).rejects.toThrow('invalid review scan decision');
+    expect(f.calls).toEqual(['allocate']);
+  });
+  it('awaits a blocked event and propagates its failure without starting a review', async () => {
+    const f = fixture();
+    f.effects.scan = async () => ({
+      clean: false,
+      denylistHits: 1,
+      gitleaksHits: 0,
+      artifactPath: '/state/runs/pr-1/secret-scan.json',
+    });
+    let rejectEvent: (error: Error) => void = () => {
+      throw new Error('blocked event not reached');
+    };
+    let signalEvent: () => void = () => {};
+    const reachedEvent = new Promise<void>((resolve) => {
+      signalEvent = resolve;
+    });
+    f.effects.blocked = async () => {
+      f.calls.push('blocked');
+      signalEvent();
+      await new Promise<void>((_resolve, reject) => {
+        rejectEvent = reject;
+      });
+    };
+    let settled = false;
+    const pending = prepareOrdinaryReview(
+      f.queue,
+      { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
+      f.effects,
+    ).finally(() => {
+      settled = true;
+    });
+    await reachedEvent;
+    expect(settled).toBe(false);
+    expect(f.calls).toEqual(['allocate', 'blocked']);
+    rejectEvent(new Error('event failed'));
+    await expect(pending).rejects.toThrow('event failed');
+    expect(f.calls).toEqual(['allocate', 'blocked']);
+  });
   it('does not reserve or spawn after checkout fails', async () => {
     const f = fixture('delta');
     f.effects.checkout = async () => {
