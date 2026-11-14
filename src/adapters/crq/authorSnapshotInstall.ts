@@ -29,6 +29,7 @@ import { decodeSnapshot, type SnapshotObject } from '../../policy/crq/authorSnap
 import { GitPool, gitCall, gitOk } from './gitExec.js';
 
 const SNAPSHOT_REF_PREFIX = 'refs/crq/author-snapshots/v1/';
+const MAX_WIRE_BYTES = 6 * 1024 * 1024;
 
 /** `crq.ALLOWLIST_PATHS`, verbatim (kept local so the scan policy is explicit). */
 const ALLOWLIST_PATHS: readonly RegExp[] = [
@@ -120,7 +121,7 @@ export async function installAuthorSnapshot(input: InstallSnapshotInput): Promis
           ]),
         ).filter((entry) => entry.mode !== '160000');
         historyBytes += history.reduce((sum, entry) => sum + entry.path.length + 1, 0);
-        if (historyBytes > 12 * 1024 * 1024) {
+        if (historyBytes > MAX_WIRE_BYTES) {
           throw new AuthorRefused('snapshot history scan exceeds bound; reduce the commit range');
         }
         historyEntries.push(...history);
@@ -159,6 +160,7 @@ export async function installAuthorSnapshot(input: InstallSnapshotInput): Promis
     }
     const rules = await readRules(clone);
     const scanParts: string[] = [Buffer.from(diff).toString('utf8')];
+    let scanBytes = diff.length;
     if (input.original) {
       for (const object of decoded.objects) {
         if (object.type !== 'commit') continue;
@@ -169,7 +171,10 @@ export async function installAuthorSnapshot(input: InstallSnapshotInput): Promis
           if (hits.length > 0)
             throw new AuthorRefused('snapshot commit metadata secret scan refused');
         }
-        scanParts.push(`commit ${object.oid}\n${text}`);
+        const part = `commit ${object.oid}\n${text}`;
+        scanBytes += Buffer.byteLength(part) + 1;
+        if (scanBytes > MAX_WIRE_BYTES) throw new AuthorRefused('snapshot scan exceeds bound');
+        scanParts.push(part);
       }
     }
     for (const entry of entries) {
@@ -195,7 +200,10 @@ export async function installAuthorSnapshot(input: InstallSnapshotInput): Promis
           }
         }
       }
-      scanParts.push(`${path}\n${contents}\n`);
+      const part = `${path}\n${contents}\n`;
+      scanBytes += Buffer.byteLength(part) + 1;
+      if (scanBytes > MAX_WIRE_BYTES) throw new AuthorRefused('snapshot scan exceeds bound');
+      scanParts.push(part);
     }
     await gitleaksScan(scanParts);
     await writeObjects(input, clone, decoded.objects, 'snapshot installation mismatch');
