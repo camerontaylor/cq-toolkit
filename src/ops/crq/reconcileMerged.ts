@@ -20,7 +20,7 @@
  * forced command is read-only, while this route mutates the queue under the
  * tick lock.
  */
-import { JsonNumber, JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
+import { JsonNumber, JsonObject, toPlainJson, type JsonValue } from '../../policy/crq/jsonValue.js';
 import { atomicJsonText } from '../../policy/crq/pythonJson.js';
 import {
   isJsonInt,
@@ -416,7 +416,10 @@ export async function runReconcileMerged(
       ),
     );
     if (outcome === null) return failed('another crq tick holds the lock; exiting', 3);
-    return { artifact: { status: 'ok', value: outcome }, exitCode: 0 };
+    // The runner prints one JSON document with `JSON.stringify`; a JsonObject
+    // still carries bigint-backed JsonNumber values, so materialise the plain
+    // JSON shape at this boundary.
+    return { artifact: { status: 'ok', value: toPlainJson(outcome) }, exitCode: 0 };
   } catch (error) {
     if (error instanceof ReconcileStorageFailed) return failed(error.message, 3);
     if (error instanceof ReconcileRefused || error instanceof PageFailed) {

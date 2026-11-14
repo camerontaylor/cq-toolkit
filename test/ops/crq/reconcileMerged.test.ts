@@ -173,7 +173,7 @@ function artifactValue(result: Awaited<ReturnType<typeof runReconcileMerged>>): 
   if (result.artifact.status !== 'ok') {
     throw new Error(`expected ok, got ${result.artifact.error}`);
   }
-  return result.artifact.value;
+  return fromPlainJson(result.artifact.value);
 }
 
 function plainRecord(value: unknown): Record<string, unknown> {
@@ -189,6 +189,8 @@ describe('reconcile-merged route', () => {
     const result = await runReconcileMerged(argv(), h.effects);
     expect(result.exitCode).toBe(0);
     expect(result.artifact.status).toBe('ok');
+    // The runner prints `result.artifact` with `JSON.stringify`.
+    expect(() => JSON.stringify(result.artifact)).not.toThrow();
     const summary = toPlainJson(asObject(artifactValue(result)));
     expect(summary).toMatchObject({
       version: 1,

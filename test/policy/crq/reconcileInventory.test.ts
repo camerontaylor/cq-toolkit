@@ -234,6 +234,17 @@ describe('reconcilePage', () => {
 });
 
 describe('reconcile page loop', () => {
+  test('base defaults to main when the caller omits it', async () => {
+    const result = await reconcile(new FakeForge({ null: cursorPage([pr(1, B)]) }).fetch, {
+      repo: REPO,
+      after: A,
+      before: B,
+      pageBudget: 1,
+    });
+    expect(result.get('base')).toBe('main');
+    expect(result.get('complete')).toBe(true);
+  });
+
   test('250 records across seven pages are all represented', async () => {
     const records = Array.from({ length: 250 }, (_, index) =>
       pr(index + 1, `2026-10-${String(1 + Math.floor(index / 25)).padStart(2, '0')}T12:00:00Z`),

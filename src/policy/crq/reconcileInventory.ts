@@ -348,7 +348,7 @@ export async function reconcile(
   pageFetch: PageFetch,
   options: ReconcileOptions,
 ): Promise<JsonObject> {
-  const { repo, base } = validatedQuery(options.repo, options.base);
+  const { repo, base } = validatedQuery(options.repo, options.base ?? DEFAULT_BRANCH);
   const interval = normalizeInterval(options.after, options.before);
   const budget = normalizePageBudget(options.pageBudget);
   const dryRun = options.dryRun ?? false;
