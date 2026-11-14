@@ -110,6 +110,27 @@ export type RunnerResult = {
   exitCode: number;
 };
 
+/**
+ * One live unit's exit code: the plain status mapping (`ok` → 0, anything
+ * else → 1), except the publish unit. Python's publisher run exits 1 for
+ * reconciliation-pending — remote work succeeded and only local bookkeeping
+ * waits — while its artifact stays an `ok` result that retains the
+ * publication value, so only the publish branch inspects `value.publication`
+ * here; every other live unit maps its status alone.
+ */
+function liveUnitExitCode(command: string, result: OpResult<unknown>): number {
+  if (result.status !== 'ok') return 1;
+  if (
+    command === 'publish' &&
+    typeof result.value === 'object' &&
+    result.value !== null &&
+    (result.value as { publication?: unknown }).publication === 'reconciliation-pending'
+  ) {
+    return 1;
+  }
+  return 0;
+}
+
 /** Planners describe effects; only the dry-run recorder is implemented in this skeleton. */
 export async function run(
   args: string[],
@@ -158,7 +179,7 @@ export async function run(
       };
     try {
       const result = await options.live(command, []);
-      return { artifact: result, exitCode: result.status === 'ok' ? 0 : 1 };
+      return { artifact: result, exitCode: liveUnitExitCode(command, result) };
     } catch (error) {
       return {
         artifact: {
