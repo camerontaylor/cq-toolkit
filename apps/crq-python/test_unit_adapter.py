@@ -886,6 +886,19 @@ class AdapterTests(AdapterFixture):
             self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
         self.assertEqual(_tree(self.unit_dir), before)
 
+    def test_preflight_refuses_special_bits_dropin_symlink_target(self):
+        self.make_declared_dropins("crq-tick.service")
+        target = self.base / ".local/infra/systemd/crq-messaging.conf"
+        for bits in (0o4644, 0o2644, 0o1644):
+            with self.subTest(bits=oct(bits)):
+                target.chmod(bits)
+                before = _tree(self.unit_dir)
+                with self.assertRaisesRegex(
+                        dc.Refused,
+                        "symlink target has unsupported special bits"):
+                    self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+                self.assertEqual(_tree(self.unit_dir), before)
+
     def test_preflight_refuses_dropin_symlink_inside_unit_dir(self):
         dropin = self.make_declared_dropins("crq-tick.service")
         link = dropin / "20-paseo-env.conf"

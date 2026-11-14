@@ -697,7 +697,11 @@ class ProductionUnitAdapter:
                     or target_info.st_gid != self.identity.gid):
                 self.refuse("declared drop-in symlink target ownership is not "
                             "the adapter identity: " + str(path))
-            if stat.S_IMODE(target_info.st_mode) & 0o022:
+            target_mode = stat.S_IMODE(target_info.st_mode)
+            if target_mode & 0o7000:
+                self.refuse("declared drop-in symlink target has unsupported "
+                            "special bits: " + str(path))
+            if target_mode & 0o022:
                 self.refuse("declared drop-in symlink target is group- or "
                             "world-writable: " + str(path))
             if target_info.st_size > MAX_DROPIN_BYTES:
