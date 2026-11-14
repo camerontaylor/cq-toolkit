@@ -265,7 +265,6 @@ export async function mergeHeadEvidence(
       } else excerpts[key + '_omitted'] = true;
     }
     containment[path] = {
-      ...excerpts,
       published: before,
       actual: after,
       status: 'contained',
@@ -277,6 +276,7 @@ export async function mergeHeadEvidence(
       patch_bytes: original.length,
       extra_patch_sha256: patchHash(extra),
       extra_patch_bytes: extra.length,
+      ...excerpts,
     };
   }
   return {

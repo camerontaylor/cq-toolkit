@@ -113,6 +113,25 @@ describe('containment oracle bounds and edge cases', () => {
       await expect(mergeHeadEvidence(input, runner)).rejects.toThrow('source changed');
     }
   });
+  test('rejects a binary published patch even when the published mode changed', async () => {
+    const runner = override((args, value) => {
+      if (args[0] === 'ls-tree' && args[2] === base) return value.replace('100644', '100755');
+      if (args[0] === 'diff' && args.includes(base)) return 'Binary files a and b differ\n';
+      return value;
+    });
+    await expect(mergeHeadEvidence(input, runner)).rejects.toThrow('source changed');
+  });
+  test('recognizes Python Unicode and form-feed line boundaries when checking undo', async () => {
+    for (const separator of ['\u2028', '\f']) {
+      const runner = override((args, value) => {
+        if (args[0] === 'diff' && args.includes(base))
+          return `diff --git a b\n@@ -1 +1 @@\n+fixed${separator}context\n`;
+        if (args[0] === 'diff') return 'diff --git a b\n@@ -1 +1 @@\n-fixed\n';
+        return value;
+      });
+      await expect(mergeHeadEvidence(input, runner)).rejects.toThrow('source changed');
+    }
+  });
   test('rejects deletion and recreation of compared source', async () => {
     for (const missing of [actual, published]) {
       const runner = override((args, value) =>
