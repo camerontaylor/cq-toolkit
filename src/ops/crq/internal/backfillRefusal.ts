@@ -112,7 +112,7 @@ export async function recordPreVendorRefusal(
   )
     throw new LedgerIntegrityError('pre-vendor refusal requires the matching unbound reservation');
   const cancelled = cancelBeforeVendor(queue, index);
-  const reason = original.get('last_error');
+  const reason = item.get('last_error');
   const at = effects.now();
   const terminal = terminalBackfill(
     cancelled.queue,
@@ -124,7 +124,7 @@ export async function recordPreVendorRefusal(
     typeof reason === 'string' ? reason : 'launch refused',
   );
   const marker = new JsonObject([
-    ['at', effects.now()],
+    ['at', at],
     ['reason', REASON],
   ]);
   const marked = putItem(

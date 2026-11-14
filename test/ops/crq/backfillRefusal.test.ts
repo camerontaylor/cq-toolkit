@@ -51,6 +51,35 @@ describe('pre-vendor refusal replay', () => {
     expect(item(result).has('refusal_state_event')).toBe(false);
     expect(item(result).get('failures')).toEqual(parse('{"n":1}').get('n'));
   });
+  it('uses reloaded error and a single clock value for terminal and marker', async () => {
+    const stale = initial();
+    let disk = withObjectKeys(stale, [
+      ['items', [withObjectKeys(item(stale), [['last_error', 'durable detail']])]],
+    ]);
+    let calls = 0;
+    let seenAt = '';
+    let savedTerminal = '';
+    const fx: BackfillRefusalEffects = {
+      now: () => {
+        calls++;
+        return calls === 1 ? '2026-10-30T00:00:00Z' : '2026-10-30T00:00:01Z';
+      },
+      loadQueue: async () => disk,
+      saveQueue: async (q) => {
+        disk = q;
+      },
+      stateEvent: async (q, _item, at) => {
+        seenAt = at;
+        savedTerminal = String(hold(q).get('terminal_at'));
+        return q;
+      },
+    };
+    const result = await recordPreVendorRefusal(stale, 0, evidence, fx);
+    expect(item(result).get('last_error')).toBe('durable detail');
+    expect(calls).toBe(1);
+    expect(seenAt).toBe('2026-10-30T00:00:00Z');
+    expect(savedTerminal).toBe(seenAt);
+  });
   it('replays a persisted marker after spool failure without another terminal transition', async () => {
     let disk = initial();
     let failed = true;
