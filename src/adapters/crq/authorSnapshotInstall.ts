@@ -34,6 +34,9 @@ const MAX_WIRE_BYTES = 6 * 1024 * 1024;
 const FALLBACK_NAME_MAX = 255;
 const FALLBACK_PATH_MAX = 4096;
 const execFileAsync = promisify(execFile);
+// Python decodes materialized paths with `errors="strict"` and does not strip
+// a leading U+FEFF, so `ignoreBOM` stays true here.
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /** `crq.ALLOWLIST_PATHS`, verbatim (kept local so the scan policy is explicit). */
 const ALLOWLIST_PATHS: readonly RegExp[] = [
@@ -204,8 +207,8 @@ export async function installAuthorSnapshot(input: InstallSnapshotInput): Promis
       }
     }
     for (const entry of entries) {
-      const path = Buffer.from(entry.path).toString('utf8');
       const materialized = headSet.has(entryKey(entry));
+      const path = materialized ? strictPath(entry.path) : Buffer.from(entry.path).toString('utf8');
       if (materialized && !safePath(path)) throw new AuthorRefused('unsafe snapshot path');
       const data = blobData.get(entry.oid);
       if (data === undefined) throw new AuthorRefused('snapshot entry blob is missing');
@@ -448,6 +451,15 @@ function safePath(path: string): boolean {
   return !path
     .split('/')
     .some((part) => part === '.' || part === '..' || part.toLowerCase() === '.git');
+}
+
+/** `raw_path.decode("utf-8", errors="strict")` for a materialized entry. */
+function strictPath(path: Uint8Array): string {
+  try {
+    return strictUtf8.decode(path);
+  } catch {
+    throw new AuthorRefused('snapshot path is not valid UTF-8');
+  }
 }
 
 /** `os.pathconf(WT_ROOT, PC_NAME_MAX/PC_PATH_MAX)`; fail closed to POSIX minima. */

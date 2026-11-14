@@ -41,12 +41,14 @@ function snapshotFor(
   base: string,
   content: string,
   corruptBlob = false,
-  shape: { readonly path?: string; readonly mode?: string } = {},
+  shape: { readonly path?: string; readonly pathBytes?: Uint8Array; readonly mode?: string } = {},
 ): Fixture {
   const blob = Buffer.from(content, 'utf8');
   const blobOid = sha1(`blob ${String(blob.length)}\0`, blob);
   const entry = Buffer.concat([
-    Buffer.from(`${shape.mode ?? '100644'} ${shape.path ?? 'hello.txt'}\0`, 'utf8'),
+    Buffer.from(`${shape.mode ?? '100644'} `, 'utf8'),
+    shape.pathBytes ?? Buffer.from(shape.path ?? 'hello.txt', 'utf8'),
+    Buffer.from('\0', 'utf8'),
     Buffer.from(blobOid, 'hex'),
   ]);
   const treeOid = sha1(`tree ${String(entry.length)}\0`, entry);
@@ -333,6 +335,21 @@ describe('installAuthorSnapshot', () => {
           limits: { nameMax: 255, pathMax: 4096 },
         }),
       ).rejects.toThrow('snapshot symlink target is not representable');
+      expect(await objectExists(repo.dir, fixture.head)).toBe(false);
+    } finally {
+      repo.pool.killAll();
+    }
+  });
+
+  test('refuses a non-UTF8 materialized path before pinning', async () => {
+    const repo = await clone();
+    try {
+      const fixture = snapshotFor(repo.base, 'hello\n', false, {
+        pathBytes: Buffer.from([0x68, 0x69, 0x80, 0x2e, 0x74, 0x78, 0x74]),
+      });
+      await expect(installAuthorSnapshot(input(repo, fixture))).rejects.toThrow(
+        'snapshot path is not valid UTF-8',
+      );
       expect(await objectExists(repo.dir, fixture.head)).toBe(false);
     } finally {
       repo.pool.killAll();
