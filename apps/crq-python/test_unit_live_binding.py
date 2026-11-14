@@ -598,15 +598,104 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("dependency scan bound", evidence["error"])
 
-    def test_symlink_outside_the_unit_directory_is_incomplete(self):
+    def test_cotenant_symlink_outside_the_unit_directory_is_supported(self):
         declared = self.declare()
-        outside = self.base / "outside.service"
-        outside.write_text("[Unit]\nWants=crq-slot.service\n")
-        (self.unit_dir / "foreign.service").symlink_to(outside)
+        outside = (self.base / "repos/telemetry/infra/systemd/user"
+                   / "telemetry-ingest@.service")
+        outside.parent.mkdir(parents=True)
+        # A real cotenant unit is an absolute symlink into its repository
+        # tree. Its text is read under the same bound as a unit-directory
+        # entry, and a legitimate execution-line continuation must not make
+        # the topology incomplete.
+        outside.write_text(
+            "[Service]\nExecStart=/bin/true \\\n  --flag\n")
+        (self.unit_dir / "telemetry-ingest@.service").symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+        self.assertIsNone(evidence["error"])
+
+    def test_cotenant_symlink_naming_the_expected_unit_is_unsupported(self):
+        declared = self.declare()
+        for directive in ("Wants", "Requires", "PartOf"):
+            with self.subTest(directive=directive):
+                outside = self.base / ("repos/%s.service"
+                                       % directive.lower())
+                outside.parent.mkdir(parents=True, exist_ok=True)
+                outside.write_text("[Unit]\n%s=crq-tick.service\n" % directive)
+                link = self.unit_dir / ("cotenant-%s.service"
+                                        % directive.lower())
+                link.symlink_to(outside)
+                evidence = self.discover(declared)
+                self.assertEqual(evidence["complete"], True)
+                self.assertEqual(evidence["supported"], False)
+                self.assertIn("%s names crq-tick.service" % directive,
+                              " ".join(evidence["foreign"]))
+                link.unlink()
+
+    def test_cotenant_symlink_continuation_hiding_a_dependency_is_unsupported(
+            self):
+        declared = self.declare()
+        outside = self.base / "repos/wrapped.service"
+        outside.parent.mkdir(parents=True)
+        # systemd joins the continued directive and ignores a comment block
+        # inside the continuation, so the scanner must join it too.
+        outside.write_text(
+            "[Unit]\nWants=\\\n# ignored comment\n crq-tick.service\n")
+        (self.unit_dir / "wrapped.service").symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Wants names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_cotenant_directory_symlink_is_not_followed(self):
+        declared = self.declare()
+        held = self.base / "repos/held.service.d"
+        held.mkdir(parents=True)
+        (held / "override.conf").write_text(
+            "[Unit]\nWants=crq-tick.service\n")
+        (self.unit_dir / "telemetry.service.d").symlink_to(held)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+
+    def test_dangling_cotenant_symlink_is_incomplete(self):
+        declared = self.declare()
+        (self.unit_dir / "dangling.service").symlink_to(
+            self.base / "repos/missing.service")
         evidence = self.discover(declared)
         self.assertEqual(evidence["complete"], False)
         self.assertEqual(evidence["supported"], False)
-        self.assertIn("symlink outside", evidence["error"])
+        self.assertIn("cannot resolve a symlink", evidence["error"])
+
+    def test_unreadable_cotenant_symlink_target_is_incomplete(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can read a mode-000 file")
+        declared = self.declare()
+        outside = self.base / "repos/locked.service"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("[Service]\n")
+        outside.chmod(0o000)
+        self.addCleanup(outside.chmod, 0o600)
+        (self.unit_dir / "locked.service").symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("cannot read", evidence["error"])
+
+    def test_oversized_cotenant_symlink_target_is_incomplete(self):
+        declared = self.declare()
+        outside = self.base / "repos/large.service"
+        outside.parent.mkdir(parents=True)
+        outside.write_bytes(b"#\n" * ((1 << 20) // 2 + 1))
+        (self.unit_dir / "large.service").symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("byte bound", evidence["error"])
 
     def test_symlink_loop_is_incomplete(self):
         declared = self.declare()

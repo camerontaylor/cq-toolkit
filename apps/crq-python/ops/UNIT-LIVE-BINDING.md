@@ -89,18 +89,26 @@ shapes:
   foreign timer naming that service is still foreign. An undeclared unit of
   another CRQ group naming only its own units is not foreign.
 
-The recursive dependency scan is bounded by visited entry count, does not
-follow symlinked directories, and reads a symlink file only when its resolved
-target stays inside the unit directory; a `/dev/null` mask is skipped. An
-unreadable directory, including an unreadable descendant, or a symlink
-escaping or unresolvable inside the unit directory makes `complete` false
-rather than silently skipping evidence.
+The recursive dependency scan is bounded by visited entry count and does not
+follow symlinked directories. A symlink file is read when its resolved target
+is a regular file, whether it stays inside the unit directory or points into a
+cotenant repository or config tree; cotenant units are routinely installed
+that way. The target text is scanned like any other source, so a cotenant unit
+naming an expected unit is still foreign, and systemd continuations are joined
+so a wrapped directive cannot hide a dependency. A `/dev/null` mask is
+skipped, and a symlinked directory or special file is not followed. A
+dangling, looping, unreadable or oversized target, or an unreadable directory
+including a descendant, makes `complete` false rather than silently skipping
+evidence. No ownership or mode gate is added for a cotenant target: its text
+is read-only evidence, not the file the switch mutates.
 
 The examined scope is the user unit directory and the user manager's installed
 and loaded lists. The following are outside this scope and are not claimed by
 `supported`: a non-CRQ unit whose in-memory dependency names a CRQ unit but is
 not on disk, transient or generated state outside the manager lists, another
-namespace or user, and an activator created between the scan and the fence.
+namespace or user, an activator created between the scan and the fence, and a
+dependency introduced through a symlinked drop-in directory because symlinked
+directories are not followed.
 This is the residual that still needs parent-owned actual-topology evidence
 before production enablement.
 
