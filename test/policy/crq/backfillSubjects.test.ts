@@ -318,6 +318,23 @@ describe('backfill subject construction', () => {
     ]);
   });
 
+  test('a debt-only candidate never reads partition or requested-blob fields', async () => {
+    const repo = new ScriptedRepo([row('a', { disposition: 'unsupported', reason: 'too large' })]);
+    const value = candidate(['a'], {
+      // Python reaches eligibility debt before it reads any of these, and it
+      // reads the requested blob only for an included row.
+      scope: [{ path: 'a', intervals: [[1, 1]] }],
+    });
+    delete value['kind'];
+    delete value['subject_id'];
+    delete value['generation'];
+
+    const result = await construct(repo, value, POLICY);
+
+    expect(result.partitions).toEqual([]);
+    expect(result.debt).toEqual([{ path: 'a', reason: 'too large', disposition: 'unsupported' }]);
+  });
+
   test('file, total and diff limits split without truncation', async () => {
     const names = Array.from({ length: 11 }, (_, index) => `p/${String(index).padStart(2, '0')}`);
     const repo = new ScriptedRepo(names.map((name) => row(name)));

@@ -238,9 +238,6 @@ export async function construct(
   const limits = effectiveLimits(policy, { requireVerified: options.offline !== true });
   const candidate = asDoc(candidateValue, 'candidate');
   const targetValue = text(need(candidate, 'target', 'candidate'), 'candidate target');
-  const kind = need(candidate, 'kind', 'candidate');
-  const subjectId = need(candidate, 'subject_id', 'candidate');
-  const generation = need(candidate, 'generation', 'candidate');
   const candidateTier = text(need(candidate, 'tier', 'candidate'), 'candidate tier');
   const pathTiers = optionalDoc(candidate, 'path_tiers', 'candidate path_tiers');
   const pathScores = optionalDoc(candidate, 'path_scores', 'candidate path_scores');
@@ -303,19 +300,22 @@ export async function construct(
       });
       continue;
     }
+    // Python `row.get(key, default)`: a present null stays null.
+    const reason = Object.prototype.hasOwnProperty.call(row, 'reason')
+      ? row.reason
+      : 'missing target path';
+    const disposition = Object.prototype.hasOwnProperty.call(row, 'disposition')
+      ? row.disposition
+      : 'ambiguous';
+    if (disposition !== 'included') {
+      debt.push({ path: name, reason, disposition });
+      continue;
+    }
+    // Python reads the requested blob only after the disposition matches.
     const request = requested.get(name) as JsonRecordLike;
     const blob = text(need(request, 'blob', 'scope row'), 'scope row blob');
-    if (row.disposition !== 'included' || row.blob !== blob) {
-      debt.push({
-        path: name,
-        // Python `row.get(key, default)`: a present null stays null.
-        reason: Object.prototype.hasOwnProperty.call(row, 'reason')
-          ? row.reason
-          : 'missing target path',
-        disposition: Object.prototype.hasOwnProperty.call(row, 'disposition')
-          ? row.disposition
-          : 'ambiguous',
-      });
+    if (row.blob !== blob) {
+      debt.push({ path: name, reason, disposition });
       continue;
     }
     eligible.push(name);
@@ -323,8 +323,13 @@ export async function construct(
 
   const cut = async (nameset: readonly string[], residual = false): Promise<void> => {
     if (nameset.length === 0) return;
-    const totalBytes = nameset.reduce((sum, name) => sum + bytesOf(objects.get(name), name), 0);
-    if (nameset.length > limits.files || totalBytes > limits.total) {
+    // Python's `or` short-circuits, so a file-count split never reads a row's
+    // byte count.
+    const overFiles = nameset.length > limits.files;
+    const overTotal =
+      !overFiles &&
+      nameset.reduce((sum, name) => sum + bytesOf(objects.get(name), name), 0) > limits.total;
+    if (overFiles || overTotal) {
       if (nameset.length === 1) {
         debt.push({
           path: nameset[0],
@@ -342,6 +347,8 @@ export async function construct(
     let provenance: Readonly<Record<string, SubjectProvenance>>;
     let base: string;
     let head: string;
+    // Python reads `candidate["kind"]` here, only once a nameset fits.
+    const kind = need(candidate, 'kind', 'candidate');
     if (kind === 'A' && !residual) {
       ({ base, head, provenance } = await repo.synthetic(target, nameset, membersValue));
     } else {
@@ -405,12 +412,14 @@ export async function construct(
 
     if (scope.length > 0) {
       const number = partitions.length;
+      const subjectId = need(candidate, 'subject_id', 'candidate');
       const identity = ledgerJsonDigest({
         parent: toPlainJsonDeep(subjectId),
         scope,
         partition: number,
         residual,
       });
+      const generation = need(candidate, 'generation', 'candidate');
       const refs = await repo.pin(identity, generation, number, base, head, target);
       let tier = text((objects.get(scope[0]?.path as string) as ObjectState).tier, 'path tier');
       let score = 0;
