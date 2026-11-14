@@ -18,6 +18,12 @@ import {
   toPlainJsonRetainingNumbers,
   type JsonValue,
 } from '../../../src/policy/crq/jsonValue.js';
+import {
+  parseConfig,
+  validateQueue,
+  validateQueueExact,
+  writeStatusForDocuments,
+} from '../../../src/ops/crq/statusWriter.js';
 import { mergedCurrent } from '../../../src/policy/crq/statusSummary.js';
 import { parseCrqState } from '../../../src/policy/crq/state.js';
 import { pythonJsonText } from '../../../src/policy/crq/pythonJson.js';
@@ -274,6 +280,79 @@ describe('runStatusWriter over a real state root', () => {
     const markdown = await readFile(join(roots.stateRoot, 'status.md'), 'utf8');
     expect(markdown).toContain('## Repair and utilization');
     expect(markdown).not.toContain('OSError');
+  });
+
+  it('selects the drainable stems from the same queue revision the route runs', async () => {
+    // Round-3 P2 regression: the seam stem selection and the route must
+    // share one queue read. If the adapter read queue.json twice (a lenient
+    // read for the seams, the route's own strict read after), a concurrent
+    // tick swapping queue.json between the reads would select stems from
+    // the old revision while the route digests the new one, and a newly
+    // queued repair job's bytes would never be captured: repairDigest
+    // refuses with a spurious OSError where Python, which reads queue.json
+    // once and opens the job inline over that same q, succeeds.
+    const roots = await makeRoots();
+    await seedRoots(roots.stateRoot, roots.runnerRoot);
+    await mkdir(join(roots.stateRoot, 'repair', 'inbox'), { recursive: true });
+    await writeFile(join(roots.stateRoot, 'repair', 'inbox', 'crq-fix.json'), '{"job": "crq-fix"}');
+    const tickedQueue = {
+      ...QUEUE,
+      items: [
+        ...QUEUE.items,
+        {
+          id: 'rep1',
+          kind: 'merged',
+          state: 'pending',
+          repair_runs: { 'crq-fix': { state: 'queued', jobs: ['crq-fix'] } },
+          cycles: [],
+          attempts: [],
+          notes: [],
+        },
+      ],
+    };
+    const tickedBytes = toQueueText(tickedQueue);
+    // Race injection at the filesystem layer: the first queue read sees the
+    // pre-tick revision (seedRoots bytes), and every later read sees the
+    // post-tick revision, exactly as if a tick swapped queue.json between
+    // the adapter's two reads. Only the one-read wiring passes both
+    // consumers the same bytes, so the seams capture the job bytes the
+    // post-tick route digest needs and the run succeeds.
+    let queueReads = 0;
+    const effects = fileStatusWriterEffects(
+      roots,
+      async () => null,
+      () => NOW,
+    );
+    const racingEffects = {
+      ...effects,
+      readQueue: async (): Promise<string> => {
+        queueReads += 1;
+        if (queueReads === 1) {
+          await writeFile(join(roots.stateRoot, 'queue.json'), tickedBytes);
+          return await readFile(join(roots.stateRoot, 'queue.json'), 'utf8');
+        }
+        return await readFile(join(roots.stateRoot, 'queue.json'), 'utf8');
+      },
+    };
+    const queueText = await racingEffects.readQueue();
+    expect(queueReads).toBe(1);
+    const documents = {
+      queue: validateQueue(queueText),
+      config: parseConfig(await racingEffects.readConfig()),
+      queueExact: validateQueueExact(queueText),
+    };
+    // Old shape: the pre-tick first read selects no stems (the pre-tick
+    // queue references no jobs), so the entry would carry jobBytes null and
+    // the post-tick digest would refuse with OSError.
+    const seams = await resolveComposerSeams(roots.stateRoot, documents.queue);
+    const entry = seams.inbox.entries.find((candidate) => candidate.stem === 'crq-fix');
+    expect(entry?.jobBytes).not.toBeNull();
+    const result = await writeStatusForDocuments(
+      { ...racingEffects, composerSeams: seams },
+      documents,
+    );
+    expect(result.markdown).toContain('## Repair and utilization');
+    expect(result.markdown).not.toContain('OSError');
   });
 
   it('keeps the composer seam reads on the state root', async () => {

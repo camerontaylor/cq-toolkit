@@ -34,7 +34,10 @@ import { readSummaryCore, type ReadOnlyStatusEffects } from '../../ops/crq/readO
 import { fileReadOnlyStatusEffects, type StatusStateRoots } from './statusSource.js';
 import {
   jsonScalar,
-  writeStatus,
+  parseConfig,
+  validateQueue,
+  validateQueueExact,
+  writeStatusForDocuments,
   type CrqDocuments,
   type StatusWriterEffects,
 } from '../../ops/crq/statusWriter.js';
@@ -124,20 +127,12 @@ export function fileStatusWriterEffects(
       // The exact `status_summary.publish(ROOT, q, CONFIG, schedule)`: build
       // the shared effect snapshot for this queue, compose the core through
       // readSummaryCore's summarize+merged_current pipeline, then write
-      // atomically. Python passes its in-memory q; here the composer re-reads
-      // the queue bytes, so a concurrent tick between the route's validation
-      // and this read yields a summary whose core counters come from one
-      // revision and whose repair/utilization sections (built from the
-      // validated documents below) come from another. That residual race is
-      // transient — the next `crq status` republishes from a consistent
-      // snapshot — and Python has the same window between `save_queue` and
-      // `publish`. The validated documents still drive the effect snapshot.
-      // The core composer re-reads through the injected text effects, so the
-      // route's already-validated bytes are re-serialized deterministically
-      // (pythonJsonText over the lossless documents) and the composer sees
-      // exactly the queue/config the route validated, not a newer revision
-      // a concurrent tick may have swapped in.
-      void documents.scheduleProbe;
+      // atomically. The composer runs over the SAME validated documents the
+      // route loaded: its queue/config text effects serve the route's bytes
+      // re-serialized deterministically (pythonJsonText over the lossless
+      // documents), and the effect snapshot's repair/utilization inputs come
+      // from those same documents, so no consumer can observe a revision the
+      // route never validated.
       const queueText = pythonJsonText(jsonScalar(documents.queueExact ?? documents.queue), {
         asciiOnly: true,
         sortKeys: false,
@@ -192,6 +187,9 @@ export function fileStatusWriterEffects(
  * drainable stems: Python opens each drainable queued job inline
  * (`repair_tick.digest`), so an unconsumed stem's bytes must be captured
  * here or the digest would refuse on null bytes where Python reads the file.
+ * The caller supplies the SAME validated queue document the route will run
+ * over (see `runStatusWriter`), so the stems and the route can never
+ * observe different queue revisions.
  */
 export async function resolveComposerSeams(
   stateRoot: string,
@@ -261,16 +259,23 @@ export async function runStatusWriter(
   now?: () => number,
 ): Promise<number> {
   try {
-    // The stems the repair digest needs come from a lenient read of the
-    // queue: a corrupt queue.json fails the route's own strict validation
-    // moments later with the schema refusal, so this read only needs to
-    // yield a plain object or nothing.
-    const seams = await resolveComposerSeams(
-      roots.stateRoot,
-      await lenientQueueJson(roots.stateRoot),
-    );
+    // One strict queue read shared by the seams and the route. Python's
+    // write_status reads queue.json once and opens the drainable repair
+    // jobs inline mid-route over that same in-memory q, so the composer's
+    // seams and the route must see one revision: if this read and the
+    // route's read were separate, a concurrent tick swapping queue.json
+    // between them would leave a newly referenced job's bytes uncaptured
+    // and repairDigest would refuse with a spurious OSError. The strict
+    // failure surfaces as the route's own schema refusal below.
     const effects = fileStatusWriterEffects(roots, realRunCommand, now);
-    const result = await writeStatus({ ...effects, composerSeams: seams });
+    const queueText = await readFile(join(roots.stateRoot, 'queue.json'), 'utf8');
+    const documents: CrqDocuments = {
+      queue: validateQueue(queueText),
+      config: parseConfig(await effects.readConfig()),
+      queueExact: validateQueueExact(queueText),
+    };
+    const seams = await resolveComposerSeams(roots.stateRoot, documents.queue);
+    const result = await writeStatusForDocuments({ ...effects, composerSeams: seams }, documents);
     io.write(result.markdown);
     return 0;
   } catch (error) {
@@ -282,14 +287,4 @@ export async function runStatusWriter(
   }
 }
 
-export { writeStatus };
-
-/** A best-effort plain-object parse of queue.json for the stem selector. */
-async function lenientQueueJson(stateRoot: string): Promise<unknown> {
-  try {
-    const parsed: unknown = JSON.parse(await readFile(join(stateRoot, 'queue.json'), 'utf8'));
-    return parsed;
-  } catch {
-    return null;
-  }
-}
+export { writeStatusForDocuments };
