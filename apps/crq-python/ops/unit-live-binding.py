@@ -105,12 +105,36 @@ def _text(value: bytes, what: str) -> str:
 
 
 def _read_file(path: Path, *, max_bytes: int) -> bytes:
+    """Read a bounded regular file without blocking on a replaced target.
+
+    The descriptor is opened non-blocking and re-checked before any read, so a
+    path swapped to a FIFO after the caller's type observation refuses instead
+    of waiting for a writer. The existing byte bound still applies.
+    """
     try:
-        with path.open("rb") as handle:
-            data = handle.read(max_bytes + 1)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except OSError as exc:
         raise LiveBindingRefused(
             "cannot read " + str(path) + ": " + str(exc)[:160]) from exc
+    try:
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise LiveBindingRefused(
+                    "not a regular file: " + str(path))
+            chunks = []
+            remaining = max_bytes + 1
+            while remaining > 0:
+                chunk = os.read(fd, min(remaining, 65536))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+        except OSError as exc:
+            raise LiveBindingRefused(
+                "cannot read " + str(path) + ": " + str(exc)[:160]) from exc
+    finally:
+        os.close(fd)
     if len(data) > max_bytes:
         raise LiveBindingRefused("file exceeds the byte bound: " + str(path))
     return data

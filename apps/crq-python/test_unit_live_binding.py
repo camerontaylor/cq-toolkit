@@ -11,6 +11,8 @@ import importlib.util
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -777,6 +779,46 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["paths"][str(timer)]["type"], "other")
         self.assertEqual(evidence["supported"], False)
         self.assertIn("not a file or symlink", evidence["error"])
+
+
+class ReadFileTests(unittest.TestCase):
+    def test_refuses_a_directory_descriptor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(live.LiveBindingRefused):
+                live._read_file(Path(temporary), max_bytes=1024)
+
+    def test_refuses_a_fifo_without_blocking(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fifo = Path(temporary) / "fifo"
+            os.mkfifo(fifo)
+            opened = threading.Event()
+
+            def holder():
+                # O_RDWR never blocks on a FIFO and keeps both ends present,
+                # so even a regression to a blocking open lets this test
+                # finish instead of hanging the suite.
+                try:
+                    descriptor = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+                except OSError:
+                    return
+                try:
+                    opened.set()
+                    time.sleep(0.2)
+                    os.write(descriptor, b"x")
+                except OSError:
+                    pass
+                finally:
+                    os.close(descriptor)
+
+            thread = threading.Thread(target=holder, daemon=True)
+            thread.start()
+            self.assertTrue(opened.wait(2))
+            try:
+                with self.assertRaises(live.LiveBindingRefused):
+                    live._read_file(fifo, max_bytes=1024)
+            finally:
+                thread.join(2)
+            self.assertFalse(thread.is_alive())
 
 
 class IdentityTests(unittest.TestCase):

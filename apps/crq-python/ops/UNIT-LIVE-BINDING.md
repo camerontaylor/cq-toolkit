@@ -101,8 +101,11 @@ wrapped directive cannot hide a dependency. A `/dev/null` mask is skipped, and
 a symlinked directory or special file is not followed. A
 dangling, looping, unreadable or oversized target, or an unreadable directory
 including a descendant, makes `complete` false rather than silently skipping
-evidence. No ownership or mode gate is added for a cotenant target: its text
-is read-only evidence, not the file the switch mutates.
+evidence. A read opens non-blocking and re-checks the descriptor as a regular
+file, so a target replaced by a FIFO or other special file between the type
+observation and the read refuses instead of blocking. No ownership or mode
+gate is added for a cotenant target: its text is read-only evidence, not the
+file the switch mutates.
 
 The examined scope is the user unit directory and the user manager's installed
 and loaded lists. The following are outside this scope and are not claimed by
