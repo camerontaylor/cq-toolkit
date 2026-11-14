@@ -13,8 +13,8 @@ import {
   receiptJsonBytes,
   sha256Hex,
 } from '../../../src/policy/crq/pythonJson.js';
+import { classify } from '../../../src/policy/crq/classification.js';
 import { parseIso, parseUtc, UtcParseError } from '../../../src/policy/crq/utc.js';
-import { decideCompletion, parseReviewerStream } from '../../../src/ops/dev/coderabbit.js';
 import {
   ReconcileRefused,
   checkpointDigest,
@@ -155,31 +155,16 @@ describe.each(loadFamily('queue-bytes'))('queue-bytes/$name', (vector) => {
   });
 });
 
-// Only completion eligibility is implemented by the existing TS classifier;
-// the Python diagnostic fields and retry provenance await the crq port.
-test('classifier vectors include the D2 no-fresh case', () => {
-  expect(loadFamily('classify').map((vector) => vector.name)).toContain(
-    'affirmative-no-fresh-completion-is-skipped',
-  );
-});
 describe.each(loadFamily('classify'))('classify/$name', (vector) => {
-  test('completion eligibility matches Python, with the D2 no-fresh exception', () => {
-    const ndjson = toPlainJson(valueAt(vector.input, 'ndjson'));
+  test('CRQ classifier matches the Python oracle losslessly', () => {
+    const stream = valueAt(vector.input, 'ndjson');
     const exit = toPlainJson(valueAt(vector.input, 'exit_code'));
-    const expected = toPlainJson(valueAt(vector.expect, 'value')) as {
-      counted: boolean;
-      outcome: string;
-    };
-    const verdict = decideCompletion(
-      typeof exit === 'number' ? exit : -1,
-      parseReviewerStream(typeof ndjson === 'string' ? ndjson : ''),
+    if (stream !== null && typeof stream !== 'string') throw new Error('invalid stream');
+    if (exit !== null && typeof exit !== 'number') throw new Error('invalid exit');
+    const actual = classify(stream === null ? null : new TextEncoder().encode(stream), exit);
+    expect(toPlainJson(actual, { bigints: true })).toEqual(
+      toPlainJson(valueAt(vector.expect, 'value'), { bigints: true }),
     );
-    expect(verdict.kind === 'terminal').toBe(expected.counted);
-    if (vector.name === 'affirmative-no-fresh-completion-is-skipped') {
-      expect(expected.outcome).toBe('skipped');
-      expect(verdict.kind).toBe('blocked');
-      if (verdict.kind === 'blocked') expect(verdict.reason).toContain('skipped:no-fresh');
-    }
   });
 });
 
