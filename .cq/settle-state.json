@@ -368,13 +368,13 @@
     },
     "1744": {
       "tuple": {
-        "head": "ea0162eb57e6b66b99654d267b79b402a6351013",
+        "head": "3040228f332d0a622659caa25117c8bc742688f5",
         "base": "5505ed3cc39251bdd2fe930ea271534167aa6dfc",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-14T03:27:56.257Z",
+          "observedAt": "2026-11-14T04:09:42.233Z",
           "by": "self-merge-prs:observe"
         }
       ]
@@ -466,19 +466,6 @@
       "observations": [
         {
           "observedAt": "2026-11-14T03:02:05.478Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1756": {
-      "tuple": {
-        "head": "819276d6cac2293bc48f53a0f95ebac145baddef",
-        "base": "5505ed3cc39251bdd2fe930ea271534167aa6dfc",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-14T03:57:14.266Z",
           "by": "self-merge-prs:observe"
         }
       ]
