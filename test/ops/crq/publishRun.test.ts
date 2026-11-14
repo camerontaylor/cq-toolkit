@@ -594,6 +594,8 @@ describe('publisher route: fixture replay through the run composition', () => {
       );
 
       // A real bare remote plus a real publisher clone over actual git.
+      // Commit identity is pinned per-repository: CI runners have no ambient
+      // git identity and the publish commits carry their own author env.
       const remote = join(root, 'remote.git');
       const clone = join(root, 'clone');
       const { execFileSync } = await import('node:child_process');
@@ -602,6 +604,8 @@ describe('publisher route: fixture replay through the run composition', () => {
       };
       git('init', '--bare', '--initial-branch=cq/review-ledger', remote);
       git('init', clone);
+      git('-C', clone, 'config', 'user.name', 'crq-fixture');
+      git('-C', clone, 'config', 'user.email', 'crq-fixture@localhost');
       git('-C', clone, 'remote', 'add', 'origin', remote);
       git('-C', clone, 'commit', '--allow-empty', '-m', 'seed');
       git('-C', clone, 'push', 'origin', 'HEAD:cq/review-ledger');
