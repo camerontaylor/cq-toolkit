@@ -9,6 +9,11 @@ import type { RunGit } from './ledgerGit.js';
 /** Raw forge bytes are retained before parsing or validation. */
 export type FetchRequiredPr = (pr: number) => Promise<Uint8Array>;
 
+/** A forge subprocess that started but failed, analogous to CalledProcessError. */
+export class RequiredForgeError extends Error {
+  override readonly name = 'RequiredForgeError';
+}
+
 /** Live, argv-only acquisition of the canonical repository's PR response. */
 export const fetchRequiredPr: FetchRequiredPr = async (pr) => {
   if (!Number.isSafeInteger(pr) || pr <= 0) throw new LedgerIntegrityError('invalid required PR');
@@ -23,7 +28,12 @@ export const fetchRequiredPr: FetchRequiredPr = async (pr) => {
         maxBuffer: 64 * 1024 * 1024,
       },
       (error, stdout) => {
-        if (error) reject(error);
+        if (error)
+          reject(
+            typeof error.code === 'string'
+              ? error
+              : new RequiredForgeError(error.message, { cause: error }),
+          );
         else resolve(new Uint8Array(stdout));
       },
     );

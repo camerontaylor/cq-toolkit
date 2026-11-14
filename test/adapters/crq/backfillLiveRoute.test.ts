@@ -124,6 +124,30 @@ describe('live backfill inventory route', () => {
     expect(await readFile(join(stateRoot, 'queue.json'), 'utf8')).toBe(queue);
     await expect(readFile(join(stateRoot, 'backfill/latest-report.json'))).rejects.toThrow();
   });
+  it('reports a failing Git invocation as an execution error', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'backfill-git-failure-'));
+    const queue = '{"items":[]}';
+    await writeFile(join(stateRoot, 'queue.json'), queue);
+    await writeFile(
+      join(stateRoot, 'backfill-rollout.json'),
+      JSON.stringify({
+        enabled: true,
+        operational_ruling: 'approved',
+        no_live_run_verification: 'verified',
+        owner_branch_ruleset_evidence: 'evidence',
+        durable_artifact_root: join(stateRoot, 'artifacts'),
+        runner_identity: 'crq-runner-app',
+        publisher_spool: { ssh_alias: 'runner@example.com', key: '/key' },
+      }),
+    );
+    const result = await runBackfillUnit(['inventory'], {
+      stateRoot,
+      cloneRoot: stateRoot,
+      runnerRoot: stateRoot,
+    });
+    expect(result.exitCode).toBe(1);
+    expect(await readFile(join(stateRoot, 'queue.json'), 'utf8')).toBe(queue);
+  });
   it('rejects invalid arguments before reading state', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'backfill-route-'));
     const result = await runBackfillUnit(['inventory', '--report-only', '--report-only'], {

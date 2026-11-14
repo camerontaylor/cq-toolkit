@@ -33,13 +33,13 @@ import {
 } from '../../ops/crq/backfillInventory.js';
 import { atomicWrite } from './atomic.js';
 import { fileArtifactStore } from './findingStore.js';
-import { GitAccountingRepository } from './backfillAccounting.js';
-import { gitSubjectRepository } from './backfillSubjects.js';
-import { collectRequired, fetchRequiredPr } from './backfillRequired.js';
+import { AccountingGitError, GitAccountingRepository } from './backfillAccounting.js';
+import { gitSubjectRepository, SubjectGitError } from './backfillSubjects.js';
+import { collectRequired, fetchRequiredPr, RequiredForgeError } from './backfillRequired.js';
 import { prepareInventory } from './backfillPreparation.js';
 import { createBackfillTransactionEffects } from './backfillTransactionSource.js';
 import { inventoryTransaction } from '../../ops/crq/internal/backfillTransaction.js';
-import { GitLedger } from './ledgerGit.js';
+import { GitLedger, LedgerTransportError } from './ledgerGit.js';
 import { runGitIn } from './publishSource.js';
 
 /** Read a document that legitimately may not exist yet (`null`). */
@@ -194,9 +194,11 @@ export async function runBackfillUnit(
               'origin',
               'refs/heads/main:refs/remotes/origin/main',
             ]);
-            if (fetch.code !== 0) throw new Error(`git fetch failed: ${fetch.stderr}`);
+            if (fetch.code !== 0)
+              throw new AccountingGitError(fetch.args, fetch.code, fetch.stderr);
             const resolved = await runGit(['rev-parse', 'origin/main^{commit}']);
-            if (resolved.code !== 0) throw new Error(`git rev-parse failed: ${resolved.stderr}`);
+            if (resolved.code !== 0)
+              throw new AccountingGitError(resolved.args, resolved.code, resolved.stderr);
             const target = await accounting.resolve(
               new TextDecoder().decode(resolved.stdout).trim(),
             );
@@ -235,7 +237,13 @@ export async function runBackfillUnit(
   } catch (error) {
     return {
       artifact: { status: 'failed', error: error instanceof Error ? error.message : String(error) },
-      exitCode: 3,
+      exitCode:
+        error instanceof AccountingGitError ||
+        error instanceof SubjectGitError ||
+        error instanceof LedgerTransportError ||
+        error instanceof RequiredForgeError
+          ? 1
+          : 3,
     };
   }
 }
