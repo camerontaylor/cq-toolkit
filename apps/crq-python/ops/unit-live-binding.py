@@ -518,6 +518,33 @@ class SubprocessSystemd:
                         "symlink: " + str(entry))
         return None
 
+    @staticmethod
+    def _inherited_dropin_applies(base, units):
+        """Whether a drop-in directory name also applies to an expected unit.
+
+        Next to the exact ``<unit>.d/`` directory, systemd merges inherited
+        drop-in directories into the selected unit: a dash-prefix
+        ``<prefix>-.<suffix>.d/`` directory applies to every unit whose name
+        begins with ``<prefix>-``, and a type-wide ``<type>.d/`` directory
+        applies to every unit of that type. An applicable inherited drop-in
+        overrides the verified unit's directives without changing its
+        ``FragmentPath``, so discovery must reject it unless declared.
+        """
+        for unit in units:
+            if base == unit:
+                return True
+            if "." not in unit:
+                continue
+            type_name = unit.rsplit(".", 1)[1]
+            if base == type_name:
+                return True
+            suffix = "." + type_name
+            if base.endswith(suffix):
+                stem = base[:-len(suffix)]
+                if stem.endswith("-") and unit.startswith(stem):
+                    return True
+        return False
+
     def _scan_dependencies(self, base, expected, declared, foreign,
                            declared_dropins):
         declared_paths = {str(path) for path in declared}
@@ -753,7 +780,13 @@ class SubprocessSystemd:
                     and name.endswith((".d", ".wants", ".requires")):
                 error = error or probe_failure
                 continue
-            if is_dir and name.endswith(".d") and name[:-2] in units:
+            # An inherited type-wide or dash-prefix drop-in directory is
+            # merged into an expected unit even though it is not named after
+            # one, so its overrides would run outside the verified bytes.
+            # The name check also rejects a symlinked or plain entry systemd
+            # would traverse as the drop-in directory.
+            if name.endswith(".d") and self._inherited_dropin_applies(
+                    name[:-2], units):
                 foreign.append("undeclared drop-in directory: " + str(entry))
             if is_dir and name.endswith((".wants", ".requires")):
                 try:
