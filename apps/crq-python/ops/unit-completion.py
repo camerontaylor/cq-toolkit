@@ -39,6 +39,25 @@ UNIT_RE = re.compile(r"[A-Za-z0-9_.@:-]+\.service")
 # path, socket and target activators. It cannot read arbitrary unit types.
 READ_UNIT_RE = re.compile(
     r"[A-Za-z0-9_.@:-]+\.(?:service|timer|path|socket|target)")
+# The only journal fields the completion witness consults. ``journalctl``
+# projects each record to these fields, so the full record bound stays well
+# inside the byte bound. Omitted payload fields (``MESSAGE``, ``_CMDLINE``,
+# process metadata) are never read as completion evidence; a projected stream
+# that still exceeds the byte bound refuses exactly as before. The 2026-11-14
+# cutover failure read 346,013 stdout bytes from a 2,735-record user journal
+# and a 256-record tail over the 262,144-byte bound; the ``show`` path was 32
+# bytes. Field projection addresses that volume, not the bound.
+WITNESS_JOURNAL_FIELDS = (
+    "_BOOT_ID",
+    "__MONOTONIC_TIMESTAMP",
+    "_SYSTEMD_USER_UNIT",
+    "_SYSTEMD_INVOCATION_ID",
+    "_SYSTEMD_UNIT",
+    "USER_UNIT",
+    "USER_INVOCATION_ID",
+    "UNIT",
+    "INVOCATION_ID",
+)
 NODE_POINTER_RE = re.compile(
     r"^(?P<root>.+)/dist/queue-runner/crq\.js$")
 
@@ -363,8 +382,10 @@ class SystemdJournalSource:
     The source is intentionally not constructed by tests. It is the live
     binding used later by a parent-owned factory. Every command is read-only and
     bounded: ``max_bytes`` applies to each of stdout and stderr while both are
-    drained concurrently. The unit name is validated before it reaches a
-    command line.
+    drained concurrently. Journal records are projected to the witness fields
+    the completion provider actually consults, so a realistic 256-record tail
+    of a chatty unit stays inside the bound without truncating evidence. The
+    unit name is validated before it reaches a command line.
     """
 
     def __init__(self, *, user: bool = True,
@@ -439,6 +460,7 @@ class SystemdJournalSource:
         # provider filter by boot, invocation and record bound.
         command += ["--user-unit" if self.user else "--unit", unit,
                     "--output=json", "--no-pager",
+                    "--output-fields=" + ",".join(WITNESS_JOURNAL_FIELDS),
                     "--lines=%d" % self.max_records]
         text = self._run(command)
         return {"boot_id": read_boot_id(),

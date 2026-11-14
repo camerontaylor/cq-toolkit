@@ -51,7 +51,10 @@ systemctl --user --no-pager stop|reset-failed|daemon-reload|start <unit>
 It returns `{rc, stdout, stderr, timeout}`. The default runner reuses
 `unit-completion._read_bounded` and `_stop_process`: both streams are drained
 concurrently, each is capped at 256 KiB, the whole read is bounded by the
-timeout, only the owned child is terminated, and non-UTF-8 output refuses.
+timeout, only the owned child is terminated, and non-UTF-8 output refuses. The
+completion provider's own `SystemdJournalSource` reads `journalctl` under the
+same bound and asks `--output-fields` for only the witness fields it consults,
+so a full 256-record tail stays inside the cap without dropping evidence.
 
 `show(unit, props)` emits `systemctl --user --no-pager show <unit>
 --property <p>...` and parses with the existing `parse_show_output`. `jobs()`

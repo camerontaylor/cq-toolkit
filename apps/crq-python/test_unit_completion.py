@@ -56,6 +56,129 @@ def _node_unit(sha=NODE_SHA):
     ).encode()
 
 
+_JOURNAL_ALWAYS = ("__CURSOR", "__REALTIME_TIMESTAMP",
+                   "__MONOTONIC_TIMESTAMP", "_BOOT_ID", "__SEQNUM",
+                   "__SEQNUM_ID")
+
+
+def realistic_journal_record(invocation, monotonic, *, boot=BOOT, unit=UNIT,
+                             message=("ok: last tick 2026-11-14T06:31:41Z "
+                                      "(6m ago) limit 36m alert none "
+                                      "queue empty")):
+    """One systemd user-journal record with the observed field volume.
+
+    Measured on systemd 259, a ``--output=json`` record of a user unit is
+    1097-1756 bytes. This record carries the same shape (process, audit, code
+    and stream metadata) so a 256-record tail realistically exceeds the
+    256 KiB read bound when nothing is projected. The 2026-11-14 cutover read
+    346,013 stdout bytes from 2,735 records with a 256-record tail.
+    """
+    return {
+        "__CURSOR": ("s=" + "9" * 32 + ";i=" + ("%x" % max(monotonic, 1))
+                      + ";b=" + boot + ";m=" + ("%x" % max(monotonic, 1))
+                      + ";t=600000000000000;x=" + "0" * 16),
+        "__REALTIME_TIMESTAMP": str(1700000000000000 + int(monotonic)),
+        "__MONOTONIC_TIMESTAMP": str(monotonic),
+        "_BOOT_ID": boot,
+        "_MACHINE_ID": "f" * 32,
+        "_HOSTNAME": "fleet-host",
+        "_UID": "1000",
+        "_GID": "1000",
+        "_PID": "4242",
+        "_COMM": "node",
+        "_EXE": "/usr/bin/node",
+        "_CMDLINE": ("/usr/bin/node /home/probe/.local/opt/crq-" + NODE_SHA
+                      + "/dist/queue-runner/crq.js watchdog --unit " + unit),
+        "_SYSTEMD_CGROUP": ("/user.slice/user-1000.slice/user@1000.service/"
+                             "app.slice/" + unit),
+        "_SYSTEMD_OWNER_UID": "1000",
+        "_SYSTEMD_SESSION": "3",
+        "_SYSTEMD_UNIT": "user@1000.service",
+        "_SYSTEMD_USER_UNIT": unit,
+        "_SYSTEMD_USER_SLICE": "app.slice",
+        "_SYSTEMD_INVOCATION_ID": invocation,
+        "_AUDIT_SESSION": "3",
+        "_AUDIT_LOGINUID": "1000",
+        "_SOURCE_REALTIME_TIMESTAMP": str(1700000000000000 + int(monotonic)),
+        "_STREAM_ID": "%032x" % max(monotonic, 1),
+        "CODE_FILE": "node:internal/process/per_thread",
+        "CODE_LINE": "1234",
+        "CODE_FUNC": "watchdogTick",
+        "SYSLOG_IDENTIFIER": "node",
+        "PRIORITY": "6",
+        "_TRANSPORT": "stdout",
+        "MESSAGE": message,
+    }
+
+
+def manager_journal_record(invocation, monotonic, *, boot=BOOT, unit=UNIT):
+    """A user-manager record naming one unit invocation."""
+    return {
+        "__CURSOR": ("s=" + "9" * 32 + ";i=" + ("%x" % max(monotonic, 1))
+                      + ";b=" + boot + ";m=" + ("%x" % max(monotonic, 1))
+                      + ";t=600000000000000;x=" + "0" * 16),
+        "__REALTIME_TIMESTAMP": str(1700000000000000 + int(monotonic)),
+        "__MONOTONIC_TIMESTAMP": str(monotonic),
+        "_BOOT_ID": boot,
+        "USER_UNIT": unit,
+        "USER_INVOCATION_ID": invocation,
+        "MESSAGE": "Succeeded.",
+    }
+
+
+def journal_text(command, records, *, honor_projection=True):
+    """Render ``journalctl --output=json`` output for one command.
+
+    ``--lines`` keeps the newest records. With ``honor_projection`` every
+    record is reduced to ``--output-fields`` plus the fields journalctl always
+    prints; without it the full payload is printed, which is the shape that
+    exceeded the production read bound.
+    """
+    limit = len(records)
+    fields = None
+    for argument in command:
+        if argument.startswith("--lines="):
+            limit = max(0, int(argument.split("=", 1)[1]))
+        elif argument.startswith("--output-fields="):
+            fields = argument.split("=", 1)[1].split(",")
+    selected = records[-limit:] if limit else []
+    if fields is None or not honor_projection:
+        return "".join(json.dumps(record) + "\n" for record in selected)
+    lines = []
+    for record in selected:
+        keys = [key for key in _JOURNAL_ALWAYS if key in record]
+        keys += [key for key in fields if key in record and key not in keys]
+        lines.append(json.dumps({key: record[key] for key in keys},
+                                separators=(",", ":")))
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+class FakeJournalPopen:
+    """A real child process serving journalctl/systemctl text.
+
+    The bounded reader is the production one; only the child's output is
+    supplied by ``respond(command)``. A temporary file backs the child so the
+    test does not depend on argv size limits.
+    """
+
+    def __init__(self, respond):
+        self.respond = respond
+        self.calls = []
+        self._temp = tempfile.TemporaryDirectory(prefix="crq-journal-")
+        self._path = Path(self._temp.name) / "output"
+
+    def cleanup(self):
+        self._temp.cleanup()
+
+    def __call__(self, command, **kwargs):
+        self.calls.append(list(command))
+        self._path.write_text(self.respond(list(command)))
+        return subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys;sys.stdout.write(open(sys.argv[1]).read())",
+             str(self._path)], **kwargs)
+
+
 class FakeSource:
     def __init__(self, unit_path, boot=BOOT):
         self.unit_path = Path(unit_path)
@@ -371,6 +494,47 @@ class WitnessTests(CompletionFixture):
             "USER_INVOCATION_ID": "2" * 32,
         }])
         self.assertEqual(evidence["witness"], "manager")
+
+    def test_large_projected_journal_yields_a_true_witness(self):
+        state = {
+            "LoadState": "loaded",
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "InvocationID": "",
+            "Result": "success",
+            "ExecMainStatus": "0",
+            "ExecMainExitTimestampMonotonic": "5000",
+            "FragmentPath": str(self.unit_path),
+        }
+        records = [realistic_journal_record("%032x" % (index + 1),
+                                            1000 + index)
+                   for index in range(255)]
+        records.append(manager_journal_record("2" * 32, 6000))
+
+        def respond(command):
+            if command[0].endswith("journalctl"):
+                return journal_text(command, records)
+            unit = command[command.index("show") + 1]
+            props = [command[index + 1] for index, argument
+                     in enumerate(command) if argument == "--property"]
+            return "".join("%s=%s\n" % (prop, state.get(prop, ""))
+                           for prop in props)
+
+        popen = FakeJournalPopen(respond)
+        self.addCleanup(popen.cleanup)
+        source = completion.SystemdJournalSource(popen=popen)
+        port = completion.SystemdJournalCompletionPort(
+            unit_dir=self.unit_dir, source=source, expected=self.identity(),
+            require_journal_witness=True)
+        with mock.patch.object(completion, "read_boot_id", return_value=BOOT):
+            self.assertEqual(port.sequence(UNIT), 5000)
+            state["InvocationID"] = "2" * 32
+            state["ExecMainExitTimestampMonotonic"] = "6000"
+            evidence = port.read(UNIT, "python", 5000)
+        self.assertEqual(evidence["sequence"], 6000)
+        self.assertEqual(evidence["invocation"], "2" * 32)
+        self.assertEqual(evidence["witness"], "manager")
+        self.assertEqual(evidence["boot_id"], BOOT)
 
     def test_unit_process_witness_accepted(self):
         evidence = self.read_with_records([{
@@ -691,6 +855,64 @@ class ParserTests(unittest.TestCase):
         self.assertNotIn("start", command)
         self.assertNotIn("stop", command)
         self.assertNotIn("mask", command)
+
+    def test_source_records_projects_only_the_witness_fields(self):
+        calls = []
+        source = self.source_for("pass", calls=calls)
+        with mock.patch.object(completion, "read_boot_id", return_value=BOOT):
+            source.records(UNIT, after_monotonic=1)
+        command = calls[0][0]
+        projection = next(argument for argument in command
+                          if argument.startswith("--output-fields="))
+        fields = projection.split("=", 1)[1].split(",")
+        self.assertEqual(set(fields), set(completion.WITNESS_JOURNAL_FIELDS))
+        self.assertNotIn("MESSAGE", fields)
+
+    def test_source_records_keeps_a_realistic_tail_inside_the_byte_bound(self):
+        records = [realistic_journal_record("%032x" % (index + 1),
+                                            1000 + index)
+                   for index in range(256)]
+        full = "\n".join(json.dumps(record) for record in records) + "\n"
+        projected = journal_text(
+            ["--lines=256",
+             "--output-fields=" + ",".join(
+                 completion.WITNESS_JOURNAL_FIELDS)], records)
+        popen = FakeJournalPopen(lambda command: journal_text(command, records))
+        self.addCleanup(popen.cleanup)
+        source = completion.SystemdJournalSource(popen=popen)
+        with mock.patch.object(completion, "read_boot_id", return_value=BOOT):
+            response = source.records(UNIT, after_monotonic=1)
+        self.assertGreater(len(full.encode()), 256 * 1024)
+        self.assertLess(len(projected.encode()), 256 * 1024)
+        self.assertEqual(len(response["records"]), 256)
+        for record in response["records"]:
+            self.assertNotIn("MESSAGE", record)
+            for field in ("_BOOT_ID", "__MONOTONIC_TIMESTAMP",
+                          "_SYSTEMD_USER_UNIT", "_SYSTEMD_INVOCATION_ID"):
+                self.assertIn(field, record)
+
+    def test_source_refuses_an_unprojected_journal_over_the_byte_bound(self):
+        records = [realistic_journal_record("%032x" % (index + 1),
+                                            1000 + index)
+                   for index in range(256)]
+        popen = FakeJournalPopen(
+            lambda command: journal_text(command, records,
+                                         honor_projection=False))
+        self.addCleanup(popen.cleanup)
+        source = completion.SystemdJournalSource(popen=popen)
+        with mock.patch.object(completion, "read_boot_id", return_value=BOOT):
+            with self.assertRaises(completion.CompletionRefused) as raised:
+                source.records(UNIT, after_monotonic=1)
+        self.assertIn("byte bound", str(raised.exception))
+
+    def test_source_refuses_a_malformed_projected_journal(self):
+        popen = FakeJournalPopen(lambda command: "not-json\n")
+        self.addCleanup(popen.cleanup)
+        source = completion.SystemdJournalSource(popen=popen)
+        with mock.patch.object(completion, "read_boot_id", return_value=BOOT):
+            with self.assertRaises(completion.CompletionRefused) as raised:
+                source.records(UNIT, after_monotonic=1)
+        self.assertIn("not valid JSON", str(raised.exception))
 
     def test_source_rejects_nonzero_exit_without_echoing_stderr(self):
         processes = []
