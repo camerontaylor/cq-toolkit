@@ -58,13 +58,26 @@ export function createLocalReviewCompletedCaller(options: {
         return value;
       },
       async classifyCompleted(runId, ndjson) {
-        const canonical = await containedLocalRunArtifact(
-          options.stateRoot,
-          runId,
-          'review.ndjson',
-        );
-        if ((await realpath(ndjson)) !== canonical) throw new Error('cycle artifact mismatch');
-        classifiedBytes = await readFile(canonical);
+        // Python parity: a missing retained log classifies as uncounted evidence
+        // (proof_complete requires the stream to exist), so preparation falls
+        // through to a fresh plan instead of retrying the same reject forever.
+        // Only ENOENT is tolerated; mismatch, symlink and containment stay fail-closed.
+        try {
+          const canonical = await containedLocalRunArtifact(
+            options.stateRoot,
+            runId,
+            'review.ndjson',
+          );
+          if ((await realpath(ndjson)) !== canonical) throw new Error('cycle artifact mismatch');
+          classifiedBytes = await readFile(canonical);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+            return new JsonObject([
+              ['counted', false],
+              ['outcome', 'error'],
+            ]);
+          throw error;
+        }
         return classify(classifiedBytes, 0);
       },
       async completeFromCycle(current, runId, classification, endedAt) {

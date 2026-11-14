@@ -100,6 +100,74 @@ describe('completed cycle adapter', () => {
     expect(receipt).toContain('local-review-full-diff');
     expect(receipt).not.toContain('swapped');
   });
+  it('treats a missing retained review.ndjson as uncounted and prepares a fresh plan', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-missing-log-'));
+    await mkdir(join(root, 'runs', 'old'), { recursive: true });
+    const oid = 'a'.repeat(40);
+    const digest = 'b'.repeat(64);
+    const repo = 'a/b';
+    const profile = { adapter: 'coderabbit-cli', revision: 'v1', flags: [] };
+    const identity = {
+      v: 1,
+      repo,
+      base_commit: oid,
+      base_tree: oid,
+      head_commit: oid,
+      head_tree: oid,
+      scope: 'full-diff',
+      projection: 'full-diff',
+      config_digest: digest,
+      profile: { adapter: 'coderabbit-cli', revision: 'v1' },
+    };
+    const wanted = parseJsonValue(JSON.stringify(identity)) as JsonObject;
+    const make = (runId: string) =>
+      parseJsonValue(
+        JSON.stringify({
+          items: [
+            {
+              id: 'local-1',
+              kind: 'local-review',
+              state: 'pending',
+              identity: digest,
+              identity_inputs: identity,
+              profile,
+              generation: 1,
+            },
+            {
+              kind: 'open',
+              repo,
+              cycles: [
+                {
+                  base: oid,
+                  head: oid,
+                  profile,
+                  range_policy: 'full-range-once-v1',
+                  run_id: runId,
+                  ndjson: join(root, 'runs', runId, 'review.ndjson'),
+                },
+              ],
+            },
+          ],
+        }),
+      ) as JsonObject;
+    const caller = createLocalReviewCompletedCaller({
+      stateRoot: root,
+      runnerRepo: repo,
+      facts: {
+        historyGit: () => async () => Buffer.from(oid),
+        resolveIdentity: async () => wanted,
+      },
+      saveQueue: async () => {},
+      rollout: async () => null,
+      now: () => new Date('2026-11-14T12:00:00Z'),
+    });
+    for (const runId of ['old', 'gone']) {
+      const queue = make(runId);
+      const item = (queue.get('items') as JsonObject[])[0]!;
+      const result = await caller.prepare(queue, item, false, false);
+      expect(result.plan?.get('head')).toBe(oid);
+    }
+  });
   it('rejects traversal and symlinked run directories and artifacts on harvest reads', async () => {
     const root = await mkdtemp(join(tmpdir(), 'crq-containment-'));
     const runs = join(root, 'runs');
