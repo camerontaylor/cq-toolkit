@@ -112,6 +112,20 @@ describe('rolling closed PR discovery', () => {
     expect(await f.scan()).toEqual(new Set([28]));
   });
 
+  test('the floor stop reads past 24 old rows but stops at 25', async () => {
+    const beforeStop = fixture(30);
+    const afterStop = fixture(30);
+    for (const f of [beforeStop, afterStop]) {
+      for (const row of f.rows.values()) row.updated_at = '2026-09-30T23:00:00Z';
+    }
+    // GitHub may retain an old sort position after an update. These two rows
+    // sit respectively behind 24 and 25 older rows in the returned order.
+    beforeStop.bump(6);
+    afterStop.bump(5);
+    expect(await beforeStop.scan()).toEqual(new Set([6]));
+    expect(await afterStop.scan()).toEqual(new Set());
+  });
+
   test('stale anchor rows changed and reopened during continuation retain all merges', async () => {
     const f = fixture(250, [152]);
     for (const n of [151, 152, 153]) f.bump(n);
