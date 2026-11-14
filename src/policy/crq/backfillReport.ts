@@ -342,7 +342,9 @@ export async function summary(options: {
     if (disposition === 'unsupported' || disposition === 'ambiguous' || countable === null) {
       group.unresolved_objects.push({
         path: name,
-        reason: opt(row, 'reason') ?? null,
+        // The oracle indexes `row["reason"]` here, so a captured row that lost
+        // it is a refusal rather than an unresolved object with no explanation.
+        reason: need(row, 'reason', `reason for ${name}`),
         countable_lines: countable,
       });
     }
