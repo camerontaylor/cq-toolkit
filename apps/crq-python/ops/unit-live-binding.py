@@ -34,9 +34,14 @@ The exception is the declared environment drop-in topology shared with
 entry names are accepted in a real directory of the declared shape. The
 selected unit's entries are validated as environment-only by the adapter.
 The dependency scanner still reads declared drop-in text for unit dependency
-directives and allows the declared absolute symlink targets, so a co-installed
-drop-in cannot introduce an unaccounted incoming activator. It never follows
-an ``EnvironmentFile`` target.
+directives, so a co-installed drop-in cannot introduce an unaccounted incoming
+activator. A cotenant unit installed as a symlink into a repository or config
+tree is read the same way: its resolved regular-file target is bounded and
+dependency-scanned, so an outside unit naming an expected unit remains
+foreign, and systemd continuations are joined with ``config_parse`` semantics
+so a wrapped directive cannot hide a dependency. Symlinked directories and
+special files are not followed. It never follows an ``EnvironmentFile``
+target.
 """
 from __future__ import annotations
 
@@ -100,15 +105,77 @@ def _text(value: bytes, what: str) -> str:
 
 
 def _read_file(path: Path, *, max_bytes: int) -> bytes:
+    """Read a bounded regular file without blocking on a replaced target.
+
+    The descriptor is opened non-blocking and re-checked before any read, so a
+    path swapped to a FIFO after the caller's type observation refuses instead
+    of waiting for a writer. The existing byte bound still applies.
+    """
     try:
-        with path.open("rb") as handle:
-            data = handle.read(max_bytes + 1)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except OSError as exc:
         raise LiveBindingRefused(
             "cannot read " + str(path) + ": " + str(exc)[:160]) from exc
+    try:
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise LiveBindingRefused(
+                    "not a regular file: " + str(path))
+            chunks = []
+            remaining = max_bytes + 1
+            while remaining > 0:
+                chunk = os.read(fd, min(remaining, 65536))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+        except OSError as exc:
+            raise LiveBindingRefused(
+                "cannot read " + str(path) + ": " + str(exc)[:160]) from exc
+    finally:
+        os.close(fd)
     if len(data) > max_bytes:
         raise LiveBindingRefused("file exceeds the byte bound: " + str(path))
     return data
+
+
+def _logical_lines(text):
+    """Yield ``(line_number, line, continued)`` with systemd continuations.
+
+    ``config_parse`` continues a line only when the trailing run of
+    backslashes is odd, replacing the last backslash with a space. A comment
+    line inside a continuation is ignored, while a blank line flushes the
+    accumulated line and ends the continuation. ``continued`` is true when the
+    yielded line absorbed a continuation, so a declared drop-in can still
+    refuse the shape outright while a cotenant unit's dependency text is
+    scanned truthfully.
+    """
+    pending = None
+    start = 0
+    continued = False
+    for number, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith(("#", ";")):
+            continue
+        if not stripped:
+            if pending is not None:
+                yield start, pending, continued
+                pending = None
+            continue
+        if pending is None:
+            pending = ""
+            start = number
+            continued = False
+        pending += line
+        if (len(pending) - len(pending.rstrip("\\"))) % 2 == 1:
+            pending = pending[:-1] + " "
+            continued = True
+            continue
+        yield start, pending, continued
+        pending = None
+    if pending is not None:
+        yield start, pending, continued
 
 
 def _directory_probe(path: Path) -> tuple[bool, str | None]:
@@ -451,7 +518,6 @@ class SubprocessSystemd:
 
     def _scan_dependencies(self, base, expected, declared, foreign,
                            declared_dropins):
-        root = base.resolve()
         declared_paths = {str(path) for path in declared}
         declared_resolved = set()
         for path in declared:
@@ -471,10 +537,6 @@ class SubprocessSystemd:
                             return "unit directory exceeds the dependency scan bound"
                         path = Path(entry.path)
                         if entry.is_symlink():
-                            declared_source = (
-                                str(path.parent) in declared_dropins
-                                and path.name
-                                in declared_dropins[str(path.parent)])
                             try:
                                 target = path.resolve(strict=False)
                             except (OSError, RuntimeError) as exc:
@@ -485,16 +547,15 @@ class SubprocessSystemd:
                                         + str(path))
                             if target == Path(os.devnull):
                                 continue
-                            if not declared_source:
-                                # Only declared drop-in symlinks may resolve
-                                # outside the unit directory; their text is
-                                # still scanned for dependency directives.
-                                try:
-                                    target.relative_to(root)
-                                except ValueError:
-                                    return ("dependency scan found a symlink "
-                                            "outside the unit directory: "
-                                            + str(path))
+                            # A cotenant unit is routinely installed as an
+                            # absolute symlink into a repository or config
+                            # tree outside the unit directory. The target is
+                            # read-only evidence, so it is read under the same
+                            # bound as a unit-directory entry and its text is
+                            # dependency-scanned; a target that names an
+                            # expected unit is still foreign. Symlinked
+                            # directories and special files are never
+                            # followed, matching the directory policy.
                             try:
                                 info = path.stat()
                             except (OSError, RuntimeError) as exc:
@@ -525,12 +586,12 @@ class SubprocessSystemd:
                             except (OSError, RuntimeError):
                                 source_declared = False
                         text = _text(data, str(path))
-                        for number, line in enumerate(text.splitlines(), 1):
-                            stripped = line.strip()
-                            if declared_file and stripped.endswith("\\"):
+                        for number, line, continued in _logical_lines(text):
+                            if declared_file and continued:
                                 return ("dependency scan found a line "
                                         "continuation in a declared drop-in: "
                                         + str(path))
+                            stripped = line.strip()
                             if not stripped or stripped.startswith(("#", ";")):
                                 continue
                             match = DEPENDENCY_RE.match(stripped)
