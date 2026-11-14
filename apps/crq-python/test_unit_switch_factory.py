@@ -412,6 +412,56 @@ class FactorySwitchTests(FactoryFixture):
         self.assertEqual(self.records(), [])
         self.assertEqual(_tree(self.unit_dir), before)
 
+    def test_publisher_forward_and_reverse_complete_at_its_declared_bound(self):
+        unit = "crq-publisher.service"
+        sha = "c" * 40
+        runtime = "node:" + sha
+        artifact = _node_artifact(self.base, sha, capabilities=["publish"])
+        _write(self.unit_dir / unit, self.python_service(unit)["bytes"], 0o600)
+        self.systemd.active[unit] = "inactive"
+        self.systemd.active["crq-publisher.timer"] = "active"
+        self.systemd.active["crq-publisher.path"] = "active"
+        self.systemd.prior(unit, "e" * 32, 900)
+
+        forward, _selection = self.compose(
+            unit=unit, runtime=runtime, artifact_root=artifact)
+        prior = forward.preflight(unit, runtime)
+        # 45 min service timeout + 65 s repeat cadence + 60 s margin.
+        self.assertEqual(prior["completion_window"], 2825)
+        first = dc.switch_unit(self.effects, forward, unit, runtime)
+        self.assertEqual(first["outcome"], "completed")
+        self.assertEqual(first["runtime"], runtime)
+        self.assertEqual(first["prior_runtime"], "python")
+        self.assertEqual(len(first["completions"]), 2)
+        self.assertLess(first["completions"][0]["sequence"],
+                        first["completions"][1]["sequence"])
+        self.assertNotEqual(first["completions"][0]["invocation"],
+                            first["completions"][1]["invocation"])
+        self.assertEqual({item["runtime"] for item in first["completions"]},
+                         {runtime})
+
+        reverse, _selection = self.compose(unit=unit, runtime="python")
+        reverse_prior = reverse.preflight(unit, "python")
+        self.assertEqual(reverse_prior["completion_window"], 2825)
+        second = dc.switch_unit(self.effects, reverse, unit, "python")
+        self.assertEqual(second["outcome"], "completed")
+        self.assertEqual(second["runtime"], "python")
+        self.assertEqual(second["prior_runtime"], runtime)
+        self.assertEqual(len(second["completions"]), 2)
+        self.assertLess(second["completions"][0]["sequence"],
+                        second["completions"][1]["sequence"])
+        self.assertNotEqual(second["completions"][0]["invocation"],
+                            second["completions"][1]["invocation"])
+        self.assertEqual({item["runtime"] for item in second["completions"]},
+                         {"python"})
+        self.assertEqual((self.unit_dir / unit).read_bytes(),
+                         self.python_service(unit)["bytes"])
+
+        started = {call[1] for call in self.systemd.calls
+                   if call and call[0] == "start"}
+        self.assertEqual(started, {unit, "crq-publisher.timer",
+                                   "crq-publisher.path"})
+
     def test_watchdog_declared_timeout_bounds_completion(self):
         unit = "crq-watchdog.service"
         self.assertEqual(self.inventory[unit]["service_timeout_seconds"], 300)

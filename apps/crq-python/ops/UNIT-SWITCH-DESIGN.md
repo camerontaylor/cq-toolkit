@@ -104,7 +104,7 @@ snapshot payload's schema-version-1 top-level keys and state shapes. It is
 composed by `unit-switch-factory.py` and reached through the controller CLI's
 `switch` verb. It has no live systemd binding in these offline tests. Node
 refuses unless the verified artifact's declaration lists the selected command;
-`watchdog` is currently the only such command.
+`watchdog` and `publish` are the declared commands.
 
 The slice remains fail-closed: discovery must enumerate the exact declared
 paths and units and report no foreign activators; unknown entries, missing
@@ -147,11 +147,19 @@ fixed default. Preflight requires the prior timer to be active, parses the
 committed timer schedule and service start timeout, and refuses when the
 declared bound exceeds the supported maximum or the caller's deadline is below
 it. An inactive timer has no bounded second invocation and refuses before
-snapshot or mutation; the 6-hour backfill and 45-minute publisher shapes exceed
-the default supported maximum, and an oneshot without a declared start timeout
-has no bounded completion and refuses. The watchdog template now declares
-`TimeoutStartSec=5min`, so its 300 s start bound and 720 s timer period fit the
-1,800 s supported maximum. A
+snapshot or mutation; an oneshot without a declared start timeout has no
+bounded completion and refuses. The supported maximum is derived from the
+timer's own declared form. A calendar-scheduled timer keeps the fixed 1,800 s
+maximum because its next fire is a scheduled point that can be hours away, so
+the 6-hour backfill shape still refuses. A timer that re-fires
+`OnUnitActiveSec` or `OnUnitInactiveSec` after the unit's own state change
+bounds the next invocation by its declared interval; its complete declared
+bound is therefore its own finite maximum. The publisher's 45-minute
+`TimeoutStartSec` plus its 65 s repeat cadence (one minute plus the 5 s
+`AccuracySec`) plus the 60 s completion margin is a 2,825 s bound, and
+preflight admits it. The watchdog template declares `TimeoutStartSec=5min`, so
+its 300 s start bound and 780 s timer bound remain a 1,140 s completion
+window. A
 `Type=simple` service has no declared invocation execution bound either, so
 preflight refuses that topology rather than treating its startup timeout as a
 completion bound; restore still rejects a failed simple service if a recovery

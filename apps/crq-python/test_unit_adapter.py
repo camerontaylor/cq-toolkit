@@ -565,6 +565,20 @@ class InventoryTests(unittest.TestCase):
             6 * 3600 + 60)
         self.assertEqual(
             inventory["crq-publisher.service"]["timer_bound_seconds"], 65)
+        # Only a repeat-after-state timer bounds the next invocation after the
+        # completed one. Calendar schedules keep the fixed supported maximum.
+        self.assertEqual(
+            inventory["crq-publisher.service"]["timer_repeat_seconds"], 65)
+        self.assertEqual(
+            inventory["crq-watchdog.service"]["timer_repeat_seconds"], 780)
+        self.assertIsNone(
+            inventory["crq-tick.service"]["timer_repeat_seconds"])
+        self.assertIsNone(
+            inventory["crq-slot.service"]["timer_repeat_seconds"])
+        self.assertIsNone(
+            inventory["crq-backfill.service"]["timer_repeat_seconds"])
+        self.assertEqual(
+            inventory["crq-repair.service"]["timer_repeat_seconds"], 660)
         self.assertEqual(inventory["crq-repair.service"]["service_type"],
                          "simple")
         self.assertEqual(
@@ -666,6 +680,63 @@ class AdapterTests(AdapterFixture):
         with self.assertRaisesRegex(dc.Refused,
                                     "exceeds the supported maximum"):
             current.preflight("crq-backfill.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_admits_publisher_declared_bound(self):
+        self.fake.active["crq-publisher.timer"] = "active"
+        current = self.make_adapter(completion_timeout=None,
+                                    max_completion_window=None)
+        before = _tree(self.unit_dir)
+        prior = current.preflight("crq-publisher.service", NODE_RUNTIME)
+        # 45 min service timeout + 65 s repeat cadence + 60 s margin.
+        self.assertEqual(prior["completion_window"], 2825)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_publisher_below_declared_bound(self):
+        self.fake.active["crq-publisher.timer"] = "active"
+        current = self.make_adapter(completion_timeout=1800.0,
+                                    max_completion_window=None)
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "completion deadline .* below the "
+                                    "declared bound"):
+            current.preflight("crq-publisher.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_explicit_maximum_still_caps_repeat_timer(self):
+        self.fake.active["crq-publisher.timer"] = "active"
+        current = self.make_adapter(completion_timeout=None,
+                                    max_completion_window=1800.0)
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "exceeds the supported maximum"):
+            current.preflight("crq-publisher.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_completion_window_rejects_non_finite_values(self):
+        for value in (float("inf"), float("-inf"), float("nan"),
+                      10 ** 400):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(TypeError, "finite positive"):
+                    self.make_adapter(completion_timeout=value)
+                with self.assertRaisesRegex(TypeError, "finite positive"):
+                    self.make_adapter(max_completion_window=value)
+
+    def test_preflight_refuses_overflowing_declared_bound(self):
+        self.fake.active["crq-publisher.timer"] = "active"
+        current = self.make_adapter(completion_timeout=None,
+                                    max_completion_window=None)
+        inventory = current._inventory()
+        inventory["crq-publisher.service"] = dict(
+            inventory["crq-publisher.service"],
+            timer_bound_seconds=10 ** 400,
+            timer_repeat_seconds=10 ** 400)
+        current._inventory = lambda: inventory
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "completion bound exceeds a supported "
+                                    "duration"):
+            current.preflight("crq-publisher.service", NODE_RUNTIME)
         self.assertEqual(_tree(self.unit_dir), before)
 
     def test_preflight_refuses_inactive_timer_completion(self):
@@ -1209,6 +1280,26 @@ class AdapterTests(AdapterFixture):
         record = current.completion("crq-tick.service", NODE_RUNTIME, 0)
         self.assertEqual(record["unit"], "crq-tick.service")
         self.assertEqual(self.completion.read_delay, 0)
+
+    def test_publisher_window_covers_a_long_delayed_completion(self):
+        self.fake.active["crq-publisher.timer"] = "active"
+        current = self.make_adapter(completion_timeout=None,
+                                    max_completion_window=None)
+        prior = current.preflight("crq-publisher.service", NODE_RUNTIME)
+        self.assertEqual(prior["completion_window"], 2825)
+        snapshot = current.snapshot("crq-publisher.service")
+        current.validate_snapshot("crq-publisher.service", snapshot)
+        current.stop_and_drain("crq-publisher.service")
+        current.install("crq-publisher.service", NODE_RUNTIME)
+        current.start("crq-publisher.service")
+        # A delay that would exhaust the old fixed 1,800 s deadline still
+        # completes inside the declared 2,825 s publisher bound.
+        self.completion.read_delay = 1800
+        first = current.completion("crq-publisher.service", NODE_RUNTIME, 0)
+        second = current.completion("crq-publisher.service", NODE_RUNTIME,
+                                    first["sequence"])
+        self.assertGreater(second["sequence"], first["sequence"])
+        self.assertNotEqual(first["invocation"], second["invocation"])
 
     def test_completion_refuses_foreign_evidence(self):
         current, _prior, _snapshot = self.switch_ready(
