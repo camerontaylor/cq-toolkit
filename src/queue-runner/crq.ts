@@ -16,6 +16,7 @@ import {
 } from '../adapters/crq/reviewCapabilityMain.js';
 import { runStatusWriter } from '../adapters/crq/statusWriter.js';
 import { runBackfillUnit } from '../adapters/crq/backfillSource.js';
+import { runReconcileMergedUnit } from '../adapters/crq/reconcileSource.js';
 import { MAX_REQUEST_BYTES, runQueueCapabilityMain } from '../adapters/crq/queueCapabilityMain.js';
 import { REVIEW_MAX_BYTES } from '../ops/crq/reviewCapability.js';
 import { AUTHOR_MAX_SNAPSHOT_BYTES } from '../policy/crq/authorWire.js';
@@ -119,6 +120,24 @@ if (command === 'queue-capability') {
         // resolves (config.state_root, default `<runner>/state`).
         return runBackfillUnit(args, { stateRoot: await publisherStateRoot(root) });
       }
+      if (liveCommand === 'reconcile-merged') {
+        // Python's `reconcile-merged` takes the tick lock, reads the persisted
+        // wrapper under `<state>/reconcile` and stages enrollment in queue.json.
+        const repo = await readRunnerRepo(root);
+        if (repo === null) {
+          return {
+            artifact: {
+              status: 'failed' as const,
+              error: 'runner config.json missing, malformed, or has no repo',
+            },
+            exitCode: 1,
+          };
+        }
+        return runReconcileMergedUnit(args, {
+          repo,
+          stateRoot: await publisherStateRoot(root),
+        });
+      }
       if (liveCommand === 'status') {
         const parsed = parseStatusArgv(args);
         if (!parsed.ok) return usageArtifact('status', parsed.message);
@@ -186,6 +205,18 @@ export async function publishLiveCommand(
     };
   }
   return runPublishUnit(validated);
+}
+
+/** `crq.REPO`: the runner's configured repository, or null when unusable. */
+async function readRunnerRepo(runnerRoot: string): Promise<string | null> {
+  try {
+    const config = JSON.parse(await readFile(join(runnerRoot, 'config.json'), 'utf8')) as unknown;
+    if (typeof config !== 'object' || config === null || Array.isArray(config)) return null;
+    const repo = (config as Record<string, unknown>)['repo'];
+    return typeof repo === 'string' && repo !== '' ? repo : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
