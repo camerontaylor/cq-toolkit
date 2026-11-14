@@ -345,32 +345,50 @@ class DiscoveryTests(PortFixture):
         self.assertIn("crq-slot.service", " ".join(evidence["foreign"]))
         self.assertIn("crq-tick.path", evidence["error"])
 
-    def test_dropin_directory_is_unsupported(self):
+    def test_declared_dropin_topology_is_supported(self):
+        declared = self.declare()
+        target = self.base / ".local/infra/systemd/crq-messaging.conf"
+        target.parent.mkdir(parents=True)
+        # A declared environment drop-in is opaque: its absolute symlink
+        # target is outside the unit directory and its content is not a unit
+        # dependency source.
+        target.write_text("[Unit]\nWants=crq-slot.service\n")
+        dropin = self.unit_dir / "crq-tick.service.d"
+        dropin.mkdir()
+        (dropin / "20-paseo-env.conf").symlink_to(target)
+        (dropin / "coderabbit-managed.conf").write_text(
+            "[Service]\nEnvironment=CODERABBIT_CLI_DISABLE_AUTO_UPDATE=true\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+        self.assertIsNone(evidence["error"])
+
+    def test_undeclared_dropin_entry_is_unsupported(self):
         declared = self.declare()
         dropin = self.unit_dir / "crq-tick.service.d"
         dropin.mkdir()
         (dropin / "override.conf").write_text("[Service]\nNice=5\n")
         evidence = self.discover(declared)
         self.assertEqual(evidence["supported"], False)
-        self.assertIn("drop-in", " ".join(evidence["foreign"]))
+        self.assertIn("declared entries", " ".join(evidence["foreign"]))
 
-    def test_symlinked_dropin_directory_is_not_scanned_as_a_dropin(self):
+    def test_symlinked_dropin_directory_is_unsupported(self):
         declared = self.declare()
         held = self.unit_dir / "held-dropin"
         held.mkdir()
         (held / "override.conf").write_text("[Service]\nNice=5\n")
         (self.unit_dir / "crq-tick.service.d").symlink_to(held)
         evidence = self.discover(declared)
-        self.assertEqual(evidence["complete"], True)
-        self.assertNotIn("drop-in", " ".join(evidence["foreign"]))
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("not a real directory", " ".join(evidence["foreign"]))
 
-    def test_dangling_symlink_entry_is_not_a_dropin_directory(self):
+    def test_dangling_dropin_directory_is_unsupported(self):
         declared = self.declare()
         (self.unit_dir / "crq-tick.service.d").symlink_to("gone")
         evidence = self.discover(declared)
-        self.assertNotIn("drop-in", " ".join(evidence["foreign"]))
-        self.assertEqual(evidence["complete"], False)
-        self.assertIn("cannot resolve a symlink", evidence["error"])
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("not a real directory", " ".join(evidence["foreign"]))
 
     def test_unreadable_enablement_entry_is_incomplete(self):
         declared = self.declare()
