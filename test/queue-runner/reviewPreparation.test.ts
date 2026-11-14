@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { JsonNumber, JsonObject } from '../../src/policy/crq/jsonValue.js';
 import {
   prepareOrdinaryReview,
+  prepareAndPersistOrdinaryReview,
   type ReviewPreparationEffects,
 } from '../../src/queue-runner/reviewPreparation.js';
 
@@ -251,5 +252,56 @@ describe('inactive ordinary review preparation', () => {
       'reviewing',
     );
     expect(f.calls).toEqual(['allocate', 'scan', 'checkout', 'meta', 'work', 'save', 'spawn']);
+  });
+});
+
+describe('ordinary preparation caller', () => {
+  it('saves the blocked queue after the event and preserves unknown fields', async () => {
+    const f = fixture();
+    f.effects.scan = async () => {
+      f.calls.push('scan');
+      return { clean: false, denylistHits: 1, gitleaksHits: 0, artifactPath: '/scan' };
+    };
+    const result = await prepareAndPersistOrdinaryReview(
+      f.queue,
+      { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
+      f.effects,
+    );
+    expect(f.calls).toEqual(['allocate', 'scan', 'blocked', 'save']);
+    expect(f.saved()).toBe(result.queue);
+    expect(result.queue.get('unknown')).toBe(f.queue.get('unknown'));
+    expect((result.queue.get('items') as JsonObject[])[0]?.get('unknown')).toBe(
+      (f.queue.get('items') as JsonObject[])[0]?.get('unknown'),
+    );
+  });
+  it('propagates a blocked save failure', async () => {
+    const f = fixture();
+    f.effects.scan = async () => {
+      f.calls.push('scan');
+      return { clean: false, denylistHits: 1, gitleaksHits: 0, artifactPath: '/scan' };
+    };
+    f.effects.launch.saveQueue = async () => {
+      f.calls.push('save');
+      throw new Error('save failed');
+    };
+    await expect(
+      prepareAndPersistOrdinaryReview(
+        f.queue,
+        { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
+        f.effects,
+      ),
+    ).rejects.toThrow('save failed');
+    expect(f.calls).toEqual(['allocate', 'scan', 'blocked', 'save']);
+  });
+  it('returns the launched queue without another save', async () => {
+    const f = fixture();
+    const result = await prepareAndPersistOrdinaryReview(
+      f.queue,
+      { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
+      f.effects,
+    );
+    expect(result.outcome).toBe('launched');
+    expect(f.saved()).toBe(result.queue);
+    expect(f.calls.slice(-3)).toEqual(['spawn', 'save', 'event']);
   });
 });
