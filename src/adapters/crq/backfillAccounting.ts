@@ -60,6 +60,7 @@ import type { BackfillCaptureRepo } from '../../policy/crq/backfillInventory.js'
 import type { BackfillReportRepo } from '../../policy/crq/backfillReport.js';
 import { JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
 import {
+  LedgerIntegrityError,
   ledgerCreditable,
   ledgerDigestOf,
   ledgerIntervals,
@@ -249,6 +250,25 @@ function integrity(message: string): BackfillAccountingError {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * `backfill_accounting.fold` catches `(OSError, ValueError, SubprocessError)`
+ * and gaps them. The port's corresponding classes are git invocations, module
+ * value errors, ledger/cache integrity and Node system errors; anything else
+ * is a programming bug and must surface rather than become a coverage gap.
+ */
+function isFoldGap(error: unknown): boolean {
+  if (
+    error instanceof AccountingGitError ||
+    error instanceof BackfillAccountingError ||
+    error instanceof LedgerIntegrityError ||
+    error instanceof BackfillCacheError
+  ) {
+    return true;
+  }
+  const node = error as NodeJS.ErrnoException | null;
+  return typeof node?.code === 'string' && typeof node.errno === 'number';
 }
 
 function asError(error: unknown): Error {
@@ -727,7 +747,9 @@ export class GitAccountingRepository implements BackfillReportRepo, BackfillCapt
     }
     const raw = await this.git(['blame', ...ACCOUNTING_BLAME_OPTIONS, target, '--', path]);
     const rows = parseBlame(raw);
-    if (cacheable) {
+    // The oracle persists and memoises only when every row has a byte filename
+    // (`all(isinstance(r[2], bytes))`); headerless rows are re-read instead.
+    if (cacheable && rows.every((row) => row.filename !== null)) {
       await this.persist('blame', identity, blameFact(rows));
       this.rememberBlame(key, rows);
     }
@@ -1051,6 +1073,7 @@ export class GitAccountingRepository implements BackfillReportRepo, BackfillCapt
           ids.push(id);
         }
       } catch (error) {
+        if (!isFoldGap(error)) throw error;
         gaps.push({ review: id, reason: messageOf(error).slice(0, 200) });
       }
     }

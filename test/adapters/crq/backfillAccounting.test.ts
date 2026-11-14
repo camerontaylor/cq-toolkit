@@ -28,13 +28,19 @@ import {
   BackfillCacheError,
   GitAccountingRepository,
   accountingFactSalt,
+  type CoverageGap,
 } from '../../../src/adapters/crq/backfillAccounting.js';
 import { fileArtifactStore, type ArtifactStore } from '../../../src/adapters/crq/findingStore.js';
 import type { RunGit } from '../../../src/adapters/crq/ledgerGit.js';
 import { runGitIn } from '../../../src/adapters/crq/publishSource.js';
 import type { BackfillCaptureRepo } from '../../../src/policy/crq/backfillInventory.js';
 import type { BackfillReportRepo } from '../../../src/policy/crq/backfillReport.js';
-import { LEDGER_REPOSITORY, ledgerEvent, ledgerLoads } from '../../../src/policy/crq/ledger.js';
+import {
+  LEDGER_REPOSITORY,
+  LedgerIntegrityError,
+  ledgerEvent,
+  ledgerLoads,
+} from '../../../src/policy/crq/ledger.js';
 import {
   JsonObject,
   parseJsonValue,
@@ -550,6 +556,86 @@ describe('coverage', () => {
     expect((await repo.coverage(target, [value], fixture.artifacts)).gaps).toHaveLength(1);
     expect(() => readdirSync(join(index, 'facts', 'verified_review'))).toThrow();
     expect(() => readdirSync(join(index, 'facts', 'coverage'))).toThrow();
+  });
+
+  test('fold gaps the oracle error set and surfaces anything else', async () => {
+    const fixture = new Fixture();
+    const review = jsonValue({
+      id: 'review-1',
+      event_type: 'review',
+      payload: {
+        target: 'a'.repeat(40),
+        artifacts: [{ sha256: 'b'.repeat(64), location: '/artifact' }],
+        source: { type: 'crq-run', producer: 'crq-runner-app', authenticated: true },
+        completion: {
+          terminal: true,
+          skipped: false,
+          scope_verified: true,
+          exit_code: 0,
+          errors: [],
+        },
+        outcome: 'completed',
+      },
+    });
+    const repo = new GitAccountingRepository({
+      repo: fixture.root,
+      runGit: async (args) => ({ args, code: 0, stdout: new Uint8Array(), stderr: '' }),
+    });
+    const throwing = (error: Error): ArtifactStore =>
+      ({
+        verify: async () => {
+          throw error;
+        },
+      }) as unknown as ArtifactStore;
+    await expect(
+      repo.fold(
+        'a'.repeat(40),
+        [review],
+        throwing(new TypeError('port bug')),
+        new Map(),
+        new Map(),
+        [],
+      ),
+    ).rejects.toThrow('port bug');
+    const gaps: CoverageGap[] = [];
+    await repo.fold(
+      'a'.repeat(40),
+      [review],
+      throwing(new LedgerIntegrityError('missing evidence')),
+      new Map(),
+      new Map(),
+      gaps,
+    );
+    expect(gaps).toEqual([{ review: 'review-1', reason: 'missing evidence' }]);
+  });
+});
+
+describe('blame persistence', () => {
+  test('headerless rows are neither persisted nor memoised', async () => {
+    const fixture = new Fixture();
+    const calls: string[][] = [];
+    const repo = new GitAccountingRepository({
+      repo: fixture.root,
+      runGit: async (args) => {
+        calls.push([...args]);
+        return {
+          args,
+          code: 0,
+          stdout: new TextEncoder().encode('\tcontent\n'),
+          stderr: '',
+        };
+      },
+      diskCache: new BackfillFactCache({
+        root: join(fixture.base, 'index'),
+        store: fixture.artifacts,
+      }),
+    });
+    const first = await repo.blame('a'.repeat(40), 'f');
+    const second = await repo.blame('a'.repeat(40), 'f');
+    expect(first[0]).toMatchObject({ origin: null, originalLine: null, filename: null });
+    expect(second[0]).toMatchObject({ origin: null, originalLine: null, filename: null });
+    expect(calls.filter((args) => args[0] === 'blame')).toHaveLength(2);
+    expect(() => readdirSync(join(fixture.base, 'index', 'facts', 'blame'))).toThrow();
   });
 });
 

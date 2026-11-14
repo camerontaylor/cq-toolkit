@@ -1069,7 +1069,9 @@ export function confirmedCounts(events: readonly JsonValue[]): Map<string, numbe
 
 /**
  * `backfill_inventory.queue_snapshot`: tag legacy floating point diagnostics
- * so they never enter the integer-only replay domain. `1.0` stays a float.
+ * so they never enter the integer-only replay domain. A losslessly parsed
+ * `1.0` stays a float; a plain-JS integral `number` has no float provenance
+ * and is an integer by definition.
  */
 export function queueSnapshot(value: unknown): unknown {
   if (value instanceof JsonNumber) {

@@ -436,13 +436,20 @@ describe('capture seam', () => {
     ).rejects.toThrow('tier policy does not match protected-path snapshot');
   });
 
-  test('legacy float diagnostics are tagged and non-finite values refuse', () => {
+  test('lossless floats are tagged, plain integers stay integers', () => {
     const snapshot = queueSnapshot(jsonValue({ value: 1.5, nested: [2, 'x'] })) as {
       value: unknown;
       nested: JsonValue[];
     };
     expect(snapshot.value).toEqual({ 'cq.legacy-number/v1': '1.5' });
     expect(snapshot.nested.map((entry) => toPlainJson(entry))).toEqual([2, 'x']);
+    const lossless = queueSnapshot(parseJsonValue('{"float":1.0,"integer":1}')) as {
+      float: unknown;
+      integer: JsonValue;
+    };
+    expect(lossless.float).toEqual({ 'cq.legacy-number/v1': '1.0' });
+    expect(toPlainJson(lossless.integer)).toBe(1);
+    expect(queueSnapshot(1)).toBe(1);
     expect(() => queueSnapshot(Number.POSITIVE_INFINITY)).toThrow('non-finite queue diagnostic');
   });
 
