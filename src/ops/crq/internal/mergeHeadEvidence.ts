@@ -3,11 +3,48 @@ import { createHash } from 'node:crypto';
 import type { RunGit } from '../../../adapters/crq/ledgerGit.js';
 import { JsonObject } from '../../../policy/crq/jsonValue.js';
 import { sourcePath } from '../../../policy/crq/repairBinding.js';
+import { pythonSplitlines } from '../../../policy/crq/repairGates.js';
 
 const sha = /^[0-9a-f]{40}$/;
 const maxPatch = 262_144;
 const maxTotal = 4_000_000;
-const decoder = new TextDecoder('utf-8', { fatal: true });
+const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+// Python reads patches as UTF-8 with surrogateescape and universal newlines.
+function patchText(bytes: Buffer): string {
+  const normalized = Buffer.from(bytes.toString('latin1').replace(/\r\n?/g, '\n'), 'latin1');
+  let text = '';
+  for (let i = 0; i < normalized.length;) {
+    const b = normalized[i]!;
+    const length =
+      b < 0x80
+        ? 1
+        : b >= 0xc2 && b <= 0xdf
+          ? 2
+          : b >= 0xe0 && b <= 0xef
+            ? 3
+            : b >= 0xf0 && b <= 0xf4
+              ? 4
+              : 0;
+    if (length && i + length <= normalized.length) {
+      try {
+        text += decoder.decode(normalized.subarray(i, i + length));
+        i += length;
+        continue;
+      } catch {
+        /* preserve the invalid byte below */
+      }
+    }
+    text += String.fromCharCode(0xdc00 + b);
+    i += 1;
+  }
+  return text;
+}
+function patchHash(bytes: Buffer): string {
+  return createHash('sha256')
+    .update(Buffer.from(bytes.toString('latin1').replace(/\r\n?/g, '\n'), 'latin1'))
+    .digest('hex');
+}
 
 type Entry = readonly [string, string] | null;
 export interface MergeHeadInput {
@@ -127,22 +164,23 @@ export async function mergeHeadEvidence(
   const blobs: Record<string, string | null> = Object.create(null) as Record<string, string | null>;
   const containment: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   let total = 0;
+  let excerptBudget = 8192;
   const patch = async (args: string[]): Promise<Buffer> => {
     const bytes = Buffer.from(await run(args));
     total += bytes.length;
     if (bytes.length > maxPatch || total > maxTotal)
-      throw new Error('published repair change too large to verify');
+      throw new Error('published repair change too large to verify; needs revalidation');
     return bytes;
   };
-  const lines = (bytes: Buffer): [Set<string>, Set<string>] => {
-    const added = new Set<string>();
-    const removed = new Set<string>();
+  const lines = (text: string): [string[], string[]] => {
+    const added: string[] = [];
+    const removed: string[] = [];
     let hunk = false;
-    for (const line of bytes.toString('latin1').split('\n')) {
+    for (const line of pythonSplitlines(text)) {
       if (line.startsWith('diff --git ')) hunk = false;
       else if (line.startsWith('@@')) hunk = true;
-      else if (hunk && line.startsWith('+')) added.add(line.slice(1));
-      else if (hunk && line.startsWith('-')) removed.add(line.slice(1));
+      else if (hunk && line.startsWith('+')) added.push(line.slice(1));
+      else if (hunk && line.startsWith('-')) removed.push(line.slice(1));
     }
     return [added, removed];
   };
@@ -159,7 +197,8 @@ export async function mergeHeadEvidence(
       containment[path] = { published: before, actual: after, status: 'identical' };
       continue;
     }
-    if (before && !after) throw new Error('merged repair source changed: ' + path);
+    if (before && !after)
+      throw new Error('merged repair source changed; needs revalidation: ' + path);
     const original = await patch(
       parent
         ? ['diff', ...options, parent, published, '--', path]
@@ -174,7 +213,8 @@ export async function mergeHeadEvidence(
             path,
           ],
     );
-    if (!original.toString('latin1').trim()) {
+    const originalText = patchText(original);
+    if (!originalText.trim()) {
       containment[path] = {
         published: before,
         actual: after,
@@ -185,32 +225,57 @@ export async function mergeHeadEvidence(
     }
     if (
       (!before && after) ||
-      /^(?:Binary files |GIT binary patch)/m.test(original.toString('latin1'))
+      pythonSplitlines(originalText).some(
+        (line) => line.startsWith('Binary files ') || line.startsWith('GIT binary patch'),
+      )
     )
-      throw new Error('merged repair source changed: ' + path);
-    const [added, removed] = lines(original);
+      throw new Error('merged repair source changed; needs revalidation: ' + path);
+    const [added, removed] = lines(originalText);
     const modeChanged = !!before && (!prior || prior[0] !== before[0]);
-    if (!added.size && !removed.size && !modeChanged)
-      throw new Error('merged repair source changed: ' + path);
+    if (!added.length && !removed.length && !modeChanged)
+      throw new Error('merged repair source changed; needs revalidation: ' + path);
     const extra = await patch(['diff', ...options, published, input.actual, '--', path]);
-    const [extraAdded, extraRemoved] = lines(extra);
+    const extraText = patchText(extra);
     if (
-      [...added].some((l) => extraRemoved.has(l)) ||
-      [...removed].some((l) => extraAdded.has(l)) ||
+      pythonSplitlines(extraText).some(
+        (line) => line.startsWith('Binary files ') || line.startsWith('GIT binary patch'),
+      )
+    )
+      throw new Error('merged repair source changed; needs revalidation: ' + path);
+    const [extraAdded, extraRemoved] = lines(extraText);
+    const extraAddedSet = new Set(extraAdded);
+    const extraRemovedSet = new Set(extraRemoved);
+    if (
+      added.some((l) => extraRemovedSet.has(l)) ||
+      removed.some((l) => extraAddedSet.has(l)) ||
       (modeChanged && after?.[0] !== before?.[0])
     )
-      throw new Error('merged repair source changed: ' + path);
+      throw new Error('merged repair source changed; needs revalidation: ' + path);
+    const excerpts: Record<string, string | boolean> = {};
+    for (const [key, text] of [
+      ['patch', originalText],
+      ['extra_patch', extraText],
+    ] as const) {
+      const kept = Math.min(2048, excerptBudget);
+      if (kept > 0) {
+        const chars = Array.from(text);
+        excerpts[key] = chars.slice(0, kept).join('');
+        excerpts[key + '_truncated'] = chars.length > kept;
+        excerptBudget -= Math.min(kept, chars.length);
+      } else excerpts[key + '_omitted'] = true;
+    }
     containment[path] = {
+      ...excerpts,
       published: before,
       actual: after,
       status: 'contained',
       published_parent: parent ?? null,
       mode_checked: modeChanged,
-      changed_added: added.size,
-      changed_removed: removed.size,
-      patch_sha256: createHash('sha256').update(original).digest('hex'),
+      changed_added: added.length,
+      changed_removed: removed.length,
+      patch_sha256: patchHash(original),
       patch_bytes: original.length,
-      extra_patch_sha256: createHash('sha256').update(extra).digest('hex'),
+      extra_patch_sha256: patchHash(extra),
       extra_patch_bytes: extra.length,
     };
   }

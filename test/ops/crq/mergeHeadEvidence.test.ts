@@ -58,3 +58,104 @@ describe('merge head containment proof', () => {
     });
   });
 });
+
+// Override individual Git observations while retaining the ordinary fixture.
+function override(rewrite: (args: readonly string[], value: string) => string): RunGit {
+  const fallback = git();
+  return async (args, options) => {
+    const call = await fallback(args, options);
+    return { ...call, stdout: Buffer.from(rewrite(args, Buffer.from(call.stdout).toString())) };
+  };
+}
+
+describe('containment oracle bounds and edge cases', () => {
+  test('rejects a change to a mode introduced by publication', async () => {
+    const runner = override((args, value) =>
+      args[0] === 'ls-tree' && (args[2] === base || args[2] === actual)
+        ? value.replace('100644', '100755')
+        : value,
+    );
+    await expect(mergeHeadEvidence(input, runner)).rejects.toThrow('needs revalidation');
+  });
+  test('rejects 129 compared paths', async () => {
+    await expect(
+      mergeHeadEvidence(
+        { ...input, anchors: Array.from({ length: 129 }, (_, i) => `src/${i}.ts`) },
+        git(),
+      ),
+    ).rejects.toThrow('paths exceed bound');
+  });
+  test('rejects an individual patch above 262144 bytes', async () => {
+    const runner = override((args, value) =>
+      args[0] === 'diff' && args.includes(base) ? value + 'x'.repeat(262145) : value,
+    );
+    await expect(mergeHeadEvidence(input, runner)).rejects.toThrow('too large');
+  });
+  test('rejects aggregate patches above 4000000 bytes', async () => {
+    const paths = Array.from({ length: 17 }, (_, i) => `src/${i}.ts`);
+    const runner = override((args, value) => {
+      if (args[0] === 'diff-tree' && args.includes('--name-only')) return '';
+      if (args[0] === 'ls-tree') return value.replace('src/a.ts', args.at(-1)!);
+      if (args[0] === 'diff' && args.includes(base)) return value + 'x'.repeat(250000);
+      return value;
+    });
+    await expect(mergeHeadEvidence({ ...input, anchors: paths }, runner)).rejects.toThrow(
+      'too large',
+    );
+  });
+  test('rejects binary published and descendant patches', async () => {
+    for (const publishedPatch of [true, false]) {
+      const runner = override((args, value) =>
+        args[0] === 'diff' && args.includes(base) === publishedPatch
+          ? 'Binary files a and b differ\n'
+          : value,
+      );
+      await expect(mergeHeadEvidence(input, runner)).rejects.toThrow('source changed');
+    }
+  });
+  test('rejects deletion and recreation of compared source', async () => {
+    for (const missing of [actual, published]) {
+      const runner = override((args, value) =>
+        args[0] === 'ls-tree' && args[2] === missing ? '' : value,
+      );
+      await expect(mergeHeadEvidence(input, runner)).rejects.toThrow('source changed');
+    }
+  });
+  test('caps recorded extra commits at 32 and reports truncation', async () => {
+    let logArgs: readonly string[] = [];
+    const runner = override((args, value) => {
+      if (args[0] === 'rev-list' && args.includes('--count')) return '33\n';
+      if (args[0] === 'log') {
+        logArgs = args;
+        return Array(32).fill(`${actual}\tsubject`).join('\n');
+      }
+      return value;
+    });
+    const proof = await mergeHeadEvidence(input, runner);
+    expect(logArgs).toContain('--max-count=32');
+    expect(proof?.extra_commits).toHaveLength(32);
+    expect(proof?.extra_commits_truncated).toBe(true);
+  });
+  test('uses Python universal newlines for hashes, excerpts and line splitting', async () => {
+    const runner = override((args, value) =>
+      args[0] === 'diff' && args.includes(base)
+        ? 'diff --git a b\r\n@@ -1 +1 @@\r-old\r+fixed\r'
+        : value,
+    );
+    const proof = await mergeHeadEvidence(input, runner);
+    expect(proof?.containment?.['src/a.ts']).toMatchObject({
+      patch: 'diff --git a b\n@@ -1 +1 @@\n-old\n+fixed\n',
+      patch_sha256: '441c9724d99f07caa09a0383890f320addeea7a2a110210c8fdb7f4a36a3eee3',
+      changed_added: 1,
+      changed_removed: 1,
+    });
+    const undo = override((args, value) =>
+      args[0] === 'diff' && args.includes(base)
+        ? 'diff --git a b\n@@ -1 +1 @@\n+fixed\r'
+        : args[0] === 'diff'
+          ? 'diff --git a b\n@@ -1 +1 @@\n-fixed\n'
+          : value,
+    );
+    await expect(mergeHeadEvidence(input, undo)).rejects.toThrow('source changed');
+  });
+});
