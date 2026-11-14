@@ -685,9 +685,19 @@ def verify_archive(archive, expected_sha256=None, lockfile=None, smoke=True,
         if expected_sha256 is not None and expected_sha256 != recorded:
             raise ArtifactError('archive sidecar does not match the expected digest')
         expected_sha256 = recorded
-    digest = sha256_file(archive)
-    if expected_sha256 is not None and digest != expected_sha256:
-        raise ArtifactError('archive digest does not match the recorded digest')
+    # Hashing and extraction must observe the same bytes: stage a private
+    # copy first so a replacement at the original pathname cannot make a
+    # self-consistent replacement verify against the original digest.
+    private = tempfile.TemporaryDirectory(prefix='crq-verify-archive-')
+    try:
+        staged = Path(private.name) / archive.name
+        shutil.copyfile(archive, staged)
+        digest = sha256_file(staged)
+        if expected_sha256 is not None and digest != expected_sha256:
+            raise ArtifactError('archive digest does not match the recorded digest')
+    except BaseException:
+        private.cleanup()
+        raise
     manager = None
     if keep:
         temp = Path(tempfile.mkdtemp(prefix='crq-verify-'))
@@ -695,7 +705,7 @@ def verify_archive(archive, expected_sha256=None, lockfile=None, smoke=True,
         manager = tempfile.TemporaryDirectory(prefix='crq-verify-')
         temp = Path(manager.name)
     try:
-        root = _safe_extract(archive, temp)
+        root = _safe_extract(staged, temp)
         try:
             manifest = json.loads((root / MANIFEST_NAME).read_text())
         except (OSError, ValueError) as exc:
@@ -740,6 +750,7 @@ def verify_archive(archive, expected_sha256=None, lockfile=None, smoke=True,
     finally:
         if manager is not None:
             manager.cleanup()
+        private.cleanup()
 
 
 def _machine_error(kind, subcommand, message, exit_code):
