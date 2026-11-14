@@ -23,6 +23,7 @@ import { JsonObject } from '../../policy/crq/jsonValue.js';
 import { pythonJsonText } from '../../policy/crq/pythonJson.js';
 import {
   runPublish,
+  PublishRolloutDisabled,
   type PublishRunEffects,
   type PublishRunResult,
 } from '../../ops/crq/publishRun.js';
@@ -224,6 +225,11 @@ export async function runPublishUnit(roots: PublisherRoots): Promise<OpResult<Pu
     const result = await runPublish(filePublishEffects(roots));
     return { status: 'ok', value: result };
   } catch (error) {
+    // An absent rollout is Python's {"publication": "disabled"}: a unit exit
+    // 0, not a failure. Only genuine defects fail the unit.
+    if (error instanceof PublishRolloutDisabled) {
+      return { status: 'ok', value: { publication: 'disabled' } };
+    }
     return {
       status: 'failed',
       error: error instanceof Error ? error.message : String(error),

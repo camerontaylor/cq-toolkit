@@ -7,8 +7,17 @@ import {
   LedgerTransportError,
   type RunGit,
 } from '../../../src/adapters/crq/ledgerGit.js';
-import { runPublish, type PublishRunEffects } from '../../../src/ops/crq/publishRun.js';
-import { JsonObject, parseJsonValue, type JsonValue } from '../../../src/policy/crq/jsonValue.js';
+import {
+  runPublish,
+  PublishRolloutDisabled,
+  type PublishRunEffects,
+} from '../../../src/ops/crq/publishRun.js';
+import {
+  JsonObject,
+  JsonNumber,
+  parseJsonValue,
+  type JsonValue,
+} from '../../../src/policy/crq/jsonValue.js';
 import { LedgerIntegrityError, ledgerCanonicalBytes } from '../../../src/policy/crq/ledger.js';
 import {
   arrayAt,
@@ -125,15 +134,14 @@ class FakeGit {
         return { code: 0, stdout: new Uint8Array(0) };
       }
       case 'merge-base': {
-        // `merge-base --is-ancestor A B`: args[2]=A, args[3]=B.
+        // `merge-base --is-ancestor A B`: args[2]=A, args[3]=B. The fake
+        // history is linear: walk parents from B looking for A.
         const ancestor = args[2] ?? '';
         const descendant = args[3] ?? '';
-        if (ancestor === descendant) return { code: 0, stdout: new Uint8Array(0) };
-        // The fake history is linear; everything fetched before the current
-        // remote head is an ancestor of it.
-        const known = ['0'.repeat(40), ...this.pushed];
-        if (this.remoteBranch.head !== null && known.includes(ancestor ?? '')) {
-          return { code: 0, stdout: new Uint8Array(0) };
+        let cursor: string | null = descendant;
+        while (cursor !== null && cursor !== '' && cursor !== '0'.repeat(40)) {
+          if (cursor === ancestor) return { code: 0, stdout: new Uint8Array(0) };
+          cursor = this.commits.get(cursor)?.parents[0] ?? null;
         }
         return { code: 1, stdout: new Uint8Array(0) };
       }
@@ -152,6 +160,21 @@ class FakeGit {
         // Remote keeps only additions of 100644 blobs, like the real ref.
         this.remoteBranch.head = head;
         this.pushed.push(head);
+        return { code: 0, stdout: new Uint8Array(0) };
+      }
+      case 'bundle': {
+        // The spool transport bundles `refs/crq/ledger-publish/<head>` into a
+        // real file before handing bytes to pushCommit; materialize a
+        // plausible bundle file so the size-bound read succeeds. The review
+        // verifier's `bundle verify/unbundle` also lands here and succeeds.
+        if (args[1] === 'create' || args[1] === 'verify' || args[1] === 'unbundle') {
+          const target = args[2] ?? '';
+          if (target !== '' && args[1] === 'create') {
+            const { writeFileSync } = require('node:fs') as typeof import('node:fs');
+            writeFileSync(target, Buffer.from(`bundle ${args.slice(3).join(' ')}\n`));
+          }
+          return { code: 0, stdout: new Uint8Array(0) };
+        }
         return { code: 0, stdout: new Uint8Array(0) };
       }
       case 'rev-list': {
@@ -287,14 +310,26 @@ async function makeEffects(root: string): Promise<PublishRunEffects> {
   await writeFile(queuePath, '{"items":[]}\n');
   const scheduler = new FakeGit();
   const publisher = new FakeGit();
+  const publisherRun = fakeRunGit(publisher);
   const effects: PublishRunEffects = {
     stateRoot,
     durableArtifactRoot: join(root, 'artifacts'),
     runSchedulerGit: fakeRunGit(scheduler),
-    runPublisherGit: fakeRunGit(publisher),
+    runPublisherGit: publisherRun,
+    // The fake transport replaces the rollout's spool ssh exactly as the B1
+    // emitter binds a fake Spool: the signer accepts the bundle and publishes
+    // the commit to the origin remote, which the driver's fresh fetch then
+    // validates. Scheduler and publisher share one in-memory origin, matching
+    // the real deployment's single ledger remote.
+    pushCommit: async (_base, head) => {
+      const pushed = await publisherRun(['push', 'origin', `${head}:refs/heads/cq/review-ledger`]);
+      if (pushed.code !== 0) throw new LedgerTransportError('push failed');
+    },
     // Python's B1 emitter drives the real publisher through `OracleArtifacts`,
     // which accepts the two public synthetic references before the real store.
-    // Mirror that wrapper so vector replay needs no host paths.
+    // Mirror that wrapper so vector replay needs no host paths. The kept
+    // synthetic reference (`"c"*64`) is also a git-bundle artifact in some
+    // vectors; the fake runner answers `bundle verify/unbundle` like git.
     async verifyArtifact(reference) {
       if (
         reference.sha256 === SYNTHETIC_KEPT_SHA &&
@@ -325,6 +360,7 @@ function canonicalText(value: JsonValue): string {
   if (value === null) return 'null';
   if (typeof value === 'boolean') return value ? 'true' : 'false';
   if (typeof value === 'string') return JSON.stringify(value);
+  if (value instanceof JsonNumber) return value.raw;
   if (Array.isArray(value)) return `[${value.map(canonicalText).join(',')}]`;
   if (value instanceof JsonObject) {
     const keys = [...value.entries.map(([key]) => key)].sort((a, b) =>
@@ -436,9 +472,10 @@ describe('publisher route: fixture replay through the run composition', () => {
     const root = await mkdtemp(join(tmpdir(), 'crq-publish-off-'));
     try {
       const effects = await makeEffects(root);
-      await expect(runPublish(effects)).rejects.toBeInstanceOf(Error);
       // Python returns {"publication": "disabled"} for a missing rollout;
-      // the route refuses instead of guessing, so no request was written.
+      // the route surfaces the sentinel (the unit adapter maps it to exit 0)
+      // and no request was written.
+      await expect(runPublish(effects)).rejects.toBeInstanceOf(PublishRolloutDisabled);
       await expect(
         stat(join(effects.stateRoot, 'backfill', 'publish-request.json')),
       ).rejects.toMatchObject({ code: 'ENOENT' });
@@ -615,6 +652,22 @@ describe('publisher route: fixture replay through the run composition', () => {
         durableArtifactRoot: join(root, 'artifacts'),
         runSchedulerGit: gitRunner(clone),
         runPublisherGit: gitRunner(join(stateRoot, 'backfill', 'publisher.git')),
+        // The live-path test binds the signer stand-in exactly as the B1
+        // vector replay does: the transport publishes the pushed commit to
+        // the origin remote, which the driver's fresh fetch then validates.
+        pushCommit: async (_base, head) => {
+          execFileSync(
+            'git',
+            [
+              '-C',
+              join(stateRoot, 'backfill', 'publisher.git'),
+              'push',
+              'origin',
+              `${head}:refs/heads/cq/review-ledger`,
+            ],
+            { stdio: 'pipe' },
+          );
+        },
         async withTickLock(fn) {
           return fn();
         },
@@ -749,6 +802,398 @@ describe('malformed rollout refuses publication', () => {
         message = error instanceof LedgerIntegrityError ? error.message : '';
       }
       expect(message).toBe('backfill rollout prerequisites incomplete');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a legacy_shell spool key refuses with the transport ruling', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-spool-'));
+    try {
+      const effects = await makeEffects(root);
+      await writeFile(
+        join(effects.stateRoot, 'backfill-rollout.json'),
+        `${JSON.stringify({
+          operational_ruling: 'fixture',
+          no_live_run_verification: 'fixture',
+          owner_branch_ruleset_evidence: 'fixture',
+          durable_artifact_root: '/unused',
+          runner_identity: 'crq-runner-app',
+          publisher_spool: {
+            ssh_alias: 'crq@spool.invalid',
+            ssh_key: '/unused/key',
+            legacy_shell: true,
+          },
+        })}\n`,
+      );
+      let message = '';
+      try {
+        await runPublish(effects);
+      } catch (error) {
+        message = error instanceof Error ? error.message : '';
+      }
+      expect(message).toContain('legacy_shell is not supported');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('reconciliation through the route', () => {
+  function queueWithItems(items: readonly JsonValue[]): JsonObject {
+    return new JsonObject([
+      ['items', [...items]],
+      ['backfill_scope_failures', new JsonObject([])],
+      // The failure-history map the family-release rule reads; tests seed the
+      // families they expect to survive or be released.
+      ['backfill_families', new JsonObject([['review-ledger', JsonNumber.int(1)]])],
+    ]);
+  }
+
+  function scopeOf(review: JsonObject): JsonValue {
+    const payload = review.get('payload');
+    if (!(payload instanceof JsonObject)) throw new Error('review has no payload');
+    const scope = payload.get('requested_scope');
+    if (scope === undefined) throw new Error('review has no requested_scope');
+    return scope;
+  }
+
+  async function seedQueue(effects: PublishRunEffects, items: readonly JsonValue[]): Promise<void> {
+    await writeFile(join(effects.stateRoot, 'queue.json'), ledgerQueueText(queueWithItems(items)));
+  }
+
+  test('a publication-pending item flips to done, families release, head lands', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-reconcile-'));
+    try {
+      const effects = await makeEffects(root);
+      await seedRollout(effects);
+      const { pending } = seedCase('finding-event-causal-order');
+      const review = pending.find((value) => recordEventType(value) === 'review');
+      if (!(review instanceof JsonObject)) throw new Error('fixture has no review');
+      await writeSeeds(effects, pending);
+      await seedRemoteBranch(effects);
+      const reviewId = recordId(review);
+      scopeOf(review);
+      await seedQueue(effects, [
+        new JsonObject([
+          ['kind', 'backfill'],
+          ['family', 'review-ledger'],
+          ['job_id', 'subject:0'],
+          ['state', 'publication-pending'],
+          ['publication_event_id', reviewId],
+          ['scope', scopeOf(review)],
+          ['scope_digest', 'digest-1'],
+          ['generation', JsonNumber.int(1)],
+        ]),
+      ]);
+      const result = await runPublish(effects);
+      expect(result.publication).toBe('reconciled');
+      const queue = parseJsonValue(await readFile(join(effects.stateRoot, 'queue.json'), 'utf8'));
+      if (!(queue instanceof JsonObject)) throw new Error('queue not an object');
+      expect(queue.get('review_ledger_head')).toBe(result.ledger_head);
+      const items = queue.get('items');
+      if (!Array.isArray(items) || !(items[0] instanceof JsonObject)) {
+        throw new Error('queue items lost');
+      }
+      expect(items[0].get('state')).toBe('done');
+      expect(items[0].get('published_event_id')).toBe(reviewId);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a superseded blocked sibling no longer retains the family', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-sibling-'));
+    try {
+      const effects = await makeEffects(root);
+      await seedRollout(effects);
+      const { pending } = seedCase('finding-event-causal-order');
+      const review = pending.find((value) => recordEventType(value) === 'review');
+      if (!(review instanceof JsonObject)) throw new Error('fixture has no review');
+      await writeSeeds(effects, pending);
+      await seedRemoteBranch(effects);
+      const reviewId = recordId(review);
+      scopeOf(review);
+      await seedQueue(effects, [
+        new JsonObject([
+          ['kind', 'backfill'],
+          ['family', 'review-ledger'],
+          ['job_id', 'subject:0'],
+          ['state', 'publication-pending'],
+          ['publication_event_id', reviewId],
+          ['scope', scopeOf(review)],
+          ['scope_digest', 'digest-1'],
+          ['generation', JsonNumber.int(2)],
+        ]),
+        new JsonObject([
+          ['kind', 'backfill'],
+          ['family', 'review-ledger'],
+          ['job_id', 'subject:1'],
+          ['state', 'blocked'],
+          ['scope', scopeOf(review)],
+          ['scope_digest', 'digest-1'],
+          ['generation', JsonNumber.int(1)],
+        ]),
+      ]);
+      await runPublish(effects);
+      const queue = parseJsonValue(await readFile(join(effects.stateRoot, 'queue.json'), 'utf8'));
+      if (!(queue instanceof JsonObject)) throw new Error('queue not an object');
+      const families = queue.get('backfill_families');
+      expect(families instanceof JsonObject && families.has('review-ledger')).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a live execution-owner sibling still retains the family', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-owner-'));
+    try {
+      const effects = await makeEffects(root);
+      await seedRollout(effects);
+      const { pending } = seedCase('finding-event-causal-order');
+      const review = pending.find((value) => recordEventType(value) === 'review');
+      if (!(review instanceof JsonObject)) throw new Error('fixture has no review');
+      await writeSeeds(effects, pending);
+      await seedRemoteBranch(effects);
+      const reviewId = recordId(review);
+      scopeOf(review);
+      await seedQueue(effects, [
+        new JsonObject([
+          ['kind', 'backfill'],
+          ['family', 'review-ledger'],
+          ['job_id', 'subject:0'],
+          ['state', 'publication-pending'],
+          ['publication_event_id', reviewId],
+          ['scope', scopeOf(review)],
+          ['scope_digest', 'digest-1'],
+          ['generation', JsonNumber.int(2)],
+        ]),
+        new JsonObject([
+          ['kind', 'backfill'],
+          ['family', 'review-ledger'],
+          ['job_id', 'subject:1'],
+          ['state', 'blocked'],
+          ['run', new JsonObject([['attempt', JsonNumber.int(3)]])],
+          ['scope', scopeOf(review)],
+          ['scope_digest', 'digest-1'],
+          ['generation', JsonNumber.int(1)],
+        ]),
+      ]);
+      await runPublish(effects);
+      const queue = parseJsonValue(await readFile(join(effects.stateRoot, 'queue.json'), 'utf8'));
+      if (!(queue instanceof JsonObject)) throw new Error('queue not an object');
+      const families = queue.get('backfill_families');
+      expect(families instanceof JsonObject && families.has('review-ledger')).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a changed rollout refuses reconciliation and keeps the request marker', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-rollover-'));
+    try {
+      const base = await makeEffects(root);
+      await seedRollout(base);
+      const { pending } = seedCase('finding-event-causal-order');
+      await writeSeeds(base, pending);
+      await seedRemoteBranch(base);
+      // Simulate a concurrent settings edit between the run's initial read and
+      // the post-push merge: the transport rewrites the rollout mid-run.
+      const swappedRollout = `${JSON.stringify({
+        operational_ruling: 'fixture',
+        no_live_run_verification: 'fixture',
+        owner_branch_ruleset_evidence: 'fixture',
+        durable_artifact_root: '/unused-fixture-volume',
+        runner_identity: 'crq-runner-app',
+        publisher_spool: { ssh_alias: 'other@spool.invalid', ssh_key: '/unused/key' },
+      })}\n`;
+      const effects: PublishRunEffects = {
+        ...base,
+        pushCommit: async (batchBase, head, bundle) => {
+          await writeFile(join(base.stateRoot, 'backfill-rollout.json'), swappedRollout);
+          await base.pushCommit?.(batchBase, head, bundle);
+        },
+      };
+      let message = '';
+      try {
+        await runPublish(effects);
+      } catch (error) {
+        message = error instanceof Error ? error.message : '';
+      }
+      expect(message).toBe('publication configuration changed; retry reconciliation');
+      // The request marker survives for a retry against the new configuration.
+      await expect(
+        stat(join(base.stateRoot, 'backfill', 'publish-request.json')),
+      ).resolves.toBeDefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('creditable review verification through the route', () => {
+  function syntheticOid(byte: string): string {
+    return byte.repeat(40);
+  }
+
+  // A completed, creditable crq-run review. The scope digest and event id are
+  // the real canonical digests of the rows/base document (sha256 over sorted,
+  // utf16be-ordered canonical JSON), so ledgerValidate accepts the record and
+  // the record is creditable end to end.
+  function completedReview(): JsonObject {
+    const A = syntheticOid('a');
+    const scopeDigest = '5df73034504e89834f0676b7a127814b91d8183bd5572979160913688a4a6039';
+    const scopeRow = (): JsonObject =>
+      new JsonObject([
+        ['path', 'src/a.ts'],
+        ['blob', A],
+        ['intervals', [[JsonNumber.int(1), JsonNumber.int(2)]]],
+      ]);
+    return new JsonObject([
+      ['schema', 'cq.review-ledger/v1'],
+      ['event_type', 'review'],
+      ['source_key', 'camerontaylor/cq-toolkit:crq-runner-app:verify'],
+      ['occurred_at', '2026-11-01T00:00:00Z'],
+      ['id', '1c488ca56e2d6e776a2135048469ebc65c402839177b3b8558ac3693d0991473'],
+      [
+        'payload',
+        new JsonObject([
+          ['repo', 'camerontaylor/cq-toolkit'],
+          ['subject_id', 'subject'],
+          ['job_id', 'subject:0'],
+          ['attempt_id', 'subject:0:1'],
+          [
+            'source',
+            new JsonObject([
+              ['repo', 'camerontaylor/cq-toolkit'],
+              ['producer', 'crq-runner-app'],
+              ['type', 'crq-run'],
+              ['id', 'verify'],
+              ['authenticated', true],
+            ]),
+          ],
+          ['base', A],
+          ['head', A],
+          ['head_tree', A],
+          ['target', A],
+          ['target_tree', A],
+          ['policy_digest', 'b'.repeat(64)],
+          ['scope_digest', scopeDigest],
+          [
+            'paths',
+            [
+              new JsonObject([
+                ['path', 'src/a.ts'],
+                ['blob', A],
+                ['mode', '100644'],
+                ['disposition', 'included'],
+                ['reason', 'verified'],
+                ['baseline', new JsonObject([])],
+              ]),
+            ],
+          ],
+          ['requested_scope', [scopeRow()]],
+          ['input_scope', [scopeRow()]],
+          ['reviewed_scope', [scopeRow()]],
+          [
+            'completion',
+            new JsonObject([
+              ['terminal', true],
+              ['skipped', false],
+              ['scope_verified', true],
+              ['exit_code', JsonNumber.int(0)],
+              ['errors', []],
+            ]),
+          ],
+          ['findings', []],
+          [
+            'artifacts',
+            [
+              new JsonObject([
+                ['sha256', 'c'.repeat(64)],
+                ['location', `/fixtures/artifacts/${'c'.repeat(64)}`],
+              ]),
+            ],
+          ],
+          ['outcome', 'completed'],
+        ]),
+      ],
+    ]);
+  }
+
+  test('a creditable review whose tree cannot be verified refuses publication', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-verif-'));
+    try {
+      const effects = await makeEffects(root);
+      await seedRollout(effects);
+      const review = completedReview();
+      await writeSeeds(effects, [review]);
+      await seedRemoteBranch(effects);
+      let message = '';
+      try {
+        await runPublish(effects);
+      } catch (error) {
+        message = error instanceof Error ? error.message : '';
+      }
+      // verify_review resolves the recorded head/target commits in the review
+      // clone; the synthetic oids are unknown there and the review refuses.
+      expect(message).toContain('git rev-parse failed');
+      // Nothing was acknowledged: the record is still pending.
+      const pendingDir = join(effects.stateRoot, 'backfill', 'publication', 'pending');
+      expect((await readdir(pendingDir)).length).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a non-creditable review is accepted without verification', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-noncred-'));
+    try {
+      const effects = await makeEffects(root);
+      await seedRollout(effects);
+      const { pending } = seedCase('finding-event-causal-order');
+      const review = pending.find((value) => recordEventType(value) === 'review');
+      if (!(review instanceof JsonObject)) throw new Error('fixture has no review');
+      // The vector review carries outcome "skipped": Python accepts it without
+      // running verify_review (no credit is claimed).
+      expect(
+        review.get('payload') instanceof JsonObject &&
+          (review.get('payload') as JsonObject).get('outcome'),
+      ).toBe('skipped');
+      await writeSeeds(effects, pending);
+      await seedRemoteBranch(effects);
+      const result = await runPublish(effects);
+      expect(result.publication).toBe('reconciled');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('CAS rollback refusal through the route', () => {
+  test('a checkpoint ahead of the remote ref blocks a rewound publication', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-cas-'));
+    try {
+      const effects = await makeEffects(root);
+      await seedRollout(effects);
+      const { pending } = seedCase('finding-event-causal-order');
+      await writeSeeds(effects, pending);
+      // Seed the checkpoint ref directly: the validated fetch requires every
+      // new head to be a descendant of this ref. The remote branch head stays
+      // a synthetic oid with no parent commit, so the ancestry walk cannot
+      // reach the checkpoint and the CAS guard refuses (Python parity).
+      const checkpoint = 'f'.repeat(40);
+      await effects.runPublisherGit(['update-ref', 'refs/crq/review-ledger-validated', checkpoint]);
+      await seedRemoteBranch(effects);
+      let message = '';
+      try {
+        await runPublish(effects);
+      } catch (error) {
+        message = error instanceof Error ? error.message : '';
+      }
+      expect(message).toBe('ledger head is not a descendant of validated history');
+      const pendingDir = join(effects.stateRoot, 'backfill', 'publication', 'pending');
+      expect((await readdir(pendingDir)).length).toBe(pending.length);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

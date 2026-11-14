@@ -14,20 +14,28 @@
  *    failure marker is `idle`. A missing marker with pending work persists a
  *    reconciliation request first, so a crash before the merge still
  *    reconciles on the next timer run.
- * 3. `publisher.publish(outbox)` runs the validated attempt loop; a fresh
- *    `fetch` then feeds review records to the finding inbox (`ingest` once
- *    per review, `recover` over all events) before any queue write.
+ * 3. `publisher.publish(outbox)` runs the validated attempt loop under
+ *    Python's publisher lock (inside the publication clone, exactly Python's
+ *    inode); a fresh `fetch` then feeds review records to the finding inbox
+ *    (`ingest` once per review, `recover` over all events) before any queue
+ *    write. Creditable reviews are verified against repository evidence
+ *    (`restore` + `verify_review`) before their batch pushes, and pushes run
+ *    through the rollout's dedicated `publisher_spool` signer transport.
  * 4. Queue reconciliation (`reconcile_publication`) runs under the caller's
- *    `tick.lock` seam: completed non-owner backfill items whose
+ *    `tick.lock` seam after reloading the rollout (a concurrent configuration
+ *    change refuses with Python's retry text and keeps the request marker):
+ *    completed non-owner backfill items whose
  *    `publication_event_id` the remote validates flip to done with Python's
- *    sibling-family bookkeeping, `review_ledger_head` advances, the
- *    publication error clears, and a request the lock still owns is removed.
+ *    sibling-family bookkeeping (including the superseded-sibling exclusion),
+ *    `review_ledger_head` advances, the publication error clears, and a
+ *    request the lock still owns is removed.
  *    A busy tick lock is `reconciliation-pending`: remote work succeeded and
  *    only local bookkeeping waits, so no failure marker is written.
  * 5. Any other failure atomically persists `backfill/publication-failure.json`
  *    and halts the queue (`backfill_halted`/`backfill_halt_operation`) under
  *    the tick lock; marker-write or queue-lock failures become notes on the
- *    original error, never replacements.
+ *    original error, never replacements. A disabled rollout (absent file) is
+ *    the `disabled` outcome, not a failure.
  *
  * Effects are injected through `PublishRunEffects`: filesystem roots, the
  * hardened git runner and the tick-lock/queue seam. The adapter binding in
@@ -37,7 +45,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, stat, unlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { atomicWrite } from '../../adapters/crq/atomic.js';
 import { withLock } from '../../adapters/crq/lock.js';
 import {
@@ -45,13 +53,25 @@ import {
   fileFindingInbox,
   type ArtifactStore,
 } from '../../adapters/crq/findingStore.js';
-import { GitLedger, LedgerTransportError, type RunGit } from '../../adapters/crq/ledgerGit.js';
-import { publisherSpoolPushCommit, SpoolConfigError } from '../../adapters/crq/publisherSpool.js';
+import {
+  GitLedger,
+  LedgerTransportError,
+  type PushCommit,
+  type RunGit,
+} from '../../adapters/crq/ledgerGit.js';
+import {
+  parsePublisherSpool,
+  publisherSpoolPushCommit,
+} from '../../adapters/crq/publisherSpool.js';
 import { FindingInbox } from '../review/internal/crq/findingInbox.js';
 import type { FindingInboxFiles } from '../review/internal/crq/findingInbox.js';
 import { Outbox, type OutboxFiles } from '../review/internal/crq/outbox.js';
-import { publish as publishOutbox, PublicationPushError } from '../review/internal/crq/publisher.js';
-import { JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
+import {
+  publish as publishOutbox,
+  PublicationPushError,
+} from '../review/internal/crq/publisher.js';
+import { verifyReview } from '../../adapters/crq/reviewVerify.js';
+import { JsonObject, JsonNumber, type JsonValue } from '../../policy/crq/jsonValue.js';
 import {
   LedgerIntegrityError,
   ledgerCanonicalBytes,
@@ -123,6 +143,14 @@ export interface PublishRunEffects {
    * exactly such a wrapper; tests replay vectors with the same seam.
    */
   readonly verifyArtifact?: ArtifactStore['verify'];
+  /**
+   * Optional publication transport override. Production (the adapter in
+   * `publishSource.ts`) leaves this unset so `worker_services` binds the
+   * rollout's dedicated `publisher_spool` signer — the only transport, never
+   * a direct-push fallback. Vector replay binds a fake, as Python's B1
+   * emitter binds a fake Spool.
+   */
+  readonly pushCommit?: PushCommit;
   /**
    * Python's `with_lock(fn, lock_wait=...)` around `tick.lock`: the callback's
    * return value when it ran, null when the lock stayed busy.
@@ -220,13 +248,21 @@ function fileOutboxFiles(root: string): OutboxFiles {
 }
 
 /** `worker_services`: publisher-owned bare clone plus the injected stores. */
-async function workerServices(effects: PublishRunEffects): Promise<Services> {
+async function workerServices(effects: PublishRunEffects, config: JsonObject): Promise<Services> {
   const repoRoot = join(effects.stateRoot, 'backfill', 'publisher.git');
   const origin = await effects.runSchedulerGit(['remote', 'get-url', 'origin']);
   if (origin.code !== 0) {
     throw new PublishRunError('scheduler clone origin unavailable');
   }
-  const ledger = new GitLedger({ repo: repoRoot, runGit: effects.runPublisherGit });
+  // Python's services(): Spool(config['publisher_spool']).publish_ledger is
+  // the only transport; a signer-key deployment never falls back to push.
+  // Tests bind the fake through the effects seam, like the B1 emitter does.
+  const spool = parsePublisherSpool(config.get('publisher_spool'));
+  const ledger = new GitLedger({
+    repo: repoRoot,
+    runGit: effects.runPublisherGit,
+    pushCommit: effects.pushCommit ?? publisherSpoolPushCommit(spool),
+  });
   await ledger.ensureBareRepo(new TextDecoder().decode(origin.stdout).trim());
   const artifacts = fileArtifactStore(effects.durableArtifactRoot);
   const artifactVerify = effects.verifyArtifact ?? artifacts.verify.bind(artifacts);
@@ -285,26 +321,7 @@ async function readRollout(effects: PublishRunEffects): Promise<JsonObject> {
   if (value.get('runner_identity') !== 'crq-runner-app') {
     throw integrity('backfill rollout prerequisites incomplete');
   }
-  const spool = value.get('publisher_spool');
-  if (!(spool instanceof JsonObject)) {
-    throw integrity('backfill rollout publisher_spool incomplete or invalid');
-  }
-  const keys = spool.entries.map(([key]) => key);
-  if (keys.some((key) => key !== 'ssh_alias' && key !== 'ssh_key' && key !== 'key')) {
-    throw integrity('backfill rollout publisher_spool incomplete or invalid');
-  }
-  const alias = spool.get('ssh_alias');
-  if (typeof alias !== 'string' || !SPOOL_ALIAS.test(alias)) {
-    throw integrity('backfill rollout publisher_spool incomplete or invalid');
-  }
-  const key = spool.get('ssh_key') ?? spool.get('key');
-  if (
-    typeof key !== 'string' ||
-    key.trim() === '' ||
-    /\n|\r|\0/.test(key)
-  ) {
-    throw integrity('backfill rollout publisher_spool incomplete or invalid');
-  }
+  parsePublisherSpool(value.get('publisher_spool'));
   return value;
 }
 
@@ -312,9 +329,6 @@ async function readRollout(effects: PublishRunEffects): Promise<JsonObject> {
 export class PublishRolloutDisabled extends Error {
   override readonly name = 'PublishRolloutDisabled';
 }
-
-/** Python's `settings()` spool alias shape: `re.fullmatch` of that pattern. */
-const SPOOL_ALIAS = /^[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.:-]*$/;
 
 /**
  * `backfill_publisher.run` over injected effects. Throws after persisting
@@ -329,7 +343,7 @@ export async function runPublish(effects: PublishRunEffects): Promise<PublishRun
   const lockPath = join(effects.stateRoot, 'backfill', 'publisher.lock');
   try {
     return await withLock(lockPath, { wait: true }, async () => {
-      const services = await workerServices(effects);
+      const services = await workerServices(effects, config);
       let requested = await readFileBytes(requestPath);
       if (
         requested === null &&
@@ -372,13 +386,18 @@ export async function runPublish(effects: PublishRunEffects): Promise<PublishRun
               location: stringField(parsed, 'location'),
             });
           },
-          verifyCreditableReview: () => Promise.resolve(),
+          // Python's publish loop: repository.restore + Repository.verify_review
+          // over the review clone for every creditable record, before the push.
+          verifyCreditableReview: (value) => {
+            if (!(value instanceof JsonObject)) {
+              return Promise.reject(integrity('creditable record is not an object'));
+            }
+            return verifyReview(effects.runSchedulerGit, value, (reference) =>
+              services.verifyArtifact(reference),
+            ).then(() => undefined);
+          },
           withPublisherLock: (fn) =>
-            withLock(
-              join(effects.stateRoot, 'backfill', 'review-ledger-publisher.lock'),
-              { wait: true },
-              fn,
-            ),
+            publisherLockPath(effects).then((lockPath) => withLock(lockPath, { wait: true }, fn)),
         },
       );
       // Only a fresh validated fetch is acknowledgement authority.
@@ -421,6 +440,23 @@ function stringField(value: JsonValue, key: string): string {
 }
 
 /**
+ * Python's publisher lock: `(GitLedger.repo / git-common-dir).resolve() /
+ * review-ledger-publisher.lock` (review_ledger.py:574-577). For the bare
+ * publisher clone that resolves inside `state/backfill/publisher.git`, so a
+ * Python and a TypeScript publisher on one state root share the inode.
+ */
+async function publisherLockPath(effects: PublishRunEffects): Promise<string> {
+  const repoRoot = join(effects.stateRoot, 'backfill', 'publisher.git');
+  const probe = await effects.runPublisherGit(['rev-parse', '--git-common-dir']);
+  if (probe.code !== 0) {
+    throw new PublishRunError('publisher clone common directory unavailable');
+  }
+  const common = new TextDecoder().decode(probe.stdout).trim();
+  const base = isAbsolute(common) ? common : join(repoRoot, common);
+  return join(resolve(base), 'review-ledger-publisher.lock');
+}
+
+/**
  * `reconcile_publication` plus the request bookkeeping Python keeps inside
  * the same `merge()` closure. Returns true when the lock ran the whole
  * merge; the caller distinguishes a busy lock.
@@ -434,6 +470,24 @@ async function reconcileQueue(
   failurePath: string,
   requested: Uint8Array | null,
 ): Promise<true> {
+  // Python's merge closure reloads settings under tick.lock and refuses a
+  // concurrent rollout change before touching the queue; the request marker
+  // survives for a retry against the current configuration.
+  let current: JsonObject;
+  try {
+    current = await readRollout(effects);
+  } catch (error) {
+    if (
+      error instanceof PublishRolloutDisabled ||
+      (error instanceof LedgerIntegrityError && /publisher_spool/.test(error.message))
+    ) {
+      throw integrity('publication configuration changed; retry reconciliation');
+    }
+    throw error;
+  }
+  if (!jsonEqual(current, config)) {
+    throw integrity('publication configuration changed; retry reconciliation');
+  }
   let queue = ledgerLoads(await effects.readQueue());
   if (!(queue instanceof JsonObject)) throw integrity('queue must be an object');
   for (const candidate of itemsOf(queue)) {
@@ -468,12 +522,11 @@ async function reconcileQueue(
     await unlink(failurePath);
   }
   if (requested !== null) {
-    const current = await readFileBytes(requestPath);
-    if (current !== null && bytesEqual(current, requested)) {
+    const latest = await readFileBytes(requestPath);
+    if (latest !== null && bytesEqual(latest, requested)) {
       await unlink(requestPath);
     }
   }
-  void config;
   return true;
 }
 
@@ -574,9 +627,32 @@ function isSubset(subset: ReadonlySet<number>, superset: ReadonlySet<number>): b
   return true;
 }
 
+/** Structural equality over the JSON domain (Python `==` on parsed JSON). */
+function jsonEqual(a: JsonValue | undefined, b: JsonValue | undefined): boolean {
+  if (a === b) return true;
+  if (a === undefined || b === undefined) return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, index) => jsonEqual(item, b[index]));
+  }
+  if (a instanceof JsonObject || b instanceof JsonObject) {
+    if (!(a instanceof JsonObject) || !(b instanceof JsonObject)) return false;
+    if (a.entries.length !== b.entries.length) return false;
+    return a.entries.every(([key, value]) => {
+      if (!b.has(key)) return false;
+      return jsonEqual(value, b.get(key));
+    });
+  }
+  return false;
+}
+
 /** Python's `value.get(key, default)` for the numeric fields of the sibling rule. */
 function numericOr(value: JsonValue | undefined, fallback: number): number {
-  return typeof value === 'number' ? value : fallback;
+  if (value instanceof JsonNumber) {
+    if (value.integer !== null) return Number(value.integer);
+    if (value.float !== null) return value.float;
+  }
+  return fallback;
 }
 
 /** `runtime.clear_operation_halt`: only the owning operation clears its halt. */
