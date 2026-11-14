@@ -11,7 +11,10 @@ The adapter reuses ``prepare-host.render_service`` for source-bound rendering an
 derives its declared unit inventory from the pinned template tree. It does not
 claim exhaustive installed-host activation discovery, root coverage or caller
 coverage. Injected discovery evidence must enumerate the supported topology and
-reject foreign entries. Unknown or failed observations refuse before mutation.
+reject foreign entries. The host's declared environment drop-in directories are
+accepted only by exact entry name, type, ownership and mode; their contents are
+never read and they are never written, removed or renamed. Unknown or failed
+observations refuse before mutation.
 
 The snapshot payload reuses the guest adapter's schema version 1 top-level keys,
 path-state shapes and activator key names. The owned path set and activator key
@@ -38,6 +41,7 @@ from typing import Protocol
 SCHEMA_VERSION = 1
 TEMPLATE_DIR = "apps/crq-python/ops/systemd/"
 MAX_UNIT_BYTES = 1 << 20
+MAX_DROPIN_BYTES = 1 << 16
 RUNTIME_RE = re.compile(r"node:[0-9a-f]{40}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
@@ -50,6 +54,19 @@ UNIT_FILE_STATES = {"enabled", "disabled", "static", "masked", "alias",
 RESTORABLE_ACTIVE = {"active", "inactive"}
 DEFAULT_COMPLETION_WINDOW = 1800.0
 COMPLETION_MARGIN_SECONDS = 60
+
+# Installed environment drop-ins the production host carries under the CRQ
+# units. The names are exact and the adapter never reads their contents: it
+# validates each declared directory and entry by type, ownership and mode, and
+# leaves them untouched across switch and rollback. A drop-in directory for a
+# unit outside this declaration still refuses.
+DECLARED_DROPINS = {
+    "crq-watchdog.service": frozenset({"20-paseo-env.conf"}),
+    "crq-tick.service": frozenset({"20-paseo-env.conf",
+                                   "coderabbit-managed.conf"}),
+    "crq-slot.service": frozenset({"20-paseo-env.conf",
+                                   "coderabbit-managed.conf"}),
+}
 
 
 class SystemdPort(Protocol):
@@ -592,14 +609,124 @@ class ProductionUnitAdapter:
         except ValueError:
             self.refuse("snapshot path parent escapes the unit directory")
 
+    def _declared_dropins(self, unit, inventory):
+        """The declared drop-in directories for one unit's scanned names."""
+        declared = {}
+        for name in (unit, inventory[unit]["timer"], inventory[unit]["path"]):
+            if name is None or name not in DECLARED_DROPINS:
+                continue
+            declared[str(self.unit_dir / (name + ".d"))] = \
+                DECLARED_DROPINS[name]
+        return declared
+
+    def _validate_dropin_dir(self, path, declared):
+        """Validate one declared environment drop-in directory.
+
+        Acceptance is exact: a real directory owned by the adapter identity
+        with no group or world write bits, containing exactly the declared
+        entry names. Contents are never read. Entries must be identity-owned
+        regular files, or absolute symlinks to an identity-owned regular file
+        outside the unit directory, with no group or world write bits.
+        """
+        path = Path(path)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            self.refuse("declared drop-in directory is unreadable: "
+                        + str(exc)[:160])
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            self.refuse("declared drop-in path is not a real directory: "
+                        + str(path))
+        if stat.S_IMODE(info.st_mode) & 0o022:
+            self.refuse("declared drop-in directory is group- or "
+                        "world-writable: " + str(path))
+        if info.st_uid != self.identity.uid or info.st_gid != self.identity.gid:
+            self.refuse("declared drop-in directory ownership is not the "
+                        "adapter identity: " + str(path))
+        try:
+            entries = sorted(path.iterdir())
+        except OSError as exc:
+            self.refuse("declared drop-in directory cannot be listed: "
+                        + str(exc)[:160])
+        if {entry.name for entry in entries} != set(declared):
+            self.refuse("declared drop-in directory does not contain exactly "
+                        "the declared entries: " + str(path))
+        for entry in entries:
+            self._validate_dropin_entry(entry)
+
+    def _validate_dropin_entry(self, path):
+        path = Path(path)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            self.refuse("declared drop-in entry disappeared: " + str(path))
+        except OSError as exc:
+            self.refuse("declared drop-in entry is unreadable: "
+                        + str(exc)[:160])
+        if info.st_uid != self.identity.uid or info.st_gid != self.identity.gid:
+            self.refuse("declared drop-in entry ownership is not the adapter "
+                        "identity: " + str(path))
+        if stat.S_ISLNK(info.st_mode):
+            try:
+                target = os.readlink(path)
+            except OSError as exc:
+                self.refuse("declared drop-in symlink is unreadable: "
+                            + str(exc)[:160])
+            target_path = Path(target)
+            if not target_path.is_absolute():
+                self.refuse("declared drop-in symlink target is not absolute: "
+                            + str(path))
+            try:
+                resolved = target_path.resolve(strict=True)
+                target_info = resolved.stat()
+            except (OSError, RuntimeError) as exc:
+                self.refuse("declared drop-in symlink target is unreadable: "
+                            + str(path) + ": " + str(exc)[:160])
+            if not stat.S_ISREG(target_info.st_mode):
+                self.refuse("declared drop-in symlink target is not a regular "
+                            "file: " + str(path))
+            if (target_info.st_uid != self.identity.uid
+                    or target_info.st_gid != self.identity.gid):
+                self.refuse("declared drop-in symlink target ownership is not "
+                            "the adapter identity: " + str(path))
+            if stat.S_IMODE(target_info.st_mode) & 0o022:
+                self.refuse("declared drop-in symlink target is group- or "
+                            "world-writable: " + str(path))
+            if target_info.st_size > MAX_DROPIN_BYTES:
+                self.refuse("declared drop-in symlink target exceeds the "
+                            "adapter bound: " + str(path))
+            try:
+                resolved.relative_to(self.unit_dir.resolve())
+            except ValueError:
+                return
+            self.refuse("declared drop-in symlink target resolves inside the "
+                        "unit directory: " + str(path))
+        if not stat.S_ISREG(info.st_mode):
+            self.refuse("declared drop-in entry is not a regular file or "
+                        "symlink: " + str(path))
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & 0o7000:
+            self.refuse("declared drop-in entry has unsupported special bits: "
+                        + str(path))
+        if mode & 0o022:
+            self.refuse("declared drop-in entry is group- or world-writable: "
+                        + str(path))
+        if info.st_size > MAX_DROPIN_BYTES:
+            self.refuse("declared drop-in entry exceeds the adapter bound: "
+                        + str(path))
+
     def _installed_entries(self, unit, inventory):
         paths = self._unit_paths(unit, inventory)
         allowed = {str(path) for path in paths.values()}
         prefix = unit.split(".")[0]
+        dropins = self._declared_dropins(unit, inventory)
         unexpected = {}
         for path in sorted(self.unit_dir.glob(prefix + "*")):
-            if str(path) not in allowed:
-                unexpected[str(path)] = "unexpected installed entry"
+            if str(path) in allowed or str(path) in dropins:
+                continue
+            unexpected[str(path)] = "unexpected installed entry"
         for wants in sorted(self.unit_dir.glob("*.wants")):
             if wants.is_symlink() or not wants.is_dir():
                 continue
@@ -610,7 +737,9 @@ class ProductionUnitAdapter:
             if name is None:
                 continue
             dropin = self.unit_dir / (name + ".d")
-            if dropin.exists() or dropin.is_symlink():
+            if str(dropin) in dropins:
+                self._validate_dropin_dir(dropin, dropins[str(dropin)])
+            elif dropin.exists() or dropin.is_symlink():
                 unexpected[str(dropin)] = "undeclared drop-in directory"
         if unexpected:
             self.refuse("installed topology is outside the declared inventory: "

@@ -118,6 +118,21 @@ production completion coverage. `test_unit_adapter.py` exercises both
 runtimes, forward and recovery, real temporary files and injected host ports
 only.
 
+Installed environment drop-ins are part of the declared topology, not an
+external exception. The production host carries `20-paseo-env.conf` (the shared
+messaging environment) under the watchdog, tick and slot service units, and
+`coderabbit-managed.conf` under tick and slot. The adapter accepts exactly those
+names as a real, identity-owned directory with no group or world write bits;
+each entry must be an identity-owned regular file, or an absolute symlink to an
+identity-owned regular file outside the unit directory. It never reads their
+contents and never writes, removes or renames them, so the alert environment
+survives switch and rollback unchanged. A drop-in directory for another unit,
+another entry name, a symlinked directory, or an unsafe entry target still
+refuses before mutation. Because these paths are host-installed rather than
+owned snapshot paths, the adapter revalidates the declared shape at every phase
+and the regression test asserts the directory, entries and shared target are
+unchanged across a full switch and rollback.
+
 The completion budget is derived from the declared topology rather than a
 fixed default. Preflight requires the prior timer to be active, parses the
 committed timer schedule and service start timeout, and refuses when the
