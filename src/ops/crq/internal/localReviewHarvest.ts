@@ -55,7 +55,10 @@ export async function completeLocalReview(
   const findings: JsonValue[] = [];
   for (const line of splitLines(raw)) {
     try {
-      const event = parseJsonValue(line);
+      const event = parseJsonValue(line, {
+        parseConstant: (raw) =>
+          JsonNumber.float(raw === 'NaN' ? NaN : raw === 'Infinity' ? Infinity : -Infinity),
+      });
       if (event instanceof JsonObject && event.get('type') === 'finding') findings.push(event);
     } catch {
       // Python ignores malformed lines when extracting findings.
