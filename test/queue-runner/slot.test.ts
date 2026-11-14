@@ -11,6 +11,7 @@ const now = Date.parse('2026-10-28T01:01:00Z');
 describe('slot preflight', () => {
   it('validates hints and requires a strictly future timestamp', () => {
     expect(futureSlotHint('2026-10-28T01:01:01Z\n', now)).toBe(true);
+    expect(futureSlotHint('2026-10-28t01:01:01z', now)).toBe(true);
     expect(futureSlotHint('2026-10-28T1:1:00Z', now)).toBe(false);
     expect(futureSlotHint('2026-02-30T00:00:00Z', now)).toBe(false);
     expect(futureSlotHint('invalid', now)).toBe(false);

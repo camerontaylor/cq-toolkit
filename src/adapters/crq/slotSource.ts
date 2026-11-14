@@ -7,7 +7,7 @@ import { withLock } from './lock.js';
 
 /** Python strptime's UTC hint format, including its unpadded components. */
 export function futureSlotHint(text: string, now: number): boolean {
-  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})T(\d{1,2}):(\d{1,2}):(\d{1,2})Z$/.exec(text.trim());
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})T(\d{1,2}):(\d{1,2}):(\d{1,2})Z$/i.exec(text.trim());
   if (!match) return false;
   const [, y, m, d, h, min, s] = match;
   const [year, month, day, hour, minute, second] = [y, m, d, h, min, s].map(Number) as [
