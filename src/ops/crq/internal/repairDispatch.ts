@@ -101,6 +101,13 @@ export interface RepairDispatchEffects {
 export interface RepairHarvestEffects {
   readonly git: RepairDispatchGit;
   readonly readPreparedJob: (jobId: string) => Promise<string>;
+  /**
+   * Host-handover marker (`state/runner-disabled`, Python #1716). Consulted only
+   * at admission points, never inside a running job: a refusal here means no
+   * kernel lease, journal write or provider launch. A throwing read propagates
+   * rather than being treated as "enabled".
+   */
+  readonly runnerDisabled: () => Promise<boolean>;
 }
 
 /**
@@ -183,6 +190,7 @@ export type RepairDispatchRefusal =
   | RepairRefusal
   | RepairRequestRefusal
   | RepairSnapshotRefusal
+  | 'runner-disabled'
   | 'selection-not-queued'
   | 'canonical-delivery-unverified'
   | 'selection-mismatch'
@@ -1284,6 +1292,10 @@ function withInvocationGuard(
         importer: async (wiring) => {
           const op = await entry.importer(wiring);
           return async (input) => {
+            // Marker written after admission but before the provider call.
+            if (await effects.runnerDisabled()) {
+              return { status: 'failed', error: `${GUARD_PREFIX}runner-disabled` };
+            }
             const guard = await revalidateAtInvocation(dispatch, effects, input);
             if (guard !== undefined) {
               return { status: 'failed', error: `${GUARD_PREFIX}${guard}` };
@@ -1360,6 +1372,12 @@ export async function runRepairDispatch(
     if (!dispatch.source.atTip) return refusal('source-not-current-tip');
   } else if (!options.resume) {
     return refusal('attempt-inconsistent');
+  }
+
+  // Admission before the kernel lease or any journal write; a retained-ok replay
+  // launches no provider, so only an attempt that can spend is refused.
+  if (dispatch.attempt !== 'retained-ok' && (await effects.runnerDisabled())) {
+    return refusal('runner-disabled');
   }
 
   const preflight = await preflightBeforeRun(dispatch, effects);
