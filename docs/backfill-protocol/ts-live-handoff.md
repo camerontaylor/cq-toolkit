@@ -33,15 +33,24 @@ an interrupted inventory can otherwise mix ranked rows with older provenance.
   endpoint or activation. The non-launching selection seam in
   `src/ops/crq/internal/backfillSelection.ts` consumes injected validated
   coverage snapshots and a dry gate probe, returning a replacement queue and
-  candidate index. The caller must hold `tick.lock`, flush pending refusal
-  events first, persist returned state, and perform the real gate and bind
-  protocol before any spawn. Snapshot refresh is requested under the lock but
-  calculated off-lock. No selection seam is wired to a live executor. Unlike
-  Python `select`, the seam stops at the first candidate: if the subsequent real
-  gate refuses, it does not mark later jobs with the refusal or write the
-  reconciliation record in that pass. Complete the executor with a continuation
-  that applies those updates before claiming selection parity. This slice cannot
-  perform the real gate because it does not own launch and binding recovery.
+  candidate index. An optional real gate can persist a reservation, with
+  refusal continuation marking later jobs and reconciliation. The caller must
+  hold `tick.lock`, flush pending refusal events first, persist returned state,
+  and complete or recover every reserved candidate. Coverage refresh hints are
+  written before a real reservation so hint failure cannot strand one. This
+  differs from Python's post-launch best-effort hint ordering.
+  `src/ops/crq/internal/backfillBinding.ts` binds a recorded reviewing run,
+  spools its state event and saves, or reloads the durable queue and saves
+  unknown ownership on bind failure. On any thrown launch, reload under the
+  same lock, reconcile the exact item and attempt, and never retry the spawn or
+  overwrite a durable run with the pre-launch queue. The caller still owns
+  launch, live effects and exception recovery. Positive
+  pre-vendor cancellation is not exposed here: it requires the complete terminal
+  transition and durable refusal-event replay. A binding identity-guard failure
+  conservatively retains unknown ownership, unlike Python's non-reviewing
+  refusal path. The future caller must route positively proven pre-vendor
+  refusals through the complete terminal path, never retry a spawn from this
+  guard. No seam is wired to a live executor.
   For the next slice, use
   `apps/crq-python/backfill_runtime.py` at main commit
   `0cb627ebf38dafb3089b2fe7eb4f1e153665f307`: `usage_context` reflects or

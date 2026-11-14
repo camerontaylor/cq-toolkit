@@ -75,6 +75,100 @@ describe('non-launching backfill selection', () => {
     expect(result.candidate).toBe(1);
     expect(getItem(result.queue, 1).get('tier_importance')).toBe('T1');
   });
+  it('continues after a real gate refusal and reconciles later jobs', async () => {
+    let calls = 0;
+    const result = await reconcileBackfillSelection(
+      queue(),
+      options,
+      effects({
+        admitGate: async (q, i) => {
+          calls++;
+          const items = q.get('items');
+          if (!Array.isArray(items)) throw new Error('bad items');
+          return {
+            queue: withObjectKeys(q, [
+              [
+                'items',
+                items.map((v, n) =>
+                  n === i ? withObjectKeys(getItem(q, i), [['wait_reason', 'quota']]) : v,
+                ),
+              ],
+              ['gate_marker', 'preserved'],
+            ]),
+            admitted: false,
+          };
+        },
+      }),
+    );
+    expect(calls).toBe(1);
+    expect(result.candidate).toBeNull();
+    expect(result.reserved).toBe(false);
+    expect(getItem(result.queue, 0).get('wait_reason')).toBe('quota');
+    expect(getItem(result.queue, 1).get('wait_reason')).toBe('quota');
+    expect(result.queue.get('gate_marker')).toBe('preserved');
+    expect(result.queue.has('backfill_coverage_reconciled')).toBe(true);
+  });
+  it('reports a persisted gate reservation and does not call the real gate in dry mode', async () => {
+    let calls = 0;
+    const fx = effects({
+      admitGate: async (q) => {
+        calls++;
+        return { queue: withObjectKeys(q, [['durable', 'yes']]), admitted: true };
+      },
+    });
+    const dry = await reconcileBackfillSelection(queue(), { ...options, dry: true }, fx);
+    expect(dry.reserved).toBe(false);
+    expect(calls).toBe(0);
+    const result = await reconcileBackfillSelection(queue(), options, fx);
+    expect(calls).toBe(1);
+    expect(result.reserved).toBe(true);
+    expect(result.queue.get('durable')).toBe('yes');
+  });
+  it('requests a stale hint only once when real admission refuses', async () => {
+    const requests: string[][] = [];
+    const result = await reconcileBackfillSelection(
+      queue(),
+      options,
+      effects({
+        loadCoverage: async (target) => (target === 't1' ? null : { covered: new Map(), gaps: [] }),
+        requestCoverage: async (_head, targets) => {
+          requests.push([...targets]);
+        },
+        admitGate: async (q, i) => {
+          const items = q.get('items');
+          if (!Array.isArray(items)) throw new Error('bad items');
+          return {
+            queue: withObjectKeys(q, [
+              [
+                'items',
+                items.map((v, n) =>
+                  n === i ? withObjectKeys(getItem(q, i), [['wait_reason', 'quota']]) : v,
+                ),
+              ],
+            ]),
+            admitted: false,
+          };
+        },
+      }),
+    );
+    expect(requests).toEqual([['t1']]);
+    expect(result.queue.has('backfill_coverage_reconciled')).toBe(false);
+  });
+  it('does not reserve when a stale-target refresh hint fails', async () => {
+    let gates = 0;
+    const fx = effects({
+      loadCoverage: async (target) => (target === 't1' ? null : { covered: new Map(), gaps: [] }),
+      requestCoverage: async () => {
+        throw new Error('hint failed');
+      },
+      admitGate: async (q) => {
+        gates++;
+        return { queue: q, admitted: true };
+      },
+    });
+    await expect(reconcileBackfillSelection(queue(), options, fx)).rejects.toThrow('hint failed');
+    expect(gates).toBe(0);
+  });
   it('requests stale and gap snapshots, and never selects either', async () => {
     const requests: string[][] = [];
     const result = await reconcileBackfillSelection(
