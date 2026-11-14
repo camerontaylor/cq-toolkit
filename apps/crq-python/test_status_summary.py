@@ -423,8 +423,10 @@ class MergedCurrentSummaryTest(unittest.TestCase):
             (root / "state").mkdir()
             (root / "state/events.jsonl").write_text(
                 "\n".join(json.dumps(e) for e in events) + "\n")
-            with mock.patch.object(adapter, "read_events",
-                                   wraps=adapter.read_events) as spy, \
+            xdg = root / "xdg-state"
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(xdg)}), \
+                    mock.patch.object(adapter, "read_events",
+                                      wraps=adapter.read_events) as spy, \
                     mock.patch.object(adapter, "systemd_activity",
                                       return_value=([], [])):
                 data = adapter.publish(root, queue, config,
