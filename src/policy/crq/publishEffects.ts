@@ -599,7 +599,8 @@ export interface SystemdActivity {
   readonly services: Readonly<Record<string, SystemdUnitActivity>>;
 }
 
-interface SystemdClock {
+/** The realtime/monotonic pair captured with the systemd probe output. */
+export interface SystemdClock {
   /** `time.time()` when the output was captured. */
   readonly realtime: number;
   /** `time.clock_gettime(CLOCK_MONOTONIC)` at the same moment. */

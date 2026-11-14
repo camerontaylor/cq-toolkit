@@ -1,10 +1,12 @@
 #!/usr/bin/env node
+import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { OpResult } from '../kernel/types.js';
 import { runRepairPrepare } from '../adapters/crq/repairPreparation.js';
 import { runPublishUnit } from '../adapters/crq/publishSource.js';
+import { runStatusWriter } from '../adapters/crq/statusWriter.js';
 import { MAX_REQUEST_BYTES, runQueueCapabilityMain } from '../adapters/crq/queueCapabilityMain.js';
 import { run } from './runner.js';
 import { planTick } from './tick.js';
@@ -48,18 +50,56 @@ if (command === 'queue-capability') {
 } else {
   const stateHome = process.env.XDG_STATE_HOME;
   const gitleaksPath = process.env.PATH;
+
+  /** The XDG state roots the status command writes/reads under. */
+  function statusRoots(stateRoot: string): {
+    runnerRoot: string;
+    stateRoot: string;
+    xdgStateHome: string;
+    home: string;
+  } {
+    const home = homedir();
+    return {
+      runnerRoot: root,
+      stateRoot,
+      xdgStateHome: stateHome ?? '',
+      home,
+    };
+  }
+
   const result = await run(process.argv.slice(2), {
     shadowRoot: root,
     tick: randomUUID(),
     planner: (planCommand, args) => planTick(root, planCommand, args),
     // Operator-only: explicit roots, no cwd/env default, never a unit command.
-    operatorLive: (liveCommand, args) =>
-      liveCommand === 'repair-prepare'
-        ? runRepairPrepare(args, { gitleaksPath })
-        : Promise.resolve({
-            artifact: { status: 'failed' as const, error: `${liveCommand} is not implemented` },
-            exitCode: 1,
-          }),
+    operatorLive: async (liveCommand, args) => {
+      if (liveCommand === 'repair-prepare') return runRepairPrepare(args, { gitleaksPath });
+      if (liveCommand === 'status') {
+        const parsed = parseStatusArgv(args);
+        if (!parsed.ok) return usageArtifact('status', parsed.message);
+        // The queue-runner binary's stdout is exactly one JSON document for
+        // every command; the operator-readable markdown travels in the
+        // artifact's `value` field, not the stdout channel.
+        let statusMarkdown = '';
+        const exitCode = await runStatusWriter(statusRoots(parsed.stateRoot), {
+          write: (text) => {
+            statusMarkdown = text;
+          },
+          error: (text) => process.stderr.write(text),
+        });
+        return {
+          artifact:
+            exitCode === 0
+              ? { status: 'ok' as const, value: { markdown: statusMarkdown } }
+              : { status: 'failed' as const, error: 'status write failed' },
+          exitCode,
+        };
+      }
+      return Promise.resolve({
+        artifact: { status: 'failed' as const, error: `${liveCommand} is not implemented` },
+        exitCode: 1,
+      });
+    },
     live: async (liveCommand): Promise<OpResult<unknown>> => {
       if (liveCommand === 'watchdog') {
         return runWatchdog(stateHome === undefined ? {} : { stateHome });
@@ -179,4 +219,30 @@ export async function readPublisherRoots(runnerRoot: string) {
     return null;
   }
   return { stateRoot, cloneRoot: clone, durableArtifactRoot };
+}
+
+/** `crq status [--state-root <dir>]` argv; the runner root is the cwd. */
+function parseStatusArgv(
+  args: readonly string[],
+):
+  | { readonly ok: true; readonly stateRoot: string }
+  | { readonly ok: false; readonly message: string } {
+  let stateRoot = join(root, 'state');
+  let index = 0;
+  while (index < args.length) {
+    const flag = args[index];
+    if (flag !== '--state-root') return { ok: false, message: `unknown flag: ${flag ?? ''}` };
+    const value = args[index + 1];
+    if (value === undefined) return { ok: false, message: 'missing value for --state-root' };
+    stateRoot = value;
+    index += 2;
+  }
+  return { ok: true, stateRoot };
+}
+
+function usageArtifact(subcommand: string, message: string) {
+  return {
+    artifact: { error: { kind: 'usage', subcommand, message, exitCode: 2 } },
+    exitCode: 2,
+  };
 }

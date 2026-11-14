@@ -200,15 +200,18 @@ def build(
 
     The injected ports are the only host boundary. ``systemd`` and
     ``journal_source`` must observe the same host and unit directory; the
-    factory cannot prove that for opaque ports. ``queue_drain`` must be the
-    caller's existing queue-ownership observation; this factory never invents
-    a second one and never signals a process.
+    factory cannot prove that for opaque ports. For a queue-issuing unit,
+    ``queue_drain`` must be the caller's existing queue-ownership observation;
+    this factory never invents a second one and never signals a process. The
+    non-issuing watchdog does not consume that observation and may be composed
+    without it.
     """
     _verify_selection(selection)
     if systemd is None or identity is None or journal_source is None:
         raise FactoryRefused(
             "systemd, identity and journal source ports are required")
-    if queue_drain is None:
+    if queue_drain is None and adapter_module.unit_issues_queue_work(
+            selection.unit):
         raise FactoryRefused("queue drain observation is required")
     if not isinstance(require_journal_witness, bool):
         raise FactoryRefused("journal witness policy must be a boolean")

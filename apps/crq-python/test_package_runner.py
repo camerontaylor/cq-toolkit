@@ -287,12 +287,28 @@ class PackageRunnerTests(unittest.TestCase):
 
     def test_smoke_runner_accepts_expected_refusal(self):
         node = self.write_fake_node(
+            'if [ -f state/runner-disabled ]; then\n'
+            '  mkdir -p shadow\n'
+            '  printf \'%s\\n\' \'{"command":"tick","value":{"complete":false,'
+            '"disabled":true},"mutations":[]}\' > shadow/disarm.json\n'
+            '  printf \'%s\\n\' \'{"status":"indeterminate",'
+            '"detail":"disarmed"}\'\n'
+            '  exit 1\n'
+            'fi\n'
+            '[ -f config.json ] && [ -f state/queue.json ] || exit 9\n'
+            'mkdir -p shadow\n'
+            'printf \'%s\\n\' \'{"command":"tick","value":{"complete":false,'
+            '"candidates":[{"id":"runner-smoke-item"}]},"mutations":[]}\' '
+            '> shadow/tick.json\n'
             'printf \'%s\\n\' \'{"status":"indeterminate","detail":"incomplete"}\'\n'
             'exit 1\n')
         observed = package_runner.smoke_runner(self.stage, node=node)
         self.assertEqual(observed['exit_code'], 1)
         self.assertEqual(observed['status'], 'indeterminate')
         self.assertEqual(observed['detail'], 'incomplete')
+        self.assertEqual(observed['planned'], ['runner-smoke-item'])
+        self.assertEqual(observed['disarmed']['detail'], 'disarmed')
+        self.assertEqual(observed['disarmed']['mutations'], 0)
 
     def test_smoke_runner_rejects_exit_zero(self):
         node = self.write_fake_node(
@@ -315,12 +331,63 @@ class PackageRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'detail'):
             package_runner.smoke_runner(self.stage, node=node)
 
+    def test_smoke_runner_rejects_a_broken_entry_artifact(self):
+        # The production symptom: the entry cannot read its fixture and emits
+        # a typed failed artifact. A non-zero exit alone must not pass.
+        node = self.write_fake_node(
+            'printf \'%s\\n\' \'{"status":"failed",'
+            '"error":"ENOENT: config.json missing"}\'\n'
+            'exit 1\n')
+        with self.assertRaisesRegex(ValueError, 'indeterminate'):
+            package_runner.smoke_runner(self.stage, node=node)
+
+    def test_smoke_runner_requires_the_planned_fixture_item(self):
+        node = self.write_fake_node(
+            'if [ -f state/runner-disabled ]; then\n'
+            '  mkdir -p shadow\n'
+            '  printf \'%s\\n\' \'{"command":"tick","value":{"complete":false,'
+            '"disabled":true},"mutations":[]}\' > shadow/disarm.json\n'
+            '  printf \'%s\\n\' \'{"status":"indeterminate",'
+            '"detail":"disarmed"}\'\n'
+            '  exit 1\n'
+            'fi\n'
+            'mkdir -p shadow\n'
+            'printf \'%s\\n\' \'{"command":"tick","value":{"complete":false,'
+            '"candidates":[]},"mutations":[]}\' > shadow/tick.json\n'
+            'printf \'%s\\n\' \'{"status":"indeterminate","detail":"incomplete"}\'\n'
+            'exit 1\n')
+        with self.assertRaisesRegex(ValueError, 'plan the fixture item'):
+            package_runner.smoke_runner(self.stage, node=node)
+
+    def test_smoke_runner_rejects_a_disarm_with_effects(self):
+        node = self.write_fake_node(
+            'mkdir -p shadow\n'
+            'printf \'%s\\n\' \'{"command":"tick","value":{"complete":false,'
+            '"disabled":true},"mutations":[{"operation":"set"}]}\' '
+            '> shadow/disarm.json\n'
+            'printf \'%s\\n\' \'{"status":"indeterminate","detail":"incomplete"}\'\n'
+            'exit 1\n')
+        with self.assertRaisesRegex(ValueError, 'disarm planned effects'):
+            package_runner.smoke_runner(self.stage, node=node)
+
     def test_smoke_plumbing(self):
         fake = self.base / 'node'
         fake.write_text(
             '#!/bin/sh\n'
             'case "$*" in\n'
-            '  *crq.js*) printf \'%s\\n\' \'{"status":"indeterminate",'
+            '  *crq.js*) if [ -f state/runner-disabled ]; then\n'
+            '      mkdir -p shadow\n'
+            '      printf \'%s\\n\' \'{"command":"tick","value":'
+            '{"complete":false,"disabled":true},"mutations":[]}\' '
+            '> shadow/disarm.json\n'
+            '      printf \'%s\\n\' \'{"status":"indeterminate",'
+            '"detail":"disarmed"}\'; exit 1\n'
+            '    fi\n'
+            '    mkdir -p shadow\n'
+            '    printf \'%s\\n\' \'{"command":"tick","value":{"complete":false,'
+            '"candidates":[{"id":"runner-smoke-item"}]},"mutations":[]}\' '
+            '> shadow/tick.json\n'
+            '    printf \'%s\\n\' \'{"status":"indeterminate",'
             '"detail":"incomplete"}\'; exit 1;;\n'
             '  *) printf \'%s\\n\' \'{"node":"v24.21.0","platform":"linux",'
             '"arch":"x64","modules":"137","fsExt":"2.1.1",'

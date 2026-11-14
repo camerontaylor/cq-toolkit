@@ -574,34 +574,102 @@ process.stdout.write(JSON.stringify({
     return observed
 
 
-def smoke_runner(root, node=None):
-    node = node or shutil.which('node')
-    if not node:
-        raise ArtifactError('node executable not found for runner smoke')
-    runner = Path(root) / 'dist/queue-runner/crq.js'
-    with tempfile.TemporaryDirectory(prefix='crq-runner-') as temp:
-        (Path(temp) / 'runner-disabled').write_text('')
-        result = subprocess.run([node, str(runner), 'tick', '--dry-run'],
-                                cwd=temp, check=False, capture_output=True,
-                                text=True, timeout=60)
+SMOKE_RUNNER_ITEM = 'runner-smoke-item'
+
+
+def _run_smoke_tick(node, runner, fixture):
+    """Run one `tick --dry-run` in a fixture root; read the shadow in-place."""
+    result = subprocess.run([node, str(runner), 'tick', '--dry-run'],
+                            cwd=str(fixture), check=False, capture_output=True,
+                            text=True, timeout=60)
+    try:
+        artifact = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError) as exc:
+        raise ArtifactError('runner smoke emitted no usable JSON artifact '
+                            '(exit ' + str(result.returncode) + '): '
+                            + (result.stderr or result.stdout).strip()[:300]
+                            ) from exc
+    if not isinstance(artifact, dict):
+        raise ArtifactError('runner smoke emitted an invalid artifact')
     if result.returncode != 1:
         raise ArtifactError('runner smoke expected exit 1, got '
                             + str(result.returncode) + ': '
                             + (result.stderr or result.stdout).strip())
-    try:
-        artifact = json.loads(result.stdout.strip().splitlines()[-1])
-    except (IndexError, ValueError) as exc:
-        raise ArtifactError('runner smoke emitted no JSON artifact') from exc
-    if not isinstance(artifact, dict):
-        raise ArtifactError('runner smoke emitted an invalid artifact')
     if artifact.get('status') != 'indeterminate':
         raise ArtifactError('runner smoke expected indeterminate refusal, got '
-                            + repr(artifact.get('status')))
+                            + repr(artifact.get('status'))
+                            + ': ' + json.dumps(artifact, sort_keys=True)[:300])
     detail = artifact.get('detail')
     if not isinstance(detail, str) or not detail:
         raise ArtifactError('runner smoke expected a non-empty detail')
-    return {'exit_code': result.returncode, 'status': artifact['status'],
-            'detail': detail}
+    shadows = [json.loads(path.read_text())
+               for path in sorted((fixture / 'shadow').glob('*.json'))]
+    if len(shadows) != 1:
+        raise ArtifactError('runner smoke expected one shadow plan, got '
+                            + str(len(shadows)))
+    return detail, shadows[0]
+
+
+def smoke_runner(root, node=None):
+    """Prove the packaged runner entry reaches its real planning boundary.
+
+    Two fixture roots exercise the two contracts the entry owns. The first
+    carries only ``state/runner-disabled`` and no config or queue: the disarm
+    short-circuit must report itself before reading either document, plan no
+    mutations and refuse with the runtime's structured ``indeterminate``
+    result. The second is a complete runner root: a ``config.json`` with the
+    bindings tick needs and a schema-valid ``state/queue.json`` holding one
+    pending item. ``tick --dry-run`` therefore loads the real policy code,
+    parses both documents, plans the item and writes its shadow artifact
+    before refusing with the runtime's own incomplete-plan result.
+
+    A broken entry that cannot read the fixture emits a typed ``failed``
+    artifact (for example ENOENT for ``config.json`` when the marker is not
+    where the runtime reads it) and is rejected: an arbitrary non-zero exit is
+    never accepted as capability.
+    """
+    node = node or shutil.which('node')
+    if not node:
+        raise ArtifactError('node executable not found for runner smoke')
+    runner = (Path(root) / 'dist/queue-runner/crq.js').resolve()
+    with tempfile.TemporaryDirectory(prefix='crq-runner-') as temp:
+        base = Path(temp)
+        disarmed = base / 'disarmed'
+        (disarmed / 'state').mkdir(parents=True)
+        (disarmed / 'state/runner-disabled').write_text('')
+        disarm_detail, disarm_shadow = _run_smoke_tick(node, runner, disarmed)
+        fixture = base / 'planned'
+        state = fixture / 'state'
+        state.mkdir(parents=True)
+        (fixture / 'config.json').write_text(json.dumps(
+            {'repo': 'acme/widgets', 'clone': 'clone-not-created'}))
+        (state / 'queue.json').write_text(json.dumps({
+            'items': [{'id': SMOKE_RUNNER_ITEM, 'kind': 'delta',
+                       'state': 'pending', 'order': 1}]}))
+        detail, shadow = _run_smoke_tick(node, runner, fixture)
+    disarm_value = (disarm_shadow.get('value')
+                    if isinstance(disarm_shadow, dict) else None)
+    if not isinstance(disarm_value, dict) \
+            or disarm_value.get('disabled') is not True:
+        raise ArtifactError('runner smoke did not observe the disarm '
+                            'short-circuit')
+    if not isinstance(disarm_shadow, dict) \
+            or disarm_shadow.get('mutations') != []:
+        raise ArtifactError('runner smoke disarm planned effects')
+    value = shadow.get('value') if isinstance(shadow, dict) else None
+    if not isinstance(value, dict) or value.get('complete') is not False:
+        raise ArtifactError('runner smoke did not reach the incomplete-plan '
+                            'boundary')
+    candidates = value.get('candidates')
+    planned = ([candidate.get('id') for candidate in candidates
+                if isinstance(candidate, dict)]
+               if isinstance(candidates, list) else [])
+    if SMOKE_RUNNER_ITEM not in planned:
+        raise ArtifactError('runner smoke did not plan the fixture item')
+    return {'exit_code': 1, 'status': 'indeterminate', 'detail': detail,
+            'planned': planned,
+            'disarmed': {'detail': disarm_detail,
+                         'mutations': len(disarm_shadow['mutations'])}}
 
 
 def verify_archive(archive, expected_sha256=None, lockfile=None, smoke=True,

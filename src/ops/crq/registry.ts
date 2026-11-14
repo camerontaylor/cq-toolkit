@@ -14,19 +14,32 @@
 // has no importer. It stays under `internal/`, so the family scan has no
 // direct-module surface to declare here.
 //
-// The type-only reference below is the family-surface declaration the registry
-// scan checks (test/cli/registry.family-scan.test.ts, the `./<base>` rule):
-// readOnlyStatus.ts is deliberately surface, not an orphan op module.
+// The type-only references below are the family-surface declarations the
+// registry scan checks (test/cli/registry.family-scan.test.ts, the
+// `./<base>` rule): readOnlyStatus.ts and statusWriter.ts are deliberately
+// surface, not orphan op modules.
 import type { OpRegistryEntry } from '../../kernel/types.js';
 import type { runQueueCapability } from './queueCapability.js';
 import type { CommandResult, ReadOnlyStatusEffects } from './readOnlyStatus.js';
 import type { PublishRunResult } from './publishRun.js';
+import type { CrqDocuments, StatusWriterEffects } from './statusWriter.js';
 
 /** The A1 read-only route's callable surface, bound to effects by its adapter. */
 export type CrqReadOnlyRoute = (
   argv: readonly string[],
   effects: ReadOnlyStatusEffects,
 ) => Promise<CommandResult>;
+
+/** The A1 write route's callable surface, bound to effects by its adapter. */
+export type CrqStatusWriterRoute = (
+  effects: StatusWriterEffects,
+  documents: CrqDocuments,
+) => Promise<{
+  readonly markdown: string;
+  readonly status: Record<string, unknown>;
+  readonly summary: Record<string, unknown> | null;
+  readonly publishFailure?: { readonly event: 'summary_failed'; readonly error: string };
+}>;
 
 /**
  * The queue-v1 capability's callable surface. It registers no dispatch name: it
