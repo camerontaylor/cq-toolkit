@@ -516,7 +516,12 @@ describe('backfill subject adapter', () => {
       expect(result.debt).toEqual([]);
       const partition = partitionAt(result);
       expect(partition.scope).toEqual([
-        { path: 'utf8.txt', blob: expect.any(String) as string, intervals: [[1, 2]] },
+        {
+          path: 'utf8.txt',
+          // Python-oracle vector: the blob id for `café\n文件\n`.
+          blob: '46632b1d203441a6491216e41ffa73cbaa9853a3',
+          intervals: [[1, 2]],
+        },
       ]);
       expect(partition.scope_digest).toBe(ledgerJsonDigest(partition.scope));
       expect(partition.subject_id).toBe(

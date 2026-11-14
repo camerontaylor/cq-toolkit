@@ -241,7 +241,6 @@ export async function construct(
   const kind = need(candidate, 'kind', 'candidate');
   const subjectId = need(candidate, 'subject_id', 'candidate');
   const generation = need(candidate, 'generation', 'candidate');
-  const prs = toPlainJsonDeep(need(candidate, 'prs', 'candidate'));
   const candidateTier = text(need(candidate, 'tier', 'candidate'), 'candidate tier');
   const pathTiers = optionalDoc(candidate, 'path_tiers', 'candidate path_tiers');
   const pathScores = optionalDoc(candidate, 'path_scores', 'candidate path_scores');
@@ -265,16 +264,23 @@ export async function construct(
     requested.set(path, row);
   }
 
-  const sources = membersValue.map((value) => {
-    const member = asDoc(value, 'subject member');
-    return {
-      // Python `m.get("pr")`: absence is `None`, a captured `null` stays null.
-      pr: recordHas(member, 'pr') ? toPlainJsonDeep(recordGet(member, 'pr')) : null,
-      // Python `m.get("context", {})`: absence is an empty object.
-      context: recordHas(member, 'context') ? toPlainJsonDeep(recordGet(member, 'context')) : {},
-    };
-  });
-  const context = { trust: 'untrusted-data-only', prs, sources };
+  // The context is canonicalised from its captured values, so `review_ledger`'s
+  // integer-only domain sees exactly what the members captured. The partition
+  // row carries the plain form, as every other emitted row does.
+  const rawContext = {
+    trust: 'untrusted-data-only',
+    prs: need(candidate, 'prs', 'candidate'),
+    sources: membersValue.map((value) => {
+      const member = asDoc(value, 'subject member');
+      return {
+        // Python `m.get("pr")`: absence is `None`, a captured `null` stays null.
+        pr: recordHas(member, 'pr') ? recordGet(member, 'pr') : null,
+        // Python `m.get("context", {})`: absence is an empty object.
+        context: recordHas(member, 'context') ? recordGet(member, 'context') : {},
+      };
+    }),
+  };
+  const context = toPlainJsonDeep(rawContext) as Record<string, unknown>;
 
   const debt: Array<Record<string, unknown>> = [];
   const partitions: Array<Record<string, unknown>> = [];
@@ -343,10 +349,10 @@ export async function construct(
 
     // Context is transported in the synthetic input commit, as inert text. It
     // cannot change the target tree, Git argv, baseline or requested paths.
-    if (sources.length > 0) {
+    if (rawContext.sources.length > 0) {
       const message =
         'crq pinned current subject\n\nBEGIN UNTRUSTED PR CONTEXT\n' +
-        ledgerJsonText(context) +
+        ledgerJsonText(rawContext) +
         '\nEND UNTRUSTED PR CONTEXT';
       head = await repo.commitTree(await repo.tree(target), base, message);
     }

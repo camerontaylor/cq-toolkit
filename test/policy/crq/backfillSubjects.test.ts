@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest';
+import { JsonNumber } from '../../../src/policy/crq/jsonValue.js';
 import { ledgerJsonDigest, ledgerJsonText } from '../../../src/policy/crq/pythonJson.js';
 import {
   construct,
@@ -417,6 +418,23 @@ describe('backfill subject construction', () => {
       prs: [1],
       sources: [],
     });
+  });
+
+  test('a captured float is refused by the canonical context domain', async () => {
+    const repo = new ScriptedRepo([row('a')]);
+    const members: SubjectMember[] = [
+      {
+        pr: 1,
+        merge: 'm'.repeat(40),
+        paths: [{ path: 'a', source_path: 'a', lineage_verified: true }],
+        context: { score: JsonNumber.float(1.0) },
+      },
+    ];
+    // `review_ledger.canonical` admits null, bool, int, str, list and dict only.
+    await expect(construct(repo, candidate(['a']), POLICY, members)).rejects.toThrow(
+      'unsupported canonical JSON value',
+    );
+    expect(repo.commits).toEqual([]);
   });
 
   test('replay is deterministic and preserves unknown candidate fields', async () => {
