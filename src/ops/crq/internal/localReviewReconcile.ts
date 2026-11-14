@@ -1,10 +1,26 @@
-import { JsonNumber, JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
-import { withObjectKeys, withoutObjectKey } from '../../policy/crq/queueDoc.js';
+import { JsonNumber, JsonObject, type JsonValue } from '../../../policy/crq/jsonValue.js';
+import { withObjectKeys, withoutObjectKey } from '../../../policy/crq/queueDoc.js';
 
 /** The reconcile caller supplies the actual prepare operation and one Python-compatible clock. */
 export interface CompletedReconcileEffects {
   nowIso(): string;
   prepareCompleted(queue: JsonObject, item: JsonObject): Promise<JsonObject>;
+}
+
+/** Transport, validation and readiness failures correspond to Python's caught exceptions. */
+function retryableEvidenceFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (typeof (error as NodeJS.ErrnoException).code === 'string') return true;
+  return new Set([
+    'Error',
+    'ValueError',
+    'ZodError',
+    'JsonParseError',
+    'LedgerIntegrityError',
+    'GitUnavailable',
+    'LocalReviewNotReady',
+    'AuthorRefused',
+  ]).has(error.name);
 }
 
 /** Retry receipt-only reuse even when new invocations are paused or cooled down. */
@@ -52,6 +68,7 @@ export async function reconcileCompletedLocalReviews(
       changed[index] = updated;
       result = withObjectKeys(result, [['items', changed]]);
     } catch (error) {
+      if (!retryableEvidenceFailure(error)) throw error;
       const previous = item.get('reconcile_failures');
       const oldCount =
         previous instanceof JsonNumber && previous.kind === 'int' && previous.integer !== null

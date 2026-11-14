@@ -3,9 +3,9 @@ import {
   JsonObject,
   parseJsonValue,
   type JsonValue,
-} from '../../policy/crq/jsonValue.js';
-import { withObjectKeys, withoutObjectKey, pyTruthy } from '../../policy/crq/queueDoc.js';
-import { receiptJsonDigest, sha256Hex } from '../../policy/crq/pythonJson.js';
+} from '../../../policy/crq/jsonValue.js';
+import { withObjectKeys, withoutObjectKey, pyTruthy } from '../../../policy/crq/queueDoc.js';
+import { receiptJsonDigest, sha256Hex } from '../../../policy/crq/pythonJson.js';
 
 /** Effects run under the caller's existing tick.lock. Receipt publication precedes queue persistence. */
 export interface LocalHarvestEffects {
@@ -155,7 +155,7 @@ export async function completeLocalReview(
           ['counted', adequate],
           ['at', endedAt],
           ['receipt_id', receiptId],
-          ['band', run.get('band') ?? 'background'],
+          ['band', run.has('band') ? required(run, 'band') : 'background'],
           ['started_at', run.get('started_at') ?? null],
         ]),
       ];

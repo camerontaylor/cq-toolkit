@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { JsonNumber, JsonObject, toPlainJson } from '../../policy/crq/jsonValue.js';
 import { IdentitySchema, ReceiptSchema } from '../../ops/review/internal/reviewOperation.js';
-import type { LocalHarvestEffects } from '../../ops/crq/localReviewHarvest.js';
+import type { LocalHarvestEffects } from '../../ops/crq/internal/localReviewHarvest.js';
 import { writeLocalReviewReceipt } from './localReviewReceipt.js';
 
 /** Python's integer schema rejects 1.0 even where a JS schema sees 1. */

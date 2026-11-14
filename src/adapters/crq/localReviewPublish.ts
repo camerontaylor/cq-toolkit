@@ -6,7 +6,7 @@ import { ledgerCanonicalBytes } from '../../policy/crq/ledger.js';
 import { sha256Hex } from '../../policy/crq/pythonJson.js';
 import { MAX_RECEIPT_BYTES } from '../../policy/crq/queueReceipt.js';
 import { withoutObjectKey } from '../../policy/crq/queueDoc.js';
-import type { LocalReviewPublishEffects } from '../../ops/crq/localReviewPublish.js';
+import type { LocalReviewPublishEffects } from '../../ops/crq/internal/localReviewPublish.js';
 import { atomicWrite } from './atomic.js';
 import { fileArtifactStore, fileFindingPublication } from './findingStore.js';
 

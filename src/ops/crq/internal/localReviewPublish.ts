@@ -1,7 +1,7 @@
-import { JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
-import { withObjectKeys } from '../../policy/crq/queueDoc.js';
-import { ledgerDigestOf, ledgerEvent } from '../../policy/crq/ledger.js';
-import { receiptJsonBytes } from '../../policy/crq/pythonJson.js';
+import { JsonObject, type JsonValue } from '../../../policy/crq/jsonValue.js';
+import { withObjectKeys } from '../../../policy/crq/queueDoc.js';
+import { ledgerDigestOf, ledgerEvent } from '../../../policy/crq/ledger.js';
+import { receiptJsonBytes } from '../../../policy/crq/pythonJson.js';
 
 /** The caller holds tick.lock. All storage and publication request effects are real bindings. */
 export interface LocalReviewPublishEffects {

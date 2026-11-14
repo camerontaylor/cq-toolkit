@@ -4,13 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileLocalHarvestEffects } from '../../../src/adapters/crq/localReviewHarvest.js';
 import { fileLocalReviewPublishEffects } from '../../../src/adapters/crq/localReviewPublish.js';
-import { republishLocalReview } from '../../../src/ops/crq/localReviewPublish.js';
+import { republishLocalReview } from '../../../src/ops/crq/internal/localReviewPublish.js';
 import { JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
 import { receiptJsonDigest } from '../../../src/policy/crq/pythonJson.js';
 import {
   completeLocalReview,
   type LocalHarvestEffects,
-} from '../../../src/ops/crq/localReviewHarvest.js';
+} from '../../../src/ops/crq/internal/localReviewHarvest.js';
 
 function doc(text: string): JsonObject {
   const result = parseJsonValue(text);
@@ -143,7 +143,9 @@ describe('local review completion', () => {
     expect((again.queue.get('review_notify_outbox') as JsonObject).entries).toHaveLength(1);
   });
   it('does not mutate the queue when receipt publication fails', async () => {
-    const queue = doc('{"items":[{"id":"i","identity":"x","identity_inputs":{},"profile":{}}]}');
+    const queue = doc(
+      '{"items":[{"id":"i","identity":"x","identity_inputs":{},"profile":{},"run":{"band":null}}]}',
+    );
     const item = (queue.get('items') as JsonObject[])[0]!;
     let saved = false;
     await expect(
@@ -164,7 +166,9 @@ describe('local review completion', () => {
     expect(item.get('state')).toBeUndefined();
   });
   it('records an absent exit and never grants adequacy to interrupted runs', async () => {
-    const queue = doc('{"items":[{"id":"i","identity":"x","identity_inputs":{},"profile":{}}]}');
+    const queue = doc(
+      '{"items":[{"id":"i","identity":"x","identity_inputs":{},"profile":{},"run":{"band":null}}]}',
+    );
     const item = (queue.get('items') as JsonObject[])[0]!;
     let observed: JsonObject | undefined;
     const result = await completeLocalReview(
@@ -189,5 +193,6 @@ describe('local review completion', () => {
     expect(observed?.get('exit_code')).toBeNull();
     expect(result.item.get('state')).toBe('failed');
     expect(result.item.get('scope_adequate')).toBe(false);
+    expect((result.item.get('attempts') as JsonObject[])[0]!.get('band')).toBeNull();
   });
 });

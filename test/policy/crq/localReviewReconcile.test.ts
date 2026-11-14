@@ -1,12 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import { JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
-import { reconcileCompletedLocalReviews } from '../../../src/ops/crq/localReviewReconcile.js';
+import { reconcileCompletedLocalReviews } from '../../../src/ops/crq/internal/localReviewReconcile.js';
 function doc(text: string): JsonObject {
   const value = parseJsonValue(text);
   if (!(value instanceof JsonObject)) throw new Error('object');
   return value;
 }
 describe('completed review reconciliation', () => {
+  it('propagates programming errors instead of backing them off', async () => {
+    const queue = doc('{"items":[{"kind":"local-review","state":"pending"}]}');
+    await expect(
+      reconcileCompletedLocalReviews(queue, 5, {
+        nowIso: () => '2026-11-14T12:00:00Z',
+        prepareCompleted: async () => {
+          throw new TypeError('bug');
+        },
+      }),
+    ).rejects.toThrow('bug');
+  });
   it('backs off unavailable evidence and later clears the failure', async () => {
     const queue = doc('{"items":[{"kind":"local-review","state":"pending","extra":1.0}]}');
     const clock = () => '2026-11-14T12:00:00Z';

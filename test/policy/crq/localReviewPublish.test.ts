@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
 import { writeLocalReviewReceipt } from '../../../src/adapters/crq/localReviewReceipt.js';
 import { fileLocalReviewPublishEffects } from '../../../src/adapters/crq/localReviewPublish.js';
-import { republishLocalReview } from '../../../src/ops/crq/localReviewPublish.js';
+import { republishLocalReview } from '../../../src/ops/crq/internal/localReviewPublish.js';
 function doc(text: string): JsonObject {
   const v = parseJsonValue(text);
   if (!(v instanceof JsonObject)) throw new Error('object');
