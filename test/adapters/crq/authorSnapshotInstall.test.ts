@@ -3,7 +3,7 @@
 // blob are refused before anything lands in the clone's object store.
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -123,6 +123,8 @@ async function publishPolicy(dir: string): Promise<void> {
     'policy',
   ]);
   await run('git', ['-C', dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD']);
+  // The policy must come from the authoritative ref, not this checkout.
+  await rm(join(dir, 'policy/denylist/patterns.yml'), { force: true });
 }
 
 async function clone(): Promise<{ dir: string; base: string; pool: GitPool }> {
