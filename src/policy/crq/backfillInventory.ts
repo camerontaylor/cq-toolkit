@@ -1,5 +1,6 @@
 /**
- * Deterministic backfill inventory ranking (`backfill_inventory.rank`).
+ * Deterministic backfill inventory capture and ranking
+ * (`backfill_inventory.capture` / `backfill_inventory.rank`).
  *
  * The Python producer is `apps/crq-python/backfill_inventory.py`. `rank` is the
  * replayable half of the inventory: it consumes only captured JSON (the
@@ -21,8 +22,17 @@
  * Unknown fields survive: rows are copied entry by entry and no captured
  * snapshot is rewritten here.
  */
-import { toPlainJsonDeep } from './jsonValue.js';
-import { compareCodePoints, ledgerJsonDigest } from './pythonJson.js';
+import { JsonNumber, JsonObject, toPlainJsonDeep, type JsonValue } from './jsonValue.js';
+import {
+  compareCodePoints,
+  ledgerJsonBytes,
+  ledgerJsonDigest,
+  pythonFloatRepr,
+  pythonJsonText,
+  sha256Hex,
+} from './pythonJson.js';
+import { LEDGER_REPOSITORY, ledgerTimestamp, ledgerValidateSequence } from './ledger.js';
+import { ACCOUNTING_BLAME_OPTIONS } from './backfillAccounting.js';
 import {
   isJsonRecord,
   pyTruthy,
@@ -36,7 +46,7 @@ import {
 export const BACKFILL_INVENTORY_VERSION = 'cq.backfill-inventory/v1';
 
 /** `backfill_accounting.BLAME_OPTIONS`: the provenance a replay is bound to. */
-export const BACKFILL_BLAME_OPTIONS: readonly string[] = ['--line-porcelain', '--encoding=UTF-8'];
+export const BACKFILL_BLAME_OPTIONS: readonly string[] = ACCOUNTING_BLAME_OPTIONS;
 
 /** The snapshot payload keys `backfill_inventory.capture` records. */
 export const BACKFILL_SNAPSHOT_KEYS: readonly string[] = [
@@ -766,4 +776,531 @@ export async function replay(
     inputs[key] = await artifacts.read(reference);
   }
   return rank(manifest, inputs);
+}
+
+// ------------------------------------------------------------------ capture
+
+/** One object row `capture` enriches; the adapter's inventory is the same shape. */
+export interface BackfillCaptureRow {
+  readonly path: string;
+  readonly blob: string;
+  readonly mode: string;
+  readonly kind: string;
+  readonly lines: number | null;
+  readonly bytes: number | null;
+  readonly disposition: string;
+  readonly reason: string;
+}
+
+/** One durable reference returned by the capture artifact seam. */
+export interface BackfillCaptureReference {
+  readonly sha256: string;
+  readonly location: string;
+}
+
+/** The artifact seam `capture` (and its coverage fold) writes through. */
+export interface BackfillCaptureArtifacts {
+  put(data: Uint8Array): Promise<BackfillCaptureReference>;
+  verify(reference: BackfillCaptureReference): Promise<void>;
+}
+
+/** `Repository.coverage`'s result, as `capture` records it. */
+export interface BackfillCoverageFold {
+  readonly covered: ReadonlyMap<string, ReadonlySet<number>>;
+  readonly evidence: ReadonlyMap<string, readonly string[]>;
+  readonly gaps: readonly unknown[];
+}
+
+/**
+ * The Git seam `capture` reads. Method names match the Python `Repository`
+ * class so the adapter binding is a direct delegation and the policy half
+ * stays testable without Git.
+ */
+export interface BackfillCaptureRepo {
+  resolve(target: string): Promise<string>;
+  tree(commit: string): Promise<string>;
+  gitVersion(): Promise<string>;
+  inventory(target: string, maxFileBytes: number): Promise<readonly BackfillCaptureRow[]>;
+  coverage(
+    target: string,
+    reviews: readonly JsonValue[],
+    artifacts: BackfillCaptureArtifacts,
+  ): Promise<BackfillCoverageFold>;
+  churn(target: string, evaluatedAt: string): Promise<ReadonlyMap<string, number>>;
+  lineage(old: string, next: string, path: string): Promise<string | null>;
+  carry(
+    old: string,
+    next: string,
+    path: string,
+    lines: ReadonlySet<number>,
+  ): Promise<{ readonly name: string | null; readonly mapped: ReadonlySet<number> }>;
+  retain(
+    artifacts: BackfillCaptureArtifacts,
+    commits: readonly string[],
+  ): Promise<BackfillCaptureReference & { readonly kind?: string }>;
+}
+
+export interface BackfillCaptureOptions {
+  readonly repo: BackfillCaptureRepo;
+  readonly target: string;
+  readonly ledgerHead: string;
+  readonly events: readonly JsonValue[];
+  readonly artifacts: BackfillCaptureArtifacts;
+  readonly queue: unknown;
+  readonly required: unknown;
+  readonly tiers: unknown;
+  readonly limits: unknown;
+  readonly evaluatedAt: string;
+  readonly requiredPaths: unknown;
+  readonly protectedBytes: Uint8Array;
+  readonly members?: unknown;
+}
+
+function definePlain(object: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(object, key, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+}
+
+function plainRecordCopy(value: unknown): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  if (isJsonRecord(value)) {
+    for (const [key, entry] of recordEntries(value)) definePlain(result, key, entry);
+  }
+  return result;
+}
+
+/** Python `min`/`max` over strings compare by code point. */
+function codePointExtreme(values: readonly string[], maximum: boolean): string {
+  return values.reduce((selected, value) => {
+    const order = compareCodePoints(selected, value);
+    return (maximum ? order <= 0 : order >= 0) ? value : selected;
+  });
+}
+
+const FNMATCH_STAR: unique symbol = Symbol('fnmatch-star');
+type FnmatchPart = string | typeof FNMATCH_STAR;
+
+function escapeRegexCharacter(character: string): string {
+  return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
+}
+
+/**
+ * `fnmatch._translate` and `_join_translated_parts` (CPython 3.14), emitted as
+ * a JavaScript regex. Two JavaScript differences are normalised here: `\z`
+ * becomes `(?![\s\S])`, and a leading `]` in a class is escaped because
+ * JavaScript, unlike Python's `re`, does not allow it unescaped. Atomic
+ * star groups are omitted; they change backtracking cost, not the language.
+ */
+function translateFnmatch(glob: string): string {
+  const characters = Array.from(glob);
+  const parts: FnmatchPart[] = [];
+  const stars: number[] = [];
+  let index = 0;
+  while (index < characters.length) {
+    const character = characters[index++] as string;
+    if (character === '*') {
+      stars.push(parts.length);
+      parts.push(FNMATCH_STAR);
+      while (index < characters.length && characters[index] === '*') index += 1;
+      continue;
+    }
+    if (character === '?') {
+      parts.push('.');
+      continue;
+    }
+    if (character !== '[') {
+      parts.push(escapeRegexCharacter(character));
+      continue;
+    }
+    let close = index;
+    if (characters[close] === '!') close += 1;
+    if (characters[close] === ']') close += 1;
+    while (close < characters.length && characters[close] !== ']') close += 1;
+    if (close >= characters.length) {
+      parts.push('\\[');
+      continue;
+    }
+    let stuff = characters.slice(index, close).join('');
+    if (!stuff.includes('-')) {
+      stuff = stuff.replace(/\\/g, '\\\\');
+    } else {
+      const chunks: string[] = [];
+      let chunkStart = index;
+      let search = characters[index] === '!' ? index + 2 : index + 1;
+      while (true) {
+        let hyphen = -1;
+        for (let cursor = search; cursor < close; cursor += 1) {
+          if (characters[cursor] === '-') {
+            hyphen = cursor;
+            break;
+          }
+        }
+        if (hyphen < 0) break;
+        chunks.push(characters.slice(chunkStart, hyphen).join(''));
+        chunkStart = hyphen + 1;
+        search = hyphen + 3;
+      }
+      const tail = characters.slice(chunkStart, close).join('');
+      if (tail !== '') chunks.push(tail);
+      else if (chunks.length > 0) chunks[chunks.length - 1] = `${chunks[chunks.length - 1]}-`;
+      for (let cursor = chunks.length - 1; cursor > 0; cursor -= 1) {
+        const previous = chunks[cursor - 1] as string;
+        const current = chunks[cursor] as string;
+        if (previous === '' || current === '') continue;
+        if ((previous[previous.length - 1] as string) > (current[0] as string)) {
+          chunks[cursor - 1] = previous.slice(0, -1) + current.slice(1);
+          chunks.splice(cursor, 1);
+        }
+      }
+      stuff = chunks.map((chunk) => chunk.replace(/\\/g, '\\\\').replace(/-/g, '\\-')).join('-');
+    }
+    index = close + 1;
+    if (stuff === '') {
+      parts.push('(?!)');
+    } else if (stuff === '!') {
+      parts.push('.');
+    } else if (stuff[0] === '!') {
+      stuff = `^${stuff.slice(1)}`;
+      if (stuff[1] === ']') stuff = `^\\]${stuff.slice(2)}`;
+      parts.push(`[${stuff}]`);
+    } else {
+      if (stuff[0] === '^' || stuff[0] === '[' || stuff[0] === ']') stuff = `\\${stuff}`;
+      parts.push(`[${stuff}]`);
+    }
+  }
+  if (stars.length === 0) return parts.join('');
+  const joined: string[] = [];
+  let cursor = 1;
+  const first = stars[0] as number;
+  joined.push(...(parts.slice(0, first) as string[]));
+  let position = first + 1;
+  while (cursor < stars.length) {
+    const next = stars[cursor++] as number;
+    joined.push('(?:.*?', ...(parts.slice(position, next) as string[]), ')');
+    position = next + 1;
+  }
+  joined.push('.*', ...(parts.slice(position) as string[]));
+  return joined.join('');
+}
+
+/** `fnmatch.fnmatchcase`: `*`, `?`, `[seq]` and `[!seq]`, never path-aware. */
+export function fnmatchCase(name: string, glob: string): boolean {
+  return new RegExp(`^(?:${translateFnmatch(glob)})(?![\\s\\S])`, 'su').test(name);
+}
+
+/** `backfill_inventory.tier`: protected pattern first, then T1..T4 globs. */
+export function captureTier(name: string, tiers: unknown): 'T1' | 'T2' | 'T3' | 'T4' {
+  const policy = asDoc(tiers, 'tier policy');
+  const patterns = need(policy, 'protected_patterns', 'tier policy');
+  if (!Array.isArray(patterns)) fail('protected patterns must be an array');
+  for (const pattern of patterns) {
+    if (new RegExp(text(pattern, 'protected pattern'), 'u').test(name)) return 'T1';
+  }
+  const groups = asDoc(need(policy, 'tiers', 'tier policy'), 'tier policy tiers');
+  for (const importance of ['T1', 'T2', 'T3', 'T4'] as const) {
+    const globs = need(groups, importance, 'tier policy tiers');
+    if (!Array.isArray(globs)) fail(`${importance} patterns must be an array`);
+    if (globs.some((glob) => fnmatchCase(name, text(glob, `${importance} glob`)))) {
+      return importance;
+    }
+  }
+  return fail('path has no importance tier');
+}
+
+const TRIAGE_ACTIONS = new Set([
+  'confirmed',
+  'fixed',
+  'already-fixed',
+  'dismissed',
+  'needs-human',
+  'superseded',
+]);
+
+/** `backfill_inventory.confirmed_counts`: confirmed findings per current path. */
+export function confirmedCounts(events: readonly JsonValue[]): Map<string, number> {
+  const status = new Map<string, string>();
+  const paths = new Map<string, string>();
+  const canonical = new Map<string, string>();
+  for (const value of events) {
+    const event = asDoc(value, 'ledger event');
+    if (opt(event, 'event_type') === 'review') {
+      const payload = asDoc(need(event, 'payload', 'review event'), 'review payload');
+      const findings = need(payload, 'findings', 'review payload');
+      if (!Array.isArray(findings)) fail('review findings must be an array');
+      for (const findingValue of findings) {
+        const finding = asDoc(findingValue, 'review finding');
+        const id = text(need(finding, 'id', 'review finding'), 'finding id');
+        status.set(id, 'untriaged');
+        paths.set(id, text(need(finding, 'path', 'review finding'), 'finding path'));
+        canonical.set(id, id);
+      }
+    } else if (opt(event, 'event_type') === 'finding-event') {
+      const payload = asDoc(need(event, 'payload', 'finding event'), 'finding payload');
+      const id = text(need(payload, 'finding_id', 'finding payload'), 'finding id');
+      const action = opt(payload, 'action');
+      if (action === 'duplicate') {
+        const evidence = asDoc(need(payload, 'evidence', 'finding payload'), 'finding evidence');
+        canonical.set(id, text(need(evidence, 'canonical_id', 'finding evidence'), 'canonical id'));
+      } else if (typeof action === 'string' && TRIAGE_ACTIONS.has(action)) {
+        status.set(id, action);
+      }
+    }
+  }
+  const counts = new Map<string, Set<string>>();
+  for (const [id, state] of status) {
+    if (state !== 'confirmed' && state !== 'fixed' && state !== 'already-fixed') continue;
+    const name = paths.get(id);
+    if (name === undefined) fail('review finding path is missing');
+    let ids = counts.get(name);
+    if (ids === undefined) {
+      ids = new Set<string>();
+      counts.set(name, ids);
+    }
+    ids.add(canonical.get(id) ?? id);
+  }
+  const result = new Map<string, number>();
+  for (const [name, ids] of counts) result.set(name, ids.size);
+  return result;
+}
+
+/**
+ * `backfill_inventory.queue_snapshot`: tag legacy floating point diagnostics
+ * so they never enter the integer-only replay domain. `1.0` stays a float.
+ */
+export function queueSnapshot(value: unknown): unknown {
+  if (value instanceof JsonNumber) {
+    if (value.kind === 'int') return value;
+    const float = value.float as number;
+    return Number.isFinite(float)
+      ? { 'cq.legacy-number/v1': pythonFloatRepr(float) }
+      : fail('non-finite queue diagnostic');
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) fail('non-finite queue diagnostic');
+    return Number.isInteger(value) ? value : { 'cq.legacy-number/v1': pythonFloatRepr(value) };
+  }
+  if (Array.isArray(value)) return value.map(queueSnapshot);
+  if (value instanceof JsonObject) {
+    const result: Record<string, unknown> = {};
+    for (const [key, entry] of value.entries) definePlain(result, key, queueSnapshot(entry));
+    return result;
+  }
+  if (isJsonRecord(value)) {
+    const result: Record<string, unknown> = {};
+    for (const [key, entry] of recordEntries(value)) {
+      definePlain(result, key, queueSnapshot(entry));
+    }
+    return result;
+  }
+  return value;
+}
+
+function setEntry(entries: Array<[string, unknown]>, key: string, value: unknown): void {
+  const index = entries.findIndex(([name]) => name === key);
+  if (index >= 0) entries[index] = [key, value];
+  else entries.push([key, value]);
+}
+
+function isActiveJob(job: JsonRecordLike): boolean {
+  const state = opt(job, 'state');
+  const vendor = opt(job, 'vendor_state');
+  return (
+    state === 'pending' ||
+    state === 'reviewing' ||
+    state === 'launch-unknown' ||
+    state === 'publication-pending' ||
+    vendor === 'live' ||
+    vendor === 'unknown'
+  );
+}
+
+function queueItems(queue: JsonRecordLike): JsonRecordLike[] {
+  const value = opt(queue, 'items');
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) fail('queue items must be an array');
+  return value.map((entry) => asDoc(entry, 'queue item'));
+}
+
+function scopeRows(job: JsonRecordLike): JsonRecordLike[] {
+  const value = opt(job, 'scope');
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) fail('queue item scope must be an array');
+  return value.map((entry) => asDoc(entry, 'scope row'));
+}
+
+/**
+ * `backfill_inventory.capture`: pin every external input before ranking.
+ *
+ * `required_paths` are retained forge/path-lineage evidence, never model
+ * output. Every unknown field survives row by row; the manifest is returned
+ * with its digest and the capture artifacts are written through the seam.
+ */
+export async function capture(options: BackfillCaptureOptions): Promise<Record<string, unknown>> {
+  const { repo, target, ledgerHead, events, artifacts } = options;
+  await repo.resolve(target);
+  ledgerTimestamp(options.evaluatedAt);
+  ledgerValidateSequence(events);
+  const tiers = asDoc(options.tiers, 'tier policy');
+  const limits = asDoc(options.limits, 'construction limits');
+  if (sha256Hex(options.protectedBytes) !== need(tiers, 'protected_policy_sha256', 'tier policy')) {
+    fail('tier policy does not match protected-path snapshot');
+  }
+  const bounds = effectiveLimits(limits, { requireVerified: false });
+  const rows = await repo.inventory(target, bounds.perFile);
+  const fold = await repo.coverage(target, events, artifacts);
+  const churn = await repo.churn(target, options.evaluatedAt);
+  const findings = confirmedCounts(events);
+
+  const byName = new Map<string, Record<string, unknown>>();
+  const objects: Array<Record<string, unknown>> = [];
+  for (const row of rows) {
+    const name = text(row.path, 'inventory object path');
+    const copy = copyRow(row, 'inventory object');
+    copy['tier'] = captureTier(name, tiers);
+    copy['covered'] = rangesOf(fold.covered.get(name) ?? new Set<number>());
+    copy['evidence'] = sortedStrings(fold.evidence.get(name) ?? []);
+    copy['churn'] = churn.get(name) ?? 0;
+    copy['findings'] = findings.get(name) ?? 0;
+    byName.set(name, copy);
+    objects.push(copy);
+  }
+
+  const rawQueueText = pythonJsonText(options.queue, {
+    asciiOnly: true,
+    sortKeys: true,
+    keyOrder: 'code-point',
+    indent: null,
+  });
+  const rawQueue = await artifacts.put(new Uint8Array(Buffer.from(rawQueueText, 'utf8')));
+
+  const queue = asDoc(options.queue, 'queue');
+  const entries: Array<[string, unknown]> = [];
+  for (const [key, value] of recordEntries(queue)) entries.push([key, value]);
+  const failuresPresent = recordHas(queue, 'backfill_scope_failures');
+  const failures = failuresPresent ? plainRecordCopy(opt(queue, 'backfill_scope_failures')) : {};
+  const lineageUnits = new Map<string, Set<string>>();
+  for (const job of queueItems(queue)) {
+    const jobTarget = opt(job, 'target');
+    if (!pyTruthy(jobTarget)) continue;
+    const jobLineages = optionalDoc(job, 'path_lineages', 'path_lineages');
+    for (const scope of scopeRows(job)) {
+      const scopePath = text(need(scope, 'path', 'scope row'), 'scope path');
+      const declared = jobLineages === null ? undefined : opt(jobLineages, scopePath);
+      const unit = declared === undefined ? scopePath : text(declared, 'path lineage');
+      if (!Object.prototype.hasOwnProperty.call(failures, unit)) continue;
+      const name = await repo.lineage(text(jobTarget, 'queue item target'), target, scopePath);
+      if (name === null || !byName.has(name)) continue;
+      let units = lineageUnits.get(name);
+      if (units === undefined) {
+        units = new Set<string>();
+        lineageUnits.set(name, units);
+      }
+      units.add(unit);
+    }
+  }
+  // A verified rename keeps its failure lineage. Multiple histories mapping to
+  // one current path are conservatively joined, never reset by regrouping.
+  const lineages: Record<string, unknown> = {};
+  for (const [name, units] of lineageUnits) {
+    const canonical = codePointExtreme([...units], false);
+    const values = [...units].map((unit) => plainRecordCopy(recordGet(failures, unit)));
+    const next = values
+      .map((value) => recordGet(value, 'next_eligible_at'))
+      .filter((value): value is string => typeof value === 'string');
+    failures[canonical] = {
+      failures: Math.max(
+        ...values.map((value) => pythonInt(recordGet(value, 'failures'), 'family failures')),
+      ),
+      quarantined: values.some((value) => pyTruthy(recordGet(value, 'quarantined'))),
+      next_eligible_at: next.length === 0 ? null : codePointExtreme(next, true),
+    };
+    definePlain(lineages, name, canonical);
+  }
+  if (failuresPresent) setEntry(entries, 'backfill_scope_failures', failures);
+  setEntry(entries, 'backfill_path_lineages', lineages);
+
+  const mappedOwnership: Array<Record<string, unknown>> = [];
+  for (const job of queueItems(queue)) {
+    if (!isActiveJob(job)) continue;
+    const jobTarget = opt(job, 'target');
+    for (const owned of scopeRows(job)) {
+      if (jobTarget === target) continue;
+      const ownedPath = text(need(owned, 'path', 'scope row'), 'scope path');
+      const ownedLines = intervalsOf(need(owned, 'intervals', 'scope row'), 'ownership intervals');
+      const carried = await repo.carry(
+        text(jobTarget, 'queue item target'),
+        target,
+        ownedPath,
+        ownedLines,
+      );
+      const current = carried.name === null ? undefined : byName.get(carried.name);
+      if (carried.name !== null && current !== undefined && carried.mapped.size > 0) {
+        mappedOwnership.push({
+          target,
+          path: carried.name,
+          blob: current['blob'],
+          intervals: rangesOf(carried.mapped),
+        });
+      } else if (byName.has(ownedPath)) {
+        // Uncertain ownership mapping conservatively holds this path.
+        const row = byName.get(ownedPath) as Record<string, unknown>;
+        const lines = row['lines'];
+        mappedOwnership.push({
+          target,
+          path: row['path'],
+          blob: row['blob'],
+          intervals: typeof lines === 'number' && lines > 0 ? [[1, lines]] : [],
+        });
+      }
+    }
+  }
+  setEntry(entries, 'backfill_mapped_ownership', mappedOwnership);
+
+  const updatedQueue: Record<string, unknown> = {};
+  for (const [key, value] of entries) definePlain(updatedQueue, key, value);
+
+  const snapshotValues: Record<string, unknown> = {
+    queue: queueSnapshot(updatedQueue),
+    required: options.required,
+    tiers: options.tiers,
+    limits: options.limits,
+    objects,
+    required_paths: options.requiredPaths,
+    ledger: events,
+    required_members: options.members ?? {},
+    evidence_gaps: fold.gaps,
+    protected_policy: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+      options.protectedBytes,
+    ),
+  };
+  const snapshots: Record<string, BackfillCaptureReference> = {};
+  for (const key of BACKFILL_SNAPSHOT_KEYS) {
+    snapshots[key] = await artifacts.put(ledgerJsonBytes(snapshotValues[key]));
+  }
+
+  const manifest: Record<string, unknown> = {
+    version: BACKFILL_INVENTORY_VERSION,
+    repo: LEDGER_REPOSITORY,
+    target,
+    tree: await repo.tree(target),
+    ledger_head: ledgerHead,
+    evaluated_at: options.evaluatedAt,
+    snapshots,
+    git_version: await repo.gitVersion(),
+    blame_options: [...BACKFILL_BLAME_OPTIONS],
+    construction_version: need(limits, 'construction_version', 'construction limits'),
+    scoring_version: need(limits, 'scoring_version', 'construction limits'),
+    limits_version: need(limits, 'version', 'construction limits'),
+    tiers_version: need(tiers, 'version', 'tier policy'),
+    git_bundle: await repo.retain(artifacts, [target]),
+    raw_queue: rawQueue,
+    queue_encoding: 'legacy-number-tag/v1',
+  };
+  manifest['id'] = ledgerJsonDigest(manifest);
+  await artifacts.put(ledgerJsonBytes(manifest));
+  return manifest;
 }

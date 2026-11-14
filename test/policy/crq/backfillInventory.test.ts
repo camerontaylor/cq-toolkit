@@ -1,4 +1,8 @@
 import { describe, expect, test } from 'vitest';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileArtifactStore } from '../../../src/adapters/crq/findingStore.js';
 import {
   JsonObject,
   parseJsonValue,
@@ -6,16 +10,23 @@ import {
   type JsonValue,
 } from '../../../src/policy/crq/jsonValue.js';
 import {
+  BACKFILL_SNAPSHOT_KEYS,
   BackfillInventoryError,
+  capture,
+  captureTier,
+  confirmedCounts,
   effectiveLimits,
+  fnmatchCase,
   intervalsOf,
+  queueSnapshot,
   rank,
   rangesOf,
   replay,
   requiredGroups,
   type InventoryArtifacts,
 } from '../../../src/policy/crq/backfillInventory.js';
-import { ledgerJsonDigest } from '../../../src/policy/crq/pythonJson.js';
+import { ledgerLoads } from '../../../src/policy/crq/ledger.js';
+import { ledgerJsonDigest, sha256Hex } from '../../../src/policy/crq/pythonJson.js';
 import { captureFixtureManifest, loadFamily, valueAt } from './backfillFixtures.js';
 
 const INVENTORY = loadFamily('backfill-inventory');
@@ -285,4 +296,221 @@ test('required groups only union explicitly named PRs, once', () => {
       explicit_unions: [],
     }),
   ).toThrow('duplicate required-list row');
+});
+
+describe('capture seam', () => {
+  const protectedBytes = new TextEncoder().encode('{"policy":true}');
+  const jsonValue = (value: unknown): JsonValue => parseJsonValue(JSON.stringify(value));
+
+  function fixture() {
+    const puts: Array<{ sha256: string; bytes: Uint8Array }> = [];
+    const base = mkdtempSync(join(tmpdir(), 'crq-capture-'));
+    const store = fileArtifactStore(join(base, 'artifacts'));
+    const artifacts = {
+      async put(data: Uint8Array) {
+        puts.push({ sha256: sha256Hex(data), bytes: data });
+        return store.put(data);
+      },
+      async verify() {
+        return Promise.resolve();
+      },
+    };
+    const tiers = {
+      version: 1,
+      protected_policy_sha256: sha256Hex(protectedBytes),
+      protected_patterns: ['^policy/protected-paths\\.json$'],
+      tiers: { T1: [], T2: ['src/selfhost/**'], T3: ['src/**'], T4: ['**'] },
+    };
+    const limits = {
+      version: 1,
+      construction_version: 'fixture-v1',
+      scoring_version: 'fixture-v1',
+      max_files: 8,
+      max_file_bytes: 1000,
+      max_total_bytes: 1000,
+      reviewer: {},
+    };
+    const rows = [
+      {
+        path: 'src/a.ts',
+        blob: 'a'.repeat(40),
+        mode: '100644',
+        kind: 'blob',
+        lines: 2,
+        bytes: 4,
+        disposition: 'included',
+        reason: 'tracked regular UTF8 text',
+      },
+      {
+        path: 'policy/protected-paths.json',
+        blob: 'b'.repeat(40),
+        mode: '100644',
+        kind: 'blob',
+        lines: 1,
+        bytes: 2,
+        disposition: 'included',
+        reason: 'tracked regular UTF8 text',
+      },
+    ];
+    const repo = {
+      resolve: async (target: string) => target,
+      tree: async () => 'c'.repeat(40),
+      gitVersion: async () => 'git version 2.43.0',
+      inventory: async () => rows,
+      coverage: async () => ({
+        covered: new Map([['src/a.ts', new Set([1])]]),
+        evidence: new Map([['src/a.ts', ['finding-1']]]),
+        gaps: [],
+      }),
+      churn: async () => new Map([['src/a.ts', 2]]),
+      lineage: async () => null,
+      carry: async () => ({ name: null, mapped: new Set<number>() }),
+      retain: async (store: typeof artifacts) => ({
+        ...(await store.put(new TextEncoder().encode('bundle'))),
+        kind: 'git-bundle',
+      }),
+    };
+    return { artifacts, tiers, limits, repo, puts };
+  }
+
+  test('pins every snapshot, enriches each row and digests the manifest', async () => {
+    const { artifacts, tiers, limits, repo, puts } = fixture();
+    const manifest = await capture({
+      repo,
+      target: '1'.repeat(40),
+      ledgerHead: '2'.repeat(40),
+      events: [],
+      artifacts,
+      queue: { items: [], backfill_scope_failures: {} },
+      required: { rows: [], explicit_unions: [] },
+      tiers,
+      limits,
+      evaluatedAt: '2026-11-09T00:00:00Z',
+      requiredPaths: {},
+      protectedBytes,
+      members: {},
+    });
+    const snapshots = manifest['snapshots'] as Record<string, { location: string }>;
+    const objects = toPlainJson(
+      ledgerLoads(readFileSync(snapshots['objects']?.location ?? '')),
+    ) as Array<Record<string, unknown>>;
+    expect(objects[0]).toMatchObject({
+      path: 'src/a.ts',
+      tier: 'T3',
+      covered: [[1, 1]],
+      evidence: ['finding-1'],
+      churn: 2,
+      findings: 0,
+    });
+    expect(objects[1]?.['tier']).toBe('T1');
+    expect(Object.keys(snapshots)).toEqual([...BACKFILL_SNAPSHOT_KEYS]);
+    expect(manifest['git_version']).toBe('git version 2.43.0');
+    expect(manifest['git_bundle']).toMatchObject({ kind: 'git-bundle' });
+    expect(manifest['queue_encoding']).toBe('legacy-number-tag/v1');
+    const withoutId: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(manifest)) if (key !== 'id') withoutId[key] = value;
+    expect(manifest['id']).toBe(ledgerJsonDigest(withoutId));
+    // The raw queue is the compact, sorted, ASCII-escaped Python bytes.
+    expect(Buffer.from(puts[0]?.bytes ?? []).toString()).toBe(
+      '{"backfill_scope_failures":{},"items":[]}',
+    );
+  });
+
+  test('a protected-path snapshot mismatch refuses before any capture', async () => {
+    const { artifacts, tiers, limits, repo } = fixture();
+    await expect(
+      capture({
+        repo,
+        target: '1'.repeat(40),
+        ledgerHead: '2'.repeat(40),
+        events: [],
+        artifacts,
+        queue: {},
+        required: {},
+        tiers,
+        limits,
+        evaluatedAt: '2026-11-09T00:00:00Z',
+        requiredPaths: {},
+        protectedBytes: new TextEncoder().encode('different'),
+      }),
+    ).rejects.toThrow('tier policy does not match protected-path snapshot');
+  });
+
+  test('legacy float diagnostics are tagged and non-finite values refuse', () => {
+    const snapshot = queueSnapshot(jsonValue({ value: 1.5, nested: [2, 'x'] })) as {
+      value: unknown;
+      nested: JsonValue[];
+    };
+    expect(snapshot.value).toEqual({ 'cq.legacy-number/v1': '1.5' });
+    expect(snapshot.nested.map((entry) => toPlainJson(entry))).toEqual([2, 'x']);
+    expect(() => queueSnapshot(Number.POSITIVE_INFINITY)).toThrow('non-finite queue diagnostic');
+  });
+
+  test('tiers follow protected patterns, then globs in T1..T4 order', () => {
+    expect(
+      captureTier('policy/protected-paths.json', {
+        protected_patterns: ['^policy/protected-paths\\.json$'],
+        tiers: { T1: [], T2: [], T3: ['**'], T4: ['**'] },
+      }),
+    ).toBe('T1');
+    expect(
+      captureTier('src/selfhost/a.ts', {
+        protected_patterns: [],
+        tiers: { T1: [], T2: ['src/selfhost/**'], T3: ['src/**'], T4: ['**'] },
+      }),
+    ).toBe('T2');
+    expect(fnmatchCase('src/a.ts', 'src/**')).toBe(true);
+    expect(fnmatchCase('src/a.ts', 'src/*.ts')).toBe(true);
+    expect(fnmatchCase('src/a.ts', 'src/*.js')).toBe(false);
+    for (const [name, glob, expected] of [
+      ['b', '[^a]', false],
+      ['^', '[^a]', true],
+      ['x', '[z-a]', false],
+      ['a', '[!a]', false],
+      ['b', '[!a]', true],
+      [']', '[]]', true],
+      [']', '[!]]', false],
+      ['a', '[!]]', true],
+      ['-', '[a-]', true],
+      ['*', '[*]', true],
+      ['\n', '*', true],
+      ['a/b', 'a*b', true],
+      ['[', '[[]', true],
+    ] as const) {
+      expect(fnmatchCase(name, glob)).toBe(expected);
+    }
+    expect(() =>
+      captureTier('docs/a.md', {
+        protected_patterns: [],
+        tiers: { T1: [], T2: [], T3: [], T4: [] },
+      }),
+    ).toThrow('path has no importance tier');
+  });
+
+  test('confirmed counts follow duplicate evidence to one canonical id', () => {
+    const events = [
+      jsonValue({
+        event_type: 'review',
+        payload: {
+          findings: [
+            { id: 'f1', path: 'src/a.ts' },
+            { id: 'f2', path: 'src/a.ts' },
+          ],
+        },
+      }),
+      jsonValue({
+        event_type: 'finding-event',
+        payload: {
+          finding_id: 'f2',
+          action: 'duplicate',
+          evidence: { canonical_id: 'f1' },
+        },
+      }),
+      jsonValue({
+        event_type: 'finding-event',
+        payload: { finding_id: 'f1', action: 'confirmed' },
+      }),
+    ];
+    expect([...confirmedCounts(events)]).toEqual([['src/a.ts', 1]]);
+  });
 });
