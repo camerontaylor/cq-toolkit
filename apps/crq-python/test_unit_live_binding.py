@@ -349,10 +349,10 @@ class DiscoveryTests(PortFixture):
         declared = self.declare()
         target = self.base / ".local/infra/systemd/crq-messaging.conf"
         target.parent.mkdir(parents=True)
-        # A declared environment drop-in is opaque: its absolute symlink
-        # target is outside the unit directory and its content is not a unit
-        # dependency source.
-        target.write_text("[Unit]\nWants=crq-slot.service\n")
+        # A declared environment drop-in may resolve to an absolute target
+        # outside the unit directory; its text is still dependency-scanned.
+        target.write_text(
+            "[Service]\nEnvironmentFile=%h/.local/state/paseo/env\n")
         dropin = self.unit_dir / "crq-tick.service.d"
         dropin.mkdir()
         (dropin / "20-paseo-env.conf").symlink_to(target)
@@ -401,6 +401,33 @@ class DiscoveryTests(PortFixture):
                 self.assertEqual(evidence["supported"], True)
                 self.assertEqual(evidence["foreign"], [])
                 self.assertIsNone(evidence["error"])
+
+    def test_co_installed_dropin_dependency_on_selected_unit_is_unsupported(
+            self):
+        good = self.base / ".local/infra/systemd/crq-messaging.conf"
+        good.parent.mkdir(parents=True)
+        good.write_text(
+            "[Service]\nEnvironmentFile=%h/.local/state/paseo/env\n")
+        bad = self.base / ".local/infra/systemd/evil.conf"
+        bad.write_text("[Unit]\nWants=crq-tick.service\n")
+
+        tick = self.declare()
+        tick_dropin = self.unit_dir / "crq-tick.service.d"
+        tick_dropin.mkdir()
+        (tick_dropin / "20-paseo-env.conf").symlink_to(good)
+        (tick_dropin / "coderabbit-managed.conf").write_text(
+            "[Service]\nEnvironment=CODERABBIT_CLI_DISABLE_AUTO_UPDATE=true\n")
+
+        self.write("crq-watchdog.service", "[Service]\nExecStart=/bin/true\n")
+        self.write("crq-watchdog.timer", "[Timer]\nOnCalendar=*:0/12\n")
+        watchdog_dropin = self.unit_dir / "crq-watchdog.service.d"
+        watchdog_dropin.mkdir()
+        (watchdog_dropin / "20-paseo-env.conf").symlink_to(bad)
+
+        evidence = self.port().discover(
+            "crq-tick.service", [str(path) for path in tick])
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("crq-tick.service", " ".join(evidence["foreign"]))
 
     def test_undeclared_dropin_entry_is_unsupported(self):
         declared = self.declare()

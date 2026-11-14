@@ -31,11 +31,12 @@ topology evidence; until then this module is an offline-tested seam.
 
 The exception is the declared environment drop-in topology shared with
 ``unit-adapter.py``: for the named CRQ service units, exactly the declared
-entry names are accepted in a real directory of the declared shape. Those
-entries are opaque here. Their contents are never read and their absolute
-symlink targets are not scanned as unit dependency sources; the adapter
-revalidates ownership, mode and environment-only service keys before any
-mutation.
+entry names are accepted in a real directory of the declared shape. The
+selected unit's entries are validated as environment-only by the adapter.
+The dependency scanner still reads declared drop-in text for unit dependency
+directives and allows the declared absolute symlink targets, so a co-installed
+drop-in cannot introduce an unaccounted incoming activator. It never follows
+an ``EnvironmentFile`` target.
 """
 from __future__ import annotations
 
@@ -469,12 +470,11 @@ class SubprocessSystemd:
                         if seen > MAX_SCAN_ENTRIES:
                             return "unit directory exceeds the dependency scan bound"
                         path = Path(entry.path)
-                        if str(path) in declared_dropins:
-                            # Declared environment drop-ins are opaque: their
-                            # contents are never read and their absolute
-                            # symlink targets are not unit dependency sources.
-                            continue
                         if entry.is_symlink():
+                            declared_source = (
+                                str(path.parent) in declared_dropins
+                                and path.name
+                                in declared_dropins[str(path.parent)])
                             try:
                                 target = path.resolve(strict=False)
                             except (OSError, RuntimeError) as exc:
@@ -483,13 +483,18 @@ class SubprocessSystemd:
                             if target == path:
                                 return ("dependency scan cannot resolve a symlink: "
                                         + str(path))
-                            try:
-                                if target == Path(os.devnull):
-                                    continue
-                                target.relative_to(root)
-                            except ValueError:
-                                return ("dependency scan found a symlink outside "
-                                        "the unit directory: " + str(path))
+                            if target == Path(os.devnull):
+                                continue
+                            if not declared_source:
+                                # Only declared drop-in symlinks may resolve
+                                # outside the unit directory; their text is
+                                # still scanned for dependency directives.
+                                try:
+                                    target.relative_to(root)
+                                except ValueError:
+                                    return ("dependency scan found a symlink "
+                                            "outside the unit directory: "
+                                            + str(path))
                             try:
                                 info = path.stat()
                             except (OSError, RuntimeError) as exc:
@@ -621,8 +626,13 @@ class SubprocessSystemd:
                     foreign.append(dropin_error)
                 continue
             if str(entry) in all_dropins:
-                # A declared environment drop-in for another co-installed CRQ
-                # unit is not part of this unit's topology and is not scanned.
+                # A co-installed declared drop-in is not part of this unit's
+                # topology, but its shape is still validated and its text is
+                # still scanned for dependencies on the selected unit.
+                dropin_error = self._declared_dropin_error(
+                    entry, all_dropins[str(entry)])
+                if dropin_error is not None:
+                    foreign.append(dropin_error)
                 continue
             if name.startswith(prefix) and str(entry) not in declared_set:
                 foreign.append("unexpected installed entry: " + str(entry))
