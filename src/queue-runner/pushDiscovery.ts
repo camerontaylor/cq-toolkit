@@ -7,6 +7,7 @@ export interface PushDiscoveryRepo {
   readonly repo: string;
   readonly name: string;
   readonly floor: string | null;
+  /** Effective quiet window. Caller resolves zero/unset repo value to global default. */
   readonly quietMinutes: number;
   readonly enabled: boolean;
 }
@@ -70,6 +71,7 @@ function nextOrder(items: JsonObject[]): JsonNumber {
   return JsonNumber.int((max ?? 0n) + 1n);
 }
 function sha(value: string): string {
+  // Receipt identities currently require 40-hex SHA-1; SHA-256 needs end-to-end support.
   if (!/^[0-9a-f]{40}$/.test(value)) throw new Error('invalid commit identity');
   return value;
 }
@@ -219,8 +221,11 @@ export async function discoverPush(
         ]),
       );
       log.push(`push discovery ${cfg.repo}: enrolled ${id}`);
-    } catch {
-      log.push(`push discovery skipped ${cfg.repo}`);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'unknown error';
+      log.push(
+        `push discovery skipped ${cfg.repo}: ${reason.replace(/[\r\n\t]/g, ' ').slice(0, 200)}`,
+      );
     }
   }
   return { queue, log };

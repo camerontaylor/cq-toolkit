@@ -134,6 +134,62 @@ describe('push discovery', () => {
     );
     expect(items(quiet.queue)).toHaveLength(0);
   });
+  it('pins reviewing and repairing lanes even without a capture', async () => {
+    for (const state of ['reviewing', 'repairing']) {
+      const result = await discoverPush(
+        queue([{ id: 'inflight', repo: 'o/r', kind: 'push-current', state, subject: {} }]),
+        [cfg],
+        false,
+        'main/repo',
+        effects(),
+      );
+      expect(items(result.queue)).toHaveLength(1);
+      expect(items(result.queue)[0]?.get('state')).toBe(state);
+    }
+  });
+  it('retains dependent parts and terminal records when coalescing', async () => {
+    const source = queue([
+      {
+        id: 'part',
+        repo: 'o/r',
+        kind: 'push-current',
+        state: 'pending',
+        subject: {},
+        depends_on: 'parent',
+      },
+      { id: 'done', repo: 'o/r', kind: 'push-current', state: 'done', subject: {} },
+      { id: 'blocked', repo: 'o/r', kind: 'push-current', state: 'blocked', subject: {} },
+      { id: 'old', repo: 'o/r', kind: 'push-current', state: 'pending', subject: {} },
+    ]);
+    const result = await discoverPush(source, [cfg], false, 'main/repo', effects());
+    expect(items(result.queue).map((item) => item.get('state'))).toEqual([
+      'pending',
+      'done',
+      'blocked',
+      'skipped',
+      'pending',
+    ]);
+  });
+  it('keeps terminal ids sticky and treats repo-less legacy items as primary', async () => {
+    const id = `push-r-${base.slice(0, 10)}-${tip.slice(0, 10)}`;
+    const sticky = await discoverPush(
+      queue([{ id, repo: 'o/r', kind: 'push-current', state: 'done', subject: {} }]),
+      [cfg],
+      false,
+      'main/repo',
+      effects(),
+    );
+    expect(items(sticky.queue)).toHaveLength(1);
+    const legacy = await discoverPush(
+      queue([{ id: 'legacy', kind: 'push-current', state: 'reviewing', subject: {} }]),
+      [cfg],
+      false,
+      'o/r',
+      effects(),
+    );
+    expect(items(legacy.queue)).toHaveLength(1);
+    expect(items(legacy.queue)[0]?.get('state')).toBe('reviewing');
+  });
   it('resets divergence without enrollment and dry runs never mutate', async () => {
     const original = queue();
     const events: string[] = [];

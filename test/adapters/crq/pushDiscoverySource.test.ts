@@ -59,6 +59,11 @@ describe('push discovery source', () => {
     await expect(effects.isAncestor(repo, 'a'.repeat(40), tip)).rejects.toThrow(
       'ancestry unavailable',
     );
-    await expect(effects.fetchTip({ ...repo })).rejects.toThrow('invalid push repository');
+    await expect(effects.isAncestor({ ...repo }, 'a'.repeat(40), tip)).rejects.toThrow(
+      'ancestry unavailable',
+    );
+    await expect(effects.fetchTip({ ...repo, repo: 'unknown/repo' })).rejects.toThrow(
+      'invalid push repository',
+    );
   });
 });

@@ -27,8 +27,14 @@ export function filePushDiscoveryEffects(
   saveQueue(queue: JsonObject): Promise<void>;
 } {
   const configured = (requested: PushDiscoveryRepo): PushRepository => {
-    const repo = options.repos.find((candidate) => candidate === requested);
-    if (!repo || branchPathFault(repo.defaultBranch) !== null || !repo.clone)
+    const matches = options.repos.filter((candidate) => candidate.repo === requested.repo);
+    const repo = matches[0];
+    if (
+      matches.length !== 1 ||
+      !repo ||
+      branchPathFault(repo.defaultBranch) !== null ||
+      !repo.clone
+    )
       throw new Error('invalid push repository');
     return repo;
   };
@@ -68,6 +74,8 @@ export function filePushDiscoveryEffects(
       const result = await execute(repo, ['merge-base', '--is-ancestor', base, tip]);
       if (result.code === 0) return true;
       if (result.code === 1) return false;
+      // Unlike Python's nonzero-as-divergence behavior, errors retain the old tip.
+      // A missing base therefore needs repair rather than silently waiving review.
       throw new Error('git ancestry unavailable');
     },
     async commitTime(repo, tip) {
