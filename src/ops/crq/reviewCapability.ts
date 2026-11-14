@@ -413,7 +413,7 @@ async function submit(
   const notifyStatus = nextBinding.get('notify_status');
   if (notifyStatus !== undefined) result = withField(result, 'notify', notifyStatus);
   await effects.saveQueue(queue);
-  if (result.get('action') === 'created' && hasCycleItems(queue)) {
+  if (result.get('action') === 'created' && !repeat && hasCycleItems(queue)) {
     const reused = await probeReusedReceipt(queue, itemId, effects);
     if (reused !== null) {
       queue = reused.queue;

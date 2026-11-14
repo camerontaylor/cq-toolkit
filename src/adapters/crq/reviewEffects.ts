@@ -40,6 +40,14 @@ export interface ReviewEffectsOptions {
   readonly now?: () => Date;
 }
 
+/** `crq.UNIVERSAL_SCAN_CLASSES`: the secret shapes every repository scans. */
+const UNIVERSAL_SCAN_CLASSES = [
+  'class:token-ssh-plumbing',
+  'class:route-key-material',
+  'class:key-material-env',
+  'class:inline-secret-assignments',
+] as const;
+
 export interface ReviewEffectsBundle {
   readonly effects: ReviewCapabilityEffects;
   /** Kill every live Git child (the forced-command deadline). */
@@ -164,10 +172,21 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
       }
     },
     async installSnapshot(repo, snapshot, binding) {
+      const configured = repoEntry(repo);
+      const scanClasses =
+        configured === null
+          ? undefined
+          : [
+              ...UNIVERSAL_SCAN_CLASSES,
+              ...arrayOrEmpty(configured.get('scan_extra_classes')).filter(
+                (value): value is string => typeof value === 'string' && value.length > 0,
+              ),
+            ];
       await installAuthorSnapshot({
         pool,
         clone: cloneFor(repo),
         scanClone: cloneFor(options.repo),
+        ...(scanClasses === undefined ? {} : { scanClasses }),
         snapshot,
         binding,
         original: true,

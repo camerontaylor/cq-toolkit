@@ -15,7 +15,7 @@
  * does not reproduce.
  */
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { JsonObject } from '../../policy/crq/jsonValue.js';
@@ -48,6 +48,10 @@ export interface InstallSnapshotInput {
   readonly clone: string;
   /** Trusted clone that supplies `policy/denylist/patterns.yml` (defaults to clone). */
   readonly scanClone?: string;
+  /** Authoritative ref for the scan policy (defaults to `origin/main`). */
+  readonly scanRef?: string;
+  /** Denylist class ids to apply; omitted keeps the full primary rule set. */
+  readonly scanClasses?: readonly string[];
   readonly snapshot: JsonObject;
   readonly binding: { readonly base: string; readonly head: string };
   readonly original: boolean;
@@ -160,7 +164,12 @@ export async function installAuthorSnapshot(input: InstallSnapshotInput): Promis
     )) {
       blobData.set(oid, data);
     }
-    const rules = await readRules(input.scanClone ?? clone);
+    const rules = await readRules(
+      input.pool,
+      input.scanClone ?? clone,
+      input.scanRef ?? 'origin/main',
+      input.scanClasses,
+    );
     const diffText = Buffer.from(diff).toString('utf8');
     scanPatch(diffText, rules);
     const scanParts: string[] = [diffText];
@@ -209,7 +218,7 @@ export async function installAuthorSnapshot(input: InstallSnapshotInput): Promis
       if (scanBytes > MAX_WIRE_BYTES) throw new AuthorRefused('snapshot scan exceeds bound');
       scanParts.push(part);
     }
-    await gitleaksScan(scanParts);
+    await gitleaksScan(scanParts, input.pool);
     await writeObjects(input, clone, decoded.objects, 'snapshot installation mismatch');
     await gitOk(input.pool, clone, [
       'update-ref',
@@ -222,18 +231,30 @@ export async function installAuthorSnapshot(input: InstallSnapshotInput): Promis
 }
 
 async function readRules(
+  pool: GitPool,
   clone: string,
+  ref: string,
+  classes: readonly string[] | undefined,
 ): Promise<ReturnType<typeof parseDenylistPatterns>['rules']> {
   let text: string;
   try {
-    text = await readFile(join(clone, 'policy/denylist/patterns.yml'), 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new AuthorRefused('denylist policy is not present in the review clone');
-    }
-    throw error;
+    text = Buffer.from(
+      await gitOk(pool, clone, ['show', `${ref}:policy/denylist/patterns.yml`]),
+    ).toString('utf8');
+  } catch {
+    throw new AuthorRefused('snapshot scan policy is unavailable');
   }
-  return parseDenylistPatterns(text, 'policy/denylist/patterns.yml').rules;
+  const rules = parseDenylistPatterns(text, 'policy/denylist/patterns.yml').rules;
+  if (classes === undefined) return rules;
+  const available = new Set(rules.map((rule) => rule.id));
+  if (classes.some((id) => !available.has(id))) {
+    throw new AuthorRefused('snapshot scan policy is missing required classes');
+  }
+  const filtered = rules.filter((rule) => classes.includes(rule.id));
+  if (filtered.length === 0) {
+    throw new AuthorRefused('snapshot scan policy filtered to zero rules');
+  }
+  return filtered;
 }
 
 /** Project-rule scan over the patch, including removed lines (`secret_scan_diff`). */
@@ -405,12 +426,13 @@ function safePath(path: string): boolean {
 }
 
 /** Refuse on any gitleaks hit; an unavailable binary is skipped like Python. */
-async function gitleaksScan(parts: readonly string[]): Promise<void> {
-  if (!(await gitleaksAvailable())) return;
+async function gitleaksScan(parts: readonly string[], pool: GitPool): Promise<void> {
+  if (!(await gitleaksAvailable(pool))) return;
   const scanner = makeGitleaksDefaultsScanner({
     async runCommand(command, args, opts) {
       return new Promise((resolve) => {
         const child = spawn(command, [...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+        pool.track(child);
         let stdout = '';
         let stderr = '';
         let timedOut = false;
@@ -457,9 +479,10 @@ async function gitleaksScan(parts: readonly string[]): Promise<void> {
   }
 }
 
-function gitleaksAvailable(): Promise<boolean> {
+function gitleaksAvailable(pool: GitPool): Promise<boolean> {
   return new Promise((resolve) => {
     const child = spawn('gitleaks', ['version'], { stdio: 'ignore' });
+    pool.track(child);
     child.on('error', () => resolve(false));
     child.on('close', (code) => resolve(code === 0));
   });

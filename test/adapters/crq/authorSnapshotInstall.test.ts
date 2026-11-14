@@ -93,10 +93,37 @@ const PATTERNS = [
   '    description: test token',
   "    regex: 'SECRET_[A-Z]+'",
   "    sample: 'SECRET_TOKEN'",
+  '  - id: class:key-material-env',
+  '    description: universal env material',
+  "    regex: 'NEVER_MATCH_[A-Z]+'",
+  "    sample: 'NEVER_MATCH_TOKEN'",
+  '  - id: class:portkey-config',
+  '    description: primary-only vocabulary',
+  "    regex: 'portkey'",
+  "    sample: 'portkey'",
   'clean_probes:',
   "  - 'ordinary text'",
   '',
 ].join('\n');
+
+async function publishPolicy(dir: string): Promise<void> {
+  await mkdir(join(dir, 'policy/denylist'), { recursive: true });
+  await writeFile(join(dir, 'policy/denylist/patterns.yml'), PATTERNS);
+  await run('git', ['-C', dir, 'add', 'policy/denylist/patterns.yml']);
+  await run('git', [
+    '-C',
+    dir,
+    '-c',
+    'user.email=a@b',
+    '-c',
+    'user.name=a',
+    'commit',
+    '-q',
+    '-m',
+    'policy',
+  ]);
+  await run('git', ['-C', dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD']);
+}
 
 async function clone(): Promise<{ dir: string; base: string; pool: GitPool }> {
   const dir = await mkdtemp(join(tmpdir(), 'cq-author-install-'));
@@ -115,8 +142,7 @@ async function clone(): Promise<{ dir: string; base: string; pool: GitPool }> {
     'base',
   ]);
   const base = (await run('git', ['-C', dir, 'rev-parse', 'HEAD'])).stdout.trim();
-  await mkdir(join(dir, 'policy/denylist'), { recursive: true });
-  await writeFile(join(dir, 'policy/denylist/patterns.yml'), PATTERNS);
+  await publishPolicy(dir);
   return { dir, base, pool: new GitPool() };
 }
 
@@ -141,8 +167,7 @@ async function cloneWithFile(
     'base',
   ]);
   const base = (await run('git', ['-C', dir, 'rev-parse', 'HEAD'])).stdout.trim();
-  await mkdir(join(dir, 'policy/denylist'), { recursive: true });
-  await writeFile(join(dir, 'policy/denylist/patterns.yml'), PATTERNS);
+  await publishPolicy(dir);
   return { dir, base, pool: new GitPool() };
 }
 
@@ -230,6 +255,30 @@ describe('installAuthorSnapshot', () => {
         'snapshot secret scan refused',
       );
       expect(await objectExists(repo.dir, fixture.head)).toBe(false);
+    } finally {
+      repo.pool.killAll();
+    }
+  });
+
+  test('filters rules for a secondary repository scan class set', async () => {
+    const repo = await clone();
+    try {
+      const fixture = snapshotFor(repo.base, 'portkey\n');
+      await expect(
+        installAuthorSnapshot({
+          ...input(repo, fixture),
+          scanClasses: ['class:missing'],
+        }),
+      ).rejects.toThrow('snapshot scan policy is missing required classes');
+      await expect(installAuthorSnapshot(input(repo, fixture))).rejects.toThrow(
+        'snapshot secret scan refused',
+      );
+      await expect(
+        installAuthorSnapshot({
+          ...input(repo, fixture),
+          scanClasses: ['class:key-material-env'],
+        }),
+      ).resolves.toBeUndefined();
     } finally {
       repo.pool.killAll();
     }
