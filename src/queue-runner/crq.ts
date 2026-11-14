@@ -6,15 +6,24 @@ import { isAbsolute, join, resolve } from 'node:path';
 import type { OpResult } from '../kernel/types.js';
 import { runRepairPrepare } from '../adapters/crq/repairPreparation.js';
 import { runPublishUnit } from '../adapters/crq/publishSource.js';
+import {
+  AUTHOR_DEADLINE_MS,
+  runAuthorCapabilityMain,
+} from '../adapters/crq/authorCapabilityMain.js';
+import {
+  REVIEW_DEADLINE_MS,
+  runReviewCapabilityMain,
+} from '../adapters/crq/reviewCapabilityMain.js';
 import { runStatusWriter } from '../adapters/crq/statusWriter.js';
 import { MAX_REQUEST_BYTES, runQueueCapabilityMain } from '../adapters/crq/queueCapabilityMain.js';
+import { REVIEW_MAX_BYTES } from '../ops/crq/reviewCapability.js';
+import { AUTHOR_MAX_SNAPSHOT_BYTES } from '../policy/crq/authorWire.js';
 import { run } from './runner.js';
 import { planTick } from './tick.js';
 import { runWatchdog } from './watchdog.js';
 
 /** Read at most one wire frame plus the byte that proves it is over-long. */
-async function readFrame(): Promise<Uint8Array> {
-  const limit = MAX_REQUEST_BYTES + 1;
+async function readFrame(limit: number = MAX_REQUEST_BYTES + 1): Promise<Uint8Array> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of process.stdin) {
@@ -46,6 +55,36 @@ if (command === 'queue-capability') {
     // read or a held queue lock would otherwise outlive the refusal.
     terminate: () => process.exit(2),
     root,
+  });
+} else if (command === 'review-capability') {
+  process.exitCode = await runReviewCapabilityMain({
+    argv: rest,
+    env: (name) => process.env[name],
+    readStdin: () => readFrame(REVIEW_MAX_BYTES + 1),
+    stdout: (bytes) => {
+      process.stdout.write(bytes);
+    },
+    stderr: (message) => {
+      process.stderr.write(`${message}\n`);
+    },
+    terminate: () => process.exit(2),
+    root,
+    deadlineMs: REVIEW_DEADLINE_MS,
+  });
+} else if (command === 'author-capability') {
+  process.exitCode = await runAuthorCapabilityMain({
+    argv: rest,
+    env: (name) => process.env[name],
+    readStdin: () => readFrame(AUTHOR_MAX_SNAPSHOT_BYTES + 1),
+    stdout: (bytes) => {
+      process.stdout.write(bytes);
+    },
+    stderr: (message) => {
+      process.stderr.write(`${message}\n`);
+    },
+    terminate: () => process.exit(2),
+    root,
+    deadlineMs: AUTHOR_DEADLINE_MS,
   });
 } else {
   const stateHome = process.env.XDG_STATE_HOME;

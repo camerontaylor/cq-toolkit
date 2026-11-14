@@ -19,9 +19,11 @@
 // `./<base>` rule): readOnlyStatus.ts and statusWriter.ts are deliberately
 // surface, not orphan op modules.
 import type { OpRegistryEntry } from '../../kernel/types.js';
+import type { runAuthorCapability } from './authorCapability.js';
 import type { runQueueCapability } from './queueCapability.js';
 import type { CommandResult, ReadOnlyStatusEffects } from './readOnlyStatus.js';
 import type { PublishRunResult } from './publishRun.js';
+import type { runReviewCapability } from './reviewCapability.js';
 import type { CrqDocuments, StatusWriterEffects } from './statusWriter.js';
 
 /** The A1 read-only route's callable surface, bound to effects by its adapter. */
@@ -49,6 +51,19 @@ export type CrqStatusWriterRoute = (
  * central dispatcher calling it by name.
  */
 export type CrqQueueCapability = typeof runQueueCapability;
+
+/**
+ * The review-v1 capability's callable surface. It too is served as an SSH
+ * forced command (`crq review-v1`), never dispatched by name: the adapter
+ * `src/adapters/crq/reviewCapabilityMain.ts` binds its effects.
+ */
+export type CrqReviewCapability = typeof runReviewCapability;
+
+/**
+ * The author-v1 capability's callable surface, served as `crq author-v1` by
+ * `src/adapters/crq/authorCapabilityMain.ts`. No dispatcher name is declared.
+ */
+export type CrqAuthorCapability = typeof runAuthorCapability;
 
 /** No dispatchable ops yet: A1 ships the route plus its file adapter. */
 export const registry: OpRegistryEntry[] = [];
