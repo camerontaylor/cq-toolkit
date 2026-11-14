@@ -341,6 +341,17 @@ def main():
     parser.add_argument('--report', type=Path)
     args = parser.parse_args()
     try:
+        if args.report is not None:
+            report_path = args.report.resolve()
+            output_path = args.output.resolve()
+            artifact_paths = {
+                output_path,
+                output_path.with_name(output_path.name + '.provenance.json'),
+                output_path.with_name(output_path.name + '.sha256'),
+            }
+            if report_path in artifact_paths:
+                raise BuildError('report path collides with an artifact: '
+                                 + str(report_path))
         report = build(args.repo, args.sha, args.staging, args.output,
                        node=args.node, pnpm=args.pnpm,
                        keep_staging=args.keep_staging)
