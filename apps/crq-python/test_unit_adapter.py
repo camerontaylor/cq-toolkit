@@ -509,6 +509,7 @@ class InventoryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="crq-inv-")
         self.addCleanup(self.temp.cleanup)
+
         self.base = Path(self.temp.name)
         self.root = self.base / "deploy"
         runner = self.root / "apps/crq-python"
@@ -521,6 +522,14 @@ class InventoryTests(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-qm", "baseline")
         self.sha = self.git("rev-parse", "HEAD").strip()
+
+    def test_queue_ownership_classification_matches_the_controller(self):
+        self.assertEqual(adapter_mod.NON_QUEUE_ISSUING_UNITS,
+                         dc.QUEUE_NON_ISSUING_UNITS)
+        for unit in dc.UNIT_RUNTIMES:
+            with self.subTest(unit=unit):
+                self.assertEqual(adapter_mod.unit_issues_queue_work(unit),
+                                 dc.unit_issues_queue_work(unit))
 
     def git(self, *args):
         return subprocess.run(["git", "-C", str(self.root), *args],
@@ -1011,6 +1020,33 @@ class AdapterTests(AdapterFixture):
         self.queue = {"drained": False, "blocked": ["pr1"]}
         with self.assertRaisesRegex(dc.Refused, "queue-owned work"):
             current.stop_and_drain("crq-tick.service")
+
+    def test_watchdog_fence_ignores_an_unrelated_live_queue(self):
+        self.fake.active["crq-watchdog.timer"] = "active"
+        probe = mock.Mock(side_effect=AssertionError(
+            "the watchdog fence must not observe unrelated queue work"))
+        current = self.make_adapter(queue_drain=probe)
+        prior = current.preflight("crq-watchdog.service", NODE_RUNTIME)
+        self.assertEqual(prior["runtime"], "python")
+        snapshot = current.snapshot("crq-watchdog.service")
+        current.validate_snapshot("crq-watchdog.service", snapshot)
+        evidence = current.stop_and_drain("crq-watchdog.service")
+        probe.assert_not_called()
+        self.assertIsNone(evidence["queue"])
+        service = self.unit_dir / "crq-watchdog.service"
+        self.assertTrue(service.is_symlink())
+        self.assertEqual(os.readlink(service), "/dev/null")
+        self.assertEqual(self.fake.active["crq-watchdog.timer"], "inactive")
+        # Its own systemd/cgroup fences still ran and settled.
+        self.assertIn(["stop", "crq-watchdog.timer"], self.fake.calls)
+        self.assertTrue(any(call[:1] == ["daemon-reload"]
+                            for call in self.fake.calls))
+
+    def test_watchdog_preflight_needs_no_queue_observation_provider(self):
+        self.fake.active["crq-watchdog.timer"] = "active"
+        current = self.make_adapter(queue_drain=None)
+        prior = current.preflight("crq-watchdog.service", NODE_RUNTIME)
+        self.assertEqual(prior["runtime"], "python")
 
     def test_stop_and_drain_refuses_command_failure(self):
         current, _prior, _snapshot = self.switch_ready(

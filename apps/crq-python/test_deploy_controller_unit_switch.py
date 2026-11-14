@@ -412,6 +412,93 @@ class UnitSwitchTests(ControllerFixture):
                          queue_before)
         self.assertEqual(list(self.record_dir.glob("controller-*.json")), [])
 
+    def test_queue_ownership_classification_is_watchdog_only(self):
+        self.assertFalse(dc.unit_issues_queue_work("crq-watchdog.service"))
+        for unit in dc.UNIT_RUNTIMES - {"crq-watchdog.service"}:
+            with self.subTest(unit=unit):
+                self.assertTrue(dc.unit_issues_queue_work(unit))
+        self.assertEqual(dc.preserved_surfaces("crq-watchdog.service"), ())
+        self.assertEqual(dc.preserved_surfaces("crq-tick.service"),
+                         ("heartbeat.json", "queue.json"))
+
+    def test_watchdog_switch_is_admitted_while_unrelated_work_is_live(self):
+        run_id = "9" * 32
+        self.write_state("queue.json", {"items": [
+            {"id": "pr-live", "run": {"run_id": run_id, "pid": 4242}}]})
+        queue_before = (self.runner / "state/queue.json").read_bytes()
+
+        class AdvancingAdapter(Adapter):
+            def install(self, unit, runtime):
+                # An unrelated live child harvests legitimate progress while
+                # the watchdog transaction is in flight.
+                fixture.write_state("queue.json", {
+                    "items": [{"id": "pr-live", "state": "done"}],
+                    "starts": ["progress"]})
+                super().install(unit, runtime)
+
+        fixture = self
+        probe = mock.Mock(side_effect=AssertionError(
+            "the watchdog queue gate must not observe unrelated work"))
+        with mock.patch.object(dc, "_runner_liveness", probe):
+            record = dc.switch_unit(
+                self.effects, AdvancingAdapter("python"),
+                "crq-watchdog.service", "node:" + "a" * 40)
+        probe.assert_not_called()
+        self.assertEqual(record["outcome"], "completed")
+        self.assertEqual(record["unit"], "crq-watchdog.service")
+        self.assertNotIn("preserved/queue.json", record["state"])
+        self.assertNotIn("preserved/heartbeat.json", record["state"])
+        self.assertNotEqual((self.runner / "state/queue.json").read_bytes(),
+                            queue_before)
+        # Progress is retained, never rolled back from a stale snapshot.
+        self.assertEqual(json.loads((self.runner
+                                     / "state/queue.json").read_text())["starts"],
+                         ["progress"])
+
+    def test_watchdog_reverse_switch_retains_concurrent_queue_progress(self):
+        node = "node:" + "a" * 40
+        records = []
+        for prior, requested in (("python", node), (node, "python")):
+            with self.subTest(requested=requested):
+                adapter = Adapter(prior)
+
+                def advance(unit, runtime, number=len(records) + 1):
+                    self.write_state("queue.json", {
+                        "items": [], "progress": number})
+                    Adapter.install(adapter, unit, runtime)
+
+                adapter.install = advance
+                records.append(dc.switch_unit(
+                    self.effects, adapter, "crq-watchdog.service", requested))
+        self.assertEqual([record["outcome"] for record in records],
+                         ["completed", "completed"])
+        self.assertEqual(json.loads((self.runner
+                                     / "state/queue.json").read_text()),
+                         {"items": [], "progress": 2})
+
+    def test_watchdog_own_failure_rolls_back_without_queue_equality(self):
+        node = "node:" + "a" * 40
+
+        class FailingAdapter(Adapter):
+            def install(self, unit, runtime):
+                fixture.write_state("queue.json", {
+                    "items": [], "progress": "concurrent"})
+                raise RuntimeError("watchdog install failed")
+
+        fixture = self
+        with self.assertRaises(dc.RecoveryRequired) as failure:
+            dc.switch_unit(self.effects, FailingAdapter("python"),
+                           "crq-watchdog.service", node)
+        recovery = failure.exception.recovery
+        self.assertEqual(recovery["outcome"], "rolled_back")
+        self.assertIn("watchdog install failed", recovery["reason"])
+        self.assertEqual(json.loads((self.runner
+                                     / "state/queue.json").read_text()),
+                         {"items": [], "progress": "concurrent"})
+        path = next(self.record_dir.glob("controller-*.json"))
+        self.assertEqual(json.loads(path.read_text())["outcome"],
+                         "rolled_back")
+
     def test_switch_refuses_ambiguous_queue_before_mutation(self):
         run_id = "b" * 32
         self.write_state("queue.json", {"items": [
@@ -462,6 +549,36 @@ class UnitSwitchTests(ControllerFixture):
             {"item": "pr3", "state": "alive", "run": run_id}])
         self.assertEqual(path.read_bytes(), before)
         self.assertTrue(adapter.running)
+
+    def test_watchdog_recovery_skips_an_unrelated_live_queue(self):
+        record = {
+            "schema_version": dc.JOURNAL_SCHEMA,
+            "transaction_id": "e" * 32,
+            "operation": "unit_switch",
+            "unit": "crq-watchdog.service",
+            "runtime": "node:" + "b" * 40,
+            "prior_runtime": "python",
+            "outcome": "pending",
+            "at": "2026-11-12T00:00:00Z",
+            "snapshot": {"runtime": "python", "running": True},
+            "state": dc.captured_state(self.effects, "crq-watchdog.service"),
+            "phase": "drained",
+        }
+        self.assertNotIn("preserved/queue.json", record["state"])
+        path = self.effects.journal_append(record)
+        self.write_state("queue.json", {"items": [
+            {"id": "pr-unrelated",
+             "run": {"run_id": "f" * 32, "pid": 6100}}]})
+        queue_before = (self.runner / "state/queue.json").read_bytes()
+        probe = mock.Mock(side_effect=AssertionError(
+            "watchdog recovery must not observe unrelated work"))
+        adapter = Adapter("python")
+        with mock.patch.object(dc, "_runner_liveness", probe):
+            completed = dc.recover_unit(self.effects, adapter, path)
+        probe.assert_not_called()
+        self.assertEqual(completed["outcome"], "rolled_back")
+        self.assertEqual((self.runner / "state/queue.json").read_bytes(),
+                         queue_before)
 
     def test_recovery_failure_keeps_pending_record_and_reports_recovery(self):
         class Crash(BaseException):

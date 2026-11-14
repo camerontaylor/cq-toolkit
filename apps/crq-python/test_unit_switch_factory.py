@@ -16,6 +16,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from test_deploy_controller_fixtures import dc
 from test_unit_adapter import (
@@ -421,6 +422,44 @@ class FactorySwitchTests(FactoryFixture):
         adapter, _selection = self.compose(unit=unit)
         prior = adapter.preflight(unit, "python")
         self.assertEqual(prior["completion_window"], 1140)
+
+    def test_watchdog_switch_and_reverse_are_admitted_with_live_queue_work(self):
+        unit = "crq-watchdog.service"
+        sha = "c" * 40
+        runtime = "node:" + sha
+        artifact = _node_artifact(self.base, sha, capabilities=["watchdog"])
+        _write(self.unit_dir / unit, self.python_service(unit)["bytes"], 0o644)
+        self.systemd.active[unit] = "inactive"
+        self.systemd.active["crq-watchdog.timer"] = "active"
+        self.systemd.prior(unit, "d" * 32, 900)
+        progress = []
+
+        def advance(_service):
+            progress.append(len(progress) + 1)
+            self.write_state("queue.json", {
+                "items": [], "progress": progress[-1]})
+
+        self.systemd.after_service_start = advance
+        self.write_state("queue.json", {"items": [], "progress": 0})
+        probe = mock.Mock(side_effect=AssertionError(
+            "a watchdog unit transaction must not observe queue ownership"))
+        forward, _selection = self.compose(
+            unit=unit, runtime=runtime, queue_drain=probe,
+            artifact_root=artifact)
+        first = dc.switch_unit(self.effects, forward, unit, runtime)
+        self.assertEqual(first["outcome"], "completed")
+        self.assertNotIn("preserved/queue.json", first["state"])
+        probe.assert_not_called()
+        # Reverse composes without a queue observation provider at all.
+        reverse, _selection = self.compose(unit=unit, runtime="python",
+                                           queue_drain=None)
+        second = dc.switch_unit(self.effects, reverse, unit, "python")
+        self.assertEqual(second["outcome"], "completed")
+        probe.assert_not_called()
+        self.assertEqual(progress, [1, 2])
+        self.assertEqual(json.loads((self.runner
+                                     / "state/queue.json").read_text()),
+                         {"items": [], "progress": 2})
 
     def test_changed_installed_bytes_refuse_completion(self):
         alternate = self.python_service("crq-slot.service")
