@@ -84,6 +84,7 @@ function blameOutput(rows: readonly BlameModel[]): string {
 }
 
 const BLOB_A = 'a'.repeat(40);
+const BLOB_B = 'b'.repeat(40);
 const C1 = '1'.repeat(40);
 const C2 = '2'.repeat(40);
 
@@ -174,8 +175,14 @@ describe('GitCoverageRepository.lineage', () => {
         const [command, ...rest] = args;
         if (command === 'rev-parse' && rest.length === 1) {
           const spec = rest[0] as string;
+          // `entries()` resolves `<commit>^{commit}`; answering that with C2
+          // would read C2's tree for C1 and pass every negative case for the
+          // wrong reason (the source path would simply be missing).
+          if (spec.endsWith('^{commit}')) {
+            return { stdout: `${spec.slice(0, -'^{commit}'.length)}\n` };
+          }
           if (spec.endsWith('^1')) return { stdout: `${C1}\n` };
-          return { stdout: `${C2}\n` };
+          return undefined;
         }
         if (command === 'ls-tree') {
           const commit = args[3] as string;
@@ -212,6 +219,80 @@ describe('GitCoverageRepository.lineage', () => {
       ).runGit,
     );
     expect(await duplicatedAfter.lineage(C1, C2, 'src/old.ts')).toBeNull();
+  });
+
+  test('a chained rename across two rows of one commit follows Python', async () => {
+    // Python's `_lineage` walks every row of the commit and reassigns
+    // `current`; a later row of the same diff can therefore match the renamed
+    // path again (`for status, source, destination in changes: if source !=
+    // current: continue ... current = destination`). Both renames here are
+    // individually unique and exact, so Python maps a -> c. The port keeps
+    // that behaviour deliberately: it is the oracle, not a destination we
+    // silently re-derive.
+    const C3 = '3'.repeat(40);
+    const script: Script = (args) => {
+      const [command, ...rest] = args;
+      if (command === 'rev-parse' && rest.length === 1) {
+        const spec = rest[0] as string;
+        if (spec.endsWith('^{commit}')) {
+          return { stdout: `${spec.slice(0, -'^{commit}'.length)}\n` };
+        }
+        if (spec.endsWith('^1')) return { stdout: `${C2}\n` };
+        return undefined;
+      }
+      if (command === 'ls-tree') {
+        const commit = args[3] as string;
+        if (commit === C2) {
+          return { stdout: lsTree({ 'src/a.ts': BLOB_A, 'src/b.ts': BLOB_B }) };
+        }
+        if (commit === C3) {
+          return { stdout: lsTree({ 'src/b.ts': BLOB_A, 'src/c.ts': BLOB_B }) };
+        }
+        return undefined;
+      }
+      if (command === 'rev-list') return { stdout: `${C3}\n${C2}\n` };
+      if (command === 'diff') {
+        return {
+          stdout: nameStatus([
+            ['R100', 'src/a.ts', 'src/b.ts'],
+            ['R100', 'src/b.ts', 'src/c.ts'],
+          ]),
+        };
+      }
+      return undefined;
+    };
+    const repository = gitCoverageRepository(runner(script).runGit);
+    expect(await repository.lineage(C2, C3, 'src/a.ts')).toBe('src/c.ts');
+  });
+
+  test('a non-ASCII rename name is decoded as UTF-8, like the tree entries', async () => {
+    // Python's `_lineage_step` decodes name-status paths as UTF-8; the tree
+    // parser does the same. A Latin-1 read of these bytes would mojibake the
+    // destination and the final `entries(new)` lookup would miss it.
+    const script: Script = (args) => {
+      const [command, ...rest] = args;
+      if (command === 'rev-parse' && rest.length === 1) {
+        const spec = rest[0] as string;
+        if (spec.endsWith('^{commit}')) {
+          return { stdout: `${spec.slice(0, -'^{commit}'.length)}\n` };
+        }
+        if (spec.endsWith('^1')) return { stdout: `${C1}\n` };
+        return undefined;
+      }
+      if (command === 'ls-tree') {
+        const commit = args[3] as string;
+        if (commit === C1) return { stdout: lsTree({ 'src/café.ts': BLOB_A }) };
+        if (commit === C2) return { stdout: lsTree({ 'src/renamed.ts': BLOB_A }) };
+        return undefined;
+      }
+      if (command === 'rev-list') return { stdout: `${C2}\n${C1}\n` };
+      if (command === 'diff') {
+        return { stdout: nameStatus([['R100', 'src/café.ts', 'src/renamed.ts']]) };
+      }
+      return undefined;
+    };
+    const repository = gitCoverageRepository(runner(script).runGit);
+    expect(await repository.lineage(C1, C2, 'src/café.ts')).toBe('src/renamed.ts');
   });
 });
 

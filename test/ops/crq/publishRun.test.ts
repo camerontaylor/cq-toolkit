@@ -1950,6 +1950,10 @@ describe('round-2 coverage: publisher clone ownership and durable transitions', 
       await writeFile(join(stateRoot, 'queue.json'), '{"items":[]}\n');
       const clone = join(root, 'clone');
       await import('node:fs/promises').then((fs) => fs.mkdir(clone, { recursive: true }));
+      // The drain reads `crq.CONFIG` (`config.json`), which Python loads at
+      // import; the live route validates it before the unit runs. No `notify`
+      // section means nothing is deliverable.
+      await writeFile(join(root, 'config.json'), `${JSON.stringify({ clone })}\n`);
       const { runPublishUnit } = await import('../../../src/adapters/crq/publishSource.js');
       const outcome = await runPublishUnit({
         stateRoot,
@@ -2117,6 +2121,9 @@ describe('the publish unit end to end (live bindings over real git)', () => {
       git('-C', clone, 'remote', 'add', 'origin', remote);
       git('-C', clone, 'commit', '--allow-empty', '-m', 'seed');
       git('-C', clone, 'push', 'origin', 'HEAD:cq/review-ledger');
+
+      // Python loads `crq.CONFIG` at import; the drain reads the same document.
+      await writeFile(join(root, 'config.json'), `${JSON.stringify({ clone })}\n`);
 
       const { filePublishUnitEffects } = await import('../../../src/adapters/crq/publishSource.js');
       const { runPublishMain } = await import('../../../src/ops/crq/publishUnit.js');

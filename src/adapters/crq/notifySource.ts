@@ -61,15 +61,16 @@ export function spawnNotifySend(destination: JsonObject, text: string): Promise<
 
 /**
  * The runner's `config.json` as Python's `crq.CONFIG` (plain `json.loads`;
- * duplicate keys keep the last value). A missing or malformed file is an empty
- * object, so the drain refuses every destination instead of crashing the unit.
+ * duplicate keys keep the last value).
+ *
+ * A read or parse failure propagates: Python loads `CONFIG` at import, so an
+ * unreadable or malformed `config.json` never reaches a drain at all. Swallowing
+ * it here would turn an environment failure into a run of
+ * `unsupported-destination` errors against a config that is merely unreadable.
+ * The unit reports the thrown drain as `retry-pending` and still publishes.
  */
 export async function readNotifyConfig(runnerRoot: string): Promise<JsonValue> {
-  try {
-    return parseJsonValue(await readFile(join(runnerRoot, 'config.json'), 'utf8'), {
-      duplicates: 'last',
-    });
-  } catch {
-    return new JsonObject([]);
-  }
+  return parseJsonValue(await readFile(join(runnerRoot, 'config.json'), 'utf8'), {
+    duplicates: 'last',
+  });
 }

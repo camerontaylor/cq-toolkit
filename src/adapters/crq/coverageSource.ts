@@ -140,7 +140,11 @@ export class GitCoverageRepository {
       parent,
       commit,
     ]);
-    const fields = latin1(raw).split('\0');
+    // Paths are UTF-8 (`_lineage_step` decodes them with `utf-8`); Latin-1 here
+    // would mojibake a non-ASCII rename and the final tree lookup in
+    // `computeLineage` would miss a name `entries()` spells correctly. Blame
+    // signatures keep Latin-1: those compare bytes, never paths.
+    const fields = decode(raw).split('\0');
     const changes: NameStatusRow[] = [];
     let index = 0;
     while (index < fields.length - 1) {

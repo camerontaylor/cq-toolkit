@@ -30,7 +30,6 @@ import { pythonJsonText } from '../../policy/crq/pythonJson.js';
 import {
   readRollout,
   publisherLedger,
-  publisherLockPath,
   PublishRolloutDisabled,
   type PublishRunEffects,
 } from '../../ops/crq/publishRun.js';
@@ -309,7 +308,15 @@ export function filePublishUnitEffects(roots: PublisherRoots): PublishUnitEffect
     readQueue: base.readQueue,
     withCoverageLock: (fn) =>
       withLock(join(roots.stateRoot, 'backfill', 'coverage.lock'), { wait: true }, fn),
-    withPublisherLock: async (fn) => withLock(await publisherLockPath(base), { wait: true }, fn),
+    // Python's resource lock, not the ledger's internal one:
+    // `backfill_coverage.run` wraps only its `worker_services(...).fetch()` in
+    // `ledger.locked(STATE / "backfill/publisher.lock")`, the same lock
+    // `backfill_publisher.run` holds for the whole publication. The
+    // publisher-owned clone's `review-ledger-publisher.lock` is a different,
+    // shorter-lived lock inside `GitLedger.publish` and would not exclude a
+    // concurrent publication's clone initialisation.
+    withPublisherLock: (fn) =>
+      withLock(join(roots.stateRoot, 'backfill', 'publisher.lock'), { wait: true }, fn),
     fetchLedger: async (config) => publisherLedger(base, config).then((ledger) => ledger.fetch()),
     async wakeSlot(isoSeconds: string): Promise<void> {
       // `usage_slots.write_next`: one atomic hint, separate from the queue.
