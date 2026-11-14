@@ -18,7 +18,7 @@
  * and no working-directory default is consulted here, so a test or the CLI
  * seam controls the roots.
  */
-import { readFile, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   fileRepairInboxState,
@@ -268,7 +268,11 @@ export async function runStatusWriter(
     // and repairDigest would refuse with a spurious OSError. The strict
     // failure surfaces as the route's own schema refusal below.
     const effects = fileStatusWriterEffects(roots, realRunCommand, now);
-    const queueText = await readFile(join(roots.stateRoot, 'queue.json'), 'utf8');
+    // The one strict read goes through effects.readQueue, not a direct
+    // readFile: the strict decoder rejects invalid UTF-8 exactly as
+    // Python's Path.read_text() raises, and the seams and route consume
+    // the same bytes it returned.
+    const queueText = await effects.readQueue();
     const documents: CrqDocuments = {
       queue: validateQueue(queueText),
       config: parseConfig(await effects.readConfig()),

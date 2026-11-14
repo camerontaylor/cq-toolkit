@@ -355,6 +355,27 @@ describe('runStatusWriter over a real state root', () => {
     expect(result.markdown).not.toContain('OSError');
   });
 
+  it('refuses a queue with invalid UTF-8 like Python read_text, not U+FFFD', async () => {
+    // The shared snapshot must come from effects.readQueue, whose strict
+    // decoder rejects invalid UTF-8 exactly as Python's Path.read_text()
+    // raises. A direct readFile('utf8') would silently replace the bad
+    // bytes with U+FFFD and publish altered ids/paths instead of refusing.
+    const roots = await makeRoots();
+    await seedRoots(roots.stateRoot, roots.runnerRoot);
+    const corrupt = Buffer.from(await readFile(join(roots.stateRoot, 'queue.json')));
+    corrupt[corrupt.indexOf(0x22, corrupt.indexOf('id'))] = 0xff;
+    await writeFile(join(roots.stateRoot, 'queue.json'), corrupt);
+    const stderr: string[] = [];
+    const exitCode = await runStatusWriter(
+      roots,
+      { write: () => {}, error: (text) => stderr.push(text) },
+      () => NOW,
+    );
+    expect(exitCode).toBe(1);
+    expect(stderr.join('')).toContain('status-writer:');
+    expect(stderr.join('')).not.toContain('\ufffd');
+  });
+
   it('keeps the composer seam reads on the state root', async () => {
     const roots = await makeRoots();
     await seedRoots(roots.stateRoot, roots.runnerRoot);
