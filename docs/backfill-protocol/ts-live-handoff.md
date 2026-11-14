@@ -36,7 +36,12 @@ an interrupted inventory can otherwise mix ranked rows with older provenance.
   candidate index. The caller must hold `tick.lock`, flush pending refusal
   events first, persist returned state, and perform the real gate and bind
   protocol before any spawn. Snapshot refresh is requested under the lock but
-  calculated off-lock. No selection seam is wired to a live executor.
+  calculated off-lock. No selection seam is wired to a live executor. Unlike
+  Python `select`, the seam stops at the first candidate: if the subsequent real
+  gate refuses, it does not mark later jobs with the refusal or write the
+  reconciliation record in that pass. Complete the executor with a continuation
+  that applies those updates before claiming selection parity. This slice cannot
+  perform the real gate because it does not own launch and binding recovery.
   For the next slice, use
   `apps/crq-python/backfill_runtime.py` at main commit
   `0cb627ebf38dafb3089b2fe7eb4f1e153665f307`: `usage_context` reflects or

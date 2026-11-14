@@ -6,6 +6,7 @@ import {
   type BackfillSelectionEffects,
 } from '../../../src/ops/crq/internal/backfillSelection.js';
 import { JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
+import { enqueue } from '../../../src/policy/crq/backfillJobs.js';
 import { withObjectKeys } from '../../../src/policy/crq/queueDoc.js';
 
 const object = (s: string): JsonObject => {
@@ -23,7 +24,7 @@ const queue = () =>
           state: 'pending',
           family: 'f',
           target: 't1',
-          tier_importance: 1,
+          tier_importance: 'T1',
           subject_kind: 'A',
           row: 1,
           subject_id: 'one',
@@ -35,7 +36,7 @@ const queue = () =>
           state: 'pending',
           family: 'f',
           target: 't2',
-          tier_importance: 2,
+          tier_importance: 'T2',
           subject_kind: 'A',
           row: 2,
           subject_id: 'two',
@@ -61,6 +62,19 @@ const effects = (overrides: Partial<BackfillSelectionEffects> = {}): BackfillSel
 });
 
 describe('non-launching backfill selection', () => {
+  it('selects real enqueued partitions with canonical string tiers', async () => {
+    const first = object(
+      '{"job_id":"j1","subject_id":"one","generation":0,"kind":"A","tier":"T2","row":1,"target":"t1","scope_digest":"d1","family":"f","scope":[{"path":"a","blob":"b","intervals":[[1,2]]}]}',
+    );
+    const second = object(
+      '{"job_id":"j2","subject_id":"two","generation":0,"kind":"A","tier":"T1","row":2,"target":"t2","scope_digest":"d2","family":"f","scope":[{"path":"b","blob":"c","intervals":[[1,2]]}]}',
+    );
+    const firstResult = enqueue(object('{}'), first, '2026-10-30T00:00:00Z');
+    const secondResult = enqueue(firstResult.queue, second, '2026-10-30T00:00:00Z');
+    const result = await reconcileBackfillSelection(secondResult.queue, options, effects());
+    expect(result.candidate).toBe(1);
+    expect(getItem(result.queue, 1).get('tier_importance')).toBe('T1');
+  });
   it('requests stale and gap snapshots, and never selects either', async () => {
     const requests: string[][] = [];
     const result = await reconcileBackfillSelection(
@@ -140,7 +154,7 @@ describe('non-launching backfill selection', () => {
           '{"scope":[{"path":"a","blob":"b","intervals":[[1,2]]},{"path":"z","blob":"c","intervals":[[1,1]]}]}',
         ).get('scope')!,
       ],
-      ['path_tiers', object('{"a":1,"z":4}')],
+      ['path_tiers', object('{"a":"T1","z":"T4"}')],
     ]);
     const result = await reconcileBackfillSelection(
       withObjectKeys(q, [['items', [first, items[1]!]]]),
@@ -153,9 +167,7 @@ describe('non-launching backfill selection', () => {
       }),
     );
     expect(result.candidate).toBe(1);
-    expect(getItem(result.queue, 0).get('dispatch_tier_importance')).toEqual(
-      object('{"n":4}').get('n'),
-    );
+    expect(getItem(result.queue, 0).get('dispatch_tier_importance')).toBe('T4');
   });
   it('does not request refresh in dry mode and fails closed on pending event', async () => {
     let requests = 0;

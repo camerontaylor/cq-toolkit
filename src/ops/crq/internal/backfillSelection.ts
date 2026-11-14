@@ -47,6 +47,12 @@ function number(value: JsonValue | undefined, label: string): bigint | number {
 function cmpNumber(a: bigint | number, b: bigint | number): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
+function cmpTier(a: JsonValue | undefined, b: JsonValue | undefined): number {
+  if (typeof a === 'string' && typeof b === 'string') return compareCodePoints(a, b);
+  if (a instanceof JsonNumber && b instanceof JsonNumber)
+    return cmpNumber(number(a, 'tier'), number(b, 'tier'));
+  throw new LedgerTypeError('tiers must be comparable strings or numbers');
+}
 function itemAt(queue: JsonObject, index: number): JsonObject {
   const items = queue.get('items');
   if (!Array.isArray(items)) throw new LedgerTypeError('items must be an array');
@@ -59,7 +65,7 @@ function putItem(queue: JsonObject, index: number, item: JsonObject): JsonObject
 }
 function compareItems(a: JsonObject, b: JsonObject, dispatch: boolean): number {
   const tier = dispatch ? 'dispatch_tier_importance' : 'tier_importance';
-  const tierCmp = cmpNumber(number(a.get(tier), tier), number(b.get(tier), tier));
+  const tierCmp = cmpTier(a.get(tier), b.get(tier));
   if (tierCmp) return tierCmp;
   const retryCmp = Number(pyTruthy(a.get('retry'))) - Number(pyTruthy(b.get('retry')));
   if (retryCmp) return retryCmp;
@@ -213,10 +219,7 @@ export async function reconcileBackfillSelection(
       (row) => pathTiers.get(text(row.get('path'), 'path')) ?? item.get('tier_importance')!,
     );
     let tier = item.get('tier_importance')!;
-    if (candidates.length)
-      tier = candidates.reduce((a, b) =>
-        cmpNumber(number(a, 'tier'), number(b, 'tier')) <= 0 ? a : b,
-      );
+    if (candidates.length) tier = candidates.reduce((a, b) => (cmpTier(a, b) <= 0 ? a : b));
     queue = putItem(queue, index, withObjectKeys(item, [['dispatch_tier_importance', tier]]));
   }
   indices.sort((a, b) => compareItems(itemAt(queue, a), itemAt(queue, b), true));
