@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   enqueue,
+  deferTerminalQuota,
   admission,
   eligible,
   bindRun,
@@ -192,5 +193,93 @@ describe('backfill admission and ownership', () => {
     expect(
       eligible(obj('{"backfill_families":{"f":{"quarantined":true}}}'), item, at).eligible,
     ).toBe(false);
+  });
+});
+
+describe('terminal quota deferral', () => {
+  const queue = obj(
+    '{"items":[{"id":"j","family":"f","scope":[{"path":"p"}],"attempt_id":"a","state":"reviewing","vendor_state":"live","run":{"run_id":"r"},"not_before":"2026-10-30T02:00:00Z"}],"cooldown_until":"2026-10-30T04:00:00Z","backfill_reservations":{"a":{"quota_state":"consumed","vendor_run_id":"r"}},"backfill_families":{"f":{"failures":3,"quarantined":true,"next_eligible_at":"2026-10-30T03:00:00Z"}},"backfill_scope_failures":{"p":{"failures":2,"quarantined":false,"next_eligible_at":null}}}',
+  );
+  test('retains quota and failures while extending all deadlines', () => {
+    const result = deferTerminalQuota(queue, 0, at, 60);
+    expect(result.item.get('not_before')).toBe('2026-10-30T04:00:00Z');
+    const families = result.queue.get('backfill_families') as JsonObject;
+    const scopes = result.queue.get('backfill_scope_failures') as JsonObject;
+    expect((families.get('f') as JsonObject).get('next_eligible_at')).toBe('2026-10-30T04:00:00Z');
+    expect((scopes.get('p') as JsonObject).get('next_eligible_at')).toBe('2026-10-30T04:00:00Z');
+    expect(isExecutionOwner(result.item)).toBe(false);
+    expect(eligible(result.queue, result.item, at).eligible).toBe(false);
+    expect(result.item.get('run')).toBeNull();
+    expect(result.item.get('state')).toBe('pending');
+    expect(atomicJsonText(result.queue)).toContain('"quota_state": "consumed"');
+    expect(atomicJsonText(result.queue)).toContain('"terminal_at": "2026-10-30T00:00:00Z"');
+    expect(atomicJsonText(result.queue)).toContain('"failures": 3');
+    expect(atomicJsonText(result.queue)).toContain('"quarantined": true');
+    expect(atomicJsonText(queue)).toContain('"state": "reviewing"');
+  });
+  test('history deadline can be the maximum', () => {
+    const input = obj(
+      '{"items":[{"family":"f","scope":[],"attempt_id":"a"}],"backfill_reservations":{"a":{"x":1}},"backfill_families":{"f":{"failures":2,"quarantined":false,"next_eligible_at":"2026-10-30T06:00:00Z"}}}',
+    );
+    expect(deferTerminalQuota(input, 0, at, 60).item.get('not_before')).toBe(
+      '2026-10-30T06:00:00Z',
+    );
+  });
+  test.each([
+    [
+      'item',
+      '{"items":[{"family":"f","scope":[],"attempt_id":"a","not_before":"2026-10-30T05:00:00Z"}],"cooldown_until":"2026-10-30T02:00:00Z","backfill_reservations":{"a":{"x":1}}}',
+      '2026-10-30T05:00:00Z',
+    ],
+    [
+      'queue',
+      '{"items":[{"family":"f","scope":[],"attempt_id":"a","not_before":"2026-10-30T02:00:00Z"}],"cooldown_until":"2026-10-30T05:00:00Z","backfill_reservations":{"a":{"x":1}}}',
+      '2026-10-30T05:00:00Z',
+    ],
+  ])('%s deadline can be the maximum', (_label, source, expected) => {
+    expect(deferTerminalQuota(obj(source), 0, at, 60).item.get('not_before')).toBe(expected);
+  });
+  test.each([
+    [
+      'at',
+      '{"items":[{"family":"f","scope":[],"attempt_id":"a"}],"backfill_reservations":{"a":{"x":1}}}',
+      'bad',
+    ],
+    [
+      'item deadline',
+      '{"items":[{"family":"f","scope":[],"attempt_id":"a","not_before":"bad"}],"backfill_reservations":{"a":{"x":1}}}',
+      at,
+    ],
+    [
+      'history deadline',
+      '{"items":[{"family":"f","scope":[],"attempt_id":"a"}],"backfill_reservations":{"a":{"x":1}},"backfill_families":{"f":{"failures":2,"quarantined":false,"next_eligible_at":"bad"}}}',
+      at,
+    ],
+  ])('rejects invalid %s without mutating input', (_label, source, timestamp) => {
+    const input = obj(source);
+    const before = atomicJsonText(input);
+    expect(() => deferTerminalQuota(input, 0, timestamp, 60)).toThrow();
+    expect(atomicJsonText(input)).toBe(before);
+  });
+  test('uses fallback delay and rejects invalid deadlines or missing reservation', () => {
+    const minimal = obj(
+      '{"items":[{"family":"f","scope":[],"attempt_id":"a"}],"backfill_reservations":{"a":{"quota_state":"consumed"}}}',
+    );
+    expect(deferTerminalQuota(minimal, 0, at, 0).item.get('not_before')).toBe(
+      '2026-10-30T01:00:00Z',
+    );
+    expect(() =>
+      deferTerminalQuota(
+        obj(
+          '{"items":[{"family":"f","scope":[],"attempt_id":"a"}],"cooldown_until":"bad","backfill_reservations":{"a":{"x":1}}}',
+        ),
+        0,
+        at,
+        1,
+      ),
+    ).toThrow();
+    expect(() =>
+      deferTerminalQuota(obj('{"items":[{"family":"f","scope":[],"attempt_id":"a"}]}'), 0, at, 1),
+    ).toThrow('quota refusal requires retained reservation');
   });
 });
