@@ -148,7 +148,8 @@ export function loadCoverageSnapshot(
     // first; an event already decoded by the ledger passes through unchanged.
     if (ledgerCreditable(fromPlainJson(value))) return null;
   }
-  return { covered: snapshot.covered, gaps: snapshot.gaps };
+  // `list(snapshot["gaps"])`: a caller cannot mutate the snapshot it was handed.
+  return { covered: snapshot.covered, gaps: [...snapshot.gaps] };
 }
 
 /** `backfill_coverage.pending_targets`: targets with a pending backfill job. */
