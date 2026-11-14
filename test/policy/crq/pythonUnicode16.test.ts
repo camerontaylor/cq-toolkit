@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   pythonUnicode16Space,
@@ -45,7 +46,10 @@ describe('inactive Python Unicode 16 tables', () => {
     () => {
       expect(version.status).toBe(0);
       expect(version.stdout.trim()).toBe('16.0.0');
-      const generated = spawnSync('python3.14', ['scripts/generate-crq-unicode16.py'], {
+      const generator = fileURLToPath(
+        new URL('../../../scripts/generate-crq-unicode16.py', import.meta.url),
+      );
+      const generated = spawnSync('python3.14', [generator], {
         encoding: 'utf8',
         maxBuffer: 1024 * 1024,
       });
@@ -55,7 +59,10 @@ describe('inactive Python Unicode 16 tables', () => {
         throw new Error('invalid generator output');
       if (typeof data.word !== 'string' || typeof data.space !== 'string')
         throw new Error('invalid generator streams');
-      const source = readFileSync('src/policy/crq/pythonUnicode16.ts', 'utf8');
+      const source = readFileSync(
+        new URL('../../../src/policy/crq/pythonUnicode16.ts', import.meta.url),
+        'utf8',
+      );
       expect(source).toContain(`'${data.word}'`);
       expect(source).toContain(`'${data.space}'`);
       const script =
