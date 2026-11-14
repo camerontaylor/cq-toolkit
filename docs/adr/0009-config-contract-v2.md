@@ -166,7 +166,7 @@ variable mapping (N15 and N21); the ADR-0004 trust boundaries; P8 (conservative 
 
 ## Appendix: process.env confinement (C7)
 
-The lint rule `cq/no-process-env` bans `process.env` in `src/**`. The rule is also switched off for `src/config/**` (the snapshot and entry helpers and the shared accessor may read
+The lint rule `cq/no-process-env` bans `process.env` in `src/**`. The rule is also switched off for `src/config/**` (the snapshot and entry helpers, and the run context that pins the entry record, may read
 `process.env`; code below an entry point must not, see "Resolve once"). The files below are switched off in
 `.oxlintrc.json`, each for one reason:
 
@@ -187,28 +187,44 @@ The lint rule `cq/no-process-env` bans `process.env` in `src/**`. The rule is al
 - `src/ops/dev/effects.ts`: git child env composition
 - `src/ops/dev/internal/snapshot.ts`: git child env composition (strips GIT_*)
 - `src/ops/sweep/unit.ts`: redacts ambient secret values from sweep output (whole-env scan)
-- `src/sandbox/launcher.ts`: PATH lookup for the sandbox launcher binary
+- `src/sandbox/launcher.ts`: sandbox launcher child env composition
 - `src/selfhost/self-merge-prs.ts`: C6 in flight; migrate after
 - `src/shared/proc.ts`: the shared child env builder
 
-The rule `cq/no-process-env-accessor` bans importing or calling `processEnv()` (`src/config/process-env.ts`) outside `src/config/**` and the debt list below. These readers have no `CqEnv` snapshot from their caller yet (debt: thread CqEnv; see issue #1185). Remove a file from the list in `.oxlintrc.json` as it is migrated; when the list is empty, delete `processEnv()` and the rule.
+### The entry environment record (issue #1185)
 
-- `src/config/process-env.ts`
-- `src/driver/acp/binaries.ts`
-- `src/driver/claude-code/routing.ts`
-- `src/driver/sessions-dir.ts`
-- `src/ops/fix/runFix.ts`
-- `src/ops/review/internal/addressEvidence.ts`
-- `src/sandbox/launcher.ts`
-- `src/selfhost/observe-prs.ts`
-- `src/selfhost/self-review-loop.ts`
+The `processEnv()` accessor and its guard rule `cq/no-process-env-accessor`
+are retired. Every reader that needed a **foreign** name (PATH, XDG_STATE_HOME,
+GH_REPOSITORY, a provider base URL) without a `CqEnv` value now takes the run's
+environment record through `currentEntryEnv()` (src/config/run-env.ts), or an
+explicit `env` argument where one already exists:
 
-Migrated (no longer read `processEnv()`): `src/harness/surface.ts`,
-`src/sandbox/config.ts` and `src/sandbox/index.ts` now take the run's
-registered `CqEnv` snapshot (`currentCqEnv()`) — the entry/run snapshot, never
-a live ambient re-read — so an ambient policy-knob change after entry cannot
-move a mid-run gate (issue #1185). An explicit `env` argument remains the
-deliberate foreign-environment injection path and still overrides the
-snapshot; launcher PATH and child env are untouched. The author-admission
-transport (`makeAuthorAdmission`/`envAuthorAdmission`) was subsequently retired
-with its module in the S2b-ii slice, so no `processEnv()` debt remains there.
+- `checkEntryEnv` returns the exact record it snapshotted (`EntryEnvCheck.env`);
+  `enterWithEntryEnv` is the print-and-exit gate for entries that read foreign
+  names (selfhost entries, observe-prs). `enterWithCqEnv` stays as the
+  CQ_*-only convenience.
+- `runWithCqEnv(cqEnv, fn, env)` pins the record (a frozen copy of a mutable
+  one, or the already-frozen entry capture) beside the snapshot. `runPlan`
+  takes `RunOptions.env` (or the enclosing run's record), pins it in the run
+  context, and hands that FROZEN record to registry importers on the wiring
+  (`env`), so an op never re-reads the ambient environment mid-run and cannot
+  capture a record that keeps drifting.
+- Outside a run (direct library use) `currentEntryEnv()` is one fresh
+  `process.env` read — the documented last resort, exactly like
+  `currentCqEnv()`'s fresh `readCqEnv()`.
+
+**Timing change.** These reads moved from call time to entry (run start): an
+ambient PATH, XDG_STATE_HOME, GH_REPOSITORY/GITHUB_REPOSITORY,
+GITHUB_STEP_SUMMARY, SWEEP_USAGE_OUT, PASEO_AGENT_ID or provider base-URL
+change after entry no longer moves a value a reader sees mid-run. Direct
+library calls outside a run are unchanged.
+
+Migrated: `src/harness/surface.ts`, `src/sandbox/config.ts` and
+`src/sandbox/index.ts` take the run's registered `CqEnv` snapshot
+(`currentCqEnv()`); `src/driver/acp/binaries.ts`,
+`src/driver/claude-code/routing.ts`, `src/driver/sessions-dir.ts`,
+`src/ops/fix/runFix.ts`, `src/ops/review/addressMany.ts`,
+`src/ops/review/internal/addressEvidence.ts`, `src/sandbox/launcher.ts`,
+`src/selfhost/observe-prs.ts` and `src/selfhost/self-review-loop.ts` take the
+entry record. An explicit `env` argument remains the deliberate
+foreign-environment injection path and still overrides both.

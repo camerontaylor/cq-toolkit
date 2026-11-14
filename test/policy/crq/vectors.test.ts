@@ -187,7 +187,12 @@ const NOT_APPLICABLE: Readonly<Record<string, string>> = {
   ledger:
     'ledger validators/interval/path/creditable functions are a later group-P port; review_ledger.canonical+digest cases live in canonical.json and ARE replayed above',
   'merged-reconcile': 'merged-interval math is a later group-P port',
-  'promotion-filter': 'promotion filters are retained Python behaviour until the C2 port',
+  'promotion-filter':
+    'crq.live_items is replayed in tickSchedule.test.ts together with the rest of the tick scheduling policy',
+  'tick-schedule':
+    'crq.rank/sort_key/background_turn and dependencies are replayed in tickSchedule.test.ts',
+  liveness: 'author_quota.identity_kind/run_state are replayed in runLiveness.test.ts',
+  'tick-admission': 'crq.admit_available gate arithmetic is replayed in tickAdmission.test.ts',
   'status-helpers': 'status helpers are a later group-P port',
   summary: 'summary rendering is a later group-P port',
   usage: 'usage/slot pacing is a later group-P port',

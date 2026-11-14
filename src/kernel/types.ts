@@ -17,6 +17,7 @@
 import type { z } from 'zod';
 import type { ModelSpec, Usage } from '../driver/types.js';
 import type { CqEnv } from '../config/env.js';
+import type { EntryEnv } from '../config/run-env.js';
 
 /**
  * The atomic-op contract: a typed, async function from a JSON-serializable
@@ -129,6 +130,11 @@ export interface RunOptions {
   resume?: boolean;
   /** The entry point's CQ_* snapshot; computed once by runPlan when absent. */
   cqEnv?: CqEnv;
+  /**
+   * The entry point's environment record (every name, `CQ_*` and foreign);
+   * pinned in the run context when absent, so a reader sees one entry-time view.
+   */
+  env?: EntryEnv;
 }
 
 /**
@@ -1097,6 +1103,11 @@ export interface OpRegistryEntry<I = unknown, R = unknown> {
   importer: (wiring?: {
     /** Resolved run configuration; supplied by the host, never plan data. */
     cqEnv?: CqEnv;
+    /**
+     * The host's environment record for this run (entry-time values); a
+     * foreign-name reader takes this snapshot, never a call-time ambient read.
+     */
+    env?: EntryEnv;
     /** Sink for the driver factory's deprecated-alias notice (review-debt #186). */
     onDeprecatedAlias?: (message: string) => void;
   }) => Promise<Op<I, R>>;
@@ -1106,5 +1117,9 @@ export interface OpRegistryEntry<I = unknown, R = unknown> {
 export interface PlanRegistryEntry {
   name: string;
   /** `cqEnv`: the host's resolved config, so a floor can mirror trust config by construction. */
-  importer: (wiring?: { cqEnv?: CqEnv }) => Promise<Plan>;
+  importer: (wiring?: {
+    cqEnv?: CqEnv;
+    /** The host's environment record for this run (entry-time values). */
+    env?: EntryEnv;
+  }) => Promise<Plan>;
 }

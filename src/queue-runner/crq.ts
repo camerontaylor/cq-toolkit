@@ -5,45 +5,84 @@ import { join } from 'node:path';
 import type { OpResult } from '../kernel/types.js';
 import { runRepairPrepare } from '../adapters/crq/repairPreparation.js';
 import { runPublishUnit } from '../adapters/crq/publishSource.js';
+import { MAX_REQUEST_BYTES, runQueueCapabilityMain } from '../adapters/crq/queueCapabilityMain.js';
 import { run } from './runner.js';
 import { planTick } from './tick.js';
 import { runWatchdog } from './watchdog.js';
 
+/** Read at most one wire frame plus the byte that proves it is over-long. */
+async function readFrame(): Promise<Uint8Array> {
+  const limit = MAX_REQUEST_BYTES + 1;
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of process.stdin) {
+    const buffer = chunk as Buffer;
+    const take = Math.min(buffer.length, limit - size);
+    chunks.push(buffer.subarray(0, take));
+    size += take;
+    if (size >= limit) break;
+  }
+  return Buffer.concat(chunks, size);
+}
+
 const root = process.cwd();
-const stateHome = process.env.XDG_STATE_HOME;
-const gitleaksPath = process.env.PATH;
-const result = await run(process.argv.slice(2), {
-  shadowRoot: root,
-  tick: randomUUID(),
-  planner: (command, args) => planTick(root, command, args),
-  // Operator-only: explicit roots, no cwd/env default, never a unit command.
-  operatorLive: (command, args) =>
-    command === 'repair-prepare'
-      ? runRepairPrepare(args, { gitleaksPath })
-      : Promise.resolve({
-          artifact: { status: 'failed' as const, error: `${command} is not implemented` },
-          exitCode: 1,
-        }),
-  live: (command): Promise<OpResult<unknown>> => {
-    if (command === 'watchdog') return runWatchdog(stateHome === undefined ? {} : { stateHome });
-    if (command === 'publish') {
-      // The unit reads the runner roots from its config, mirroring Python's
-      // crq.py CONFIG: explicit paths, never a cwd/env default beyond cwd.
-      return readPublisherRoots(root).then(async (roots): Promise<OpResult<unknown>> => {
-        if (roots === null) {
-          return {
-            status: 'failed',
-            error: 'publisher roots unavailable: config.json clone/durable_artifact_root',
-          };
-        }
-        return runPublishUnit(roots);
-      });
-    }
-    return Promise.resolve({ status: 'failed', error: `${command} is not implemented` });
-  },
-});
-process.stdout.write(`${JSON.stringify(result.artifact)}\n`);
-process.exitCode = result.exitCode;
+const [command, ...rest] = process.argv.slice(2);
+if (command === 'queue-capability') {
+  // The forced-command route: policy and identity come from the environment,
+  // the request frame from stdin, and nothing else is accepted.
+  process.exitCode = await runQueueCapabilityMain({
+    argv: rest,
+    env: (name) => process.env[name],
+    readStdin: readFrame,
+    stdout: (bytes) => {
+      process.stdout.write(bytes);
+    },
+    stderr: (message) => {
+      process.stderr.write(`${message}\n`);
+    },
+    // The deadline must end the process, not just the race: a pending stdin
+    // read or a held queue lock would otherwise outlive the refusal.
+    terminate: () => process.exit(2),
+    root,
+  });
+} else {
+  const stateHome = process.env.XDG_STATE_HOME;
+  const gitleaksPath = process.env.PATH;
+  const result = await run(process.argv.slice(2), {
+    shadowRoot: root,
+    tick: randomUUID(),
+    planner: (planCommand, args) => planTick(root, planCommand, args),
+    // Operator-only: explicit roots, no cwd/env default, never a unit command.
+    operatorLive: (liveCommand, args) =>
+      liveCommand === 'repair-prepare'
+        ? runRepairPrepare(args, { gitleaksPath })
+        : Promise.resolve({
+            artifact: { status: 'failed' as const, error: `${liveCommand} is not implemented` },
+            exitCode: 1,
+          }),
+    live: (liveCommand): Promise<OpResult<unknown>> => {
+      if (liveCommand === 'watchdog') {
+        return runWatchdog(stateHome === undefined ? {} : { stateHome });
+      }
+      if (liveCommand === 'publish') {
+        // The unit reads the runner roots from its config, mirroring Python's
+        // crq.py CONFIG: explicit paths, never a cwd/env default beyond cwd.
+        return readPublisherRoots(root).then(async (roots): Promise<OpResult<unknown>> => {
+          if (roots === null) {
+            return {
+              status: 'failed',
+              error: 'publisher roots unavailable: config.json clone/durable_artifact_root',
+            };
+          }
+          return runPublishUnit(roots);
+        });
+      }
+      return Promise.resolve({ status: 'failed', error: `${liveCommand} is not implemented` });
+    },
+  });
+  process.stdout.write(`${JSON.stringify(result.artifact)}\n`);
+  process.exitCode = result.exitCode;
+}
 
 /**
  * The publisher roots from the runner's own `config.json` (Python's CONFIG:

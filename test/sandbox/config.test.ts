@@ -111,9 +111,8 @@ describe('resolveSandboxConfig reads the run snapshot, not the ambient environme
   it('an ambient CQ_SANDBOX change after entry is invisible inside the run context', async () => {
     const { readCqEnv } = await import('../../src/config/env.js');
     const { runWithCqEnv } = await import('../../src/config/run-env.js');
-    const { processEnv } = await import('../../src/config/process-env.js');
     const snapshot = readCqEnv({ CQ_SANDBOX: 'off', CQ_RUN_TOOL: 'on' });
-    const previous = processEnv()['CQ_SANDBOX'];
+    const previous = process.env['CQ_SANDBOX'];
     try {
       runWithCqEnv(snapshot, () => {
         // Ambiently flip the knob AFTER the snapshot was taken.
@@ -153,9 +152,8 @@ describe('resolveSandboxConfig reads the run snapshot, not the ambient environme
     const { harnessRunGate } = await import('../../src/sandbox/index.js');
     const { readCqEnv } = await import('../../src/config/env.js');
     const { runWithCqEnv } = await import('../../src/config/run-env.js');
-    const { processEnv } = await import('../../src/config/process-env.js');
     const snapshot = readCqEnv({ CQ_SANDBOX: 'off' });
-    const previous = processEnv()['CQ_RUN_TOOL'];
+    const previous = process.env['CQ_RUN_TOOL'];
     try {
       runWithCqEnv(snapshot, () => {
         process.env['CQ_RUN_TOOL'] = 'off';

@@ -1,13 +1,12 @@
 // no-process-env — confines direct `process.env` access (config contract C7,
 // ADR-0009). CQ_* configuration is read once at the entry through readCqEnv
-// and threaded down; a reader that has no snapshot goes through
-// `processEnv()` from src/config/process-env.ts. The only files that may name
-// `process.env` are src/config/** and the driver/adapter child-env builders,
-// which compose a child's environment from foreign names. That allowlist lives
-// in .oxlintrc.json as per-file "off" overrides; the reasons are in the
-// appendix of docs/adr/0009-config-contract-v2.md. The rule itself reports
-// every use and is scoped to src/**. The sibling rule no-process-env-accessor
-// guards the `processEnv()` escape hatch; follow-up: issue #1185.
+// and threaded down; foreign names come from the same entry record through
+// `currentEntryEnv()` (src/config/run-env.ts), never a call-time ambient read.
+// The only files that may name `process.env` are src/config/** and the
+// driver/adapter child-env builders, which compose a child's environment from
+// foreign names. That allowlist lives in .oxlintrc.json as per-file "off"
+// overrides; the reasons are in the appendix of docs/adr/0009-config-contract-v2.md.
+// The rule itself reports every use and is scoped to src/**.
 //
 // Forms caught: `process.env`, `process['env']`, `globalThis.process.env`,
 // destructuring `{ env } = process` in declarations, assignments and
@@ -58,7 +57,7 @@ export default {
     schema: [],
     messages: {
       processEnv:
-        'Do not read process.env here: take the CqEnv snapshot (or its values) from the caller, or use processEnv() from src/config/process-env.ts.',
+        'Do not read process.env here: take the run entry environment snapshot (currentEntryEnv(), or an explicit env argument) from the caller.',
     },
   },
   create(context) {
