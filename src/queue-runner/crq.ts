@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { OpResult } from '../kernel/types.js';
 import { runRepairPrepare } from '../adapters/crq/repairPreparation.js';
@@ -69,6 +69,12 @@ if (command === 'queue-capability') {
         // crq.py CONFIG: explicit paths, never a cwd/env default beyond cwd.
         return readPublisherRoots(root).then(async (roots): Promise<OpResult<unknown>> => {
           if (roots === null) {
+            // An absent rollout is Python's {"publication": "disabled"}: the
+            // unit reports disabled (exit 0) instead of failing. Only a
+            // missing config.json/clone is a genuine unavailability.
+            if (await isRolloutAbsent(join(root, 'state', 'backfill-rollout.json'))) {
+              return { status: 'ok', value: { publication: 'disabled' } };
+            }
             return {
               status: 'failed',
               error: 'publisher roots unavailable: config.json clone/durable_artifact_root',
@@ -89,6 +95,15 @@ if (command === 'queue-capability') {
  * `clone` and the rollout's `durable_artifact_root`), resolved against the
  * runner root. Absent or unusable config is a refusal, never a guess.
  */
+async function isRolloutAbsent(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 async function readPublisherRoots(runnerRoot: string) {
   let config: unknown;
   try {
