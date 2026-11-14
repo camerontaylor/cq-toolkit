@@ -258,18 +258,16 @@ describe('inactive ordinary review preparation', () => {
 describe('ordinary preparation caller', () => {
   it('saves the blocked queue after the event and preserves unknown fields', async () => {
     const f = fixture();
-    f.effects.scan = async () => ({
-      clean: false,
-      denylistHits: 1,
-      gitleaksHits: 0,
-      artifactPath: '/scan',
-    });
+    f.effects.scan = async () => {
+      f.calls.push('scan');
+      return { clean: false, denylistHits: 1, gitleaksHits: 0, artifactPath: '/scan' };
+    };
     const result = await prepareAndPersistOrdinaryReview(
       f.queue,
       { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
       f.effects,
     );
-    expect(f.calls).toEqual(['allocate', 'blocked', 'save']);
+    expect(f.calls).toEqual(['allocate', 'scan', 'blocked', 'save']);
     expect(f.saved()).toBe(result.queue);
     expect(result.queue.get('unknown')).toBe(f.queue.get('unknown'));
     expect((result.queue.get('items') as JsonObject[])[0]?.get('unknown')).toBe(
@@ -278,12 +276,10 @@ describe('ordinary preparation caller', () => {
   });
   it('propagates a blocked save failure', async () => {
     const f = fixture();
-    f.effects.scan = async () => ({
-      clean: false,
-      denylistHits: 1,
-      gitleaksHits: 0,
-      artifactPath: '/scan',
-    });
+    f.effects.scan = async () => {
+      f.calls.push('scan');
+      return { clean: false, denylistHits: 1, gitleaksHits: 0, artifactPath: '/scan' };
+    };
     f.effects.launch.saveQueue = async () => {
       f.calls.push('save');
       throw new Error('save failed');
@@ -295,7 +291,7 @@ describe('ordinary preparation caller', () => {
         f.effects,
       ),
     ).rejects.toThrow('save failed');
-    expect(f.calls).toEqual(['allocate', 'blocked', 'save']);
+    expect(f.calls).toEqual(['allocate', 'scan', 'blocked', 'save']);
   });
   it('returns the launched queue without another save', async () => {
     const f = fixture();
