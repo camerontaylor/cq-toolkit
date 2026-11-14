@@ -238,19 +238,34 @@ async function writeObjects(
   objects: readonly SnapshotObject[],
   mismatch: string,
 ): Promise<void> {
-  for (const object of objects) {
-    const result = await gitCall(
-      input.pool,
-      cwd,
-      ['hash-object', '-w', '-t', object.type, '--stdin'],
-      {
-        input: object.data,
-      },
-    );
-    if (result.code !== 0) throw new AuthorRefused(`snapshot object write refused: ${mismatch}`);
-    if (Buffer.from(result.stdout).toString('utf8').trim() !== object.oid) {
-      throw new AuthorRefused(mismatch);
+  const temp = await mkdtemp(join(tmpdir(), 'cq-author-objects-'));
+  try {
+    for (const type of ['blob', 'tree', 'commit'] as const) {
+      const group = objects.filter((object) => object.type === type);
+      if (group.length === 0) continue;
+      const paths: string[] = [];
+      for (const [index, object] of group.entries()) {
+        const path = join(temp, `${type}-${String(index)}`);
+        await writeFile(path, object.data);
+        paths.push(path);
+      }
+      const result = await gitCall(
+        input.pool,
+        cwd,
+        ['hash-object', '-w', '--no-filters', '-t', type, '--stdin-paths'],
+        { input: Buffer.from(`${paths.join('\n')}\n`, 'utf8') },
+      );
+      const written = Buffer.from(result.stdout).toString('utf8').trim().split('\n');
+      if (
+        result.code !== 0 ||
+        written.length !== group.length ||
+        written.some((oid, index) => oid !== group[index]?.oid)
+      ) {
+        throw new AuthorRefused(`snapshot object write refused: ${mismatch}`);
+      }
     }
+  } finally {
+    await rm(temp, { recursive: true, force: true });
   }
 }
 
