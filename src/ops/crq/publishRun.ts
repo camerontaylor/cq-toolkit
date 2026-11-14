@@ -351,95 +351,127 @@ export async function runPublish(effects: PublishRunEffects): Promise<PublishRun
   const lockPath = join(effects.stateRoot, 'backfill', 'publisher.lock');
   try {
     return await withLock(lockPath, { wait: true }, async () => {
-      const services = await workerServices(effects, config);
-      let requested = await readFileBytes(requestPath);
-      if (
-        requested === null &&
-        (await services.outbox.pending()).length === 0 &&
-        !(await exists(failurePath))
-      ) {
-        return { publication: 'idle' };
+      try {
+        return await publishUnderLock(effects, config, requestPath, failurePath);
+      } catch (error) {
+        // Python keeps the publisher lock held across failure persistence
+        // (backfill_publisher.run: the except block runs inside
+        // `with ledger.locked(publisher.lock)`), so a second overlapping
+        // invocation cannot publish-and-reconcile between this invocation's
+        // marker write and its queue halt and leave a stale halt behind.
+        await recordFailure(effects, error, failurePath);
+        failurePersisted.add(error instanceof Error ? error : {});
+        throw error;
       }
-      if (requested === null) {
-        // Persist reconciliation intent even when only the periodic pending
-        // scan woke us: remote acknowledgements can precede a crash.
-        requested = ledgerCanonicalBytes(
-          new JsonObject([['request', randomUUID().replace(/-/g, '')]]),
-        );
-        await atomicWrite(requestPath, requested);
-      }
-      await publishOutbox(
-        {
-          fetch: () => services.ledger.fetch(),
-          publish: async (batch, baseHead) => {
-            try {
-              return await services.ledger.publishBatch(batch, baseHead);
-            } catch (error) {
-              // Python retries only the push; a local failure (index, commit,
-              // bundle staging) must surface immediately as an integrity
-              // failure, not spin through three attempts as "pending".
-              if (
-                error instanceof LedgerTransportError &&
-                (error.operation === '' || error.operation === 'push')
-              ) {
-                throw new PublicationPushError(error.message, { cause: error });
-              }
-              throw error;
-            }
-          },
-        },
-        services.outbox,
-        {
-          verifyArtifact: (reference) => {
-            const parsed = ledgerLoads(ledgerCanonicalBytes(reference));
-            return services.verifyArtifact({
-              sha256: stringField(parsed, 'sha256'),
-              location: stringField(parsed, 'location'),
-            });
-          },
-          // Python's publish loop: repository.restore + Repository.verify_review
-          // over the publisher-owned clone (`accounting.Repository(self.repo)`,
-          // the publication worker's bare repository) for every creditable
-          // record, before the push. Bounding verification to the publisher
-          // clone keeps the scheduler clone scheduler-only and refuses commits
-          // no retained evidence bundle backs.
-          verifyCreditableReview: (value) => {
-            if (!(value instanceof JsonObject)) {
-              return Promise.reject(integrity('creditable record is not an object'));
-            }
-            return verifyReview(effects.runPublisherGit, value, (reference) =>
-              services.verifyArtifact(reference),
-            ).then(() => undefined);
-          },
-          withPublisherLock: (fn) =>
-            publisherLockPath(effects).then((lockPath) => withLock(lockPath, { wait: true }, fn)),
-        },
-      );
-      // Only a fresh validated fetch is acknowledgement authority.
-      const { head, values } = await services.ledger.fetch();
-      const ids = ledgerValidateSequence(values);
-      for (const value of values) {
-        if (value instanceof JsonObject && value.get('event_type') === 'review') {
-          await services.inbox.ingest(value);
-        }
-      }
-      await services.inbox.recover(values);
-
-      // Queue reconciliation under the caller's tick lock. A busy lock is
-      // routine (spools happen under it): never a failure marker.
-      const merged = await effects.withTickLock(
-        () =>
-          reconcileQueue(effects, services, config, head, ids, requestPath, failurePath, requested),
-        { lockWait: 30 },
-      );
-      if (merged !== true) {
-        return { ledger_head: head, publication: 'reconciliation-pending' };
-      }
-      return { ledger_head: head, publication: 'reconciled' };
     });
   } catch (error) {
-    await recordFailure(effects, error, failurePath);
+    const key = error instanceof Error ? error : undefined;
+    if (key === undefined || !failurePersisted.has(key)) {
+      await recordFailure(effects, error, failurePath);
+    }
     throw error;
+  }
+}
+
+/** Errors whose failure marker was already persisted under the publisher lock. */
+const failurePersisted = new WeakSet<object>();
+
+/**
+ * The publish body Python runs inside `with ledger.locked(publisher.lock)`.
+ * Failures are persisted by the caller while the lock is still held.
+ */
+async function publishUnderLock(
+  effects: PublishRunEffects,
+  config: JsonObject,
+  requestPath: string,
+  failurePath: string,
+): Promise<PublishRunResult> {
+  {
+    const services = await workerServices(effects, config);
+    let requested = await readFileBytes(requestPath);
+    if (
+      requested === null &&
+      (await services.outbox.pending()).length === 0 &&
+      !(await exists(failurePath))
+    ) {
+      return { publication: 'idle' };
+    }
+    if (requested === null) {
+      // Persist reconciliation intent even when only the periodic pending
+      // scan woke us: remote acknowledgements can precede a crash.
+      requested = ledgerCanonicalBytes(
+        new JsonObject([['request', randomUUID().replace(/-/g, '')]]),
+      );
+      await atomicWrite(requestPath, requested);
+    }
+    await publishOutbox(
+      {
+        fetch: () => services.ledger.fetch(),
+        publish: async (batch, baseHead) => {
+          try {
+            return await services.ledger.publishBatch(batch, baseHead);
+          } catch (error) {
+            // Python retries only the push; a local failure (index, commit,
+            // bundle staging) must surface immediately as an integrity
+            // failure, not spin through three attempts as "pending".
+            if (
+              error instanceof LedgerTransportError &&
+              (error.operation === '' || error.operation === 'push')
+            ) {
+              throw new PublicationPushError(error.message, { cause: error });
+            }
+            throw error;
+          }
+        },
+      },
+      services.outbox,
+      {
+        verifyArtifact: (reference) => {
+          const parsed = ledgerLoads(ledgerCanonicalBytes(reference));
+          return services.verifyArtifact({
+            sha256: stringField(parsed, 'sha256'),
+            location: stringField(parsed, 'location'),
+          });
+        },
+        // Python's publish loop: repository.restore + Repository.verify_review
+        // over the publisher-owned clone (`accounting.Repository(self.repo)`,
+        // the publication worker's bare repository) for every creditable
+        // record, before the push. Bounding verification to the publisher
+        // clone keeps the scheduler clone scheduler-only and refuses commits
+        // no retained evidence bundle backs.
+        verifyCreditableReview: (value) => {
+          if (!(value instanceof JsonObject)) {
+            return Promise.reject(integrity('creditable record is not an object'));
+          }
+          return verifyReview(effects.runPublisherGit, value, (reference) =>
+            services.verifyArtifact(reference),
+          ).then(() => undefined);
+        },
+        withPublisherLock: (fn) =>
+          publisherLockPath(effects).then((lockPath) => withLock(lockPath, { wait: true }, fn)),
+      },
+    );
+    // Only a fresh validated fetch is acknowledgement authority.
+    const { head, values } = await services.ledger.fetch();
+    const ids = ledgerValidateSequence(values);
+    for (const value of values) {
+      if (value instanceof JsonObject && value.get('event_type') === 'review') {
+        await services.inbox.ingest(value);
+      }
+    }
+    await services.inbox.recover(values);
+
+    // Queue reconciliation under the caller's tick lock. A busy lock is
+    // routine (spools happen under it): never a failure marker.
+    const merged = await effects.withTickLock(
+      () =>
+        reconcileQueue(effects, services, config, head, ids, requestPath, failurePath, requested),
+      { lockWait: 30 },
+    );
+    if (merged !== true) {
+      return { ledger_head: head, publication: 'reconciliation-pending' };
+    }
+    return { ledger_head: head, publication: 'reconciled' };
   }
 }
 
