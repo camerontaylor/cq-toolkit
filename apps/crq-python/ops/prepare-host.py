@@ -767,14 +767,23 @@ def switch(root, overlay, raw, target, tag=None):
             if git(root, 'status', '--porcelain', '--untracked-files=all'):
                 raise ValueError('checkout not clean after config restore')
             git(root, 'checkout', '--detach', target)
+            # Same tick lock spans drift check, checkout, render and audit.
+            record(root, overlay, raw, destination, 'switch-render', previous_sha=previous, tag=tag)
+            atomic_bytes(root / CONFIG, destination)
+            if git(root, 'status', '--porcelain', '--untracked-files=all') not in ('', ' M ' + CONFIG):
+                raise ValueError('post-switch status must contain only rendered config')
         except BaseException:
-            atomic_bytes(root / CONFIG, current)
+            # Recovery spans the whole post-checkout window: the audit and
+            # config writes above run after HEAD moved, so a failure there
+            # (e.g. a full audit volume) must roll the checkout back too, or
+            # the host is left on the target with its committed config and no
+            # host overrides and a retry fails drift_check. Best effort per
+            # step; the original error still propagates.
+            try:
+                git(root, 'checkout', '--detach', previous)
+            finally:
+                atomic_bytes(root / CONFIG, current)
             raise
-        # Same tick lock spans drift check, checkout, render and audit.
-        record(root, overlay, raw, destination, 'switch-render', previous_sha=previous, tag=tag)
-        atomic_bytes(root / CONFIG, destination)
-        if git(root, 'status', '--porcelain', '--untracked-files=all') not in ('', ' M ' + CONFIG):
-            raise ValueError('post-switch status must contain only rendered config')
     return target
 
 
