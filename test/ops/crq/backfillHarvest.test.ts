@@ -4,7 +4,8 @@ import {
   type BackfillFailureHarvestEffects,
   type BackfillRunArtifacts,
 } from '../../../src/ops/crq/internal/backfillHarvest.js';
-import { JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
+import { JsonNumber, JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
+import { withObjectKeys } from '../../../src/policy/crq/queueDoc.js';
 
 const enc = new TextEncoder();
 function queue(): JsonObject {
@@ -95,6 +96,87 @@ describe('bounded backfill failure harvest', () => {
     await expect(
       harvestBackfillFailure(queue(), 0, { ...proof, runId: 'other' }, fixture().effects),
     ).rejects.toThrow('ownership');
+  });
+  it('does not mutate mixed quota and hard failure outcomes', async () => {
+    const f = fixture(
+      artifacts(
+        '{"type":"error","errorType":"rate_limit","recoverable":true}\n{"type":"error","errorType":"auth"}\n',
+      ),
+    );
+    const initial = queue();
+    const result = await harvestBackfillFailure(initial, 0, proof, f.effects);
+    expect(result.classification.get('outcome')).toBe('auth');
+    expect(result.status).toBe('unhandled');
+    expect(result.queue).toBe(initial);
+    expect(f.calls).toEqual([]);
+  });
+  it.each([
+    ['state', 'pending'],
+    ['vendor_state', 'unknown'],
+    ['attempt_id', 'other'],
+  ] as const)('refuses mismatched item %s before effects', async (field, value) => {
+    const q = queue();
+    const items = q.get('items');
+    if (!Array.isArray(items) || !(items[0] instanceof JsonObject)) throw new Error('fixture');
+    const changed = withObjectKeys(q, [['items', [withObjectKeys(items[0], [[field, value]])]]]);
+    const f = fixture();
+    await expect(harvestBackfillFailure(changed, 0, proof, f.effects)).rejects.toThrow();
+    expect(f.calls).toEqual([]);
+  });
+  it.each([
+    ['item', 'other'],
+    ['vendor_run_id', 'other'],
+  ] as const)('refuses mismatched reservation %s before effects', async (field, value) => {
+    const q = queue();
+    const holds = q.get('backfill_reservations');
+    if (!(holds instanceof JsonObject) || !(holds.get('a') instanceof JsonObject))
+      throw new Error('fixture');
+    const hold = holds.get('a');
+    if (!(hold instanceof JsonObject)) throw new Error('fixture');
+    const changed = withObjectKeys(q, [
+      [
+        'backfill_reservations',
+        withObjectKeys(holds, [['a', withObjectKeys(hold, [[field, value]])]]),
+      ],
+    ]);
+    const f = fixture();
+    await expect(harvestBackfillFailure(changed, 0, proof, f.effects)).rejects.toThrow();
+    expect(f.calls).toEqual([]);
+  });
+  it('refuses mismatched exit and unverified terminal proof', async () => {
+    const f = fixture();
+    await expect(
+      harvestBackfillFailure(queue(), 0, { ...proof, exitCode: 2 }, f.effects),
+    ).rejects.toThrow();
+    await expect(
+      // @ts-expect-error Exercise runtime rejection of an unverified caller.
+      harvestBackfillFailure(queue(), 0, { ...proof, terminalVerified: false }, f.effects),
+    ).rejects.toThrow();
+    expect(f.calls).toEqual([]);
+  });
+  it('pauses on auth and records capacity and attempt exactly once', async () => {
+    const f = fixture(artifacts('{"type":"error","errorType":"auth"}\n'));
+    const result = await harvestBackfillFailure(queue(), 0, proof, f.effects);
+    expect(result.queue.get('paused')).toBe(true);
+    expect(result.queue.get('pause_reason')).toBe(
+      'backfill vendor authentication/action required; operator ruling needed',
+    );
+    expect(result.queue.get('backfill_capacity_runs')).toEqual(['r']);
+    const capacity = result.queue.get('backfill_daily_capacity');
+    if (!(capacity instanceof JsonObject) || !(capacity.get('2026-10-30') instanceof JsonObject))
+      throw new Error('capacity');
+    const day = capacity.get('2026-10-30');
+    if (!(day instanceof JsonObject)) throw new Error('day');
+    expect(day.get('completed_partitions')).toEqual(JsonNumber.int(0));
+    expect(day.get('spare_admissions')).toEqual(JsonNumber.int(0));
+    const items = result.queue.get('items');
+    if (!Array.isArray(items) || !(items[0] instanceof JsonObject)) throw new Error('item');
+    const attempts = items[0].get('attempts');
+    if (!Array.isArray(attempts) || !(attempts[0] instanceof JsonObject))
+      throw new Error('attempt');
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0].get('run_id')).toBe('r');
+    expect(attempts[0].get('outcome')).toBe('auth');
   });
   it('leaves quota and counted completion untouched', async () => {
     const rate = fixture(
