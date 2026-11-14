@@ -3,7 +3,8 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as gitExec from '../../../src/adapters/crq/gitExec.js';
 import {
   allocateReviewRun,
   checkoutReviewWorktree,
@@ -18,6 +19,7 @@ import {
 const exec = promisify(execFile);
 const roots: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 async function fixture() {
@@ -75,6 +77,44 @@ describe('review preparation filesystem', () => {
     await expect(checkoutReviewWorktree(other)).rejects.toBeInstanceOf(ReviewCheckoutError);
     expect(await git('rev-parse', `crq/wt-${other.runId}`)).toBe(head);
     expect(root).toBeTruthy();
+  });
+  it.each([null, 0])(
+    'maps git timeout or overflow sentinel to checkout failure (exit %s)',
+    async (code) => {
+      const { clone, wt, head } = await fixture();
+      const git = vi
+        .spyOn(gitExec, 'gitCall')
+        .mockResolvedValue({ code, stdout: new Uint8Array(), stderr: 'output exceeded bound' });
+      await expect(
+        checkoutReviewWorktree({
+          clone,
+          worktreeRoot: wt,
+          prefix: 'crq-',
+          runId: 'sentinel-run',
+          head,
+          pool: new GitPool(),
+        }),
+      ).rejects.toBeInstanceOf(ReviewCheckoutError);
+      expect(git).toHaveBeenCalledOnce();
+    },
+  );
+  it('propagates git spawn failure as an unexpected error', async () => {
+    const { clone, wt, head } = await fixture();
+    const git = vi
+      .spyOn(gitExec, 'gitCall')
+      .mockResolvedValue({ code: null, stdout: new Uint8Array(), stderr: 'spawn failed' });
+    const error = await checkoutReviewWorktree({
+      clone,
+      worktreeRoot: wt,
+      prefix: 'crq-',
+      runId: 'spawn-run',
+      head,
+      pool: new GitPool(),
+    }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(ReviewCheckoutError);
+    expect((error as Error).message).toBe('git checkout process could not be started');
+    expect(git).toHaveBeenCalledOnce();
   });
   it('refuses an existing empty worktree directory', async () => {
     const { clone, wt, head } = await fixture();
