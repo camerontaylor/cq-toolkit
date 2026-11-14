@@ -7,7 +7,7 @@ import { fileLocalExitHarvestEffects } from '../../../src/adapters/crq/localRevi
 import { harvestLocalReviewExit } from '../../../src/ops/crq/internal/localReviewExit.js';
 import { fileLocalReviewPublishEffects } from '../../../src/adapters/crq/localReviewPublish.js';
 import { republishLocalReview } from '../../../src/ops/crq/internal/localReviewPublish.js';
-import { JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
+import { JsonNumber, JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
 import { receiptJsonDigest } from '../../../src/policy/crq/pythonJson.js';
 import {
   completeLocalReview,
@@ -15,7 +15,10 @@ import {
 } from '../../../src/ops/crq/internal/localReviewHarvest.js';
 
 function doc(text: string): JsonObject {
-  const result = parseJsonValue(text);
+  const result = parseJsonValue(text, {
+    parseConstant: (raw) =>
+      JsonNumber.float(raw === 'NaN' ? NaN : raw === 'Infinity' ? Infinity : -Infinity),
+  });
   if (!(result instanceof JsonObject)) throw new Error('expected object');
   return result;
 }
@@ -72,7 +75,7 @@ describe('local review completion', () => {
       );
       await writeFile(
         join(dir, 'review.ndjson'),
-        '{"type":"finding","severity":"minor","fileName":"x","comment":"hello"}\n',
+        '{"type":"finding","severity":"minor","fileName":"x","comment":"hello","number":NaN}\n',
       );
       let saved = queue;
       const saveQueue = async (q: JsonObject) => {
@@ -103,6 +106,7 @@ describe('local review completion', () => {
       expect(result.queue).toBe(saved);
       const updated = (result.queue.get('items') as JsonObject[])[0]!;
       expect(updated.get('state')).toBe('done');
+      expect(updated.get('publication_reason')).toBe('publication-spooled');
       expect((result.queue.get('review_notify_outbox') as JsonObject).entries).toHaveLength(1);
       expect(await readFile(join(dir, 'findings.md'), 'utf8')).toContain('## F1 [minor] x');
       expect(await readFile(join(root, 'events.jsonl'), 'utf8')).toContain('review_finished');

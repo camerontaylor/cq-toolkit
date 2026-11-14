@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { JsonObject, parseJsonValue } from '../../policy/crq/jsonValue.js';
+import { JsonNumber, JsonObject, parseJsonValue } from '../../policy/crq/jsonValue.js';
 import { ledgerCanonicalBytes } from '../../policy/crq/ledger.js';
 import { sha256Hex } from '../../policy/crq/pythonJson.js';
 import { MAX_RECEIPT_BYTES } from '../../policy/crq/queueReceipt.js';
@@ -36,6 +36,8 @@ export function fileLocalReviewPublishEffects(options: {
       if (sha256Hex(bytes) !== id) throw new Error('receipt digest mismatch');
       const value = parseJsonValue(new TextDecoder('utf-8', { fatal: true }).decode(bytes), {
         duplicates: 'error',
+        parseConstant: (raw) =>
+          JsonNumber.float(raw === 'NaN' ? NaN : raw === 'Infinity' ? Infinity : -Infinity),
       });
       if (!(value instanceof JsonObject)) throw new Error('invalid receipt');
       return value;

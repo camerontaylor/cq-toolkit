@@ -83,10 +83,12 @@ function cooldown(
     current !== null && current.epochMicros > deadline ? current.epochMicros : deadline;
   return withObjectKeys(queue, [['cooldown_until', formatUtcMicros(result).slice(0, 19) + 'Z']]);
 }
+/** Cleanup adapters wrap expected runtime or subprocess failures in this error. */
+export class LocalReviewCleanupError extends Error {}
 function cleanupFailure(error: unknown): boolean {
   return (
-    error instanceof Error &&
-    (error.name === 'Error' || typeof (error as NodeJS.ErrnoException).code === 'string')
+    error instanceof LocalReviewCleanupError ||
+    (error instanceof Error && typeof (error as NodeJS.ErrnoException).errno === 'number')
   );
 }
 
@@ -124,6 +126,8 @@ export async function harvestLocalReviewExit(
   const exitValue = required(exit, 'exit');
   if (dry) return { queue, message: `would harvest ${runId}` };
   const exitCode = exitValue === null ? null : seconds(exitValue);
+  // Deliberate fail-closed divergence: Python accepts other JSON shapes, but the TS
+  // classifier and receipt contract only support null or lossless safe integers.
   if (
     exitValue !== null &&
     (!(exitValue instanceof JsonNumber) ||

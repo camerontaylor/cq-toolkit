@@ -3,6 +3,7 @@ import { JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js
 import { withObjectKeys } from '../../../src/policy/crq/queueDoc.js';
 import {
   harvestLocalReviewExit,
+  LocalReviewCleanupError,
   type LocalExitHarvestEffects,
 } from '../../../src/ops/crq/internal/localReviewExit.js';
 import { renderLocalReviewFindings } from '../../../src/ops/crq/internal/localReviewReport.js';
@@ -75,6 +76,18 @@ function setup() {
   return { queue, item, calls, effects };
 }
 describe('local-review exit harvest lifecycle', () => {
+  it('propagates programming errors during cleanup instead of hiding them', async () => {
+    const x = setup();
+    await expect(
+      harvestLocalReviewExit(x.queue, x.item, false, 5, {
+        ...x.effects,
+        cleanup: async () => {
+          throw new Error('missing worktree');
+        },
+      }),
+    ).rejects.toThrow('missing worktree');
+    expect(x.calls).not.toContain('local_review_cleanup_failed');
+  });
   it('uses an explicit zero wait instead of the configured default', async () => {
     const x = setup();
     const result = await harvestLocalReviewExit(x.queue, x.item, false, 5, {
@@ -178,7 +191,7 @@ describe('local-review exit harvest lifecycle', () => {
         return x.effects.complete(q, current, run, cls, at, code);
       },
       cleanup: async () => {
-        throw new Error('cleanup failed');
+        throw new LocalReviewCleanupError('cleanup failed');
       },
     });
     expect(received?.get('cooldown_until')).toBe('2026-11-14T12:02:00Z');
