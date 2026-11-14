@@ -201,16 +201,16 @@ describe('runReconcileFixPrs', () => {
   });
 
   test('the first five errors survive and a pass of only errors is not quiet', async () => {
-    const runs = Array.from({ length: 8 }, (_, index) => `r${String(index)}`).map((run, index) => [
-      run,
-      { fix_pr: { number: index + 1 } },
-    ]);
+    const runs: Array<[string, { readonly fix_pr: { readonly number: number } }]> = Array.from(
+      { length: 8 },
+      (_, index) => [`r${String(index)}`, { fix_pr: { number: index + 1 } }],
+    );
     const queue = [item({ id: 'item-1', repair_runs: Object.fromEntries(runs) })];
     const stats = await runReconcileFixPrs(
       effects({
         items: queue,
         outcomes: Object.fromEntries(
-          runs.map(([run]) => [run as string, { kind: 'deferred' as const, message: 'boom' }]),
+          runs.map(([run]) => [run, { kind: 'deferred' as const, message: 'boom' }]),
         ),
       }),
     );
