@@ -60,26 +60,28 @@ if (command === 'queue-capability') {
             artifact: { status: 'failed' as const, error: `${liveCommand} is not implemented` },
             exitCode: 1,
           }),
-    live: (liveCommand): Promise<OpResult<unknown>> => {
+    live: async (liveCommand): Promise<OpResult<unknown>> => {
       if (liveCommand === 'watchdog') {
         return runWatchdog(stateHome === undefined ? {} : { stateHome });
       }
       if (liveCommand === 'publish') {
         // The unit reads the runner roots from its config, mirroring Python's
         // crq.py CONFIG: explicit paths, never a cwd/env default beyond cwd.
+        // Python's run(): `config = runtime.settings(c.STATE); if not config:
+        // return {"publication": "disabled"}`. settings returns None only for
+        // a missing rollout file; a malformed rollout raises IntegrityError,
+        // and a missing config.json/clone raises before settings runs. So the
+        // unit reports disabled only when the rollout is absent at the
+        // resolved state root; configuration defects report failed.
+        const stateRoot = await publisherStateRoot(root);
+        if (await isRolloutAbsent(join(stateRoot, 'backfill-rollout.json'))) {
+          return { status: 'ok', value: { publication: 'disabled' } };
+        }
         return readPublisherRoots(root).then(async (roots): Promise<OpResult<unknown>> => {
           if (roots === null) {
-            // An absent rollout is Python's {"publication": "disabled"}: the
-            // unit reports disabled (exit 0) instead of failing. Only a
-            // missing config.json/clone is a genuine unavailability. Probe
-            // the state root the same way readPublisherRoots derives it
-            // (config.state_root, default <root>/state).
-            if (await isRolloutAbsent(await publisherStateRoot(root))) {
-              return { status: 'ok', value: { publication: 'disabled' } };
-            }
             return {
               status: 'failed',
-              error: 'publisher roots unavailable: config.json clone/durable_artifact_root',
+              error: 'backfill rollout prerequisites incomplete',
             };
           }
           return runPublishUnit(roots);

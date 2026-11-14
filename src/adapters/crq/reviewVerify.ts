@@ -153,14 +153,24 @@ export async function changedIntervals(
   let current: string | null = null;
   let oldLeft = 0;
   let newLeft = 0;
+  // Head-side line cursor. --unified=0 normally emits only +/- lines, so the
+  // hunk-header range is already the added set; but GIT_DIFF_OPTS overrides
+  // -U/--unified, so ambient context (-U1, say) could widen the header range
+  // into unchanged lines. Walking the body and crediting only '+' lines is
+  // correct under any context width (Git gives GIT_DIFF_OPTS precedence over
+  // --unified; gitEnv passes the ambient environment through).
+  let headLine = 0;
   for (const line of decode(out).split('\n')) {
     if (oldLeft !== 0 || newLeft !== 0) {
       if (line.startsWith(' ')) {
         oldLeft -= 1;
         newLeft -= 1;
+        headLine += 1;
       } else if (line.startsWith('-')) {
         oldLeft -= 1;
       } else if (line.startsWith('+')) {
+        if (current !== null) result.get(current)?.add(headLine);
+        headLine += 1;
         newLeft -= 1;
       } else if (line.startsWith('\\ No newline at end of file')) {
         continue;
@@ -187,11 +197,8 @@ export async function changedIntervals(
       oldLeft = match[1] === undefined ? 1 : Number(match[1]);
       const start = Number(match[2]);
       newLeft = match[3] === undefined ? 1 : Number(match[3]);
-      if (current !== null) {
-        const set = result.get(current) ?? new Set<number>();
-        for (let n = start; n < start + newLeft; n++) set.add(n);
-        result.set(current, set);
-      }
+      // The first body line lands on new-side line `start`.
+      headLine = start;
     }
   }
   if (oldLeft !== 0 || newLeft !== 0) throw integrity('truncated diff hunk');

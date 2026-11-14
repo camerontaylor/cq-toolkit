@@ -212,7 +212,18 @@ export function publisherSpoolPushCommit(config: PublisherSpoolConfig): PushComm
         : rawKey.startsWith('~/')
           ? `${homedir()}${rawKey.slice(1)}`
           : rawKey;
-    const keyPath = await realpath(expanded).catch(() => expanded);
+    // A missing signer key must refuse before ssh runs: OpenSSH ignores an
+    // inaccessible -i file and still offers default identities (~/.ssh/*),
+    // which could authorize the spool host with a general-purpose key
+    // (owner D4: no fallback). Python's expanduser would produce a nonexistent
+    // path and ssh would then fail unreachable; refusing here is the same
+    // outcome without ever offering a default identity.
+    let keyPath: string;
+    try {
+      keyPath = await realpath(expanded);
+    } catch {
+      throw new LedgerTransportError('ledger signer key unavailable; retain publication outbox');
+    }
     const argv = publisherSshArgv(config, keyPath, base, head);
     const result = await runSsh(argv, bundle, SSH_TIMEOUT_MS);
     if (result.code !== 0) {

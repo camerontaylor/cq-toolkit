@@ -34,7 +34,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { join } from 'node:path';
 import { JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
 import {
   LedgerIntegrityError,
@@ -441,25 +441,17 @@ export class GitLedger {
   /**
    * Ensure the publisher-owned bare clone exists, then pin the publication
    * remote's URL (Python's `worker_services`: `git init --bare` once, then
-   * `git config remote.origin.url <scheduler clone origin>`). The probe
-   * requires the discovered repository to be the intended one: a state root
-   * nested inside a checkout makes `rev-parse --git-common-dir` succeed
-   * against the enclosing checkout, and trusting it would rewrite the
-   * enclosing `remote.origin.url` and publish from the wrong repository.
+   * `git config remote.origin.url <scheduler clone origin>`). The bare
+   * init runs unconditionally, exactly Python's `worker_services`:
+   * `git init --bare` is idempotent for an existing bare repository, and a
+   * probe (`rev-parse --git-common-dir`) would find an enclosing checkout
+   * when the state root is nested inside one, skipping the init and letting
+   * the `config` step rewrite the wrong repository's origin.
    */
   async ensureBareRepo(url: string): Promise<void> {
     await mkdir(this.repo, { recursive: true });
-    const probe = await this.git('rev-parse', '--git-common-dir');
-    let initialized = false;
-    if (probe.code === 0) {
-      const commonDir = decode(probe.stdout).trim();
-      const resolved = resolve(this.repo, commonDir);
-      initialized = resolved === this.repo || resolved.startsWith(this.repo + sep);
-    }
-    if (!initialized) {
-      const init = await this.runGit(['init', '--bare', '--quiet', this.repo]);
-      if (init.code !== 0) throw transport('init', init);
-    }
+    const init = await this.runGit(['init', '--bare', '--quiet', this.repo]);
+    if (init.code !== 0) throw transport('init', init);
     const set = await this.git('config', 'remote.origin.url', url);
     if (set.code !== 0) throw transport('config', set);
   }

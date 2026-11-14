@@ -172,4 +172,17 @@ describe('parseSignerReply', () => {
       /invalid ledger bundle size/,
     );
   });
+
+  test('a missing signer key refuses before ssh runs', async () => {
+    // OpenSSH ignores an inaccessible -i file and still offers default
+    // identities, so a nonexistent key must refuse the transport (owner D4:
+    // no fallback) instead of reaching ssh with a fallback path.
+    const push = publisherSpoolPushCommit({
+      sshAlias: 'crq@spool.invalid',
+      sshKey: '/keys/crq-signer-does-not-exist',
+    });
+    await expect(push('a'.repeat(40), 'b'.repeat(40), new Uint8Array(8))).rejects.toThrow(
+      /signer key unavailable/,
+    );
+  });
 });

@@ -76,10 +76,10 @@ class FakeGit {
       case undefined:
         return { code: 128, stdout: new Uint8Array(0) };
       case 'rev-parse': {
-        // `rev-parse --git-common-dir` probes for a repository in
-        // ensureBareRepo; the fake is not nested inside a checkout, so the
-        // bare clone's own git dir is the answer (real git prints an absolute
-        // path for a bare repository).
+        // publisherLockPath probes `rev-parse --git-common-dir` (Python's
+        // publisher lock derivation); the fake's bare clone answers '.' like
+        // real git for a bare repository. ensureBareRepo no longer probes
+        // (unconditional `git init --bare`), so this is the only consumer.
         if (args.includes('--git-common-dir')) {
           return { code: 0, stdout: text('.') };
         }
