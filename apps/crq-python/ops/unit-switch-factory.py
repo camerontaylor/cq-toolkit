@@ -246,6 +246,7 @@ def build(
             "sha256": selection.render["sha256"],
             "source_sha": selection.render["source_sha"],
             "template_blob_oid": selection.render["template_blob_oid"],
+            "artifact": selection.render.get("artifact"),
         },
         "clock": clock,
         "sleep": sleep,

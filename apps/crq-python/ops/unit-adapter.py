@@ -1254,7 +1254,7 @@ class ProductionUnitAdapter:
         cached = self._rendered.get((unit, runtime))
         if not isinstance(cached, dict):
             self.refuse("install requires a render established by preflight")
-        for key in ("source_sha", "template_blob_oid", "sha256"):
+        for key in ("source_sha", "template_blob_oid", "sha256", "artifact"):
             if rendered[key] != cached[key]:
                 self.refuse("render changed between preflight and install: " + key)
         masked = self._show(unit, ["LoadState", "FragmentPath"])
