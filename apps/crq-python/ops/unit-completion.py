@@ -180,13 +180,8 @@ def sha256_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
 
 
-def parse_runtime_from_unit(path: Path) -> str:
-    """Parse the installed unit's single ExecStart into python or node:<sha>.
-
-    This mirrors the adapter's shape check without importing it. It does not
-    prove the executable exists or that its artifact tree is intact; those are
-    adapter responsibilities.
-    """
+def parse_exec_start_from_unit(path: Path) -> list[str]:
+    """Return the ``shlex`` tokens of a unit file's single ``ExecStart``."""
     try:
         text = path.read_text()
     except OSError as exc:
@@ -196,10 +191,20 @@ def parse_runtime_from_unit(path: Path) -> str:
     if len(lines) != 1:
         raise CompletionRefused("installed unit must contain one ExecStart")
     try:
-        parts = shlex.split(lines[0][len("ExecStart="):])
+        return shlex.split(lines[0][len("ExecStart="):])
     except ValueError as exc:
         raise CompletionRefused("installed unit ExecStart cannot be parsed: "
                                 + str(exc)[:160]) from exc
+
+
+def parse_runtime_from_unit(path: Path) -> str:
+    """Parse the installed unit's single ExecStart into python or node:<sha>.
+
+    This mirrors the adapter's shape check without importing it. It does not
+    prove the executable exists or that its artifact tree is intact; those are
+    adapter responsibilities.
+    """
+    parts = parse_exec_start_from_unit(path)
     if len(parts) < 3 or Path(parts[0]).name != "env":
         raise CompletionRefused("installed unit ExecStart is not the expected shape")
     interpreter = Path(parts[1]).name
@@ -253,6 +258,40 @@ def parse_show_output(text: str) -> dict[str, str]:
             raise CompletionRefused("systemctl show returned a duplicate property")
         result[key] = value
     return result
+
+
+def parse_show_exec_start(text: str) -> list[str]:
+    """Parse the manager's ``ExecStart`` record into effective argv tokens.
+
+    ``systemctl show`` renders the effective command as a semicolon-separated
+    record such as ``{ path=/usr/bin/env ; argv[]=/usr/bin/env python3 run ;
+    ignore_errors=no ; ... }``. Drop-in files merge after the main unit file
+    and may reset ``ExecStart=``, so this manager record, not the installed
+    fragment bytes, is the command that would run. Anything malformed
+    refuses.
+    """
+    record = text.strip()
+    if not (record.startswith("{") and record.endswith("}")):
+        raise CompletionRefused("effective ExecStart record is malformed")
+    executable = None
+    argv_text = None
+    for field in record[1:-1].split(";"):
+        field = field.strip()
+        if field.startswith("path="):
+            if executable is not None:
+                raise CompletionRefused("effective ExecStart repeats path")
+            executable = field[len("path="):]
+        elif field.startswith("argv[]="):
+            if argv_text is not None:
+                raise CompletionRefused("effective ExecStart repeats argv")
+            argv_text = field[len("argv[]="):]
+    if not executable or argv_text is None:
+        raise CompletionRefused("effective ExecStart record lacks the command")
+    argv = argv_text.split()
+    if not argv or argv[0] != executable:
+        raise CompletionRefused(
+            "effective ExecStart argv does not start with its path")
+    return argv
 
 
 def parse_journal_json(text: str, *, max_records: int) -> list[dict[str, Any]]:
@@ -473,7 +512,7 @@ class SystemdJournalCompletionPort:
     def _show(self, unit: str) -> dict[str, str]:
         props = ("LoadState", "ActiveState", "SubState", "InvocationID",
                  "Result", "ExecMainStatus", "ExecMainExitTimestampMonotonic",
-                 "FragmentPath")
+                 "FragmentPath", "ExecStart")
         try:
             values = self.source.show(unit, props)
         except CompletionError:
@@ -520,6 +559,25 @@ class SystemdJournalCompletionPort:
                 "installed service digest does not match the selected render")
         return path, digest
 
+    def _effective_exec_start(self, unit: str, show: Mapping[str, str]) -> None:
+        """Refuse unless the manager's effective command is the unit file's.
+
+        ``systemd`` merges drop-in files after the main unit file and a
+        drop-in may reset ``ExecStart=``, so the digest-verified fragment
+        bytes alone do not prove which command runs. The effective
+        ``ExecStart`` reported by ``systemctl show`` must equal the single
+        ``ExecStart`` of the installed unit file. A command-resetting drop-in
+        in any systemd search path, not only the declared drop-in directory,
+        therefore refuses, while drop-ins that set only ordering or
+        requirement dependencies keep the rendered command effective and
+        stay accepted.
+        """
+        effective = parse_show_exec_start(show["ExecStart"])
+        declared = parse_exec_start_from_unit(self.unit_dir / unit)
+        if effective != declared:
+            raise CompletionRefused(
+                "effective ExecStart does not match the installed unit")
+
     def _unit_and_runtime(self, unit: str, runtime: str) -> None:
         if unit != self.expected.unit:
             raise CompletionRefused("unit does not match the selected identity")
@@ -551,6 +609,11 @@ class SystemdJournalCompletionPort:
         active = show["ActiveState"]
         if active != "inactive":
             raise CompletionRefused("unit is not in a stable inactive state")
+        # A masked unit has no observable effective command; the baseline
+        # branch below handles it. Every loaded observation must still name
+        # the installed unit's own command as the effective one.
+        if show["LoadState"] != "masked":
+            self._effective_exec_start(unit, show)
         invocation = show["InvocationID"]
         if invocation and HEX32_RE.fullmatch(invocation) is None:
             raise CompletionRefused("baseline InvocationID is malformed")
@@ -631,6 +694,10 @@ class SystemdJournalCompletionPort:
         if invocation == self._baseline_invocation or invocation in self._returned:
             return None
 
+        # The digest check below binds the fragment bytes; this binds the
+        # command the manager actually merged and would run for the credited
+        # invocation.
+        self._effective_exec_start(unit, show)
         _, service_sha = self._service(unit, runtime)
         boot = self._boot()
         if self._baseline_boot_id is not None \
