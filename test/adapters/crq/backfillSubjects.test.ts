@@ -391,6 +391,29 @@ describe('backfill subject adapter', () => {
     }
   });
 
+  test('a member without paths has no baseline and falls back', async () => {
+    const fixture = await fixtureRepo();
+    try {
+      await fixture.commit({ a: 'same\n' });
+      const merge = await fixture.commit({ a: 'changed\n' });
+      const { accounting, repo } = await subjectRepo(fixture);
+
+      const result = await construct(
+        repo,
+        await candidate(fixture, accounting, merge, ['a'], 'A'),
+        policy(),
+        [{ merge }],
+      );
+
+      expect(result.debt).toEqual([]);
+      expect(partitionAt(result).paths[0]?.baseline['reason']).toBe(
+        'missing/ambiguous baseline lineage',
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   test('nonlinear members fall back and an oversize peer does not block the subject', async () => {
     const fixture = await fixtureRepo();
     try {

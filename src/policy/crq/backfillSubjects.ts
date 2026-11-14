@@ -308,8 +308,13 @@ export async function construct(
     if (row.disposition !== 'included' || row.blob !== blob) {
       debt.push({
         path: name,
-        reason: row.reason ?? 'missing target path',
-        disposition: row.disposition ?? 'ambiguous',
+        // Python `row.get(key, default)`: a present null stays null.
+        reason: Object.prototype.hasOwnProperty.call(row, 'reason')
+          ? row.reason
+          : 'missing target path',
+        disposition: Object.prototype.hasOwnProperty.call(row, 'disposition')
+          ? row.disposition
+          : 'ambiguous',
       });
       continue;
     }

@@ -47,6 +47,7 @@ import {
   isJsonRecord,
   pyTruthy,
   recordGet,
+  recordHas,
   type JsonRecordLike,
 } from '../../policy/crq/queueDoc.js';
 import type { RunGit } from './ledgerGit.js';
@@ -143,10 +144,14 @@ function parseMembers(members: readonly SubjectMember[]): ParsedMember[] {
     if (!isJsonRecord(value)) fail(`subject member ${index} must be an object`);
     const merge = recordGet(value, 'merge');
     if (typeof merge !== 'string') fail(`subject member ${index} merge must be a string`);
-    const pathsValue = recordGet(value, 'paths');
+    // Python `member.get("paths", [])`: an absent list has no candidates.
+    const pathsValue = recordHas(value, 'paths') ? recordGet(value, 'paths') : [];
     if (!Array.isArray(pathsValue)) fail(`subject member ${index} paths must be an array`);
     const paths = pathsValue.map((row, pathIndex) => {
       if (!isJsonRecord(row)) fail(`subject member ${index} path ${pathIndex} must be an object`);
+      if (typeof recordGet(row, 'path') !== 'string') {
+        fail(`subject member ${index} path ${pathIndex} must name a path`);
+      }
       return row;
     });
     return { merge, paths };
