@@ -256,11 +256,11 @@ function asError(error: unknown): Error {
 }
 
 function decode(bytes: Uint8Array): string {
-  return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  return new TextDecoder('utf-8', { fatal: false, ignoreBOM: true }).decode(bytes);
 }
 
 function decodeStrict(bytes: Uint8Array): string {
-  return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
 }
 
 function trim(bytes: Uint8Array): string {
@@ -828,6 +828,8 @@ export class GitAccountingRepository implements BackfillReportRepo, BackfillCapt
     const position = chain.indexOf(old);
     if (position < 0) return null;
     let current: string | null = name;
+    // One name-status diff cannot chain a path (a destination is absent from
+    // the parent tree), so the oracle's in-order scan has one match per step.
     for (const commit of chain.slice(0, position).reverse()) {
       const step = await this.lineageStep(commit);
       for (const [status, source, destination] of step.changes) {
@@ -1054,6 +1056,12 @@ export class GitAccountingRepository implements BackfillReportRepo, BackfillCapt
     }
   }
 
+  /**
+   * `Repository._verify_once`: evidence is verified once per immutable
+   * invocation and the outcome is reused across targets. `beginInvocation`
+   * clears this map, so a gap from an earlier invocation is retried; retained
+   * objects are immutable for the duration of one invocation by contract.
+   */
   private async verifyOnce(
     value: JsonValue,
     artifacts: ArtifactStore,

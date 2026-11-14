@@ -18,6 +18,7 @@ import {
   carryFromFact,
   carryMatches,
   carrySelection,
+  coverageFact,
   factInt,
   hexString,
   intervalRows,
@@ -41,6 +42,7 @@ import {
   type JsonValue,
 } from '../../../src/policy/crq/jsonValue.js';
 import { loadFamily, textAt, valueAt, type VectorCase } from './backfillFixtures.js';
+import { ledgerJsonBytes } from '../../../src/policy/crq/pythonJson.js';
 
 function json(value: unknown): JsonValue {
   return parseJsonValue(JSON.stringify(value));
@@ -265,6 +267,21 @@ describe('carry matching', () => {
     expect(verifiedFact(new Map([['a', new Set([1, 2, 3])]]))).toEqual({
       a: [[1, 3]],
     });
+  });
+});
+
+describe('prototype-safe fact encoding', () => {
+  test('a __proto__ path is an own JSON property, not the prototype', () => {
+    const verified = verifiedFact(new Map([['__proto__', new Set([1, 2])]]));
+    expect(Object.prototype.hasOwnProperty.call(verified, '__proto__')).toBe(true);
+    expect(Buffer.from(ledgerJsonBytes(verified)).toString()).toBe('{"__proto__":[[1,2]]}');
+    const coverage = coverageFact(
+      new Map([['__proto__', new Set([3])]]),
+      new Map([['__proto__', ['finding-1']]]),
+    );
+    expect(Buffer.from(ledgerJsonBytes(coverage)).toString()).toBe(
+      '{"covered":{"__proto__":[[3,3]]},"evidence":{"__proto__":["finding-1"]}}',
+    );
   });
 });
 

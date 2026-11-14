@@ -289,7 +289,7 @@ function startsWith(data: Uint8Array, prefix: readonly number[]): boolean {
 }
 
 function decodeLossless(data: Uint8Array): string {
-  return new TextDecoder('utf-8', { fatal: false }).decode(data);
+  return new TextDecoder('utf-8', { fatal: false, ignoreBOM: true }).decode(data);
 }
 
 /**
@@ -322,7 +322,7 @@ export function parseBlame(raw: Uint8Array): BlameRow[] {
 }
 
 function decodeReplaced(data: Uint8Array): string {
-  return new TextDecoder('utf-8', { fatal: false }).decode(data);
+  return new TextDecoder('utf-8', { fatal: false, ignoreBOM: true }).decode(data);
 }
 
 /**
@@ -573,7 +573,7 @@ export function verifiedFact(
   lines: ReadonlyMap<string, ReadonlySet<number>>,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
-  for (const [name, rows] of lines) result[name] = lineRanges(rows);
+  for (const [name, rows] of lines) definePlain(result, name, lineRanges(rows));
   return result;
 }
 
@@ -584,7 +584,17 @@ export function coverageFact(
 ): Record<string, unknown> {
   const rows: Record<string, unknown> = {};
   const ids: Record<string, unknown> = {};
-  for (const [name, lines] of covered) rows[name] = lineRanges(lines);
-  for (const [name, values] of evidence) ids[name] = [...values];
+  for (const [name, lines] of covered) definePlain(rows, name, lineRanges(lines));
+  for (const [name, values] of evidence) definePlain(ids, name, [...values]);
   return { covered: rows, evidence: ids };
+}
+
+/** A canonical repository path such as `__proto__` stays an own data property. */
+function definePlain(object: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(object, key, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
 }

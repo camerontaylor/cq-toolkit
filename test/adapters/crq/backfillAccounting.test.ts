@@ -357,6 +357,14 @@ describe('inventory', () => {
     (entries.get('a') as { blob: string }).blob = 'poison';
     expect((await fixture.repo.entries(target)).get('a')?.blob).not.toBe('poison');
   });
+
+  test('a path beginning with U+FEFF keeps its identity', async () => {
+    const fixture = new Fixture();
+    const name = '\uFEFFa.ts';
+    const target = fixture.commit({ [name]: 'one\n' });
+    expect((await fixture.repo.inventory(target, 10)).map((row) => row.path)).toEqual([name]);
+    expect((await fixture.repo.entries(target)).has(name)).toBe(true);
+  });
 });
 
 describe('lineage and deletion', () => {

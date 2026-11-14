@@ -881,46 +881,115 @@ function codePointExtreme(values: readonly string[], maximum: boolean): string {
   });
 }
 
-/** `fnmatch.fnmatchcase`: `*`, `?`, `[seq]` and `[!seq]`, never path-aware. */
-export function fnmatchCase(name: string, glob: string): boolean {
-  let source = '^';
-  for (let index = 0; index < glob.length; index += 1) {
-    const character = glob[index] as string;
+const FNMATCH_STAR: unique symbol = Symbol('fnmatch-star');
+type FnmatchPart = string | typeof FNMATCH_STAR;
+
+function escapeRegexCharacter(character: string): string {
+  return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
+}
+
+/**
+ * `fnmatch._translate` and `_join_translated_parts` (CPython 3.14), emitted as
+ * a JavaScript regex. Two JavaScript differences are normalised here: `\z`
+ * becomes `(?![\s\S])`, and a leading `]` in a class is escaped because
+ * JavaScript, unlike Python's `re`, does not allow it unescaped. Atomic
+ * star groups are omitted; they change backtracking cost, not the language.
+ */
+function translateFnmatch(glob: string): string {
+  const characters = Array.from(glob);
+  const parts: FnmatchPart[] = [];
+  const stars: number[] = [];
+  let index = 0;
+  while (index < characters.length) {
+    const character = characters[index++] as string;
     if (character === '*') {
-      source += '[\\s\\S]*';
+      stars.push(parts.length);
+      parts.push(FNMATCH_STAR);
+      while (index < characters.length && characters[index] === '*') index += 1;
       continue;
     }
     if (character === '?') {
-      source += '[\\s\\S]';
+      parts.push('.');
       continue;
     }
-    if (character === '[') {
-      let cursor = index + 1;
-      let group = '[';
-      if (glob[cursor] === '!') {
-        group += '^';
-        cursor += 1;
-      }
-      if (glob[cursor] === ']') {
-        group += '\\]';
-        cursor += 1;
-      }
-      while (cursor < glob.length && glob[cursor] !== ']') {
-        const member = glob[cursor] as string;
-        group += member === '\\' ? '\\\\' : member;
-        cursor += 1;
-      }
-      if (cursor >= glob.length) {
-        source += '\\[';
-      } else {
-        source += `${group}]`;
-        index = cursor;
-      }
+    if (character !== '[') {
+      parts.push(escapeRegexCharacter(character));
       continue;
     }
-    source += character.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    let close = index;
+    if (characters[close] === '!') close += 1;
+    if (characters[close] === ']') close += 1;
+    while (close < characters.length && characters[close] !== ']') close += 1;
+    if (close >= characters.length) {
+      parts.push('\\[');
+      continue;
+    }
+    let stuff = characters.slice(index, close).join('');
+    if (!stuff.includes('-')) {
+      stuff = stuff.replace(/\\/g, '\\\\');
+    } else {
+      const chunks: string[] = [];
+      let chunkStart = index;
+      let search = characters[index] === '!' ? index + 2 : index + 1;
+      while (true) {
+        let hyphen = -1;
+        for (let cursor = search; cursor < close; cursor += 1) {
+          if (characters[cursor] === '-') {
+            hyphen = cursor;
+            break;
+          }
+        }
+        if (hyphen < 0) break;
+        chunks.push(characters.slice(chunkStart, hyphen).join(''));
+        chunkStart = hyphen + 1;
+        search = hyphen + 3;
+      }
+      const tail = characters.slice(chunkStart, close).join('');
+      if (tail !== '') chunks.push(tail);
+      else if (chunks.length > 0) chunks[chunks.length - 1] = `${chunks[chunks.length - 1]}-`;
+      for (let cursor = chunks.length - 1; cursor > 0; cursor -= 1) {
+        const previous = chunks[cursor - 1] as string;
+        const current = chunks[cursor] as string;
+        if (previous === '' || current === '') continue;
+        if ((previous[previous.length - 1] as string) > (current[0] as string)) {
+          chunks[cursor - 1] = previous.slice(0, -1) + current.slice(1);
+          chunks.splice(cursor, 1);
+        }
+      }
+      stuff = chunks.map((chunk) => chunk.replace(/\\/g, '\\\\').replace(/-/g, '\\-')).join('-');
+    }
+    index = close + 1;
+    if (stuff === '') {
+      parts.push('(?!)');
+    } else if (stuff === '!') {
+      parts.push('.');
+    } else if (stuff[0] === '!') {
+      stuff = `^${stuff.slice(1)}`;
+      if (stuff[1] === ']') stuff = `^\\]${stuff.slice(2)}`;
+      parts.push(`[${stuff}]`);
+    } else {
+      if (stuff[0] === '^' || stuff[0] === '[' || stuff[0] === ']') stuff = `\\${stuff}`;
+      parts.push(`[${stuff}]`);
+    }
   }
-  return new RegExp(`${source}$`, 'u').test(name);
+  if (stars.length === 0) return parts.join('');
+  const joined: string[] = [];
+  let cursor = 1;
+  const first = stars[0] as number;
+  joined.push(...(parts.slice(0, first) as string[]));
+  let position = first + 1;
+  while (cursor < stars.length) {
+    const next = stars[cursor++] as number;
+    joined.push('(?:.*?', ...(parts.slice(position, next) as string[]), ')');
+    position = next + 1;
+  }
+  joined.push('.*', ...(parts.slice(position) as string[]));
+  return joined.join('');
+}
+
+/** `fnmatch.fnmatchcase`: `*`, `?`, `[seq]` and `[!seq]`, never path-aware. */
+export function fnmatchCase(name: string, glob: string): boolean {
+  return new RegExp(`^(?:${translateFnmatch(glob)})(?![\\s\\S])`, 'su').test(name);
 }
 
 /** `backfill_inventory.tier`: protected pattern first, then T1..T4 globs. */
@@ -1204,7 +1273,9 @@ export async function capture(options: BackfillCaptureOptions): Promise<Record<s
     ledger: events,
     required_members: options.members ?? {},
     evidence_gaps: fold.gaps,
-    protected_policy: new TextDecoder('utf-8', { fatal: true }).decode(options.protectedBytes),
+    protected_policy: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+      options.protectedBytes,
+    ),
   };
   const snapshots: Record<string, BackfillCaptureReference> = {};
   for (const key of BACKFILL_SNAPSHOT_KEYS) {

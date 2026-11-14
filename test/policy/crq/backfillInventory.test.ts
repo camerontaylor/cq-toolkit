@@ -462,6 +462,23 @@ describe('capture seam', () => {
     expect(fnmatchCase('src/a.ts', 'src/**')).toBe(true);
     expect(fnmatchCase('src/a.ts', 'src/*.ts')).toBe(true);
     expect(fnmatchCase('src/a.ts', 'src/*.js')).toBe(false);
+    for (const [name, glob, expected] of [
+      ['b', '[^a]', false],
+      ['^', '[^a]', true],
+      ['x', '[z-a]', false],
+      ['a', '[!a]', false],
+      ['b', '[!a]', true],
+      [']', '[]]', true],
+      [']', '[!]]', false],
+      ['a', '[!]]', true],
+      ['-', '[a-]', true],
+      ['*', '[*]', true],
+      ['\n', '*', true],
+      ['a/b', 'a*b', true],
+      ['[', '[[]', true],
+    ] as const) {
+      expect(fnmatchCase(name, glob)).toBe(expected);
+    }
     expect(() =>
       captureTier('docs/a.md', {
         protected_patterns: [],
