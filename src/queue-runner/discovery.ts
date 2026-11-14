@@ -75,6 +75,9 @@ export function rollingInterval(queue: JsonObject, floor: unknown, now: Date): R
     }
   }
   const watermark = queue.get('merged_watermark');
+  if (watermark !== undefined && watermark !== null && typeof watermark !== 'string') {
+    throw new Error('invalid merged watermark');
+  }
   let after = validatedFloor;
   if (typeof watermark === 'string' && watermark !== '') {
     const parsed = Date.parse(watermark);
@@ -98,6 +101,8 @@ export function rollingInterval(queue: JsonObject, floor: unknown, now: Date): R
  * Crash ordering: bounds, checkpoint/enrollment, summary, watermark, prune
  * stamp. A storage failure aborts; no failure may advance the watermark.
  * Reconciliation reloads the saved queue, avoiding stale enrollment overwrite.
+ * Invalid or empty intervals are refused rather than Python's no-op return:
+ * this seam requires validated frozen bounds and does not claim an empty scan.
  */
 export async function discoverRolling(
   interval: ReconcileInterval,

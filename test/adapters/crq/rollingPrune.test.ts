@@ -51,6 +51,11 @@ describe('rolling wrapper retention', () => {
       keep = new Set<string>(),
     ) => mayPruneRollingWrapper(text, pathKey, repo, watermark, bound, keep);
     expect(check(wrapper())).toBe(true);
+    const valid = JSON.parse(wrapper()) as Record<string, unknown>;
+    expect(check(JSON.stringify({ ...valid, digest: '0'.repeat(64) }))).toBe(false);
+    const extra = { ...valid, extra: true };
+    const extraBody = parseJsonValue(JSON.stringify(extra)) as JsonObject;
+    expect(check(JSON.stringify({ ...extra, digest: checkpointDigest(extraBody) }))).toBe(false);
     expect(check(wrapper(false))).toBe(false);
     expect(check(wrapper(true, true))).toBe(false);
     expect(check(wrapper().replace('closed-updated-v1', 'all-number-slots-v1'))).toBe(false);
