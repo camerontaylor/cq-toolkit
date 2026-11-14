@@ -3,7 +3,7 @@
 // blob are refused before anything lands in the clone's object store.
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -268,6 +268,90 @@ describe('installAuthorSnapshot', () => {
         'snapshot secret scanner probe failed (exit 7)',
       );
       expect(await objectExists(repo.dir, fixture.head)).toBe(false);
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      repo.pool.killAll();
+      await rm(bin, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses an executable scanner with a missing interpreter before install or pin', async () => {
+    const repo = await clone();
+    const bin = await mkdtemp(join(tmpdir(), 'cq-missing-interpreter-'));
+    const savedPath = process.env.PATH;
+    try {
+      await writeFile(join(bin, 'gitleaks'), '#!/definitely-missing-cq-review-interpreter\n', {
+        mode: 0o755,
+      });
+      process.env.PATH = `${bin}:${savedPath ?? ''}`;
+      const fixture = snapshotFor(repo.base, 'hello\n');
+      await expect(installAuthorSnapshot(input(repo, fixture))).rejects.toThrow(
+        'snapshot secret scanner probe failed',
+      );
+      expect(await objectExists(repo.dir, fixture.head)).toBe(false);
+      await expect(
+        run('git', [
+          '-C',
+          repo.dir,
+          'show-ref',
+          '--verify',
+          `refs/crq/author-snapshots/v1/${fixture.head}`,
+        ]),
+      ).rejects.toThrow();
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      repo.pool.killAll();
+      await rm(bin, { recursive: true, force: true });
+    }
+  });
+
+  test('runs the discovered scanner and refuses a failed scan', async () => {
+    const repo = await clone();
+    const bin = await mkdtemp(join(tmpdir(), 'cq-failed-scan-'));
+    const savedPath = process.env.PATH;
+    try {
+      await writeFile(
+        join(bin, 'gitleaks'),
+        '#!/bin/sh\nif [ "$1" = version ]; then exit 0; fi\nexit 3\n',
+        { mode: 0o755 },
+      );
+      process.env.PATH = `${bin}:${savedPath ?? ''}`;
+      const fixture = snapshotFor(repo.base, 'hello\n');
+      await expect(installAuthorSnapshot(input(repo, fixture))).rejects.toThrow(
+        'snapshot secret scanner unavailable on the runner',
+      );
+      expect(await objectExists(repo.dir, fixture.head)).toBe(false);
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      repo.pool.killAll();
+      await rm(bin, { recursive: true, force: true });
+    }
+  });
+
+  test('installs a clean snapshot when gitleaks is genuinely absent from PATH', async () => {
+    const repo = await clone();
+    const bin = await mkdtemp(join(tmpdir(), 'cq-no-gitleaks-'));
+    const savedPath = process.env.PATH;
+    try {
+      const git = (await run('which', ['git'])).stdout.trim();
+      await symlink(git, join(bin, 'git'));
+      process.env.PATH = bin;
+      const fixture = snapshotFor(repo.base, 'hello\n');
+      await expect(installAuthorSnapshot(input(repo, fixture))).resolves.toBeUndefined();
+      expect(await objectExists(repo.dir, fixture.head)).toBe(true);
+      expect(
+        (
+          await run('git', [
+            '-C',
+            repo.dir,
+            'rev-parse',
+            `refs/crq/author-snapshots/v1/${fixture.head}`,
+          ])
+        ).stdout.trim(),
+      ).toBe(fixture.head);
     } finally {
       if (savedPath === undefined) delete process.env.PATH;
       else process.env.PATH = savedPath;

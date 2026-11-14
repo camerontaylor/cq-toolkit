@@ -15,10 +15,12 @@
  * `git worktree add` would require.
  */
 import { execFile, spawn } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, mkdtemp, mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { currentEntryEnv } from '../../config/run-env.js';
 import type { JsonObject } from '../../policy/crq/jsonValue.js';
 import {
   makeGitleaksDefaultsScanner,
@@ -511,11 +513,15 @@ function longestComponent(path: Uint8Array): number {
  * with the project denylist alone.
  */
 async function gitleaksScan(parts: readonly string[], pool: GitPool): Promise<void> {
-  if (!(await gitleaksAvailable(pool))) return;
+  const env = { ...currentEntryEnv() };
+  const executable = await findGitleaks(env.PATH);
+  if (executable === null) return;
+  await probeGitleaks(executable, pool, env);
   const scanner = makeGitleaksDefaultsScanner({
-    async runCommand(command, args, opts) {
+    async runCommand(_command, args, opts) {
       return new Promise((resolve) => {
-        const child = spawn(command, [...args], {
+        const child = spawn(executable, [...args], {
+          env,
           stdio: ['ignore', 'pipe', 'pipe'],
           detached: process.platform !== 'win32',
         });
@@ -566,9 +572,31 @@ async function gitleaksScan(parts: readonly string[], pool: GitPool): Promise<vo
   }
 }
 
-function gitleaksAvailable(pool: GitPool): Promise<boolean> {
+/** Match executable discovery separately from execution: ENOENT on spawn can
+ * also mean that an existing executable's interpreter or loader is absent. */
+async function findGitleaks(path: string | undefined): Promise<string | null> {
+  for (const entry of (path ?? '/usr/bin:/bin').split(delimiter)) {
+    const candidate = resolve(entry || '.', 'gitleaks');
+    try {
+      await access(candidate, constants.X_OK);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EACCES') continue;
+      throw new AuthorRefused('snapshot secret scanner discovery failed');
+    }
+    try {
+      if ((await stat(candidate)).isFile()) return candidate;
+    } catch {
+      throw new AuthorRefused('snapshot secret scanner discovery failed');
+    }
+  }
+  return null;
+}
+
+function probeGitleaks(executable: string, pool: GitPool, env: NodeJS.ProcessEnv): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn('gitleaks', ['version'], {
+    const child = spawn(executable, ['version'], {
+      env,
       stdio: 'ignore',
       detached: process.platform !== 'win32',
     });
@@ -588,10 +616,6 @@ function gitleaksAvailable(pool: GitPool): Promise<boolean> {
       );
     }, 10_000);
     child.on('error', (error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT') {
-        finish(() => resolve(false));
-        return;
-      }
       finish(() =>
         reject(
           new AuthorRefused(
@@ -602,7 +626,7 @@ function gitleaksAvailable(pool: GitPool): Promise<boolean> {
     });
     child.on('close', (code, signal) => {
       if (code === 0) {
-        finish(() => resolve(true));
+        finish(() => resolve());
         return;
       }
       const detail = code === null ? `signal ${signal ?? 'unknown'}` : `exit ${String(code)}`;
