@@ -30,7 +30,14 @@ an interrupted inventory can otherwise mix ranked rows with older provenance.
   rank-four gate, including event-before-queue-save sequencing. Its caller must
   hold `tick.lock` and provide real refresh, event and queue-save effects. These
   bindings, selection and launch are not wired, and the seam is not a live
-  endpoint or activation. For the next slice, use
+  endpoint or activation. The non-launching selection seam in
+  `src/ops/crq/internal/backfillSelection.ts` consumes injected validated
+  coverage snapshots and a dry gate probe, returning a replacement queue and
+  candidate index. The caller must hold `tick.lock`, flush pending refusal
+  events first, persist returned state, and perform the real gate and bind
+  protocol before any spawn. Snapshot refresh is requested under the lock but
+  calculated off-lock. No selection seam is wired to a live executor.
+  For the next slice, use
   `apps/crq-python/backfill_runtime.py` at main commit
   `0cb627ebf38dafb3089b2fe7eb4f1e153665f307`: `usage_context` reflects or
   expires terminal holds and subtracts unrepresented starts; `rank4_gate`

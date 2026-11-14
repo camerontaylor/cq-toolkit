@@ -1,0 +1,186 @@
+import { describe, expect, it } from 'vitest';
+import {
+  COVERAGE_PENDING,
+  MISSING_EVIDENCE,
+  reconcileBackfillSelection,
+  type BackfillSelectionEffects,
+} from '../../../src/ops/crq/internal/backfillSelection.js';
+import { JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
+import { withObjectKeys } from '../../../src/policy/crq/queueDoc.js';
+
+const object = (s: string): JsonObject => {
+  const result = parseJsonValue(s);
+  if (!(result instanceof JsonObject)) throw new Error('not object');
+  return result;
+};
+const queue = () =>
+  object(
+    JSON.stringify({
+      items: [
+        {
+          id: 'one',
+          kind: 'backfill',
+          state: 'pending',
+          family: 'f',
+          target: 't1',
+          tier_importance: 1,
+          subject_kind: 'A',
+          row: 1,
+          subject_id: 'one',
+          scope: [{ path: 'a', blob: 'b', intervals: [[1, 2]] }],
+        },
+        {
+          id: 'two',
+          kind: 'backfill',
+          state: 'pending',
+          family: 'f',
+          target: 't2',
+          tier_importance: 2,
+          subject_kind: 'A',
+          row: 2,
+          subject_id: 'two',
+          scope: [{ path: 'b', blob: 'c', intervals: [[1, 2]] }],
+        },
+      ],
+      other: 1.25,
+    }),
+  );
+const getItem = (q: JsonObject, i: number): JsonObject => {
+  const items = q.get('items');
+  if (!Array.isArray(items) || !(items[i] instanceof JsonObject)) throw new Error('bad item');
+  return items[i];
+};
+const options = { halted: false, dispatchEnabled: true, dry: false };
+const effects = (overrides: Partial<BackfillSelectionEffects> = {}): BackfillSelectionEffects => ({
+  now: () => '2026-10-30T00:10:00Z',
+  probeGate: async (q) => ({ queue: q, admitted: true }),
+  fetchLedger: async () => ({ head: 'head', events: [] }),
+  loadCoverage: async () => ({ covered: new Map(), gaps: [] }),
+  requestCoverage: async () => {},
+  ...overrides,
+});
+
+describe('non-launching backfill selection', () => {
+  it('requests stale and gap snapshots, and never selects either', async () => {
+    const requests: string[][] = [];
+    const result = await reconcileBackfillSelection(
+      queue(),
+      options,
+      effects({
+        loadCoverage: async (target) =>
+          target === 't1' ? null : { covered: new Map(), gaps: ['gap'] },
+        requestCoverage: async (_head, targets) => {
+          requests.push([...targets]);
+        },
+      }),
+    );
+    expect(result.candidate).toBeNull();
+    expect(result.available).toBe(false);
+    expect(getItem(result.queue, 0).get('wait_reason')).toBe(COVERAGE_PENDING);
+    expect(getItem(result.queue, 1).get('wait_reason')).toBe(MISSING_EVIDENCE);
+    expect(requests).toEqual([['t1', 't2']]);
+    expect(result.queue.has('backfill_coverage_reconciled')).toBe(false);
+  });
+  it('marks covered jobs done and returns next uncovered candidate without reserving', async () => {
+    const result = await reconcileBackfillSelection(
+      queue(),
+      options,
+      effects({
+        loadCoverage: async (target) => ({
+          covered: target === 't1' ? new Map([['a', new Set([1, 2])]]) : new Map(),
+          gaps: [],
+        }),
+      }),
+    );
+    expect(getItem(result.queue, 0).get('state')).toBe('done');
+    expect(getItem(result.queue, 0).get('coverage_satisfied_by')).toBe('head');
+    expect(result.candidate).toBe(1);
+    expect(result.available).toBe(true);
+    expect(result.queue.has('backfill_reservations')).toBe(false);
+  });
+  it('records refusal reconciliation and skips repeat reads', async () => {
+    let reads = 0;
+    const fx = effects({
+      probeGate: async (q, i) => {
+        const items = q.get('items');
+        if (!Array.isArray(items)) throw new Error('bad items');
+        return {
+          queue: withObjectKeys(q, [
+            [
+              'items',
+              items.map((v, n) =>
+                n === i ? withObjectKeys(getItem(q, i), [['wait_reason', 'quota']]) : v,
+              ),
+            ],
+          ]),
+          admitted: false,
+        };
+      },
+      loadCoverage: async () => {
+        reads++;
+        return { covered: new Map(), gaps: [] };
+      },
+    });
+    const first = await reconcileBackfillSelection(queue(), options, fx);
+    expect(first.candidate).toBeNull();
+    expect(first.available).toBe(true);
+    expect(getItem(first.queue, 0).get('wait_reason')).toBe('quota');
+    const second = await reconcileBackfillSelection(first.queue, options, fx);
+    expect(reads).toBe(2);
+    expect(second.available).toBe(true);
+  });
+  it('reorders by the least important remaining uncovered path', async () => {
+    const q = queue();
+    const items = q.get('items');
+    if (!Array.isArray(items)) throw new Error('bad items');
+    const first = withObjectKeys(getItem(q, 0), [
+      [
+        'scope',
+        object(
+          '{"scope":[{"path":"a","blob":"b","intervals":[[1,2]]},{"path":"z","blob":"c","intervals":[[1,1]]}]}',
+        ).get('scope')!,
+      ],
+      ['path_tiers', object('{"a":1,"z":4}')],
+    ]);
+    const result = await reconcileBackfillSelection(
+      withObjectKeys(q, [['items', [first, items[1]!]]]),
+      options,
+      effects({
+        loadCoverage: async (target) => ({
+          covered: target === 't1' ? new Map([['a', new Set([1, 2])]]) : new Map(),
+          gaps: [],
+        }),
+      }),
+    );
+    expect(result.candidate).toBe(1);
+    expect(getItem(result.queue, 0).get('dispatch_tier_importance')).toEqual(
+      object('{"n":4}').get('n'),
+    );
+  });
+  it('does not request refresh in dry mode and fails closed on pending event', async () => {
+    let requests = 0;
+    const fx = effects({
+      loadCoverage: async () => null,
+      requestCoverage: async () => {
+        requests++;
+      },
+    });
+    await reconcileBackfillSelection(queue(), { ...options, dry: true }, fx);
+    expect(requests).toBe(0);
+    const q = queue();
+    const items = q.get('items');
+    if (!Array.isArray(items)) throw new Error('bad items');
+    const changed = withObjectKeys(q, [
+      [
+        'items',
+        [
+          withObjectKeys(getItem(q, 0), [['refusal_state_event', object('{"reason":"x"}')]]),
+          items[1]!,
+        ],
+      ],
+    ]);
+    await expect(reconcileBackfillSelection(changed, options, fx)).rejects.toThrow(
+      'pending refusal state events',
+    );
+  });
+});
