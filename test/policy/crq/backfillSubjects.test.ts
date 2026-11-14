@@ -445,4 +445,17 @@ describe('backfill subject construction', () => {
       construct(repo, candidate(['a']), unverified, [], { offline: true }),
     ).resolves.toMatchObject({ debt: [] });
   });
+
+  test('an invalid requested interval keeps the ledger refusal text', async () => {
+    const repo = new ScriptedRepo([row('a')]);
+    await expect(
+      construct(
+        repo,
+        candidate([], {
+          scope: [{ path: 'a', blob: 'blob-a', intervals: [[2, 1]] }],
+        }),
+        POLICY,
+      ),
+    ).rejects.toThrow('invalid or overlapping intervals');
+  });
 });

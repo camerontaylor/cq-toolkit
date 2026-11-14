@@ -2,12 +2,14 @@
  * Git binding for `backfill_subjects`: deterministic projections, synthetic
  * pre-merge baselines, and create-only generation pins.
  *
- * The write half lives here because it commits objects and updates refs. Every
- * read is delegated to the Stage 1 accounting repository through
+ * The write half lives here because it commits objects and updates refs.
+ * Accounting reads are delegated to the Stage 1 repository through
  * {@link BackfillSubjectAccounting}: the concrete `GitAccountingRepository`
  * (policy `BackfillCaptureRepo` plus its public `entries`, `changedIntervals`
  * and `lineage`) satisfies this interface structurally, so this module can land
  * before that adapter merges without reimplementing its parsers or caches.
+ * Ancestry probes, index rewrites, `commit-tree` and ref updates run on the
+ * injected `RunGit` directly.
  *
  * Exact behaviours kept from the Python oracle:
  *

@@ -147,10 +147,11 @@ export interface SubjectSynthetic extends SubjectProjection {
 }
 
 /**
- * The Git seam construction reads. `resolve`, `tree`, `entries`, `inventory`,
- * `changedIntervals` and `lineage` are the Stage 1 accounting repository's
- * read surface; `projection`, `synthetic`, `commitTree`, `pin` and `diffBytes`
- * are the writes and process calls this stage binds in its own adapter.
+ * The Git seam construction reads. `resolve`, `tree`, `inventory` and
+ * `changedIntervals` are the Stage 1 accounting repository's read surface; its
+ * public `entries` and `lineage` are used by the adapter's synthetic baseline
+ * builder. `projection`, `synthetic`, `commitTree`, `pin` and `diffBytes` are
+ * the writes and process calls this stage binds in its own adapter.
  *
  * `pin` validates its own generation, partition and identity, because the
  * Python oracle does so inside the seam rather than in `construct`.
@@ -371,7 +372,9 @@ export async function construct(
     const remaining: string[] = [];
     for (const name of nameset) {
       const request = requested.get(name) as JsonRecordLike;
-      const lines = intervalsOf(need(request, 'intervals', 'scope row'), 'requested intervals');
+      // The default label keeps Python's exact refusal text:
+      // `invalid or overlapping intervals`.
+      const lines = intervalsOf(need(request, 'intervals', 'scope row'));
       const actual = changed.get(name) ?? new Set<number>();
       const seen = new Set<number>();
       let unexposed = false;
