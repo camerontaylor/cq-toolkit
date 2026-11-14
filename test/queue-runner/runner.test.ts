@@ -147,4 +147,37 @@ describe('operator-live command seam (D1)', () => {
       exitCode: 1,
     });
   });
+
+  it('maps a publish reconciliation-pending artifact to exit 1 while keeping its value', async () => {
+    // Python's publisher unit: reconciliation-pending exits 1 even though the
+    // artifact stays an ok result that retains the publication value.
+    const pending = await run(['publish'], {
+      shadowRoot: '/unused',
+      tick: 'x',
+      live: async () => ({
+        status: 'ok',
+        value: { ledger_head: 'a'.repeat(40), publication: 'reconciliation-pending' },
+      }),
+    });
+    expect(pending).toEqual({
+      artifact: {
+        status: 'ok',
+        value: { ledger_head: 'a'.repeat(40), publication: 'reconciliation-pending' },
+      },
+      exitCode: 1,
+    });
+    const reconciled = await run(['publish'], {
+      shadowRoot: '/unused',
+      tick: 'x',
+      live: async () => ({ status: 'ok', value: { publication: 'reconciled' } }),
+    });
+    expect(reconciled.exitCode).toBe(0);
+    // Other live units keep the plain status mapping, whatever their value.
+    const watchdog = await run(['watchdog'], {
+      shadowRoot: '/unused',
+      tick: 'x',
+      live: async () => ({ status: 'ok', value: { publication: 'reconciliation-pending' } }),
+    });
+    expect(watchdog.exitCode).toBe(0);
+  });
 });
