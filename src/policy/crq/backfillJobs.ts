@@ -4,6 +4,7 @@ import {
   LedgerIntegrityError,
   LedgerKeyError,
   LedgerTypeError,
+  LedgerTimestampError,
   ledgerTimestamp,
 } from './ledger.js';
 import { pyTruthy, pythonValueEqual, withObjectKeys } from './queueDoc.js';
@@ -203,8 +204,11 @@ export function eligible(
   try {
     if (future(item.get('not_before')) || future(queue.get('cooldown_until')))
       return { queue, eligible: false };
-  } catch {
-    return { queue, eligible: false };
+  } catch (error) {
+    if (error instanceof LedgerTypeError || error instanceof LedgerKeyError) throw error;
+    if (error instanceof LedgerIntegrityError || error instanceof LedgerTimestampError)
+      return { queue, eligible: false };
+    throw error;
   }
   const result = history(queue, item);
   try {
@@ -216,7 +220,9 @@ export function eligible(
     };
   } catch (error) {
     if (error instanceof LedgerKeyError || error instanceof LedgerTypeError) throw error;
-    return { queue: result.queue, eligible: false };
+    if (error instanceof LedgerIntegrityError || error instanceof LedgerTimestampError)
+      return { queue: result.queue, eligible: false };
+    throw error;
   }
 }
 
@@ -277,9 +283,20 @@ export function admission(
       const reflectedValue = observation.has('reflected_reservations')
         ? observation.get('reflected_reservations')
         : [];
-      if (!Array.isArray(reflectedValue))
+      const iterable =
+        typeof reflectedValue === 'string'
+          ? [...reflectedValue]
+          : reflectedValue instanceof JsonObject
+            ? reflectedValue.entries.map(([key]) => key)
+            : reflectedValue;
+      if (!Array.isArray(iterable))
         throw new LedgerTypeError('reflected reservations must be an array');
-      const reflected = new Set(reflectedValue.map((value) => text(value, 'reservation id')));
+      const reflected = new Set<string>();
+      for (const value of iterable) {
+        if (Array.isArray(value) || value instanceof JsonObject)
+          throw new LedgerTypeError('unhashable reflected reservation');
+        if (typeof value === 'string') reflected.add(value);
+      }
       let unreflected = 0n;
       for (const [key, value] of holds.entries) {
         const hold = object(value, 'reservation');
@@ -312,7 +329,22 @@ export function admission(
   ]);
   const appended = appendAdmission(resultQueue, decision);
   resultQueue = appended.queue;
-  if (reason !== null || !reserve) return { queue: resultQueue, item, decision: appended.row };
+  // appendAdmission's plain-JSON projection normalizes a float such as 1.0 to
+  // an integer. Preserve the three captured fields exactly in this queue path.
+  let row = appended.row;
+  if (observation !== null) {
+    const fields = ['successful', 'observed_at', 'remaining'];
+    const captured = new JsonObject(
+      fields.filter((key) => observation.has(key)).map((key) => [key, required(observation, key)]),
+    );
+    row = withObjectKeys(row, [['observation', captured]]);
+    const rows = resultQueue.get('backfill_admissions');
+    if (!Array.isArray(rows)) throw new LedgerTypeError('backfill_admissions must be an array');
+    resultQueue = withObjectKeys(resultQueue, [
+      ['backfill_admissions', [...rows.slice(0, -1), row]],
+    ]);
+  }
+  if (reason !== null || !reserve) return { queue: resultQueue, item, decision: row };
   const attempt = item.has('attempt') ? item.get('attempt') : JsonNumber.int(0);
   if (!(attempt instanceof JsonNumber) || attempt.kind !== 'int' || attempt.integer === null)
     throw new LedgerTypeError('attempt must be an integer');
@@ -336,7 +368,7 @@ export function admission(
     ['items', updatedItems],
     ['backfill_reservations', withObjectKeys(holds, [[attemptId, hold]])],
   ]);
-  return { queue: resultQueue, item: updatedItem, decision: appended.row };
+  return { queue: resultQueue, item: updatedItem, decision: row };
 }
 
 /** Bind a reserved attempt to the observed vendor run without replacing an identity. */
@@ -351,7 +383,7 @@ export function bindRun(
   const attemptId = text(required(item, 'attempt_id'), 'attempt_id');
   const holds = object(required(queue, 'backfill_reservations'), 'backfill_reservations');
   const hold = object(required(holds, attemptId), 'reservation');
-  const existing = hold.get('vendor_run_id');
+  const existing = required(hold, 'vendor_run_id');
   if (pyTruthy(existing) && existing !== vendorRunId)
     throw new LedgerIntegrityError('vendor identity conflict');
   const updatedItem = withObjectKeys(item, [

@@ -11,6 +11,7 @@ import {
 } from '../../../src/policy/crq/backfillJobs.js';
 import { JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
 import { LedgerIntegrityError } from '../../../src/policy/crq/ledger.js';
+import { atomicJsonText } from '../../../src/policy/crq/pythonJson.js';
 
 const obj = (source: string): JsonObject => {
   const value = parseJsonValue(source);
@@ -96,6 +97,8 @@ describe('backfill admission and ownership', () => {
     const bound = bindRun(first.queue, 0, 'vendor-1');
     expect(bound.item.get('state')).toBe('reviewing');
     expect(() => bindRun(bound.queue, 0, 'vendor-2')).toThrow('vendor identity conflict');
+    const missingRunId = obj('{"items":[{"attempt_id":"a"}],"backfill_reservations":{"a":{}}}');
+    expect(() => bindRun(missingRunId, 0, 'vendor-1')).toThrow('vendor_run_id');
     const cancelled = cancelBeforeVendor(first.queue, 0);
     expect((cancelled.queue.get('backfill_reservations') as JsonObject).get('job:1')).toEqual(
       obj(
@@ -147,6 +150,22 @@ describe('backfill admission and ownership', () => {
     const result = admission(queue, 0, at, observation, false, false);
     expect(result.decision.get('decision')).toBe('admit');
     expect(result.decision.get('effective_remaining')).toEqual(obj('{"value":2}').get('value'));
+    const mixed = obj(
+      '{"successful":true,"remaining":3,"observed_at":"2026-10-30T00:00:00Z","reflected_reservations":["a",4,true,null]}',
+    );
+    expect(admission(queue, 0, at, mixed, false, false).decision.get('decision')).toBe('admit');
+    const unhashable = obj(
+      '{"successful":true,"remaining":3,"observed_at":"2026-10-30T00:00:00Z","reflected_reservations":[{}]}',
+    );
+    expect(() => admission(queue, 0, at, unhashable, false, false)).toThrow('unhashable');
+  });
+  test('retains the exact observed float in the persisted refusal diagnostic', () => {
+    const floatUsage = obj(
+      '{"successful":true,"remaining":8.0,"observed_at":"2026-10-30T00:00:00Z"}',
+    );
+    const result = admission(input, 0, at, floatUsage, false);
+    expect(result.decision.get('decision')).toBe('usage-stale-or-invalid');
+    expect(atomicJsonText(result.queue)).toContain('"remaining": 8.0');
   });
   test('dry admission records diagnostics without ownership and counts coverage in cap', () => {
     const dry = admission(input, 0, at, usage, false, false);
