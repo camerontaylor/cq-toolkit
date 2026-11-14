@@ -61,7 +61,17 @@ export async function bindBackfillLaunch(
       const id = original.get('id');
       const attempt = original.get('attempt_id');
       if (typeof id !== 'string' || typeof attempt !== 'string') throw error;
-      await saveUnknownBackfillLaunch(id, attempt, effects);
+      try {
+        await saveUnknownBackfillLaunch(id, attempt, effects);
+      } catch (recoveryError) {
+        if (error instanceof Error && Object.isExtensible(error)) {
+          Object.defineProperty(error, 'recoveryError', { value: recoveryError });
+        } else {
+          throw new AggregateError([error, recoveryError], 'binding and recovery failed', {
+            cause: error,
+          });
+        }
+      }
     }
     throw error;
   }

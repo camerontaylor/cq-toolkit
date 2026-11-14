@@ -46,7 +46,11 @@ an interrupted inventory can otherwise mix ranked rows with older provenance.
   overwrite a durable run with the pre-launch queue. The caller still owns
   launch, live effects and exception recovery. Positive
   pre-vendor cancellation is not exposed here: it requires the complete terminal
-  transition and durable refusal-event replay. No seam is wired to a live executor.
+  transition and durable refusal-event replay. A binding identity-guard failure
+  conservatively retains unknown ownership, unlike Python's non-reviewing
+  refusal path. The future caller must route positively proven pre-vendor
+  refusals through the complete terminal path, never retry a spawn from this
+  guard. No seam is wired to a live executor.
   For the next slice, use
   `apps/crq-python/backfill_runtime.py` at main commit
   `0cb627ebf38dafb3089b2fe7eb4f1e153665f307`: `usage_context` reflects or

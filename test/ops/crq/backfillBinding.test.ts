@@ -71,6 +71,31 @@ describe('backfill binding lifecycle', () => {
     expect(item(saves[1]!).get('run')).toEqual(item(queue()).get('run'));
     expect(hold(saves[1]!).get('quota_state')).toBe('reserved');
   });
+  it('retains the bind failure and secondary reload failure without overwriting changed ownership', async () => {
+    const changed = withObjectKeys(queue(), [
+      ['items', [withObjectKeys(item(queue()), [['attempt_id', 'new']])]],
+    ]);
+    let saves = 0;
+    let failure: unknown;
+    try {
+      await bindBackfillLaunch(queue(), 0, 'different', {
+        now: () => '2026-10-30T00:00:00Z',
+        stateEvent: async (q) => q,
+        loadQueue: async () => changed,
+        saveQueue: async () => {
+          saves++;
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain('recorded reviewing run identity');
+    expect((failure as Error & { recoveryError: Error }).recoveryError.message).toContain(
+      'launch attempt changed',
+    );
+    expect(saves).toBe(0);
+  });
   it('retries the bound save after a save error and preserves the original error', async () => {
     let calls = 0;
     const fx: BackfillBindingEffects = {

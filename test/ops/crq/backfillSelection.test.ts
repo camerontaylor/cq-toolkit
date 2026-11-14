@@ -124,6 +124,36 @@ describe('non-launching backfill selection', () => {
     expect(result.reserved).toBe(true);
     expect(result.queue.get('durable')).toBe('yes');
   });
+  it('requests a stale hint only once when real admission refuses', async () => {
+    const requests: string[][] = [];
+    const result = await reconcileBackfillSelection(
+      queue(),
+      options,
+      effects({
+        loadCoverage: async (target) => (target === 't1' ? null : { covered: new Map(), gaps: [] }),
+        requestCoverage: async (_head, targets) => {
+          requests.push([...targets]);
+        },
+        admitGate: async (q, i) => {
+          const items = q.get('items');
+          if (!Array.isArray(items)) throw new Error('bad items');
+          return {
+            queue: withObjectKeys(q, [
+              [
+                'items',
+                items.map((v, n) =>
+                  n === i ? withObjectKeys(getItem(q, i), [['wait_reason', 'quota']]) : v,
+                ),
+              ],
+            ]),
+            admitted: false,
+          };
+        },
+      }),
+    );
+    expect(requests).toEqual([['t1']]);
+    expect(result.queue.has('backfill_coverage_reconciled')).toBe(false);
+  });
   it('does not reserve when a stale-target refresh hint fails', async () => {
     let gates = 0;
     const fx = effects({

@@ -199,6 +199,13 @@ export async function reconcileBackfillSelection(
   }
   const snapshots = new Map<string, CoverageLoad | null>();
   const stale = new Set<string>();
+  let requestedCount = 0;
+  const requestStale = async (): Promise<void> => {
+    if (!options.dry && stale.size > requestedCount) {
+      await effects.requestCoverage(head, [...stale].sort(compareCodePoints));
+      requestedCount = stale.size;
+    }
+  };
   const load = async (target: string): Promise<CoverageLoad | null> => {
     if (!snapshots.has(target)) {
       const snapshot = await effects.loadCoverage(target, events);
@@ -277,7 +284,7 @@ export async function reconcileBackfillSelection(
     }
     if (!options.dry && effects.admitGate !== undefined) {
       // A failed refresh hint must not conceal a durable reservation.
-      if (stale.size) await effects.requestCoverage(head, [...stale].sort(compareCodePoints));
+      await requestStale();
       const admission = await effects.admitGate(queue, index);
       queue = admission.queue;
       if (!admission.admitted) {
@@ -292,8 +299,7 @@ export async function reconcileBackfillSelection(
     candidate = index;
     break;
   }
-  if (stale.size && !options.dry)
-    await effects.requestCoverage(head, [...stale].sort(compareCodePoints));
+  await requestStale();
   if (candidate === null && !stale.size && !options.only)
     queue = withObjectKeys(queue, [
       [
