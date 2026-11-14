@@ -90,9 +90,7 @@ export function fileCurrentRepairEffects(
       if (!/^[0-9a-f]{40}$/.test(ancestor) || !/^[0-9a-f]{40}$/.test(descendant))
         throw new Error('invalid ancestry operand');
       const call = await git(['merge-base', '--is-ancestor', ancestor, descendant]);
-      if (call.code === 0) return true;
-      if (call.code === 1) return false;
-      throw new Error('ancestry check failed');
+      return call.code === 0;
     },
   };
 }

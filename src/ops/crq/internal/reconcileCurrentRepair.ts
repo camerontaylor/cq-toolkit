@@ -183,15 +183,10 @@ export async function reconcileCurrentRepair(
       }
     } catch (error) {
       if (error instanceof RefreshExhausted) starved += 1;
-      else {
-        deferred += 1;
-        item = withObjectKeys(item, [
-          ['repair_error', (error instanceof Error ? error.message : String(error)).slice(0, 300)],
-        ]);
-      }
+      else deferred += 1;
       if (errors.length < 2)
         errors.push(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
-      return result();
+      continue;
     }
     if (!ancestry) continue;
     const evidence = new JsonObject([
