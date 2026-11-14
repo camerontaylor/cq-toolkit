@@ -6,6 +6,7 @@ import {
   type JsonValue,
 } from './jsonValue.js';
 import { pythonStr } from './prReviewFindings.js';
+import { pythonStrip } from './repairBinding.js';
 
 const types = new Set([
   'finding',
@@ -44,7 +45,7 @@ export function classify(bytes: Uint8Array | null, exitCode: number | null): Jso
     // Python str.splitlines recognises these C0 separators too.
     // eslint-disable-next-line no-control-regex
     for (const raw of text.split(/\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/u)) {
-      const line = raw.trim();
+      const line = pythonStrip(raw);
       if (!line) continue;
       try {
         const event = parseJsonValue(line, {
@@ -153,13 +154,14 @@ export function classify(bytes: Uint8Array | null, exitCode: number | null): Jso
       for (const e of errors) {
         const metadata = e.get('metadata');
         const value = metadata instanceof JsonObject ? metadata.get('waitTime') : undefined;
-        const m =
-          typeof value === 'string'
-            ? /^(\p{Decimal_Number}+)\s*(second|minute|hour)s?$(?![\s\S])/u.exec(value)
-            : null;
-        if (m)
+        // Python regex whitespace includes C0 separators and excludes the BOM.
+        // eslint-disable-next-line no-control-regex
+        const waitPattern =
+          /^(\p{Decimal_Number}+)([\s\x1c-\x1f]*)(second|minute|hour)s?$(?![\s\S])/u;
+        const m = typeof value === 'string' ? waitPattern.exec(value) : null;
+        if (m && !m[2]!.includes('\ufeff'))
           waits.push(
-            decimalInteger(m[1]!) * BigInt(m[2] === 'second' ? 1 : m[2] === 'minute' ? 60 : 3600),
+            decimalInteger(m[1]!) * BigInt(m[3] === 'second' ? 1 : m[3] === 'minute' ? 60 : 3600),
           );
       }
       wait = waits.length ? int(waits.reduce((a, b) => (a > b ? a : b))) : null;
@@ -241,7 +243,7 @@ export function classify(bytes: Uint8Array | null, exitCode: number | null): Jso
       errors.length &&
       errors.every(
         (e) =>
-          ['network_error', 'transport_error'].includes(String(e.get('errorType'))) &&
+          (e.get('errorType') === 'network_error' || e.get('errorType') === 'transport_error') &&
           e.get('recoverable') === true,
       ) &&
       (exitCode === 0 || exitCode === 1)

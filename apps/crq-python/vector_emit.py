@@ -299,6 +299,8 @@ def classify_vectors() -> Dict[str, Any]:
         _classify("sighup-exit-is-not-transient", "", 129),
         _classify("empty-existing-stream-is-interrupted", "", 0),
         _classify("absent-stream-is-interrupted", None, 0),
+        _classify("bom-prefix-is-not-whitespace", '\ufeff{"type":"complete","status":"review_completed"}\n', 0),
+        _classify("transport-type-array-is-not-transient", '{"type":"error","errorType":["transport_error"],"recoverable":true}\n', 1),
         _classify("error-code-trailing-newline-is-unknown", '{"type":"error","errorType":"auth\\n"}\n', 1),
         _classify("unicode-wait-digits", '{"type":"error","errorType":"rate_limit","recoverable":true,"metadata":{"waitTime":"٢ minutes"}}\n', 1),
         _classify("wait-trailing-newline-is-not-proof", '{"type":"error","errorType":"rate_limit","recoverable":true,"metadata":{"waitTime":"2 minutes\\n"}}\n', 1),

@@ -839,6 +839,94 @@
       }
     },
     {
+      "name": "bom-prefix-is-not-whitespace",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "\ufeff{\"type\":\"complete\",\"status\":\"review_completed\"}\n",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 0,
+          "bad_lines": 1,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "malformed",
+          "message": "stream contains malformed or unrecognized events",
+          "failure_provenance": {
+            "version": 1,
+            "complete": false,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "malformed-stream"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "nonterminal-review"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "transport-type-array-is-not-transient",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"error\",\"errorType\":[\"transport_error\"],\"recoverable\":true}\n",
+        "exit_code": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 1,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "error",
+          "message": "structured failure; see failure provenance",
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "unknown-error"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "unexpected-exit"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
       "name": "error-code-trailing-newline-is-unknown",
       "source": "crq.classify",
       "input": {
