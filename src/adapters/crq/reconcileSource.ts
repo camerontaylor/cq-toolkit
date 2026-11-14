@@ -24,6 +24,7 @@ import { ForgeBudget, RefreshExhausted } from '../../policy/crq/forgeBudget.js';
 import { BudgetExhausted, PageFailed } from '../../policy/crq/reconcileInventory.js';
 import { ReconcileRefused } from '../../policy/crq/reconcileCheckpoint.js';
 import { fromPlainJson } from '../../policy/crq/queueDoc.js';
+import { JsonParseError, parseJsonValue } from '../../policy/crq/jsonValue.js';
 import {
   ReconcileStorageFailed,
   runReconcileMerged,
@@ -50,6 +51,53 @@ export function fileReconcileMergedEffects(
 ): ReconcileMergedEffects {
   const budget = options.budget ?? new ForgeBudget();
   const queuePath = join(options.stateRoot, 'queue.json');
+  const forgeRead = async (args: string[], lossless = false): Promise<unknown> => {
+    let timeoutSeconds: number;
+    try {
+      timeoutSeconds = budget.take();
+    } catch (error) {
+      if (error instanceof RefreshExhausted) {
+        throw new BudgetExhausted('aggregate forge budget exhausted; cursor retained');
+      }
+      throw error;
+    }
+    const timeoutMs = Math.max(1, Math.ceil(timeoutSeconds * 1000));
+    const run: GhFn =
+      options.gh === undefined
+        ? makeGhRunner({ timeoutMs })
+        : async (argv) => {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              return await Promise.race([
+                options.gh!(argv),
+                new Promise<never>((_, reject) => {
+                  timer = setTimeout(
+                    () => reject(new PageFailed('forge read unavailable; cursor retained')),
+                    timeoutMs,
+                  );
+                }),
+              ]);
+            } finally {
+              if (timer !== undefined) clearTimeout(timer);
+            }
+          };
+    try {
+      if (!lossless) return await ghJson(run, args);
+      const result = await run(args);
+      if (result.code !== 0) throw new PageFailed('forge read unavailable; cursor retained');
+      try {
+        return parseJsonValue(result.stdout, { duplicates: 'last' });
+      } catch (error) {
+        if (error instanceof JsonParseError)
+          throw new PageFailed('forge read unavailable; cursor retained');
+        throw error;
+      }
+    } catch (error) {
+      if (error instanceof PageFailed) throw error;
+      if (error instanceof GhError) throw new PageFailed('forge read unavailable; cursor retained');
+      throw error;
+    }
+  };
   return {
     repo: options.repo,
     nowIso: () => isoUtc(options.now?.() ?? new Date()),
@@ -79,48 +127,16 @@ export function fileReconcileMergedEffects(
     },
     reconcilePath: (key) => join(options.stateRoot, 'reconcile', `${key}.json`),
     async forgeQuery(query) {
-      let timeoutSeconds: number;
-      try {
-        timeoutSeconds = budget.take();
-      } catch (error) {
-        if (error instanceof RefreshExhausted) {
-          throw new BudgetExhausted('aggregate forge budget exhausted; cursor retained');
-        }
-        throw error;
-      }
-      const timeoutMs = Math.max(1, Math.ceil(timeoutSeconds * 1000));
-      // The real runner kills its child. An injected GhFn has no cancellation
-      // contract, so bound the wait and leave its eventual settlement observed.
-      const run: GhFn =
-        options.gh === undefined
-          ? makeGhRunner({ timeoutMs })
-          : async (args) => {
-              let timer: ReturnType<typeof setTimeout> | undefined;
-              try {
-                return await Promise.race([
-                  options.gh!(args),
-                  new Promise<never>((_, reject) => {
-                    timer = setTimeout(
-                      () => reject(new PageFailed('forge read unavailable; cursor retained')),
-                      timeoutMs,
-                    );
-                  }),
-                ]);
-              } finally {
-                if (timer !== undefined) clearTimeout(timer);
-              }
-            };
-      try {
-        // `ghJson` parses with JSON.parse; the policy layer needs the lossless
-        // model so a Python `1.0` lexeme is never rewritten as `1`.
-        return fromPlainJson(await ghJson(run, ['api', 'graphql', '-f', `query=${query}`]));
-      } catch (error) {
-        if (error instanceof PageFailed) throw error;
-        if (error instanceof GhError)
-          throw new PageFailed('forge read unavailable; cursor retained');
-        throw error;
-      }
+      return fromPlainJson(await forgeRead(['api', 'graphql', '-f', `query=${query}`]));
     },
+    forgeClosedPage: (size, page) =>
+      forgeRead(
+        [
+          'api',
+          `repos/${options.repo}/pulls?state=closed&sort=updated&direction=desc&per_page=${size}&page=${page}`,
+        ],
+        true,
+      ),
     loadQueue: () => loadQueueDocument(queuePath),
     saveQueue: (queue) => atomicWrite(queuePath, queueBytes(queue)),
     async withTickLock(work) {

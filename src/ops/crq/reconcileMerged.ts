@@ -7,9 +7,7 @@
  * - the `state/reconcile/<digest>.json` wrapper
  *   (`{source, checkpoint, digest}`), read losslessly and written with the
  *   Python atomic bytes (`json.dump(indent=2)`, one trailing newline);
- * - page effects through the injected forge query (numeric all-slot windows by
- *   default; the rolling `closed-updated-v1` page adapter is refused until that
- *   slice lands, while its wrapper key/method is already supported);
+ * - page effects through the injected forge query or rolling REST adapter;
  * - resumption: a complete checkpoint revalidates without a forge read, an
  *   incomplete one resumes at its retained cursor without repeating a page;
  * - queue staging: enrollment happens before `merged_reconcile` is recorded, and
@@ -32,6 +30,7 @@ import {
   type JsonRecordLike,
 } from '../../policy/crq/queueDoc.js';
 import { enrollMergedCurrent, type QueueSelector } from '../../policy/crq/queueReceipt.js';
+import { recentMergedPage } from '../../policy/crq/recentDiscovery.js';
 import {
   DISCOVERY_SELECTOR,
   RECONCILE_METHOD_CLOSED_UPDATED,
@@ -87,6 +86,8 @@ export interface ReconcileMergedEffects {
   reconcilePath(key: string): string;
   /** One GraphQL query; budget/transport failures are typed by the adapter. */
   forgeQuery(query: string): Promise<unknown>;
+  /** One closed-PR REST page, sharing the forge budget with GraphQL. */
+  forgeClosedPage?(size: number, page: number): Promise<unknown>;
   /** `runner.load_queue()`. */
   loadQueue(): Promise<JsonObject>;
   /** `runner.save_queue()`, atomic and Python-byte-identical. */
@@ -100,7 +101,7 @@ export interface ReconcileMergedOptions {
   readonly before: string;
   readonly pageBudget: number;
   readonly dryRun?: boolean;
-  /** Rolling `closed-updated-v1` scans (the page adapter is not ported yet). */
+  /** Rolling `closed-updated-v1` scans. */
   readonly recent?: boolean;
   /** A page adapter seam; production leaves it unset for numeric windows. */
   readonly pageFetch?: PageFetch;
@@ -259,16 +260,21 @@ export async function reconcileMerged(
     // enrollment retry below is idempotent by binding.
     result = loadCheckpoint(raw, interval, budget, effects.repo, DISCOVERY_SELECTOR, true);
   } else {
-    if (recent && options.pageFetch === undefined) {
-      throw new ReconcileRefused('rolling closed-updated-v1 discovery page adapter is not ported');
-    }
+    if (recent && options.pageFetch === undefined && effects.forgeClosedPage === undefined)
+      throw new ReconcileRefused('rolling closed-updated-v1 discovery requires a REST page effect');
     const pageFetch =
       options.pageFetch ??
       ((cursor: string | null) =>
-        numberPage(effects.forgeQuery, source, cursor, {
-          repo: effects.repo,
-          base: DISCOVERY_SELECTOR,
-        }));
+        recent
+          ? recentMergedPage(
+              (size, page) => effects.forgeClosedPage!(size, page),
+              cursor,
+              interval.after,
+            )
+          : numberPage(effects.forgeQuery, source, cursor, {
+              repo: effects.repo,
+              base: DISCOVERY_SELECTOR,
+            }));
     result = await reconcile(pageFetch, {
       repo: effects.repo,
       base: DISCOVERY_SELECTOR,
