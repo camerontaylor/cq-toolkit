@@ -222,6 +222,7 @@ describe('review-v1 forced command over the TypeScript client', () => {
     let out = '';
     let err = '';
     let terminated = false;
+    let exitCode: number | undefined;
     const code = await runReviewCapabilityMain({
       argv: [],
       env: (name) => {
@@ -237,14 +238,16 @@ describe('review-v1 forced command over the TypeScript client', () => {
       stderr: (message) => {
         err += message;
       },
-      terminate: () => {
+      terminate: (code) => {
         terminated = true;
+        exitCode = code;
       },
       root: '/tmp/missing-review-root',
       deadlineMs: 5,
     });
     expect(code).toBe(0);
     expect(terminated).toBe(true);
+    expect(exitCode).toBe(0);
     expect(err).toBe('');
     expect(JSON.parse(out)).toMatchObject({
       v: 1,

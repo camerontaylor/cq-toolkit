@@ -29,7 +29,7 @@ export interface ReviewCapabilityMainDeps {
   readonly readStdin: () => Promise<Uint8Array>;
   readonly stdout: (bytes: Uint8Array) => void;
   readonly stderr: (message: string) => void;
-  readonly terminate: () => void;
+  readonly terminate: (code?: number) => void;
   readonly root: string;
   readonly deadlineMs?: number;
   readonly now?: () => Date;
@@ -113,7 +113,7 @@ export async function runReviewCapabilityMain(deps: ReviewCapabilityMainDeps): P
         ),
       );
       await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
-      deps.terminate();
+      deps.terminate(0);
       return 0;
     }
     return code;

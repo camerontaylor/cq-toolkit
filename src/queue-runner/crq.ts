@@ -67,7 +67,7 @@ if (command === 'queue-capability') {
     stderr: (message) => {
       process.stderr.write(`${message}\n`);
     },
-    terminate: () => process.exit(2),
+    terminate: (code = 2) => process.exit(code),
     root,
     deadlineMs: REVIEW_DEADLINE_MS,
   });
