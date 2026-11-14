@@ -193,10 +193,6 @@ export async function harvestBackfillFailure(
     throw new LedgerIntegrityError('harvest event owner changed');
   const attempts =
     current.get('attempts') === undefined ? [] : array(current.get('attempts'), 'attempts');
-  if (quota) {
-    await effects.saveQueue(queue);
-    await effects.cleanup(meta);
-  }
   if (!attempts.some((v) => v instanceof JsonObject && v.get('run_id') === proof.runId)) {
     const newAttempt = new JsonObject([
       ['run_id', proof.runId],
@@ -215,6 +211,6 @@ export async function harvestBackfillFailure(
     ]);
   }
   await effects.saveQueue(queue);
-  if (!quota) await effects.cleanup(meta);
+  await effects.cleanup(meta);
   return { queue, status: 'handled', classification };
 }
