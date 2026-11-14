@@ -46,6 +46,57 @@ function fixture(a = artifacts()) {
 }
 const proof = { runId: 'r', exitCode: 1, terminalVerified: true } as const;
 describe('bounded backfill failure harvest', () => {
+  it('defers verified vendor quota with retained reservation and cooldown', async () => {
+    const f = fixture(artifacts('{"type":"error","errorType":"rate_limit","recoverable":true}\n'));
+    const result = await harvestBackfillFailure(queue(), 0, proof, f.effects, 2);
+    expect(result.status).toBe('handled');
+    expect(result.queue.get('cooldown_until')).toBe('2026-10-30T01:02:00Z');
+    expect(f.calls).toEqual(['retain', 'retain', 'event', 'save', 'cleanup', 'save']);
+    const hold = (result.queue.get('backfill_reservations') as JsonObject).get('a') as JsonObject;
+    expect(hold.get('quota_state')).toBe('reserved');
+    expect(hold.get('terminal_at')).toBe('2026-10-30T01:00:00Z');
+  });
+  it('leaves quota unhandled when no usable cooldown exists', async () => {
+    const f = fixture(artifacts('{"type":"error","errorType":"rate_limit","recoverable":true}\n'));
+    const initial = queue();
+    const result = await harvestBackfillFailure(initial, 0, proof, f.effects);
+    expect(result.status).toBe('unhandled');
+    expect(result.queue).toBe(initial);
+    expect(f.calls).toEqual([]);
+  });
+  it('uses the classified wait instead of the fallback', async () => {
+    const f = fixture(
+      artifacts(
+        '{"type":"error","errorType":"rate_limit","recoverable":true,"metadata":{"waitTime":"2 minutes"}}\n',
+      ),
+    );
+    const result = await harvestBackfillFailure(queue(), 0, proof, f.effects, 9);
+    expect(result.queue.get('cooldown_until')).toBe('2026-10-30T01:02:00Z');
+  });
+  it.each(['retain', 'event', 'save'] as const)(
+    'does not clean quota after %s fails',
+    async (failure) => {
+      const f = fixture(
+        artifacts('{"type":"error","errorType":"rate_limit","recoverable":true}\n'),
+      );
+      if (failure === 'retain')
+        f.effects.retain = async () => {
+          throw new Error(failure);
+        };
+      if (failure === 'event')
+        f.effects.stateEvent = async () => {
+          throw new Error(failure);
+        };
+      if (failure === 'save')
+        f.effects.saveQueue = async () => {
+          throw new Error(failure);
+        };
+      await expect(harvestBackfillFailure(queue(), 0, proof, f.effects, 2)).rejects.toThrow(
+        failure,
+      );
+      expect(f.calls).not.toContain('cleanup');
+    },
+  );
   it('retains evidence before event and save, cleans only after save', async () => {
     const initial = queue();
     const f = fixture();
