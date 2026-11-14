@@ -178,10 +178,12 @@ describe.each(loadFamily('classify'))('classify/$name', (vector) => {
  * the runner cannot claim broad vector coverage by omission.
  */
 const NOT_APPLICABLE: Readonly<Record<string, string>> = {
-  'backfill-accounting': 'backfill accounting is a later group-P port',
-  'backfill-inventory': 'backfill inventory is a later group-P port',
-  'backfill-report': 'backfill report is a later group-P port',
-  backfill: 'backfill driver helpers are a later group-P port',
+  'backfill-accounting':
+    'backfill_accounting.ranges is replayed in backfillInventory.test.ts; the blame/carry fold belongs to the capture adapter, which is not ported yet',
+  'backfill-inventory': 'backfill_inventory.rank is replayed in backfillInventory.test.ts',
+  'backfill-report': 'backfill_report.baseline/summary are replayed in backfillReport.test.ts',
+  backfill:
+    'backfill_accounting.ranges and admission_history.summarize are replayed in backfillInventory.test.ts and admissionHistory.test.ts; backfill_jobs.admission is exercised through tickAdmission.test.ts',
   coverage:
     'coverage.utilization_digest is replayed in coverageUtilization.test.ts; coverage_candidate/record_opportunity and the rest are a later group-P port',
   ledger:

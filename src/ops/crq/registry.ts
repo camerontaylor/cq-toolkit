@@ -19,6 +19,7 @@
 // `./<base>` rule): readOnlyStatus.ts and statusWriter.ts are deliberately
 // surface, not orphan op modules.
 import type { OpRegistryEntry } from '../../kernel/types.js';
+import type { BackfillInventoryEffects, BackfillRouteResult } from './backfillInventory.js';
 import type { CoverageRunResult, runCoverageRefresh } from './coverageRefresh.js';
 import type { drainNotifications } from './notifyDrain.js';
 import type { runQueueCapability } from './queueCapability.js';
@@ -83,3 +84,12 @@ export type CrqPublishUnitOutcome = PublishUnitOutcome;
 
 /** The coverage refresher's JSON result (`{"head", "targets"}`). */
 export type CrqCoverageRunResult = CoverageRunResult;
+
+/**
+ * The S4 backfill inventory route (`./backfillInventory.js`) is family surface
+ * wired by the live runner (`queue-runner` operator-live `backfill` ->
+ * `crq.ts` -> `adapters/crq/backfillSource`), not a JSON-dispatchable op: the
+ * type-only import above declares it so the family scan does not classify it as
+ * an orphan module.
+ */
+export type { BackfillInventoryEffects, BackfillRouteResult };

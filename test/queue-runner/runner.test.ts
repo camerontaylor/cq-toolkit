@@ -95,7 +95,9 @@ describe('operator-live command seam (D1)', () => {
   it('keeps the operator-live set separate from the unit live set', async () => {
     const { LIVE_OPERATOR_COMMANDS } = await import('../../src/queue-runner/runner.js');
     const { LIVE_UNIT_COMMANDS } = await import('../../src/queue-runner/capabilities.js');
-    expect([...LIVE_OPERATOR_COMMANDS]).toEqual(['repair-prepare', 'status']);
+    // `backfill` joins the set in S4: its own argv-bearing route (inventory),
+    // still outside `capabilities.json` so no unit adapter can select it.
+    expect([...LIVE_OPERATOR_COMMANDS]).toEqual(['repair-prepare', 'status', 'backfill']);
     for (const command of LIVE_OPERATOR_COMMANDS) {
       expect([...LIVE_UNIT_COMMANDS]).not.toContain(command);
     }
