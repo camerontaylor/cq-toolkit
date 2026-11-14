@@ -115,7 +115,7 @@ class UnitSwitchTests(ControllerFixture):
         self.assertEqual(result["state"]["preserved/queue.json"],
                          dc._sha256(self.effects.state_dir() / "queue.json"))
 
-    def test_activation_crash_is_not_blindly_replayed(self):
+    def test_activation_crash_recovers_after_a_demonstrated_fence(self):
         class Crash(BaseException):
             pass
 
@@ -129,13 +129,16 @@ class UnitSwitchTests(ControllerFixture):
             dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
         path = next(self.record_dir.glob("controller-*.json"))
         self.assertEqual(json.loads(path.read_text())["phase"], "activation_pending")
-        with self.assertRaises(dc.RecoveryRequired):
-            dc.recover_unit(self.effects, adapter, path)
-        self.assertEqual(adapter.runtime, "node:" + "a" * 40)
-        self.assertFalse(adapter.running)
-        self.assertEqual(json.loads(path.read_text())["phase"], "activation_pending")
+        recovered = dc.recover_unit(self.effects, adapter, path)
+        self.assertEqual(recovered["outcome"], "rolled_back")
+        self.assertEqual(recovered["failed_phase"], "activation_pending")
+        self.assertEqual(adapter.runtime, "python")
+        self.assertTrue(adapter.running)
+        final = json.loads(path.read_text())
+        self.assertEqual(final["phase"], "restore_activation_pending")
+        self.assertEqual(final["outcome"], "rolled_back")
 
-    def test_ambiguous_activation_drains_owned_work_in_adapter_fake(self):
+    def test_activation_recovery_drains_owned_work_before_restoring(self):
         class Crash(BaseException):
             pass
 
@@ -158,31 +161,39 @@ class UnitSwitchTests(ControllerFixture):
             dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
         path = next(self.record_dir.glob("controller-*.json"))
         self.assertEqual(adapter.owned, ["new-unit-work"])
-        with self.assertRaises(dc.RecoveryRequired):
-            dc.recover_unit(self.effects, adapter, path)
+        recovered = dc.recover_unit(self.effects, adapter, path)
+        self.assertEqual(recovered["outcome"], "rolled_back")
         self.assertEqual(adapter.owned, [])
         self.assertEqual(adapter.unrelated, ["unrelated-session"])
 
-    def test_crash_releasing_rollback_activation_is_not_replayed(self):
+    def test_recovery_retries_an_interrupted_release_after_reestablishing_the_fence(self):
         class Crash(BaseException):
             pass
 
         class CrashingAdapter(Adapter):
+            crashed = False
+
             def install(self, unit, runtime):
                 raise RuntimeError("install failed")
 
             def restore_activation(self, unit, snapshot):
                 super().restore_activation(unit, snapshot)
-                raise Crash()
+                if not self.crashed:
+                    self.crashed = True
+                    raise Crash()
 
         adapter = CrashingAdapter("python")
         with self.assertRaises(Crash):
             dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
         path = next(self.record_dir.glob("controller-*.json"))
         self.assertEqual(json.loads(path.read_text())["phase"], "restore_activation_pending")
-        with self.assertRaises(dc.RecoveryRequired):
-            dc.recover_unit(self.effects, adapter, path)
-        self.assertFalse(adapter.running)
+        recovered = dc.recover_unit(self.effects, adapter, path)
+        self.assertEqual(recovered["outcome"], "rolled_back")
+        self.assertEqual(recovered["failed_phase"], "drained")
+        self.assertTrue(adapter.running)
+        final = json.loads(path.read_text())
+        self.assertEqual(final["phase"], "restore_activation_pending")
+        self.assertEqual(final["outcome"], "rolled_back")
 
     def test_rollback_release_follows_restore_activation_journal(self):
         fixture = self
@@ -243,8 +254,9 @@ class UnitSwitchTests(ControllerFixture):
                 dc.recover_unit(self.effects, adapter, path)
         self.assertEqual(failure.exception.recovery["outcome"], "pending")
         self.assertEqual(json.loads(path.read_text())["phase"], "restore_activation_pending")
-        with self.assertRaises(dc.RecoveryRequired):
-            dc.recover_unit(self.effects, adapter, path)
+        retried = dc.recover_unit(self.effects, adapter, path)
+        self.assertEqual(retried["outcome"], "rolled_back")
+        self.assertEqual(json.loads(path.read_text())["outcome"], "rolled_back")
 
     def test_pending_unit_intent_blocks_deploy_and_rollback(self):
         self.effects.journal_append(pending_unit_switch())
@@ -370,14 +382,18 @@ class UnitSwitchTests(ControllerFixture):
             self.assertLess(result["completions"][0]["sequence"],
                             result["completions"][1]["sequence"])
 
-    def test_wrong_binding_requires_inspection_after_activation(self):
+    def test_wrong_binding_rolls_back_after_a_demonstrated_fence(self):
         adapter = Adapter("python")
         adapter.bad_evidence = True
         with self.assertRaises(dc.RecoveryRequired) as error:
             dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
-        self.assertEqual(error.exception.recovery["outcome"], "recovery_required")
-        self.assertEqual(adapter.runtime, "node:" + "a" * 40)
-        self.assertFalse(adapter.running)
+        recovery = error.exception.recovery
+        self.assertEqual(recovery["outcome"], "rolled_back")
+        self.assertEqual(recovery["failed_phase"], "activation_pending")
+        self.assertIn("non-advancing unit completion evidence",
+                      recovery["reason"])
+        self.assertEqual(adapter.runtime, "python")
+        self.assertTrue(adapter.running)
 
     def test_missing_provider_refuses_before_mutation(self):
         with self.assertRaisesRegex(dc.Refused, "no runtime-bound"):
@@ -849,9 +865,8 @@ class RecoverFactoryTests(ControllerFixture):
                 self.assertIn("refused:", stderr)
                 self.assertEqual(path.read_bytes(), before)
 
-    def test_recover_factory_path_drains_before_an_activation_refusal(self):
+    def test_recover_factory_path_rolls_back_a_demonstrably_fenced_activation(self):
         path = self.pending_record(phase="activation_pending")
-        before = path.read_bytes()
 
         class OwnedWorkAdapter(Adapter):
             def __init__(self):
@@ -871,15 +886,51 @@ class RecoverFactoryTests(ControllerFixture):
             adapters.append(adapter)
             return adapter
 
-        with self.assertRaises(dc.RecoveryRequired) as failure:
-            dc.recover_unit(self.effects, None, path, adapter_factory=factory)
-        self.assertIn("activation may have occurred", str(failure.exception))
+        recovered = dc.recover_unit(self.effects, None, path,
+                                    adapter_factory=factory)
         self.assertEqual(len(adapters), 1)
         self.assertEqual(adapters[0].drains, 1)
         self.assertEqual(adapters[0].owned, [])
+        self.assertEqual(recovered["outcome"], "rolled_back")
+        self.assertEqual(recovered["failed_phase"], "activation_pending")
+        final = json.loads(path.read_text())
+        self.assertEqual(final["phase"], "restore_activation_pending")
+        self.assertEqual(final["outcome"], "rolled_back")
+        self.assertEqual(final["failed_phase"], "activation_pending")
+        self.assertIsNone(final["fence"])
+
+    def test_recover_factory_path_refuses_when_the_fence_cannot_be_demonstrated(self):
+        path = self.pending_record(phase="activation_pending")
+        before = path.read_bytes()
+
+        class UndrainedAdapter(Adapter):
+            def __init__(self):
+                super().__init__("python")
+                self.drains = 0
+                self.restores = 0
+
+            def stop_and_drain(self, unit):
+                self.drains += 1
+                raise RuntimeError("owned process remains")
+
+            def restore(self, unit, snapshot):
+                self.restores += 1
+                super().restore(unit, snapshot)
+
+        adapters = []
+
+        def factory(unit, prior_runtime):
+            adapter = UndrainedAdapter()
+            adapters.append(adapter)
+            return adapter
+
+        with self.assertRaises(dc.RecoveryRequired) as failure:
+            dc.recover_unit(self.effects, None, path, adapter_factory=factory)
+        self.assertIn("owned process remains", str(failure.exception))
+        self.assertEqual(len(adapters), 1)
+        self.assertEqual(adapters[0].drains, 1)
+        self.assertEqual(adapters[0].restores, 0)
         self.assertEqual(path.read_bytes(), before)
-        self.assertEqual(json.loads(path.read_text())["phase"],
-                         "activation_pending")
 
 
 class ControllerLockModeTests(ControllerFixture):

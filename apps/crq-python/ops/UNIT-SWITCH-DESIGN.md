@@ -166,9 +166,13 @@ snapshot. `restore_activation` rejects a failed service and requires a simple
 service to be active. Drain diagnostics distinguish queued jobs, owned
 processes, active services and active activators, and malformed `list-jobs`
 observations refuse. A pre-release refusal at `start` leaves the mask in place,
-but the controller's `activation_pending` gate still refuses automatic restore
-after any `start` attempt; it records `recovery_required` rather than claiming
-a rollback. The adapter does not change that controller contract.
+and a failure after `start` is restored automatically only when the fence
+demonstrates absence: no matching systemd job, no owned process, an inactive
+service, inactive activators and, for an issuing unit, a drained queue. The
+rolled-back record keeps the failed phase, the original reason and the fence
+observation, so the target's execution is not erased. A fence that cannot
+establish absence, or an installed file that matches neither the snapshot nor
+the verified released render, stays `recovery_required`.
 
 The installed timer file must hash-match the pinned template before its
 schedule is used, so preflight cannot certify a bound for a timer the
@@ -249,8 +253,11 @@ and the real renderer through the actual `switch_unit`/`recover_unit` seams over
 real temporary unit files, with a structured systemd port and a journal source
 that returns systemd invocation and record fields. It covers a completed
 Node-to-Python switch with two advancing invocations, a pre-activation rollback
-followed by `recover_unit`, a reboot refusal, changed installed bytes, a
-Python-to-Node watchdog switch whose artifact declares `watchdog`, and
+followed by `recover_unit`, a reboot during completion that rolls back through
+a demonstrated fence, a completion-observation failure that restores the prior
+unit and timer without manual recovery, changed installed bytes that stay
+`recovery_required`, a Python-to-Node watchdog switch whose artifact declares
+`watchdog`, and
 fail-closed refusal of a Node target whose declaration is empty or names
 another command, plus the simple, long-schedule and unbounded oneshot
 topologies. It is not live-host evidence.
@@ -292,16 +299,21 @@ journal schema, store, lock or new capability mechanism is introduced.
 5. Before activation, recovery may re-establish the fence, verify drain and
    restore the snapshot. It persists `restore_activation_pending` before
    releasing prior activation, and records rollback only afterwards. A crash
-   in either activation-pending phase is ambiguous: stop/drain, retain the
-   intent and investigate rather than blindly replay or restore. That drain
-   can interrupt live work launched after activation; the adapter must identify
-   owned work without stopping unrelated sessions. The fake adapter test does
-   not establish real process ownership or systemd behavior. Queue data is
-   never restored from the snapshot. Actual controller retries and interruption
+   in either activation-pending phase is retried by re-establishing and
+   observing the fence: a recovery or switch failure after activation restores
+   only when stop/drain demonstrates absence, and otherwise retains the intent
+   and reports `recovery_required`. The record keeps the failed phase, reason
+   and fence evidence so a completed target is not presented as never having
+   run. That drain can interrupt live work launched after activation; the
+   adapter must identify owned work without stopping unrelated sessions. The
+   fake adapter test does not establish real process ownership or systemd
+   behavior. Queue data is never restored from the snapshot. Actual controller
+   retries and interruption
    at each phase require VM proof; synthetic recovery is not that proof.
    The production entry point does not change this contract: it composes an
-   adapter for the record's prior runtime, so an ambiguous activation is still
-   stopped and drained before the rc-3 refusal, with the record bytes unchanged.
+   adapter for the record's prior runtime and re-establishes the fence under
+   the controller lock before restoring. A fence it cannot demonstrate leaves
+   the record bytes unchanged and reports `recovery_required`.
 
 The installed templates provide tick, slot, backfill and watchdog timers;
 repair and publisher each have both timer and path activators. The host adapter

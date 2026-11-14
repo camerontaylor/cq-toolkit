@@ -158,8 +158,10 @@ unsupported discovery topology refuses before any journal or unit mutation.
 The binding is reached through the controller CLI's switch and recover paths.
 The recovery wiring tests drive `recover --record` with the real production
 adapter and injected systemd and journal ports over a real temporary unit
-directory and record directory; an `activation_pending` record still stops and
-drains owned work, then refuses with rc 3 and unchanged record bytes. `watchdog`
+directory and record directory; an `activation_pending` record stops and drains
+owned work, then restores the snapshot and reports rc 0 with a `rolled_back`
+record only when the fence demonstrated absence. A fence that cannot be
+demonstrated still refuses with rc 3 and unchanged record bytes. `watchdog`
 is the only Node command the verified artifact currently declares; `tick`,
 `slot`, `publisher`, `backfill` and `repair` still refuse for a Node target. The
 binding does not call `switch_unit` or `recover_unit` itself; the controller
