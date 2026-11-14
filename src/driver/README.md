@@ -77,8 +77,7 @@ included), unlike `maxTokens`, which also counts the input and cache reads
 every tool-loop step re-sends. `maxContextTokens` stops the run once a
 completed step's reported input (fresh + cache read + cache write) reaches
 it, before the next request. It is measured, not predicted, so the request
-that crosses the ceiling has already been sent; use `strictTokenBudget` for a
-pre-request guarantee. Either stop settles `stopReason: 'budget'` and appends
+that crosses the ceiling has already been sent. `strictTokenBudget` is a separate pre-request bound on `maxInputTokens` and `reserveOutputTokens`; it does not enforce `maxContextTokens`. Either stop settles `stopReason: 'budget'` and appends
 one `type: "budget-stop"` session line with the cause and a one-line detail.
 
 ## Freeze rule
