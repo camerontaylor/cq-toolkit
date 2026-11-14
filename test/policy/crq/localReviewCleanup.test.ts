@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
 import { GitPool, type GitResult } from '../../../src/adapters/crq/gitExec.js';
 import {
@@ -10,6 +10,21 @@ import {
   localReviewCleanup,
 } from '../../../src/adapters/crq/localReviewCleanup.js';
 import { createLocalReviewHarvestCaller } from '../../../src/adapters/crq/localReviewHarvestCaller.js';
+const race = vi.hoisted(() => ({ path: '', target: '' }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    lstat: async (path: Parameters<typeof actual.lstat>[0]) => {
+      const stat = await actual.lstat(path);
+      if (path === race.path) {
+        await actual.rmdir(path);
+        await actual.symlink(race.target, path);
+      }
+      return stat;
+    },
+  };
+});
 function doc(value: unknown): JsonObject {
   const out = parseJsonValue(JSON.stringify(value));
   if (!(out instanceof JsonObject)) throw new Error('invalid');
@@ -220,27 +235,52 @@ describe('safe local review worktree cleanup', () => {
         calls.push([...args]);
         return ok(listing(f.path));
       };
-      for (const bad of [
-        doc({
-          run_id: 'wrong',
-          item_id: 'local-1',
-          repo,
-          head,
-          worktree: f.path,
-          wt_branch: branch,
-        }),
-        doc({ run_id: id, item_id: 'local-1', repo, head, worktree: f.path, wt_branch: 'main' }),
-        doc({ run_id: id, item_id: 'local-1', repo, head, worktree: root, wt_branch: branch }),
-        doc({
-          run_id: id,
-          item_id: 'local-1',
-          repo: 'foreign/repo',
-          head,
-          worktree: f.path,
-          wt_branch: branch,
-        }),
-      ])
-        await expect(cleanupLocalReviewWorktree(f.options, f.item, bad, git)).rejects.toThrow();
+      for (const [bad, reason] of [
+        [
+          doc({
+            run_id: 'wrong',
+            item_id: 'local-1',
+            repo,
+            head,
+            worktree: f.path,
+            wt_branch: branch,
+          }),
+          'run ownership mismatch',
+        ],
+        [
+          doc({ run_id: id, item_id: 'local-1', repo, head, worktree: f.path, wt_branch: 'main' }),
+          'worktree path or branch mismatch',
+        ],
+        [
+          doc({ run_id: id, item_id: 'local-1', repo, head, worktree: root, wt_branch: branch }),
+          'worktree path or branch mismatch',
+        ],
+        [
+          doc({
+            run_id: id,
+            item_id: 'local-1',
+            repo: 'foreign/repo',
+            head,
+            worktree: f.path,
+            wt_branch: branch,
+          }),
+          'run ownership mismatch',
+        ],
+        [
+          doc({
+            run_id: id,
+            item_id: 'local-1',
+            repo,
+            head: 'b'.repeat(40),
+            worktree: f.path,
+            wt_branch: branch,
+          }),
+          'run ownership mismatch',
+        ],
+      ] as const)
+        await expect(cleanupLocalReviewWorktree(f.options, f.item, bad, git)).rejects.toThrow(
+          reason,
+        );
       expect(calls).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -260,6 +300,89 @@ describe('safe local review worktree cleanup', () => {
         'registry ownership mismatch',
       );
       expect(calls).toEqual([['worktree', 'list', '--porcelain', '-z']]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('refuses a different registered branch even when head matches', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-cleanup-'));
+    try {
+      const f = fixture(root);
+      await mkdir(f.path);
+      const calls: string[][] = [];
+      const git = async (_cwd: string, args: readonly string[]) => {
+        calls.push([...args]);
+        return ok(listing(f.path, head, 'refs/heads/other'));
+      };
+      await expect(cleanupLocalReviewWorktree(f.options, f.item, f.meta, git)).rejects.toThrow(
+        'registry ownership mismatch',
+      );
+      expect(calls).toEqual([['worktree', 'list', '--porcelain', '-z']]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('refuses duplicate foreign repo configuration before git', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-cleanup-'));
+    try {
+      const f = fixture(root);
+      await mkdir(f.path);
+      const foreign = 'foreign/repo';
+      const config = doc({
+        worktree_root: root,
+        worktree_prefix: 'queue-',
+        clone: join(root, 'primary'),
+        repos: [
+          { repo: foreign, clone: join(root, 'one') },
+          { repo: 'FOREIGN/REPO', clone: join(root, 'two') },
+        ],
+      });
+      const item = doc({
+        id: 'local-1',
+        run: { run_id: id },
+        identity_inputs: { repo: foreign, head_commit: head },
+      });
+      const meta = doc({
+        run_id: id,
+        item_id: 'local-1',
+        repo: foreign,
+        head,
+        worktree: f.path,
+        wt_branch: branch,
+      });
+      let calls = 0;
+      await expect(
+        cleanupLocalReviewWorktree({ ...f.options, config }, item, meta, async () => {
+          calls++;
+          return ok(listing(f.path));
+        }),
+      ).rejects.toThrow('unconfigured or ambiguous review repository');
+      expect(calls).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('refuses when a path changes between lstat and realpath', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-cleanup-'));
+    try {
+      const f = fixture(root);
+      await mkdir(f.path);
+      race.path = f.path;
+      race.target = join(root, 'escaped');
+      await mkdir(race.target);
+      let calls = 0;
+      try {
+        await expect(
+          cleanupLocalReviewWorktree(f.options, f.item, f.meta, async () => {
+            calls++;
+            return ok(listing(f.path));
+          }),
+        ).rejects.toThrow('worktree path resolves outside root');
+        expect(calls).toBe(0);
+      } finally {
+        race.path = '';
+        race.target = '';
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
