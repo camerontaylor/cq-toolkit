@@ -72,7 +72,13 @@ import {
   PublicationPushError,
 } from '../review/internal/crq/publisher.js';
 import { verifyReview } from '../../adapters/crq/reviewVerify.js';
-import { JsonObject, JsonNumber, type JsonValue } from '../../policy/crq/jsonValue.js';
+import {
+  JsonObject,
+  JsonNumber,
+  parseJsonValue,
+  pythonNumbersEqual,
+  type JsonValue,
+} from '../../policy/crq/jsonValue.js';
 import {
   LedgerIntegrityError,
   ledgerCanonicalBytes,
@@ -295,6 +301,33 @@ async function workerServices(effects: PublishRunEffects, config: JsonObject): P
     // The same files seam backs the recovery inbox; the inbox binds it.
     inbox: new FindingInbox(inboxFiles),
   };
+}
+
+/**
+ * The queue is a Python-domain document, not a ledger-domain one: Python's
+ * `load_queue` accepts finite floats (a `diagnostic: 1.5` queue field is
+ * exercised in `test_backfill.py`) and the plain `json.loads` constants
+ * `NaN`/`Infinity`/`-Infinity`, while refusing duplicate keys
+ * (`unique_pairs`). The rollout reads stay on `ledgerLoads` (its canonical
+ * integer domain).
+ */
+function queueLoads(bytes: Uint8Array): JsonValue {
+  return parseJsonValue(new TextDecoder().decode(bytes), {
+    objectPairs: (pairs) => {
+      const seen = new Set<string>();
+      for (const [key] of pairs) {
+        if (seen.has(key)) throw integrity('duplicate JSON key');
+        seen.add(key);
+      }
+      return new JsonObject(pairs);
+    },
+    parseConstant: (raw) => {
+      // Python json.loads: NaN, Infinity, -Infinity.
+      if (raw === 'NaN') return JsonNumber.float(Number.NaN, 'NaN');
+      if (raw === 'Infinity') return JsonNumber.float(Number.POSITIVE_INFINITY, 'Infinity');
+      return JsonNumber.float(Number.NEGATIVE_INFINITY, '-Infinity');
+    },
+  });
 }
 
 /**
@@ -595,7 +628,7 @@ async function reconcileQueue(
   if (!jsonEqual(current, config)) {
     throw integrity('publication configuration changed; retry reconciliation');
   }
-  let queue = ledgerLoads(await effects.readQueue());
+  let queue = queueLoads(await effects.readQueue());
   if (!(queue instanceof JsonObject)) throw integrity('queue must be an object');
   for (const candidate of itemsOf(queue)) {
     if (!(candidate instanceof JsonObject)) continue;
@@ -738,14 +771,16 @@ function isSubset(subset: ReadonlySet<number>, superset: ReadonlySet<number>): b
   return true;
 }
 
-/** Structural equality over the JSON domain (Python `==` on parsed JSON). */
-function jsonEqual(a: JsonValue | undefined, b: JsonValue | undefined): boolean {
+/** Structural equality over the JSON domain (Python `==` on parsed JSON).
+ * Exported for the numeric-equality regression tests. */
+export function jsonEqual(a: JsonValue | undefined, b: JsonValue | undefined): boolean {
   if (a === b) return true;
   if (a === undefined || b === undefined) return false;
   if (a instanceof JsonNumber || b instanceof JsonNumber) {
-    if (!(a instanceof JsonNumber) || !(b instanceof JsonNumber)) return false;
-    if (a.integer !== null && b.integer !== null) return a.integer === b.integer;
-    return a.raw === b.raw;
+    // Python `==` on numbers: 1 == 1.0, and exponent/lexeme forms like 1e0
+    // compare by value, not raw text (a reformat must not read as a rollout
+    // change). Exact for integers above Number.MAX_SAFE_INTEGER.
+    return pythonNumbersEqual(a, b) === true;
   }
   if (Array.isArray(a) || Array.isArray(b)) {
     if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
@@ -805,7 +840,7 @@ async function recordFailure(
   try {
     const halted = await effects.withTickLock(
       async () => {
-        const parsed = ledgerLoads(await effects.readQueue());
+        const parsed = queueLoads(await effects.readQueue());
         if (!(parsed instanceof JsonObject)) throw integrity('queue must be an object');
         const text = truncated(error);
         let queue = setKeys(parsed, [['backfill_publication_error', text]]);

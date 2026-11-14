@@ -34,6 +34,7 @@ import { LedgerTransportError } from './ledgerGit.js';
 import type { PushCommit } from './ledgerGit.js';
 import { JsonObject } from '../../policy/crq/jsonValue.js';
 import type { JsonValue } from '../../policy/crq/jsonValue.js';
+import { pythonTruthy as truthy } from '../../policy/crq/ledger.js';
 
 /** Thrown before any ssh runs when the rollout's spool shape is unusable. */
 export class SpoolConfigError extends Error {
@@ -82,7 +83,12 @@ export function parsePublisherSpool(value: JsonValue | undefined): PublisherSpoo
       `publisher_spool.ssh_alias must be a literal user@host (ssh runs with -F none), got ${JSON.stringify(alias ?? null)}`,
     );
   }
-  const key = value.get('ssh_key') ?? value.get('key');
+  // Python settings(): `key = (spool.get("ssh_key") or spool.get("key"))` —
+  // `or` truthiness, not nullish: an empty ssh_key falls through to `key`, and
+  // any truthy non-string ssh_key is selected and then refused by the
+  // isinstance gate below, exactly like Python.
+  const selected = truthy(value.get('ssh_key')) ? value.get('ssh_key') : value.get('key');
+  const key = typeof selected === 'string' ? selected : undefined;
   if (typeof key !== 'string' || key.trim() === '' || /[\n\r\0]/.test(key)) {
     throw new SpoolConfigError('backfill rollout publisher_spool incomplete or invalid');
   }

@@ -105,30 +105,7 @@ if (command === 'queue-capability') {
         return runWatchdog(stateHome === undefined ? {} : { stateHome });
       }
       if (liveCommand === 'publish') {
-        // The unit reads the runner roots from its config, mirroring Python's
-        // crq.py CONFIG: explicit paths, never a cwd/env default beyond cwd.
-        // Python's run(): `config = runtime.settings(c.STATE); if not config:
-        // return {"publication": "disabled"}`. settings returns None only for
-        // a missing rollout file; a malformed rollout raises IntegrityError,
-        // and a missing config.json/clone raises before settings runs.
-        // Configuration is therefore validated before any disabled outcome:
-        // a missing or malformed config.json, a missing clone, or an unusable
-        // rollout read is the IntegrityError path (failure), never disabled.
-        const validated = await readPublisherRoots(root);
-        if (validated === null) {
-          const stateRoot = await publisherStateRoot(root);
-          if (await isRolloutAbsent(join(stateRoot, 'backfill-rollout.json'))) {
-            // A usable configuration whose rollout file is missing: Python's
-            // settings() returns None, run() reports {"publication":"disabled"}.
-            // A config.json with a clone but absent rollout reaches here.
-            return { status: 'ok', value: { publication: 'disabled' } };
-          }
-          return {
-            status: 'failed',
-            error: 'backfill rollout prerequisites incomplete',
-          };
-        }
-        return runPublishUnit(validated);
+        return publishLiveCommand(root);
       }
       return Promise.resolve({ status: 'failed', error: `${liveCommand} is not implemented` });
     },
@@ -159,6 +136,58 @@ async function isRolloutAbsent(path: string): Promise<boolean> {
     }
     throw error;
   }
+}
+
+/**
+ * The `publish` live unit over the runner's own roots. Mirrors Python's
+ * crq.py: the CONFIG load (config.json with a clone path) happens before
+ * `runtime.settings`, so a missing, malformed or clone-less config.json is a
+ * failure (Python raises at import), never a disabled outcome. A usable
+ * configuration whose rollout file is genuinely absent is Python's
+ * `settings() -> None` (disabled); a present-but-incomplete rollout is the
+ * IntegrityError failure path. An unusable config must not let
+ * publisherStateRoot's default guess stand in for the configured state root.
+ */
+export async function publishLiveCommand(runnerRoot: string): Promise<OpResult<unknown>> {
+  if (!(await readRunnerConfig(runnerRoot))) {
+    return {
+      status: 'failed',
+      error: 'runner config.json missing, malformed, or has no clone path',
+    };
+  }
+  const stateRoot = await publisherStateRoot(runnerRoot);
+  const validated = await readPublisherRoots(runnerRoot);
+  if (validated === null) {
+    if (await isRolloutAbsent(join(stateRoot, 'backfill-rollout.json'))) {
+      // A usable configuration whose rollout file is missing: Python's
+      // settings() returns None, run() reports {"publication":"disabled"}.
+      return { status: 'ok', value: { publication: 'disabled' } };
+    }
+    return {
+      status: 'failed',
+      error: 'backfill rollout prerequisites incomplete',
+    };
+  }
+  return runPublishUnit(validated);
+}
+
+/**
+ * Only the runner's own `config.json` shape (Python's CONFIG load): an object
+ * with a nonempty `clone` string. Everything else — the state_root resolution
+ * and the rollout read — is {@link readPublisherRoots}' concern; this gate
+ * exists so the disabled probe cannot run against a guessed state root after
+ * the configuration Python would have raised on is gone.
+ */
+async function readRunnerConfig(runnerRoot: string): Promise<boolean> {
+  let config: unknown;
+  try {
+    config = JSON.parse(await readFile(join(runnerRoot, 'config.json'), 'utf8'));
+  } catch {
+    return false;
+  }
+  if (typeof config !== 'object' || config === null || Array.isArray(config)) return false;
+  const clone = (config as Record<string, unknown>)['clone'];
+  return typeof clone === 'string' && clone !== '';
 }
 
 /** The state root `readPublisherRoots` would use: config.state_root or default. */

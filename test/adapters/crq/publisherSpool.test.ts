@@ -23,6 +23,41 @@ describe('parsePublisherSpool', () => {
     );
   });
 
+  test('an empty ssh_key falls through to a valid key: Python `or` truthiness', () => {
+    // backfill_runtime.settings(): key = spool.get("ssh_key") or spool.get("key").
+    // bool("") is False, so the alias selects `key`; nullish coalescing would
+    // select the empty string and refuse a configuration Python accepts.
+    const config = parsePublisherSpool(
+      new JsonObject([
+        ['ssh_alias', 'crq@spool.invalid'],
+        ['ssh_key', ''],
+        ['key', '/keys/crq-signer'],
+      ]),
+    );
+    expect(config).toEqual({ sshAlias: 'crq@spool.invalid', sshKey: '/keys/crq-signer' });
+    // A truthy non-string ssh_key is selected and then refused by the
+    // isinstance gate, exactly like Python.
+    expect(() =>
+      parsePublisherSpool(
+        new JsonObject([
+          ['ssh_alias', 'crq@spool.invalid'],
+          ['ssh_key', JsonNumber.int(5)],
+          ['key', '/keys/crq-signer'],
+        ]),
+      ),
+    ).toThrow(SpoolConfigError);
+    // Both keys empty refuses: the fallback is also falsy.
+    expect(() =>
+      parsePublisherSpool(
+        new JsonObject([
+          ['ssh_alias', 'crq@spool.invalid'],
+          ['ssh_key', ''],
+          ['key', ''],
+        ]),
+      ),
+    ).toThrow(SpoolConfigError);
+  });
+
   test('a well-formed spool document normalizes to alias plus key', () => {
     const config = parsePublisherSpool(
       new JsonObject([

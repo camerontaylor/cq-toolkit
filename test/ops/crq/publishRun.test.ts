@@ -8,6 +8,7 @@ import {
   type RunGit,
 } from '../../../src/adapters/crq/ledgerGit.js';
 import {
+  jsonEqual,
   runPublish,
   PublishRolloutDisabled,
   type PublishRunEffects,
@@ -361,7 +362,10 @@ async function makeEffects(root: string): Promise<PublishRunEffects> {
 }
 
 function ledgerQueueText(queue: JsonObject): string {
-  return `${JSON.stringify(JSON.parse(canonicalText(queue)))}\n`;
+  // canonicalText already emits valid queue JSON (quoted keys, JsonNumber raw
+  // lexemes, NaN constants); JSON.parse would choke on the NaN constants the
+  // float test seeds, and is otherwise an identity round trip.
+  return `${canonicalText(queue)}\n`;
 }
 
 function canonicalText(value: JsonValue): string {
@@ -456,6 +460,42 @@ function randomOid(): string {
  */
 const SYNTHETIC_KEPT_SHA = 'c'.repeat(64);
 
+describe('jsonEqual numeric equality (Python == over parsed JSON)', () => {
+  test('1 == 1.0 and exponent lexemes compare by value, not raw text', () => {
+    expect(jsonEqual(JsonNumber.int('1'), JsonNumber.float(1, '1.0'))).toBe(true);
+    expect(jsonEqual(JsonNumber.int('100'), JsonNumber.float(100, '1e2'))).toBe(true);
+    expect(jsonEqual(JsonNumber.float(1, '1e0'), JsonNumber.float(1, '1.0'))).toBe(true);
+    expect(jsonEqual(JsonNumber.int('7'), JsonNumber.float(7, '7.000'))).toBe(true);
+    // Negative zero vs zero: Python says True.
+    expect(jsonEqual(JsonNumber.int('0'), JsonNumber.float(0, '-0.0'))).toBe(true);
+    // Distinct values stay distinct.
+    expect(jsonEqual(JsonNumber.int('1'), JsonNumber.float(1.5, '1.5'))).toBe(false);
+    // Precision loss is avoided: integers above Number.MAX_SAFE_INTEGER
+    // compare exactly, never through a float round trip.
+    const bigA = JsonNumber.int('9007199254740993');
+    const bigB = JsonNumber.int('9007199254740992');
+    expect(jsonEqual(bigA, bigB)).toBe(false);
+    // float 1e2 vs int 100 across nested containers and key order.
+    expect(
+      jsonEqual(
+        new JsonObject([
+          ['a', [JsonNumber.int('1'), new JsonObject([['b', JsonNumber.int('100')]])]],
+        ]),
+        new JsonObject([
+          [
+            'a',
+            [JsonNumber.float(1, '1.0'), new JsonObject([['b', JsonNumber.float(100, '1e2')]])],
+          ],
+        ]),
+      ),
+    ).toBe(true);
+    // NaN equals nothing, not even NaN.
+    expect(
+      jsonEqual(JsonNumber.float(Number.NaN, 'NaN'), JsonNumber.float(Number.NaN, 'NaN')),
+    ).toBe(false);
+  });
+});
+
 describe('publisher route: fixture replay through the run composition', () => {
   test('idle outbox stays idle and writes nothing', async () => {
     const root = await mkdtemp(join(tmpdir(), 'crq-publish-idle-'));
@@ -537,6 +577,72 @@ describe('publisher route: fixture replay through the run composition', () => {
       const second = await runPublish(effects);
       expect(second).toEqual({ publication: 'idle' });
       expect(await readdir(pendingDir)).toEqual(remaining);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a queue float diagnostic survives reconciliation and the failure halt', async () => {
+    // Python's load_queue (admission_history.Reader, non-strict) accepts
+    // finite floats and NaN constants; test_backfill.py seeds diagnostic: 1.5.
+    // ledgerLoads refuses every float, so using it here made reconciliation
+    // (and the failure handler's halt) fail forever on a queue Python accepts.
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-float-'));
+    try {
+      const effects = await makeEffects(root);
+      await seedRollout(effects);
+      const { pending } = seedCase('finding-event-causal-order');
+      const review = pending.find((value) => recordEventType(value) === 'review');
+      if (!(review instanceof JsonObject)) throw new Error('fixture has no review');
+      const reviewScope = (review.get('payload') as JsonObject).get('requested_scope');
+      await writeSeeds(effects, pending);
+      await seedRemoteBranch(effects);
+      // Write the queue as raw Python-shaped JSON text: 1.5 stays a float
+      // lexeme and NaN stays a constant, which the plain JSON.stringify path
+      // above cannot express.
+      const reviewScopeText = canonicalText(reviewScope as JsonValue);
+      await writeFile(
+        join(effects.stateRoot, 'queue.json'),
+        `{
+  "items": [
+    {
+      "kind": "backfill",
+      "family": "review-ledger",
+      "job_id": "subject:0",
+      "state": "publication-pending",
+      "publication_event_id": ${JSON.stringify(recordId(review))},
+      "scope": ${reviewScopeText},
+      "generation": 1
+    }
+  ],
+  "diagnostic": 1.5,
+  "nan_const": NaN
+}\n`,
+      );
+      const result = await runPublish(effects);
+      expect(result.publication).toBe('reconciled');
+      const queueText = await readFile(join(effects.stateRoot, 'queue.json'), 'utf8');
+      const queue = parseJsonValue(queueText, {
+        // The reader side of the same Python-domain rules queueLoads applies.
+        parseConstant: (raw) =>
+          raw === 'NaN'
+            ? JsonNumber.float(Number.NaN, 'NaN')
+            : raw === 'Infinity'
+              ? JsonNumber.float(Number.POSITIVE_INFINITY, 'Infinity')
+              : JsonNumber.float(Number.NEGATIVE_INFINITY, '-Infinity'),
+      });
+      if (!(queue instanceof JsonObject)) throw new Error('queue not an object');
+      // The float and the NaN constant survive the rewrite losslessly.
+      expect(queue.get('diagnostic')).toEqual(JsonNumber.float(1.5));
+      const nan = queue.get('nan_const');
+      if (!(nan instanceof JsonNumber) || nan.float === null || !Number.isNaN(nan.float)) {
+        throw new Error('NaN constant lost');
+      }
+      const items = queue.get('items');
+      if (!Array.isArray(items) || !(items[0] instanceof JsonObject)) {
+        throw new Error('queue items lost');
+      }
+      expect(items[0].get('state')).toBe('done');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1046,6 +1152,62 @@ describe('reconciliation through the route', () => {
       if (!(queue instanceof JsonObject)) throw new Error('queue not an object');
       const families = queue.get('backfill_families');
       expect(families instanceof JsonObject && families.has('review-ledger')).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a reformatted rollout with identical values reconciles (Python == semantics)', async () => {
+    // jsonEqual compares numbers by Python ==, so a value-identical rewrite
+    // between the initial read and the post-push merge is not a configuration
+    // change. The rollout domain itself is integer-only (float lexemes are
+    // refused at read, Python parity), so the route-level reformat is lexeme
+    // (1e2 vs 100), key order and whitespace; the int-vs-float/exponent
+    // cross-form equality is pinned at the jsonEqual unit level below.
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-lexeme-'));
+    try {
+      const base = await makeEffects(root);
+      await seedRollout(base);
+      const { pending } = seedCase('finding-event-causal-order');
+      await writeSeeds(base, pending);
+      await seedRemoteBranch(base);
+      // Between the run's initial read and the post-push merge, the rollout is
+      // rewritten with the identical key set, reordered, reformatted, and the
+      // integer limit in an equivalent integer lexeme (1e2 is integral, but
+      // the rollout parser refuses exponent forms in EITHER language: they
+      // are float lexemes). So the reformatted document keeps plain integers
+      // and only changes key order plus whitespace; the numeric-equality
+      // cross-form behavior is pinned at the jsonEqual unit level below.
+      const initial = `{
+  "operational_ruling": "fixture",
+  "no_live_run_verification": "fixture",
+  "owner_branch_ruleset_evidence": "fixture",
+  "durable_artifact_root": "/unused-fixture-volume",
+  "runner_identity": "crq-runner-app",
+  "publisher_spool": { "ssh_alias": "crq@spool.invalid", "ssh_key": "/unused/key" },
+  "generation": 1,
+  "limit": 100
+}\n`;
+      const reformatted = `{
+  "limit": 100,
+  "generation": 1,
+  "publisher_spool": { "ssh_key": "/unused/key", "ssh_alias": "crq@spool.invalid" },
+  "runner_identity": "crq-runner-app",
+  "durable_artifact_root": "/unused-fixture-volume",
+  "owner_branch_ruleset_evidence": "fixture",
+  "no_live_run_verification": "fixture",
+  "operational_ruling": "fixture"
+}\n`;
+      await writeFile(join(base.stateRoot, 'backfill-rollout.json'), initial);
+      const effects: PublishRunEffects = {
+        ...base,
+        pushCommit: async (batchBase, head, bundle) => {
+          await writeFile(join(base.stateRoot, 'backfill-rollout.json'), reformatted);
+          await base.pushCommit?.(batchBase, head, bundle);
+        },
+      };
+      const result = await runPublish(effects);
+      expect(result.publication).toBe('reconciled');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1800,6 +1962,54 @@ describe('round-2 coverage: publisher clone ownership and durable transitions', 
       await expect(
         stat(join(stateRoot, 'backfill', 'publication-failure.json')),
       ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a usable config with a custom state root reports disabled only at that root', async () => {
+    // The reviewer's scenario: config.json names a custom state_root, the
+    // rollout file there is absent, and the default <root>/state directory is
+    // also empty. The disabled outcome is legitimate (the configured rollout
+    // is genuinely absent), but publisherStateRoot must probe the CONFIGURED
+    // root, not the default; if the configured root holds a malformed rollout
+    // the outcome is the integrity failure, never disabled.
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-customstate-'));
+    try {
+      const stateRoot = join(root, 'custom-state');
+      await writeFile(
+        join(root, 'config.json'),
+        `${JSON.stringify({ clone: join(root, 'clone'), state_root: stateRoot })}\n`,
+      );
+      await import('node:fs/promises').then((fs) => fs.mkdir(stateRoot, { recursive: true }));
+      await writeFile(join(stateRoot, 'queue.json'), '{"items":[]}\n');
+      const crq = (await import('../../../src/queue-runner/crq.js')) as {
+        publishLiveCommand: (runnerRoot: string) => Promise<{
+          status: string;
+          value?: unknown;
+          error?: string;
+        }>;
+      };
+      // Absent rollout at the configured root: disabled, not failure.
+      expect(await crq.publishLiveCommand(root)).toEqual({
+        status: 'ok',
+        value: { publication: 'disabled' },
+      });
+      // A malformed rollout at the configured root is the integrity refusal.
+      await writeFile(join(stateRoot, 'backfill-rollout.json'), '{"durable_artifact_root":');
+      const failed = await crq.publishLiveCommand(root);
+      expect(failed.status).toBe('failed');
+      expect(failed.error).toBe('backfill rollout prerequisites incomplete');
+      // A missing or clone-less config.json is the CONFIG-load failure:
+      // Python raises before settings() could ever return None.
+      await writeFile(join(root, 'config.json'), '{}\n');
+      const noClone = await crq.publishLiveCommand(root);
+      expect(noClone.status).toBe('failed');
+      expect(noClone.error).toBe('runner config.json missing, malformed, or has no clone path');
+      await rm(join(root, 'config.json'), { force: true });
+      const noConfig = await crq.publishLiveCommand(root);
+      expect(noConfig.status).toBe('failed');
+      expect(noConfig.error).toBe('runner config.json missing, malformed, or has no clone path');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
