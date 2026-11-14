@@ -371,10 +371,32 @@ class Hold:
             raise Refused(
                 "admission is already held by " + str(self.path)
                 + "; another deploy or a manual hold owns it") from exc
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(self.token)
-            handle.flush()
-            os.fsync(handle.fileno())
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(self.token)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            # The marker was created, but this run's token never reached
+            # stable storage. O_EXCL made the marker exclusively ours, so
+            # remove it rather than leave admission disabled behind a
+            # half-written marker, and refuse with the reason. If even the
+            # removal fails, keep the marker and fail-stop: a recorded
+            # recovery-required outcome is the only honest report, never a
+            # silently blocked admission.
+            try:
+                self.path.unlink(missing_ok=True)
+            except OSError as cleanup:
+                raise FailStop(
+                    "the admission marker " + str(self.path)
+                    + " was created but its token could not be written ("
+                    + str(exc) + ") and the marker could not be removed ("
+                    + str(cleanup) + "); admission stays held and an owner "
+                    "must remove it") from cleanup
+            raise Refused(
+                "could not write this run's token into the admission marker "
+                + str(self.path) + " (" + str(exc) + "); the marker this run "
+                "created was removed") from exc
         self.acquired = True
 
     def owns(self):

@@ -799,5 +799,38 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertFalse(self.marker().exists())
 
 
+class HoldTests(unittest.TestCase):
+    """A marker created by O_EXCL must never outlive its failed token."""
+
+    def test_token_write_failure_removes_the_marker_it_created(self):
+        # If the token never reaches stable storage, the marker this run
+        # created is removed: admission must not stay silently disabled
+        # behind a half-written marker nobody owns.
+        with tempfile.TemporaryDirectory(prefix="crq-hold-") as temp:
+            hold = rb.Hold(temp)
+            with mock.patch.object(rb.os, "fsync",
+                                   side_effect=OSError(28, "no space left")):
+                with self.assertRaisesRegex(rb.Refused,
+                                            "marker this run created"):
+                    hold.acquire()
+            self.assertFalse(hold.path.exists())
+            self.assertFalse(hold.acquired)
+            self.assertFalse(hold.owns())
+
+    def test_unremovable_marker_fail_stops_as_recovery_required(self):
+        # If the marker cannot be removed either, the failure is a FailStop:
+        # the marker stays and recovery is reported, never a silent block.
+        with tempfile.TemporaryDirectory(prefix="crq-hold-") as temp:
+            hold = rb.Hold(temp)
+            with mock.patch.object(rb.os, "fsync",
+                                   side_effect=OSError(28, "no space left")), \
+                    mock.patch.object(rb.Path, "unlink",
+                                      side_effect=OSError(13, "permission")):
+                with self.assertRaisesRegex(rb.FailStop, "owner must remove"):
+                    hold.acquire()
+            self.assertTrue(hold.path.exists())
+            self.assertFalse(hold.acquired)
+
+
 if __name__ == "__main__":
     unittest.main()
