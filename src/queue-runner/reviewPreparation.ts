@@ -3,6 +3,9 @@ import { JsonObject, type JsonValue } from '../policy/crq/jsonValue.js';
 import { pyTruthy, withObjectKeys } from '../policy/crq/queueDoc.js';
 import { reserveAndSpawnReview, type ReviewLaunchEffects } from './reviewLaunch.js';
 
+/** An identified failure from the checkout operation, not a validation error. */
+export class ReviewCheckoutError extends Error {}
+
 export interface ReviewScanDecision {
   readonly clean: boolean;
   readonly denylistHits: number;
@@ -121,7 +124,21 @@ export async function prepareOrdinaryReview(
     await effects.blocked(id, reason);
     return { queue: blockedQueue, runId, outcome: 'blocked' };
   }
-  const worktree = await effects.checkout({ runId, repo, head });
+  let worktree: { path: string; branch: string };
+  try {
+    worktree = await effects.checkout({ runId, repo, head });
+  } catch (error) {
+    if (!(error instanceof ReviewCheckoutError)) throw error;
+    const reason = `review worktree checkout failed: ${error.message}`.slice(0, 300);
+    const nextItems = [...items];
+    nextItems[input.itemIndex] = withObjectKeys(item, [
+      ['state', 'blocked'],
+      ['last_error', reason],
+    ]);
+    const blockedQueue = withObjectKeys(queue, [['items', nextItems]]);
+    await effects.blocked(id, reason);
+    return { queue: blockedQueue, runId, outcome: 'blocked' };
+  }
   const startedAt = effects.nowIso();
   const meta = new JsonObject([
     ['run_id', runId],

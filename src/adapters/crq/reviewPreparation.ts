@@ -2,7 +2,10 @@
 import { mkdir, realpath } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { GitPool, gitCall } from './gitExec.js';
-import type { ReviewPreparationEffects } from '../../queue-runner/reviewPreparation.js';
+import {
+  ReviewCheckoutError,
+  type ReviewPreparationEffects,
+} from '../../queue-runner/reviewPreparation.js';
 
 function safePart(value: string): boolean {
   return /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(value) && value !== '.' && value !== '..';
@@ -74,8 +77,11 @@ export async function checkoutReviewWorktree(options: {
     ],
     { skipLfsSmudge: true },
   );
-  if (result.code !== 0)
-    throw new Error(
+  // gitCall uses these sentinel strings for spawn failure and timeout/overflow.
+  if (result.code === null && result.stderr === 'spawn failed')
+    throw new Error('git checkout process could not be started');
+  if (result.code !== 0 || result.stderr === 'output exceeded bound')
+    throw new ReviewCheckoutError(
       `worktree checkout refused: ${result.stderr.trim().slice(0, 200) || 'git failed'}`,
     );
   return { path, branch };
