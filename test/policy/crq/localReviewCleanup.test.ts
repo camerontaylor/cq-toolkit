@@ -46,7 +46,7 @@ const ok = (stdout: string): GitResult => ({ code: 0, stdout: Buffer.from(stdout
 const listing = (path: string, sha = head, ref = `refs/heads/${branch}`) =>
   `worktree ${path}\0HEAD ${sha}\0branch ${ref}\0\0`;
 describe('safe local review worktree cleanup', () => {
-  it('assembles real harvest and cleanup for an owned disposable run', async () => {
+  it.each([false, true])('assembles real harvest with dirty=%s', async (dirty) => {
     const root = await mkdtemp(join(tmpdir(), 'crq-caller-'));
     try {
       const clone = join(root, 'clone');
@@ -76,6 +76,7 @@ describe('safe local review worktree cleanup', () => {
       const sha = git('rev-parse', 'HEAD');
       const f = fixture(root, sha);
       git('worktree', 'add', '-q', '-b', branch, f.path, 'HEAD');
+      if (dirty) await writeFile(join(f.path, 'untracked.txt'), 'retain');
       const digest = 'b'.repeat(64);
       const profile = { adapter: 'coderabbit-cli', revision: 'v1', flags: [] };
       const identity = {
@@ -154,8 +155,16 @@ describe('safe local review worktree cleanup', () => {
       expect((result.queue.get('items') as JsonObject[])[0]!.get('publication_reason')).toBe(
         'publication-spooled',
       );
-      expect(await readFile(join(state, 'events.jsonl'), 'utf8')).toContain('review_finished');
-      expect(git('worktree', 'list', '--porcelain')).not.toContain(f.path);
+      const events = await readFile(join(state, 'events.jsonl'), 'utf8');
+      expect(events).toContain('review_finished');
+      if (dirty) {
+        expect(events).toContain('local_review_cleanup_failed');
+        expect(await readFile(join(f.path, 'untracked.txt'), 'utf8')).toBe('retain');
+        expect(git('worktree', 'list', '--porcelain')).toContain(f.path);
+      } else {
+        expect(events).not.toContain('local_review_cleanup_failed');
+        expect(git('worktree', 'list', '--porcelain')).not.toContain(f.path);
+      }
       expect(git('rev-parse', `refs/heads/${branch}`)).toBe(sha);
     } finally {
       await rm(root, { recursive: true, force: true });
