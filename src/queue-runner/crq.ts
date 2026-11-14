@@ -15,6 +15,7 @@ import {
   runReviewCapabilityMain,
 } from '../adapters/crq/reviewCapabilityMain.js';
 import { runStatusWriter } from '../adapters/crq/statusWriter.js';
+import { runBackfillUnit } from '../adapters/crq/backfillSource.js';
 import { MAX_REQUEST_BYTES, runQueueCapabilityMain } from '../adapters/crq/queueCapabilityMain.js';
 import { REVIEW_MAX_BYTES } from '../ops/crq/reviewCapability.js';
 import { AUTHOR_MAX_SNAPSHOT_BYTES } from '../policy/crq/authorWire.js';
@@ -113,6 +114,11 @@ if (command === 'queue-capability') {
     // Operator-only: explicit roots, no cwd/env default, never a unit command.
     operatorLive: async (liveCommand, args) => {
       if (liveCommand === 'repair-prepare') return runRepairPrepare(args, { gitleaksPath });
+      if (liveCommand === 'backfill') {
+        // The backfill route reads and writes the same state root the publisher
+        // resolves (config.state_root, default `<runner>/state`).
+        return runBackfillUnit(args, { stateRoot: await publisherStateRoot(root) });
+      }
       if (liveCommand === 'status') {
         const parsed = parseStatusArgv(args);
         if (!parsed.ok) return usageArtifact('status', parsed.message);

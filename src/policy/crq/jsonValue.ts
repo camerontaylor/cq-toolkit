@@ -519,6 +519,40 @@ export function toPlainJsonRetainingNumbers(value: JsonValue): unknown {
   return value;
 }
 
+/**
+ * Materialise a value that may mix {@link JsonValue} nodes with ordinary
+ * JavaScript containers.
+ *
+ * {@link toPlainJson} descends only into `JsonValue` nodes, so a policy port
+ * that copies a captured payload field by field into a plain object would leak
+ * a `JsonObject`/`JsonNumber` leaf to its caller. This descends through both, so
+ * the result is plain JSON either way. Integers keep their exact value through
+ * `bigints`, which is also what the ledger encoder would have written, so a
+ * serialised result is byte-identical to the value it was built from.
+ */
+export function toPlainJsonDeep(value: unknown): unknown {
+  if (value instanceof JsonNumber || value instanceof JsonObject) {
+    return toPlainJson(value, { bigints: true });
+  }
+  if (Array.isArray(value)) return value.map(toPlainJsonDeep);
+  if (typeof value === 'object' && value !== null) {
+    // Only an ordinary object is descended: a class instance (a `JsonObject`, a
+    // prototype-bound row) is a value of its own.
+    if (Object.getPrototypeOf(value) !== Object.prototype) return value;
+    const object: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      Object.defineProperty(object, key, {
+        value: toPlainJsonDeep(entry),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+    return object;
+  }
+  return value;
+}
+
 interface PythonNumber {
   readonly kind: 'int' | 'float';
   readonly integer: bigint | null;
