@@ -13,7 +13,7 @@
  * crq adapters use.
  */
 import { readFile, readdir } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { parseJsonValue } from '../../policy/crq/jsonValue.js';
 import { compareCodePoints } from '../../policy/crq/pythonJson.js';
 import {
@@ -62,11 +62,13 @@ function fileBackfillStore(durableRoot: string): BackfillArtifactStore {
   return {
     verify: (reference: BackfillArtifactReference) => store.verify(reference),
     async read(reference: BackfillArtifactReference): Promise<unknown> {
+      // `verify` already proved this location resolves to the store's own
+      // `sha256/<digest>` entry and hashes to it, so the read binds the same
+      // file without re-deriving the store's layout. `rank` then re-checks the
+      // decoded payload against the manifest digest, so a swap between the two
+      // is a refusal, not a replay of unverified bytes.
       await store.verify(reference);
-      // The store's successful verify proves `reference.location` resolves to
-      // `sha256/<digest>`; reading through the same root is that file.
-      const bytes = await readFile(join(resolve(durableRoot), 'sha256', reference.sha256));
-      return parseJsonValue(bytes.toString('utf8'));
+      return parseJsonValue(await readFile(reference.location, 'utf8'));
     },
   };
 }
