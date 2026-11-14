@@ -22,7 +22,10 @@ Discovery is scoped and truthful. ``complete`` is true only when every
 required filesystem and manager observation succeeded. ``supported`` is true
 only when the observed topology is within the declared shapes: no foreign
 prefix entries, enablement links, drop-ins, dependency references, or
-unexpected manager units. The examined scope is the user unit directory plus
+unexpected manager units. Socket activation is scanned too: ``[Socket]
+Service=`` names the unit its incoming traffic starts, so a co-installed
+socket naming the selected unit is a foreign dependency edge. The examined
+scope is the user unit directory plus
 the user manager's installed and loaded lists. A non-CRQ unit that names a CRQ
 unit only in memory, transient or generated state, another namespace, or an
 activation created between the scan and the fence is outside this scope and
@@ -91,7 +94,7 @@ CRQ_NAME_RE = re.compile(r"crq-[A-Za-z0-9_.@:-]+")
 DEPENDENCY_RE = re.compile(
     r"(?P<directive>Wants|Requires|Requisite|BindsTo|PartOf|Conflicts|"
     r"WantedBy|RequiredBy|Also|Upholds|OnFailure|OnSuccess|Triggers|"
-    r"TriggersBy|Unit)\s*=\s*(?P<value>.*)")
+    r"TriggersBy|Unit|Service)\s*=\s*(?P<value>.*)")
 UNIT_SUFFIXES = {".service", ".timer", ".path"}
 
 

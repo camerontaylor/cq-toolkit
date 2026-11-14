@@ -574,6 +574,20 @@ class DiscoveryTests(PortFixture):
         self.assertIn("Unit names crq-tick.service", foreign)
         self.assertIn("PartOf names crq-tick.service", foreign)
 
+    def test_co_installed_socket_service_target_is_unsupported(self):
+        declared = self.declare()
+        # ``[Socket] Service=`` selects the unit that incoming traffic
+        # activates, so a differently named co-installed socket is a foreign
+        # activation edge even without the selected unit's name prefix.
+        self.write("ingress.socket",
+                   "[Socket]\nListenStream=127.0.0.1:4440\n"
+                   "Service=crq-tick.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Service names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
     def test_declared_source_may_name_expected_units(self):
         declared = self.declare()
         self.write("crq-tick.timer",
