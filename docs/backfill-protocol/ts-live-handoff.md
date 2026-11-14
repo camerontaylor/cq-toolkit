@@ -7,6 +7,13 @@ preparation and a guarded merge in `src/ops/crq/internal/backfillTransaction.ts`
 The `baseline` route pins the existing ranked inventory under `tick.lock`.
 Do not declare the broader backfill capability or activate a unit on that basis.
 
+The TypeScript baseline deliberately differs from `backfill.py` in two safety
+checks. It retains the content-addressed artifact before writing the baseline
+pin, so a failed retention leaves no pin and can be retried. A successful put
+followed by a failed pin can leave a harmless orphaned artifact. It also refuses
+with exit 3 when the ranked `manifest_id` differs from the queue manifest `id`:
+an interrupted inventory can otherwise mix ranked rows with older provenance.
+
 ## Next implementation seams
 
 - Scheduler: port `usage_context`, `rank4_gate` and `select` in
