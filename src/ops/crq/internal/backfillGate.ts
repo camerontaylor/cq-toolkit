@@ -4,10 +4,14 @@
  * usage refresh, durable state-event outbox and queue writer. An admitted gate
  * returns only after the event and queue save succeed, never a vendor spawn.
  */
-import { JsonNumber, JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
-import { LedgerIntegrityError, LedgerTypeError, ledgerTimestamp } from '../../policy/crq/ledger.js';
-import { admission } from '../../policy/crq/backfillJobs.js';
-import { pyTruthy, pythonValueEqual, withObjectKeys } from '../../policy/crq/queueDoc.js';
+import { JsonNumber, JsonObject, type JsonValue } from '../../../policy/crq/jsonValue.js';
+import {
+  LedgerIntegrityError,
+  LedgerTypeError,
+  ledgerTimestamp,
+} from '../../../policy/crq/ledger.js';
+import { admission } from '../../../policy/crq/backfillJobs.js';
+import { pyTruthy, pythonValueEqual, withObjectKeys } from '../../../policy/crq/queueDoc.js';
 
 const empty = (): JsonObject => new JsonObject([]);
 function object(value: JsonValue | undefined, label: string): JsonObject {

@@ -3,7 +3,7 @@ import {
   rank4Gate,
   usageContext,
   type Rank4GateEffects,
-} from '../../../src/ops/crq/backfillGate.js';
+} from '../../../src/ops/crq/internal/backfillGate.js';
 import { JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
 
 const at = '2026-10-30T00:10:00Z';

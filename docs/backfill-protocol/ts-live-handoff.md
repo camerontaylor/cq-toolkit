@@ -26,7 +26,7 @@ an interrupted inventory can otherwise mix ranked rows with older provenance.
   observation and ordinary-work priority as `rank4_gate` does, and durably save
   the reservation before any vendor spawn. An admission decision alone is not
   an authorization to launch.
-  The injected `src/ops/crq/backfillGate.ts` implements usage context and the
+  The injected `src/ops/crq/internal/backfillGate.ts` implements usage context and the
   rank-four gate, including event-before-queue-save sequencing. Its caller must
   hold `tick.lock` and provide real refresh, event and queue-save effects. These
   bindings, selection and launch are not wired, and the seam is not a live
