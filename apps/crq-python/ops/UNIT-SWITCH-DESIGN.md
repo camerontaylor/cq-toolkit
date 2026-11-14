@@ -136,9 +136,11 @@ unsafe entry target also refuses. Because these paths are host-installed rather
 than owned snapshot paths, the adapter revalidates the declared shape at every
 phase and the regression test asserts the directory, entries and shared target
 are unchanged across a full switch and rollback. The live discovery binding
-shares the same declaration and treats declared entries as opaque, so an
+shares the same declaration, accepts the declared entry names in a real
+directory, and still scans their text for dependency directives, so an
 absolute environment symlink outside the unit directory is not mistaken for a
-dependency escape and the shared file is never read during dependency scanning.
+dependency escape and a drop-in cannot introduce an unaccounted incoming
+activator.
 
 The completion budget is derived from the declared topology rather than a
 fixed default. Preflight requires the prior timer to be active, parses the
