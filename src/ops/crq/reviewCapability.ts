@@ -413,14 +413,6 @@ async function submit(
   const notifyStatus = nextBinding.get('notify_status');
   if (notifyStatus !== undefined) result = withField(result, 'notify', notifyStatus);
   await effects.saveQueue(queue);
-  if (result.get('action') === 'created' && !repeat && hasCycleItems(queue)) {
-    const reused = await probeReusedReceipt(queue, itemId, effects);
-    if (reused !== null) {
-      queue = reused.queue;
-      await effects.saveQueue(queue);
-      result = withField(reviewStatus(queue, requestId), 'action', 'reused');
-    }
-  }
   result = withField(result, 'history', historyCue(excluded));
   return { queue, result };
 }
@@ -593,88 +585,6 @@ async function retainedReceiptIds(
     }
   }
   return verified;
-}
-
-/** The narrow reuse probe: an equivalent completed cycle with a retained receipt. */
-async function probeReusedReceipt(
-  queue: JsonObject,
-  itemId: string,
-  effects: ReviewCapabilityEffects,
-): Promise<{ readonly queue: JsonObject } | null> {
-  const item = findItem(queue, itemId);
-  if (item === null || item.get('kind') !== 'local-review') return null;
-  const wanted = objectOrNull(item.get('identity_inputs'));
-  if (wanted === null) return null;
-  for (const entry of arrayOf(queue.get('items'))) {
-    const candidate = entry instanceof JsonObject ? entry : null;
-    if (candidate === null) continue;
-    if (candidate.get('kind') !== 'open' && candidate.get('kind') !== 'delta') continue;
-    const cycles = arrayOf(candidate.get('cycles'));
-    for (let index = cycles.length - 1; index >= 0; index -= 1) {
-      const cycle = cycles[index];
-      if (!(cycle instanceof JsonObject)) continue;
-      const receiptId = cycle.get('receipt_id');
-      if (typeof receiptId !== 'string') continue;
-      const configDigest = cycle.get('config_digest');
-      if (typeof configDigest !== 'string' || configDigest !== wanted.get('config_digest'))
-        continue;
-      const profile = cycle.get('profile');
-      if (!(profile instanceof JsonObject)) continue;
-      // Stored cycles retain the complete execution profile (including
-      // flags); only adapter and revision are identity-bearing.
-      if (!sameJson(identityProfile(profile), identityProfile(wanted.get('profile')))) continue;
-      if (cycle.get('base') !== wanted.get('base_commit')) continue;
-      if (cycle.get('head') !== wanted.get('head_commit')) continue;
-      try {
-        const data = await effects.readReceipt(receiptId);
-        const parsed = parseJsonValue(new TextDecoder('utf-8', { fatal: true }).decode(data), {
-          duplicates: 'error',
-        });
-        if (!(parsed instanceof JsonObject)) continue;
-        const receipt = ReceiptSchema.safeParse(toPlainJson(parsed));
-        if (!receipt.success) continue;
-        const document = fromPlainJson(parsed) as JsonObject;
-        if (document.get('identity') !== item.get('identity')) continue;
-        if (!sameJson(document.get('identity_inputs'), wanted)) continue;
-        if (document.get('scope_adequate') !== true) continue;
-        const outcome = document.get('outcome');
-        if (outcome !== 'clean' && outcome !== 'findings') continue;
-        const completed = withFields(item, [
-          ['state', 'done'],
-          ['outcome', outcome],
-          ['scope_adequate', true],
-          ['receipt_id', receiptId],
-          ['completed_at', effects.nowIso()],
-          ['identity', document.get('identity') ?? item.get('identity')],
-        ]);
-        return { queue: replaceItem(queue, completed) };
-      } catch {
-        continue;
-      }
-    }
-  }
-  return null;
-}
-
-function identityProfile(value: unknown): JsonObject | null {
-  const profile = objectOrNull(value);
-  if (profile === null) return null;
-  const adapter = profile.get('adapter');
-  const revision = profile.get('revision');
-  if (typeof adapter !== 'string' || typeof revision !== 'string') return null;
-  return new JsonObject([
-    ['adapter', adapter],
-    ['revision', revision],
-  ]);
-}
-
-function hasCycleItems(queue: JsonObject): boolean {
-  return arrayOf(queue.get('items')).some((entry) => {
-    const item = entry instanceof JsonObject ? entry : null;
-    if (item === null) return false;
-    const kind = item.get('kind');
-    return (kind === 'open' || kind === 'delta') && arrayOf(item.get('cycles')).length > 0;
-  });
 }
 
 async function recordPolicyRefusal(

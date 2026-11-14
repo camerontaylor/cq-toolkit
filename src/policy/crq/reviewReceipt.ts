@@ -9,6 +9,7 @@
  */
 import { JsonNumber, JsonObject } from './jsonValue.js';
 import { receiptJsonBytes, receiptJsonDigest, sha256Hex } from './pythonJson.js';
+import { ValueError } from './reviewAdmission.js';
 
 /** `review_receipt.CHUNK_BYTES`. */
 export const REVIEW_CHUNK_BYTES = 3072;
@@ -36,10 +37,10 @@ export function reviewReceiptDigest(document: unknown): string {
  * empty page. The chunk digest lets the client discard a mixed snapshot.
  */
 export function reviewResultChunk(receiptId: string, data: Uint8Array, index: number): JsonObject {
-  if (!/^[0-9a-f]{64}$/.test(receiptId)) throw new Error('invalid receipt id');
-  if (!Number.isInteger(index) || index < 0) throw new Error('invalid result index');
+  if (!/^[0-9a-f]{64}$/.test(receiptId)) throw new ValueError('invalid receipt id');
+  if (!Number.isInteger(index) || index < 0) throw new ValueError('invalid result index');
   const count = Math.max(1, Math.ceil(data.length / REVIEW_CHUNK_BYTES));
-  if (index >= count) throw new Error('result index out of bounds');
+  if (index >= count) throw new ValueError('result index out of bounds');
   const chunk = data.subarray(index * REVIEW_CHUNK_BYTES, (index + 1) * REVIEW_CHUNK_BYTES);
   return new JsonObject([
     ['v', JsonNumber.int(1)],

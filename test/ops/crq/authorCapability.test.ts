@@ -170,6 +170,22 @@ describe('author-v1 pure handler', () => {
     expect(h.state.saves).toBe(saves + 1);
   });
 
+  test('status and fallback answer from the lease without the policy file', async () => {
+    const h = harness();
+    await h.call(frame());
+    // The policy file may disappear after enrollment; the durable lease is
+    // the authority for status and fallback.
+    (h.effects as { readPolicy: AuthorCapabilityEffects['readPolicy'] }).readPolicy = async () => {
+      throw new Error('policy file missing');
+    };
+    const status = await h.call({ v: 1, op: 'status', binding: binding() });
+    expect(status.get('issuer')).toBe('waiting');
+    h.state.now = '2026-11-13T00:06:00Z';
+    const granted = await h.call({ v: 1, op: 'fallback', binding: binding() });
+    expect(granted.get('issuer')).toBe('agent');
+    expect(granted.get('reviewer')).toBe(REVIEWER);
+  });
+
   test('fallback before the deadline is refused and after it grants once', async () => {
     const h = harness();
     await h.call(frame());

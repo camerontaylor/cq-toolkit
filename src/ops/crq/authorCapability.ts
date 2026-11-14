@@ -62,31 +62,33 @@ export async function runAuthorCapability(
   if (input.approvedTarget.length === 0 || request.binding.target !== input.approvedTarget) {
     throw new AuthorRefused('operator-approved author target required');
   }
-  const policy = await effects.readPolicy(input.policyPath);
   const at = effects.nowIso();
   const result = await effects.withQueueLock(async () => {
     let queue = await effects.loadQueue();
-    if (request.v === 2) {
-      const entry = requestEntry(queue, request.binding.requestId);
-      if (entry !== null && !sameBinding(entry, request.binding)) {
-        throw new AuthorRefused('conflicting snapshot request binding');
-      }
-      const lease = newLease(policy, input.reviewer, at);
-      const preview = enrollAuthor(queue, {
-        binding: request.binding,
-        at,
-        lease: null,
-      });
-      if (!preview.created) {
-        if (readLease(preview.item) === null) {
-          throw new AuthorRefused("cannot replace an existing request's lease policy");
-        }
-        assertLeaseReplacement(preview.item, lease);
-      }
-      if (request.snapshot === null) throw new AuthorRefused('invalid snapshot frame');
-      await effects.installSnapshot(request.binding, request.snapshot);
-    }
     if (request.op === 'enroll') {
+      // Status and fallback answer from the persisted lease; only enrollment
+      // needs the operator policy file.
+      const policy = await effects.readPolicy(input.policyPath);
+      if (request.v === 2) {
+        const entry = requestEntry(queue, request.binding.requestId);
+        if (entry !== null && !sameBinding(entry, request.binding)) {
+          throw new AuthorRefused('conflicting snapshot request binding');
+        }
+        const lease = newLease(policy, input.reviewer, at);
+        const preview = enrollAuthor(queue, {
+          binding: request.binding,
+          at,
+          lease: null,
+        });
+        if (!preview.created) {
+          if (readLease(preview.item) === null) {
+            throw new AuthorRefused("cannot replace an existing request's lease policy");
+          }
+          assertLeaseReplacement(preview.item, lease);
+        }
+        if (request.snapshot === null) throw new AuthorRefused('invalid snapshot frame');
+        await effects.installSnapshot(request.binding, request.snapshot);
+      }
       const lease = newLease(policy, input.reviewer, at);
       const enrolled = enrollAuthor(queue, {
         binding: request.binding,

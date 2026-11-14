@@ -4,17 +4,15 @@
 // Git and filesystem state.
 import { describe, expect, test } from 'vitest';
 import { createHash } from 'node:crypto';
-import { JsonObject, parseJsonValue, toPlainJson } from '../../../src/policy/crq/jsonValue.js';
+import { JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
 import { withObjectKeys } from '../../../src/policy/crq/queueDoc.js';
 import { receiptJsonText, sha256Hex } from '../../../src/policy/crq/pythonJson.js';
 import {
   runReviewCapability,
+  safeHandle,
   type ReviewCapabilityEffects,
 } from '../../../src/ops/crq/reviewCapability.js';
-import {
-  ReceiptSchema,
-  canonicalReview,
-} from '../../../src/ops/review/internal/reviewOperation.js';
+import { ValueError } from '../../../src/policy/crq/reviewAdmission.js';
 
 const REPO = 'owner/repo';
 const PRINCIPAL = 'client-a';
@@ -257,73 +255,6 @@ describe('review-v1 pure handler', () => {
     expect(error.get('retryable')).toBe(true);
   });
 
-  test('completed-cycle reuse compares only identity-bearing profile fields', async () => {
-    const seedHarness = harness();
-    const seed = await seedHarness.call(frame({ request_id: 'seed' }));
-    const seedItem = (seedHarness.state.queue.get('items') as JsonObject[]).find(
-      (item) => item.get('id') === seed.get('item'),
-    );
-    if (seedItem === undefined) throw new Error('missing seeded item');
-    const identity = seed.get('identity') as string;
-    const identityInputs = seedItem.get('identity_inputs');
-    if (!(identityInputs instanceof JsonObject)) throw new Error('missing resolved inputs');
-    const receipt = Buffer.from(
-      canonicalReview(
-        ReceiptSchema.parse({
-          v: 1,
-          kind: 'local-review-full-diff',
-          identity,
-          identity_inputs: toPlainJson(identityInputs),
-          profile: {
-            adapter: 'coderabbit-cli',
-            revision: 'committed-full-diff-v1',
-            flags: [],
-          },
-          run_id: 'run-1',
-          outcome: 'clean',
-          scope_adequate: true,
-          findings: [],
-          report: '',
-          observed: {},
-          independent_acceptance: false,
-        }),
-      ),
-      'utf8',
-    );
-    const receiptId = sha256Hex(receipt);
-    const h = harness({ receipt });
-    h.state.queue = object({
-      items: [
-        {
-          id: 'pr-1',
-          kind: 'open',
-          identity,
-          identity_inputs: toPlainJson(identityInputs),
-          cycles: [
-            {
-              receipt_id: receiptId,
-              base: BASE,
-              head: HEAD,
-              config_digest: 'e'.repeat(64),
-              // Stored cycles retain flags; identity is adapter and revision.
-              profile: {
-                adapter: 'coderabbit-cli',
-                revision: 'committed-full-diff-v1',
-                flags: ['--profile', 'chill'],
-              },
-            },
-          ],
-        },
-      ],
-      review_requests: {},
-    });
-
-    const result = await h.call(frame({ request_id: 'req-2' }));
-    expect(result.get('action')).toBe('reused');
-    expect(result.get('state')).toBe('completed');
-    expect(result.get('receipt_id')).toBe(receiptId);
-  });
-
   test('status reads the stored binding and a result chunk is verified off disk', async () => {
     const receipt = Buffer.from(
       receiptJsonText(
@@ -379,6 +310,16 @@ describe('review-v1 pure handler', () => {
     expect((chunk.get('bytes') as { integer: bigint }).integer).toBe(BigInt(receipt.length));
     const data = Buffer.from(chunk.get('data') as string, 'base64');
     expect(createHash('sha256').update(data).digest('hex')).toBe(chunk.get('chunk_sha256'));
+
+    await expect(
+      h.call({ v: 1, op: 'result', request_id: 'req-1', index: 99 }),
+    ).rejects.toMatchObject({ name: 'ValueError', message: 'result index out of bounds' });
+    const mapped = object(
+      JSON.parse(
+        Buffer.from(safeHandle(new ValueError('result index out of bounds'))).toString('utf8'),
+      ),
+    );
+    expect((mapped.get('error') as JsonObject).get('code')).toBe('invalid-input');
   });
 
   test('cancel withdraws the observer and cancels an unobserved pending item', async () => {
