@@ -620,7 +620,9 @@ async function probeReusedReceipt(
         continue;
       const profile = cycle.get('profile');
       if (!(profile instanceof JsonObject)) continue;
-      if (!sameJson(profile, wanted.get('profile'))) continue;
+      // Stored cycles retain the complete execution profile (including
+      // flags); only adapter and revision are identity-bearing.
+      if (!sameJson(identityProfile(profile), identityProfile(wanted.get('profile')))) continue;
       if (cycle.get('base') !== wanted.get('base_commit')) continue;
       if (cycle.get('head') !== wanted.get('head_commit')) continue;
       try {
@@ -652,6 +654,18 @@ async function probeReusedReceipt(
     }
   }
   return null;
+}
+
+function identityProfile(value: unknown): JsonObject | null {
+  const profile = objectOrNull(value);
+  if (profile === null) return null;
+  const adapter = profile.get('adapter');
+  const revision = profile.get('revision');
+  if (typeof adapter !== 'string' || typeof revision !== 'string') return null;
+  return new JsonObject([
+    ['adapter', adapter],
+    ['revision', revision],
+  ]);
 }
 
 function hasCycleItems(queue: JsonObject): boolean {
