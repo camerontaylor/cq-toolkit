@@ -704,6 +704,108 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("cannot resolve a symlink", evidence["error"])
 
+    def test_dangling_cotenant_enablement_links_are_skipped(self):
+        declared = self.declare()
+        stale = self.base / "old-home/systemd/user"
+        stale.mkdir(parents=True)
+        # Enabling a unit creates a link under the target's wants (or
+        # requires) directory. A co-tenant's link can outlive the target it
+        # named while the still-present unit is installed beside it. Ceres
+        # carries exactly this shape for codexbar-quota-cues.timer,
+        # portkey-gateway.service and ntfy-server.service.
+        (self.unit_dir / "timers.target.wants/codexbar-quota-cues.timer"
+         ).symlink_to(stale / "codexbar-quota-cues.timer")
+        self.link("default.target.wants/portkey-gateway.service",
+                  stale / "portkey-gateway.service")
+        self.link("default.target.requires/ntfy-server.service",
+                  stale / "ntfy-server.service")
+        self.write("codexbar-quota-cues.timer",
+                   "[Timer]\nUnit=codexbar-quota-cues.service\n")
+        self.write("portkey-gateway.service",
+                   "[Service]\nExecStart=/bin/true\n")
+        self.write("ntfy-server.service",
+                   "[Service]\nExecStart=/bin/true\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+        self.assertIsNone(evidence["error"])
+
+    def test_dangling_enablement_skip_continues_with_sibling_content(self):
+        declared = self.declare()
+        stale = self.base / "old-home/systemd/user"
+        stale.mkdir(parents=True)
+        # The scan must keep reading the remaining entries after a skipped
+        # stale link, so a cotenant dependency on the selected unit is still
+        # foreign.
+        (self.unit_dir / "timers.target.wants/stale-cotenant.timer"
+         ).symlink_to(stale / "stale-cotenant.timer")
+        self.write("telemetry.service",
+                   "[Unit]\nWants=crq-tick.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Wants names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_dangling_enablement_link_naming_the_selected_unit_is_foreign(
+            self):
+        declared = self.declare()
+        # The link name is the dependency edge systemd records, so it is
+        # foreign even though the target is gone. This must not be skipped
+        # with the benign co-tenant links.
+        self.link("default.target.wants/crq-tick.service",
+                  self.base / "repos/missing/crq-tick.service")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("dangling enablement link names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_dangling_enablement_link_target_naming_a_crq_unit_is_not_skipped(
+            self):
+        declared = self.declare()
+        self.link("default.target.wants/telemetry.service",
+                  self.base / "repos/missing/crq-tick.service")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("dangling enablement link names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_declared_dangling_enablement_link_is_incomplete(self):
+        declared = self.declare()
+        wants = declared[2]
+        wants.unlink()
+        wants.symlink_to(self.base / "repos/missing/crq-tick.timer")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("cannot resolve a symlink", evidence["error"])
+
+    def test_unreadable_enablement_target_is_incomplete(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can read a mode-000 file")
+        declared = self.declare()
+        outside = self.base / "repos/locked-cotenant.timer"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("[Timer]\n")
+        outside.chmod(0o000)
+        self.addCleanup(outside.chmod, 0o600)
+        (self.unit_dir / "timers.target.wants/locked-cotenant.timer"
+         ).symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("cannot read", evidence["error"])
+
+    def test_enablement_symlink_loop_is_incomplete(self):
+        declared = self.declare()
+        self.link("default.target.wants/loop.timer", "loop.timer")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("cannot resolve a symlink", evidence["error"])
+
     def test_unreadable_cotenant_symlink_target_is_incomplete(self):
         if os.geteuid() == 0:
             self.skipTest("root can read a mode-000 file")

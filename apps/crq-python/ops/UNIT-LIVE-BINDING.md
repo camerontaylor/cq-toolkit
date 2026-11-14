@@ -98,14 +98,19 @@ naming an expected unit is still foreign, and systemd continuations are joined
 with `config_parse` semantics (only an odd trailing backslash continues, a
 comment line is ignored, a blank line flushes the accumulated line) so a
 wrapped directive cannot hide a dependency. A `/dev/null` mask is skipped, and
-a symlinked directory or special file is not followed. A
-dangling, looping, unreadable or oversized target, or an unreadable directory
-including a descendant, makes `complete` false rather than silently skipping
-evidence. A read opens non-blocking and re-checks the descriptor as a regular
-file, so a target replaced by a FIFO or other special file between the type
-observation and the read refuses instead of blocking. No ownership or mode
-gate is added for a cotenant target: its text is read-only evidence, not the
-file the switch mutates.
+a symlinked directory or special file is not followed. A stale co-tenant
+`*.wants`/`*.requires` enablement link whose target no longer exists is
+skipped when it is undeclared and neither its link name nor its target name is
+a CRQ unit: the link name is the dependency edge systemd installs, and a dead
+link beside a still-present unit is not evidence about the selected topology.
+A dangling link that names a CRQ unit in either position is foreign, and a
+declared, non-enablement, looping, unreadable or oversized target, or an
+unreadable directory including a descendant, makes `complete` false rather
+than silently skipping evidence. A read opens non-blocking and re-checks the
+descriptor as a regular file, so a target replaced by a FIFO or other special
+file between the type observation and the read refuses instead of blocking.
+No ownership or mode gate is added for a cotenant target: its text is
+read-only evidence, not the file the switch mutates.
 
 The examined scope is the user unit directory and the user manager's installed
 and loaded lists. The following are outside this scope and are not claimed by
