@@ -708,14 +708,24 @@ def prepare(root, overlay, raw, output, tag):
     # Deliberately no start or enable here.
 
 
-def verify_target(root, target, tag):
+def verify_target(root, target, tag=None):
+    """Verify a target SHA is deployable.
+
+    A merged main SHA is deployable on its own: the ancestry check below is
+    the whole rule, and the deploy path names no tag. When ``tag`` is given,
+    it must still be the owner's annotated runner tag peeled to ``target``;
+    that is the historical path and is unchanged. ``None`` means "no tag":
+    the caller has resolved a merged main SHA and the merged-main ancestry
+    check is the proof.
+    """
     if not re.fullmatch(r'[0-9a-f]{40}', target):
         raise ValueError('target must be a full commit SHA')
-    if not re.fullmatch(r'crq-runner/[0-9]{8}-[0-9]+', tag):
-        raise ValueError('runner annotated tag required')
-    ref = 'refs/tags/' + tag
-    if git(root, 'cat-file', '-t', ref) != 'tag' or git(root, 'rev-parse', ref + '^{commit}') != target:
-        raise ValueError('annotated tag does not name target')
+    if tag is not None:
+        if not re.fullmatch(r'crq-runner/[0-9]{8}-[0-9]+', tag):
+            raise ValueError('runner tag must be crq-runner/YYYYMMDD-N')
+        ref = 'refs/tags/' + tag
+        if git(root, 'cat-file', '-t', ref) != 'tag' or git(root, 'rev-parse', ref + '^{commit}') != target:
+            raise ValueError('annotated tag does not name target')
     git(root, 'merge-base', '--is-ancestor', target, 'refs/remotes/origin/main')
     git(root, 'merge-base', '--is-ancestor', POLICY_FLOOR, target)
     if git(root, 'ls-tree', '-r', '--name-only', target, 'apps/crq-python/state/'):
@@ -737,7 +747,7 @@ def verify_target(root, target, tag):
         validate_unit_template(Path(path).name, git(root, 'show', f'{target}:{path}'))
 
 
-def switch(root, overlay, raw, target, tag):
+def switch(root, overlay, raw, target, tag=None):
     root_check(root, overlay)
     verify_target(root, target, tag)
     # Validate the destination config before changing anything.
@@ -797,7 +807,9 @@ def main(argv=None):
     preview.add_argument('--output', required=True, type=Path)
     switching = sub.add_parser('switch')
     switching.add_argument('--sha', required=True)
-    switching.add_argument('--tag', required=True)
+    switching.add_argument('--tag', default=None,
+                           help='optional annotated runner tag; omitted for a '
+                                'merged main SHA')
     legacy = sub.add_parser('legacy-check')
     legacy.add_argument('--legacy-root', required=True, type=Path)
     if argv is None:

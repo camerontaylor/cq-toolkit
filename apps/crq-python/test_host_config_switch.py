@@ -152,6 +152,27 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'track runner state'):
             host.verify_target(self.root, target, 'crq-runner/20261016-5')
 
+    def test_a_merged_main_sha_switches_without_a_tag(self):
+        # A merged main SHA is deployable on its own: verify_target's
+        # origin/main ancestry check is the proof, and switch records no tag.
+        self.rendered()
+        with mock.patch.object(host, 'run', side_effect=self.stopped):
+            host.switch(self.root, self.overlay, self.raw, self.target)
+        self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.target)
+        self.assertEqual(self.command('status', '--porcelain').rstrip(),
+                         ' M ' + host.CONFIG)
+        records = [json.loads(p.read_text())
+                   for p in (self.base / 'records').glob('*.json')]
+        self.assertEqual({r['operation'] for r in records},
+                         {'switch-before', 'switch-render'})
+        self.assertTrue(all(r['tag'] is None for r in records))
+
+    def test_an_unmerged_sha_is_refused_without_a_tag(self):
+        self.command('commit', '--allow-empty', '-qm', 'not on main')
+        unmerged = self.command('rev-parse', 'HEAD').strip()
+        with self.assertRaises(subprocess.CalledProcessError):
+            host.verify_target(self.root, unmerged, None)
+
 
 if __name__ == '__main__':
     unittest.main()
