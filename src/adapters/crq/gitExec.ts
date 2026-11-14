@@ -13,8 +13,8 @@ import { currentEntryEnv } from '../../config/run-env.js';
 
 /** Hard per-call wall-clock bound (`author_snapshot.git` uses 10s). */
 export const GIT_CALL_TIMEOUT_MS = 10_000;
-/** Captured output ceiling for snapshot/history reads. */
-export const GIT_MAX_OUTPUT = 16 * 1024 * 1024;
+/** Captured output ceiling for snapshot/history reads (`author_snapshot.MAX_WIRE`). */
+export const GIT_MAX_OUTPUT = 6 * 1024 * 1024;
 
 export interface GitResult {
   readonly code: number | null;
@@ -68,11 +68,15 @@ export function gitCall(
   const timeoutMs = options.timeoutMs ?? GIT_CALL_TIMEOUT_MS;
   const maxOutput = options.maxOutput ?? GIT_MAX_OUTPUT;
   return new Promise((resolve) => {
-    const child = spawn('git', ['-C', cwd, ...GIT_HARDEN, ...args], {
-      env: childEnv(),
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-    });
+    const child = spawn(
+      'git',
+      ['-C', cwd, '--no-replace-objects', '-c', 'core.hooksPath=/dev/null', ...GIT_HARDEN, ...args],
+      {
+        env: childEnv(),
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      },
+    );
     pool.track(child);
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
