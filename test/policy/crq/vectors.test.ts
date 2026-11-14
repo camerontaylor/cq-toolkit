@@ -15,6 +15,16 @@ import {
 } from '../../../src/policy/crq/pythonJson.js';
 import { parseIso, parseUtc, UtcParseError } from '../../../src/policy/crq/utc.js';
 import { decideCompletion, parseReviewerStream } from '../../../src/ops/dev/coderabbit.js';
+import {
+  ReconcileRefused,
+  checkpointDigest,
+  loadCheckpoint,
+  newCheckpoint,
+  normalizeInterval,
+  normalizePageBudget,
+  recordIdentity,
+} from '../../../src/policy/crq/reconcileCheckpoint.js';
+import { reconcilePage } from '../../../src/policy/crq/reconcileInventory.js';
 
 const GROUP_P = new URL('../../../apps/crq-python/fixtures/group-p/', import.meta.url);
 
@@ -173,6 +183,78 @@ describe.each(loadFamily('classify'))('classify/$name', (vector) => {
   });
 });
 
+function mergedInterval(input: JsonObject): { readonly after: string; readonly before: string } {
+  const interval = valueAt(input, 'interval');
+  if (!(interval instanceof JsonObject)) throw new Error('interval is not an object');
+  return normalizeInterval(interval.get('after'), interval.get('before'));
+}
+
+/**
+ * Replay one `merged-reconcile` vector through the ported producer. The
+ * emitter folds `pages` sequentially through `reconcile_page`, so the replay
+ * does the same rather than inventing a second traversal.
+ */
+function replayMergedReconcile(vector: VectorCase): unknown {
+  const input = vector.input;
+  switch (vector.source) {
+    case 'merged_reconcile.normalize_interval':
+      return toPlainJson(normalizeInterval(input.get('after'), input.get('before')));
+    case 'merged_reconcile.normalize_page_budget':
+      return normalizePageBudget(valueAt(input, 'budget'));
+    case 'merged_reconcile.record_identity':
+      return toPlainJson(recordIdentity(valueAt(input, 'record')));
+    case 'merged_reconcile.checkpoint_digest':
+      return checkpointDigest(valueAt(input, 'checkpoint') as JsonObject);
+    case 'merged_reconcile.new_checkpoint':
+      return toPlainJson(
+        newCheckpoint(
+          mergedInterval(input),
+          normalizePageBudget(valueAt(input, 'page_budget')),
+          stringAt(input, 'repo'),
+          stringAt(input, 'base'),
+        ),
+      );
+    case 'merged_reconcile.reconcile_page': {
+      let checkpoint = valueAt(input, 'checkpoint') as JsonObject;
+      const pages = valueAt(input, 'pages');
+      if (!Array.isArray(pages)) throw new Error('pages is not an array');
+      for (const page of pages) checkpoint = reconcilePage(checkpoint, page);
+      return toPlainJson(checkpoint);
+    }
+    case 'merged_reconcile.load_checkpoint':
+      return toPlainJson(
+        loadCheckpoint(
+          valueAt(input, 'checkpoint'),
+          mergedInterval(input),
+          normalizePageBudget(valueAt(input, 'page_budget')),
+          stringAt(input, 'repo'),
+          stringAt(input, 'base'),
+          valueAt(input, 'allow_complete') === true,
+        ),
+      );
+    default:
+      throw new Error(`unhandled merged-reconcile source ${vector.source}`);
+  }
+}
+
+function captureReconcile(action: () => unknown): Outcome {
+  try {
+    return { ok: true, value: action() };
+  } catch (error) {
+    if (error instanceof ReconcileRefused) return { ok: false, pythonError: 'ReconcileRefused' };
+    throw error;
+  }
+}
+
+describe.each(loadFamily('merged-reconcile'))('merged-reconcile/$name', (vector) => {
+  test(`${vector.source} matches the Python oracle`, () => {
+    assertExpected(
+      vector,
+      captureReconcile(() => replayMergedReconcile(vector)),
+    );
+  });
+});
+
 /**
  * A family WITHOUT a ported implementation. The reason is part of the test so
  * the runner cannot claim broad vector coverage by omission.
@@ -188,7 +270,6 @@ const NOT_APPLICABLE: Readonly<Record<string, string>> = {
     'coverage.utilization_digest is replayed in coverageUtilization.test.ts; coverage_candidate/record_opportunity and the rest are a later group-P port',
   ledger:
     'ledger validators/interval/path/creditable functions are a later group-P port; review_ledger.canonical+digest cases live in canonical.json and ARE replayed above',
-  'merged-reconcile': 'merged-interval math is a later group-P port',
   'promotion-filter':
     'crq.live_items is replayed in tickSchedule.test.ts together with the rest of the tick scheduling policy',
   'tick-schedule':
@@ -200,7 +281,7 @@ const NOT_APPLICABLE: Readonly<Record<string, string>> = {
   usage: 'usage/slot pacing is a later group-P port',
 };
 
-const HANDLED = new Set(['canonical', 'time', 'queue-bytes', 'classify']);
+const HANDLED = new Set(['canonical', 'time', 'queue-bytes', 'classify', 'merged-reconcile']);
 
 test('every group-P family is either replayed or explicitly not applicable', () => {
   const families = readdirSync(GROUP_P)

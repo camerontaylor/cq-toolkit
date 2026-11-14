@@ -26,6 +26,12 @@ import type { runQueueCapability } from './queueCapability.js';
 import type { CommandResult, ReadOnlyStatusEffects } from './readOnlyStatus.js';
 import type { PublishRunResult } from './publishRun.js';
 import type { PublishUnitOutcome, runPublishMain } from './publishUnit.js';
+import type { ReconcileFixPrEffects, runReconcileFixPrs } from './reconcileFixPrs.js';
+import type {
+  ReconcileMergedEffects,
+  ReconcileRouteResult,
+  runReconcileMerged,
+} from './reconcileMerged.js';
 import type { CrqDocuments, StatusWriterEffects } from './statusWriter.js';
 
 /** The A1 read-only route's callable surface, bound to effects by its adapter. */
@@ -93,3 +99,14 @@ export type CrqCoverageRunResult = CoverageRunResult;
  * an orphan module.
  */
 export type { BackfillInventoryEffects, BackfillRouteResult };
+
+/**
+ * The S2 reconcile slice is family surface, not a dispatchable op:
+ * `./reconcileMerged.js` is the operator-live `reconcile-merged` route wired by
+ * `crq.ts`, and `./reconcileFixPrs.js` is the per-run report envelope whose
+ * forge/repair advance effects await the repair slice. The type-only imports
+ * above declare both so the family scan does not classify them as orphans.
+ */
+export type CrqReconcileMerged = typeof runReconcileMerged;
+export type CrqReconcileFixPrs = typeof runReconcileFixPrs;
+export type { ReconcileFixPrEffects, ReconcileMergedEffects, ReconcileRouteResult };
