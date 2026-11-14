@@ -839,6 +839,491 @@
       }
     },
     {
+      "name": "error-code-trailing-newline-is-unknown",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"error\",\"errorType\":\"auth\\n\"}\n",
+        "exit_code": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 1,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "error",
+          "message": "structured failure; see failure provenance",
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "unknown-error"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "unexpected-exit"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "unicode-wait-digits",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"error\",\"errorType\":\"rate_limit\",\"recoverable\":true,\"metadata\":{\"waitTime\":\"\u0662 minutes\"}}\n",
+        "exit_code": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 1,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "rate_limited",
+          "wait_seconds": 120,
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "vendor",
+                "category": "vendor-rate-limited",
+                "code": "rate_limit"
+              }
+            ]
+          },
+          "counted": false,
+          "retry_transient": {
+            "version": 1,
+            "category": "vendor-rate-limited"
+          }
+        }
+      }
+    },
+    {
+      "name": "wait-trailing-newline-is-not-proof",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"error\",\"errorType\":\"rate_limit\",\"recoverable\":true,\"metadata\":{\"waitTime\":\"2 minutes\\n\"}}\n",
+        "exit_code": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 1,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "rate_limited",
+          "wait_seconds": null,
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "vendor",
+                "category": "vendor-rate-limited",
+                "code": "rate_limit"
+              }
+            ]
+          },
+          "counted": false,
+          "retry_transient": {
+            "version": 1,
+            "category": "vendor-rate-limited"
+          }
+        }
+      }
+    },
+    {
+      "name": "vendor-plus-blocking-finding",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"error\",\"errorType\":\"rate_limit\",\"recoverable\":true}\n{\"type\":\"finding\",\"severity\":\"major\"}\n",
+        "exit_code": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 1,
+          "events": 2,
+          "bad_lines": 0,
+          "findings": 1,
+          "severity_counts": {
+            "critical": 0,
+            "major": 1,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "error",
+          "message": "structured failure; see failure provenance",
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "vendor",
+                "category": "vendor-rate-limited",
+                "code": "rate_limit"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "blocking-finding"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "unexpected-exit"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "vendor-plus-unknown-status",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"error\",\"errorType\":\"rate_limit\",\"recoverable\":true}\n{\"type\":\"status\",\"status\":\"budget\"}\n",
+        "exit_code": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 1,
+          "events": 2,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "error",
+          "message": "structured failure; see failure provenance",
+          "failure_provenance": {
+            "version": 1,
+            "complete": false,
+            "causes": [
+              {
+                "source": "vendor",
+                "category": "vendor-rate-limited",
+                "code": "rate_limit"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "budget"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "unexpected-exit"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "vendor-plus-malformed",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"error\",\"errorType\":\"rate_limit\",\"recoverable\":true}\nnope\n",
+        "exit_code": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 1,
+          "events": 1,
+          "bad_lines": 1,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "error",
+          "message": "structured failure; see failure provenance",
+          "failure_provenance": {
+            "version": 1,
+            "complete": false,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "malformed-stream"
+              },
+              {
+                "source": "vendor",
+                "category": "vendor-rate-limited",
+                "code": "rate_limit"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "unexpected-exit"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "transport-plus-terminal",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"error\",\"errorType\":\"transport_error\",\"recoverable\":true}\n{\"type\":\"complete\",\"status\":\"review_completed\"}\n",
+        "exit_code": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 1,
+          "events": 2,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "error",
+          "message": "structured failure; see failure provenance",
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "transport_error"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "conflicting-terminal"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "unexpected-exit"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "unrecoverable-transport",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"error\",\"errorType\":\"transport_error\",\"recoverable\":false}\n",
+        "exit_code": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 1,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "error",
+          "message": "structured failure; see failure provenance",
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "transport_error"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "unexpected-exit"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "mixed-errors",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"error\",\"errorType\":\"rate_limit\",\"recoverable\":true}\n{\"type\":\"error\",\"errorType\":\"auth\"}\n",
+        "exit_code": 1
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 1,
+          "events": 2,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "auth",
+          "message": "structured authentication failure; owner action needed",
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": [
+              {
+                "source": "vendor",
+                "category": "vendor-rate-limited",
+                "code": "rate_limit"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "auth"
+              },
+              {
+                "source": "queue",
+                "category": "unknown",
+                "code": "unexpected-exit"
+              }
+            ]
+          },
+          "counted": false
+        }
+      }
+    },
+    {
+      "name": "reviewed-files-huge-integer",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"complete\",\"status\":\"review_completed\",\"reviewedFiles\":900719925474099312345}\n",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "completed",
+          "reviewed_files": 900719925474099312345,
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": []
+          },
+          "counted": true
+        }
+      }
+    },
+    {
+      "name": "reviewed-files-float",
+      "source": "crq.classify",
+      "input": {
+        "ndjson": "{\"type\":\"complete\",\"status\":\"review_completed\",\"reviewedFiles\":1.0}\n",
+        "exit_code": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": {
+          "exit": 0,
+          "events": 1,
+          "bad_lines": 0,
+          "findings": 0,
+          "severity_counts": {
+            "critical": 0,
+            "major": 0,
+            "minor": 0,
+            "trivial": 0,
+            "info": 0,
+            "none": 0
+          },
+          "outcome": "completed",
+          "reviewed_files": 0,
+          "failure_provenance": {
+            "version": 1,
+            "complete": true,
+            "causes": []
+          },
+          "counted": true
+        }
+      }
+    },
+    {
       "name": "unknown-severity-is-counted-under-its-name",
       "source": "crq.classify",
       "input": {
