@@ -121,14 +121,6 @@ export interface SubjectInventoryRow {
   readonly reason: string;
 }
 
-/** One tree entry: the baseline record a synthetic partition carries. */
-export interface SubjectTreeEntry {
-  readonly path: string;
-  readonly mode: string;
-  readonly kind: string;
-  readonly blob: string;
-}
-
 /** One retained PR member, as `synthetic` reads it. */
 export type SubjectMember = JsonRecordLike;
 

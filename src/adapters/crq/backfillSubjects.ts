@@ -38,7 +38,6 @@ import {
   type SubjectProjection,
   type SubjectProvenance,
   type SubjectSynthetic,
-  type SubjectTreeEntry,
 } from '../../policy/crq/backfillSubjects.js';
 import { LedgerIntegrityError, ledgerPath } from '../../policy/crq/ledger.js';
 import { compareCodePoints } from '../../policy/crq/pythonJson.js';
@@ -49,7 +48,7 @@ import {
   recordHas,
   type JsonRecordLike,
 } from '../../policy/crq/queueDoc.js';
-import type { GitAccountingRepository } from './backfillAccounting.js';
+import type { GitAccountingRepository, TreeEntry } from './backfillAccounting.js';
 import type { RunGit } from './ledgerGit.js';
 
 /** A Git invocation the construction step cannot continue past. */
@@ -120,7 +119,7 @@ function sortedUnique(names: readonly string[]): string[] {
 }
 
 /** The baseline entry shape Python's `Repository.entries` freezes. */
-function plainEntry(entry: SubjectTreeEntry): Record<string, string> {
+function plainEntry(entry: TreeEntry): Record<string, string> {
   return { path: entry.path, mode: entry.mode, kind: entry.kind, blob: entry.blob };
 }
 
