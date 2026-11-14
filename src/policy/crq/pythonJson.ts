@@ -69,6 +69,13 @@ export interface PythonJsonOptions {
   /** Append one `\n` after a top-level value (the atomic queue writer does). */
   trailingNewline?: boolean;
   /**
+   * Python's DEFAULT `json.dumps` separators (`", "` / `": "`) instead of the
+   * compact `("," / ":")`. Python flips to compact only when `indent` or an
+   * explicit `separators=` is given, so `status.md`'s bare `json.dumps`
+   * blocks need this; the atomic writers keep the compact join.
+   */
+  spacedSeparators?: boolean;
+  /**
    * `review_ledger.canonical`'s integer-only domain: refuse floats, integers
    * outside the interoperable JSON range, and non-scalar Unicode.
    */
@@ -152,11 +159,13 @@ interface NormalizedEntry {
 class Encoder {
   private readonly asciiOnly: boolean;
   private readonly integerDomain: boolean;
+  private readonly spaced: boolean;
   private readonly indent: number | null;
 
   constructor(private readonly options: PythonJsonOptions) {
     this.asciiOnly = options.asciiOnly;
     this.integerDomain = options.integerDomain === true;
+    this.spaced = options.spacedSeparators === true;
     this.indent = options.indent ?? null;
   }
 
@@ -222,7 +231,7 @@ class Encoder {
     if (normalized.length === 0) return '{}';
     const encoded = normalized.map(
       ({ key, value }) =>
-        `${this.encodeString(key)}${separator(this.indent)}${this.encode(value, depth + 1)}`,
+        `${this.encodeString(key)}${this.keyValueSeparator()}${this.encode(value, depth + 1)}`,
     );
     return this.wrap('{', '}', encoded, depth);
   }
@@ -249,8 +258,18 @@ class Encoder {
     return this.encodeObject(entries, depth);
   }
 
+  /** `":"` compact, `": "` spaced or indented: Python's separator choice. */
+  private keyValueSeparator(): string {
+    if (this.indent !== null || this.spaced) return ': ';
+    return ':';
+  }
+
   private wrap(open: '{' | '[', close: '}' | ']', items: string[], depth: number): string {
-    if (this.indent === null) return open + items.join(',') + close;
+    if (this.indent === null) {
+      // Python's default `json.dumps` separators put a space after each
+      // comma and colon; every canonical writer here stays compact.
+      return open + items.join(this.spaced ? ', ' : ',') + close;
+    }
     const padding = ' '.repeat(this.indent * (depth + 1));
     const closing = ' '.repeat(this.indent * depth);
     return `${open}\n${padding}${items.join(`,\n${padding}`)}\n${closing}${close}`;
@@ -278,10 +297,6 @@ function normalizeEntries(
     return normalized.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   }
   return normalized.sort((a, b) => compareCodePoints(a.key, b.key));
-}
-
-function separator(indent: number | null): string {
-  return indent === null ? ':' : ': ';
 }
 
 /** Python `str` comparison is by Unicode code point, not UTF-16 code unit. */
