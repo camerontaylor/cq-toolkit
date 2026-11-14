@@ -8,6 +8,38 @@ import {
 } from '../../../src/adapters/crq/backfillSource.js';
 
 describe('backfill adapter', () => {
+  test('live enqueue refuses a disabled rollout without contacting Git or writing queue', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cq-backfill-live-'));
+    try {
+      const queue = '{"items":[],"unknown":1.0}';
+      await writeFile(join(root, 'queue.json'), queue);
+      await writeFile(
+        join(root, 'backfill-rollout.json'),
+        JSON.stringify({
+          enabled: false,
+          operational_ruling: 'yes',
+          no_live_run_verification: 'yes',
+          owner_branch_ruleset_evidence: 'yes',
+          durable_artifact_root: root,
+          runner_identity: 'crq-runner-app',
+          publisher_spool: { ssh_alias: 'user@host', ssh_key: '/key' },
+        }),
+      );
+      const result = await runBackfillUnit(['inventory'], {
+        stateRoot: root,
+        cloneRoot: join(root, 'missing'),
+        runnerRoot: root,
+      });
+      expect(result.exitCode).toBe(3);
+      expect(result.artifact).toEqual({
+        status: 'failed',
+        error: 'operator rollout must be enabled before inventory enqueue',
+      });
+      expect(await readFile(join(root, 'queue.json'), 'utf8')).toBe(queue);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   test('an unimplemented subcommand is refused, never silently replayed', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cq-backfill-adapter-'));
     try {

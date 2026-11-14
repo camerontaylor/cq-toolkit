@@ -91,6 +91,21 @@ it('executes the built CLI dry-run against a queue without changing its bytes', 
   expect(await readFile(join(root, 'state', 'queue.json'), 'utf8')).toBe(queue);
 });
 
+it('writes backfill wrapper JSON with Python sorted keys and separators', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const root = await mkdtemp(join(tmpdir(), 'crq-backfill-output-'));
+  const cli = fileURLToPath(new URL('../../dist/queue-runner/crq.js', import.meta.url));
+  const result = spawnSync(process.execPath, [cli, 'backfill', 'unknown'], {
+    cwd: root,
+    encoding: 'utf8',
+  });
+  expect(result.status).toBe(2);
+  expect(result.stdout).toBe(
+    '{"error": {"exitCode": 2, "kind": "usage", "message": "Unknown or missing backfill subcommand", "subcommand": "backfill"}}\n',
+  );
+});
+
 describe('operator-live command seam (D1)', () => {
   it('keeps the operator-live set separate from the unit live set', async () => {
     const { LIVE_OPERATOR_COMMANDS } = await import('../../src/queue-runner/runner.js');

@@ -98,7 +98,7 @@ export type BackfillRouteResult =
   | { readonly artifact: { readonly status: 'ok'; readonly value: unknown }; readonly exitCode: 0 }
   | {
       readonly artifact: { readonly status: 'failed'; readonly error: string };
-      readonly exitCode: 2 | 3;
+      readonly exitCode: 1 | 2 | 3;
     };
 
 function usage(message: string): BackfillRouteResult {

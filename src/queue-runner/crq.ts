@@ -16,6 +16,7 @@ import {
 } from '../adapters/crq/reviewCapabilityMain.js';
 import { runStatusWriter } from '../adapters/crq/statusWriter.js';
 import { runBackfillUnit } from '../adapters/crq/backfillSource.js';
+import { pythonJsonText } from '../policy/crq/pythonJson.js';
 import { runReconcileMergedUnit } from '../adapters/crq/reconcileSource.js';
 import { MAX_REQUEST_BYTES, runQueueCapabilityMain } from '../adapters/crq/queueCapabilityMain.js';
 import { REVIEW_MAX_BYTES } from '../ops/crq/reviewCapability.js';
@@ -118,7 +119,21 @@ if (command === 'queue-capability') {
       if (liveCommand === 'backfill') {
         // The backfill route reads and writes the same state root the publisher
         // resolves (config.state_root, default `<runner>/state`).
-        return runBackfillUnit(args, { stateRoot: await publisherStateRoot(root) });
+        const roots = await readPublisherRoots(root);
+        if (roots === null) {
+          return {
+            artifact: {
+              status: 'failed' as const,
+              error: 'runner config.json missing, malformed, or has no clone path',
+            },
+            exitCode: 3,
+          };
+        }
+        return runBackfillUnit(args, {
+          stateRoot: roots.stateRoot,
+          cloneRoot: roots.cloneRoot,
+          runnerRoot: root,
+        });
       }
       if (liveCommand === 'reconcile-merged') {
         // Python's `reconcile-merged` takes the tick lock, reads the persisted
@@ -174,7 +189,16 @@ if (command === 'queue-capability') {
       return Promise.resolve({ status: 'failed', error: `${liveCommand} is not implemented` });
     },
   });
-  process.stdout.write(`${JSON.stringify(result.artifact)}\n`);
+  const output =
+    command === 'backfill'
+      ? pythonJsonText(result.artifact, {
+          asciiOnly: true,
+          sortKeys: true,
+          keyOrder: 'code-point',
+          spacedSeparators: true,
+        })
+      : JSON.stringify(result.artifact);
+  process.stdout.write(`${output}\n`);
   process.exitCode = result.exitCode;
 }
 
