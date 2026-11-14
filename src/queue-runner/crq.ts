@@ -8,6 +8,7 @@ import { runRepairPrepare } from '../adapters/crq/repairPreparation.js';
 import { runPublishUnit } from '../adapters/crq/publishSource.js';
 import { runStatusWriter } from '../adapters/crq/statusWriter.js';
 import { runBackfillUnit } from '../adapters/crq/backfillSource.js';
+import { pythonJsonText } from '../policy/crq/pythonJson.js';
 import { MAX_REQUEST_BYTES, runQueueCapabilityMain } from '../adapters/crq/queueCapabilityMain.js';
 import { run } from './runner.js';
 import { planTick } from './tick.js';
@@ -78,7 +79,21 @@ if (command === 'queue-capability') {
       if (liveCommand === 'backfill') {
         // The backfill route reads and writes the same state root the publisher
         // resolves (config.state_root, default `<runner>/state`).
-        return runBackfillUnit(args, { stateRoot: await publisherStateRoot(root) });
+        const roots = await readPublisherRoots(root);
+        if (roots === null) {
+          return {
+            artifact: {
+              status: 'failed' as const,
+              error: 'runner config.json missing, malformed, or has no clone path',
+            },
+            exitCode: 3,
+          };
+        }
+        return runBackfillUnit(args, {
+          stateRoot: roots.stateRoot,
+          cloneRoot: roots.cloneRoot,
+          runnerRoot: root,
+        });
       }
       if (liveCommand === 'status') {
         const parsed = parseStatusArgv(args);
@@ -116,7 +131,11 @@ if (command === 'queue-capability') {
       return Promise.resolve({ status: 'failed', error: `${liveCommand} is not implemented` });
     },
   });
-  process.stdout.write(`${JSON.stringify(result.artifact)}\n`);
+  const output =
+    command === 'backfill'
+      ? pythonJsonText(result.artifact, { asciiOnly: false, sortKeys: false })
+      : JSON.stringify(result.artifact);
+  process.stdout.write(`${output}\n`);
   process.exitCode = result.exitCode;
 }
 
