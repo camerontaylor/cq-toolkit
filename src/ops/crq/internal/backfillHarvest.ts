@@ -1,6 +1,6 @@
-/** Bounded backfill harvest: verified non-counted, non-quota failures only.
+/** Bounded backfill harvest: verified non-counted failures and vendor-only quota.
  * Caller holds tick.lock and supplies independently verified terminal liveness.
- * Counted completion and quota/mixed-provenance paths remain unhandled.
+ * Counted completion and mixed-provenance paths remain unhandled.
  */
 import { JsonNumber, JsonObject, type JsonValue } from '../../../policy/crq/jsonValue.js';
 import {
@@ -11,6 +11,8 @@ import {
 } from '../../../policy/crq/ledger.js';
 import { classify } from '../../../policy/crq/classification.js';
 import { terminalBackfill } from '../../../policy/crq/backfillTerminal.js';
+import { deferTerminalQuota } from '../../../policy/crq/backfillJobs.js';
+import { parseIso, formatUtcMicros } from '../../../policy/crq/utc.js';
 import { pyTruthy, withObjectKeys } from '../../../policy/crq/queueDoc.js';
 
 export interface BackfillRunArtifacts {
@@ -61,6 +63,7 @@ export async function harvestBackfillFailure(
   index: number,
   proof: { readonly runId: string; readonly exitCode: number; readonly terminalVerified: true },
   effects: BackfillFailureHarvestEffects,
+  defaultBackoffMinutes?: number,
 ): Promise<{ queue: JsonObject; status: 'handled' | 'unhandled'; classification: JsonObject }> {
   const item = itemAt(initial, index);
   const itemId = text(item.get('id'), 'item id');
@@ -96,11 +99,35 @@ export async function harvestBackfillFailure(
   const outcome = text(classification.get('outcome'), 'outcome');
   const provenance = obj(classification.get('failure_provenance'), 'failure provenance');
   const causes = array(provenance.get('causes'), 'failure causes');
+  const quota = outcome === 'rate_limited';
   if (
     classification.get('counted') !== false ||
-    outcome === 'rate_limited' ||
-    causes.some((v) => obj(v, 'cause').get('category') === 'vendor-rate-limited')
+    (quota
+      ? provenance.get('complete') !== true ||
+        causes.length === 0 ||
+        causes.some((v) => {
+          const cause = obj(v, 'cause');
+          return (
+            cause.get('source') !== 'vendor' || cause.get('category') !== 'vendor-rate-limited'
+          );
+        })
+      : causes.some((v) => obj(v, 'cause').get('category') === 'vendor-rate-limited'))
   )
+    return { queue: initial, status: 'unhandled', classification };
+  const positiveInt = (value: JsonValue | undefined): number | null => {
+    if (!(value instanceof JsonNumber) || value.kind !== 'int' || value.integer === null)
+      return null;
+    const n = Number(value.integer);
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  };
+  const configured = initial.get('rl_backoff_min');
+  const fallback = pyTruthy(configured) ? positiveInt(configured) : defaultBackoffMinutes;
+  const waitSeconds =
+    positiveInt(classification.get('wait_seconds')) ??
+    (typeof fallback === 'number' && Number.isSafeInteger(fallback) && fallback > 0
+      ? fallback * 60
+      : null);
+  if (quota && (waitSeconds === null || !Number.isSafeInteger(waitSeconds)))
     return { queue: initial, status: 'unhandled', classification };
   await effects.retain(artifacts.review);
   await effects.retain(artifacts.exit);
@@ -114,17 +141,30 @@ export async function harvestBackfillFailure(
     terminalOutcome = 'auth';
   }
   const wait = classification.get('wait_seconds');
-  const retryAfter = pyTruthy(wait) ? exitInt(wait) : 0;
+  const retryAfter = !quota && pyTruthy(wait) ? exitInt(wait) : 0;
   const message = classification.get('message');
-  const result = terminalBackfill(
-    queue,
-    index,
-    endedAt,
-    terminalOutcome,
-    true,
-    retryAfter,
-    typeof message === 'string' && message ? message : terminalOutcome,
-  );
+  const result = quota
+    ? (() => {
+        const ended = parseIso(endedAt);
+        if (ended === null) throw new LedgerIntegrityError('invalid terminal timestamp');
+        const deadline = ended.epochMicros + BigInt(waitSeconds!) * 1000000n;
+        const current = parseIso(queue.get('cooldown_until'));
+        const effective =
+          current !== null && current.epochMicros > deadline ? current.epochMicros : deadline;
+        queue = withObjectKeys(queue, [
+          ['cooldown_until', formatUtcMicros(effective).slice(0, 19) + 'Z'],
+        ]);
+        return deferTerminalQuota(queue, index, endedAt, waitSeconds!);
+      })()
+    : terminalBackfill(
+        queue,
+        index,
+        endedAt,
+        terminalOutcome,
+        true,
+        retryAfter,
+        typeof message === 'string' && message ? message : terminalOutcome,
+      );
   queue = await effects.stateEvent(result.queue, result.item, endedAt, outcome);
   const capacityRuns =
     queue.get('backfill_capacity_runs') === undefined

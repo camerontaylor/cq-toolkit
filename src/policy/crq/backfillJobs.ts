@@ -10,6 +10,7 @@ import {
 import { pyTruthy, pythonValueEqual, withObjectKeys } from './queueDoc.js';
 import { compareCodePoints } from './pythonJson.js';
 import { appendAdmission } from './admissionHistory.js';
+import { parseUtc, UtcInstant } from './utc.js';
 
 const empty = (): JsonObject => new JsonObject([]);
 const required = (object: JsonObject, key: string): JsonValue => {
@@ -95,6 +96,85 @@ export function history(queue: JsonObject, item: JsonObject): BackfillHistoryRes
       ['backfill_scope_failures', scopes],
     ]),
     histories,
+  };
+}
+
+/** Defer a verified terminal quota refusal without refunding its reservation. */
+export function deferTerminalQuota(
+  queue: JsonObject,
+  index: number,
+  at: string,
+  retrySeconds: number,
+): BackfillEnqueueResult {
+  const items = queue.get('items');
+  if (!Array.isArray(items)) throw new LedgerTypeError('items must be an array');
+  const item = object(items[index], 'item');
+  const canonical = (value: JsonValue | undefined): string => {
+    const t = ledgerTimestamp(value);
+    return `${String(t.year).padStart(4, '0')}-${String(t.month).padStart(2, '0')}-${String(t.day).padStart(2, '0')}T${String(t.hour).padStart(2, '0')}:${String(t.minute).padStart(2, '0')}:${String(t.second).padStart(2, '0')}Z`;
+  };
+  const instant = parseUtc(canonical(at));
+  const delay = Number.isSafeInteger(retrySeconds) && retrySeconds > 0 ? retrySeconds : 3600;
+  if (instant === null) throw new LedgerIntegrityError('invalid quota cooldown');
+  const formatted = new UtcInstant(instant.epochMicros + BigInt(delay) * 1000000n).iso;
+  if (!/^\d{4}-/.test(formatted) || formatted.startsWith('0000'))
+    throw new LedgerIntegrityError('quota cooldown overflows datetime');
+  const histories = history(queue, item);
+  const deadlines = [
+    formatted.slice(0, 19) + 'Z',
+    item.get('not_before'),
+    queue.get('cooldown_until'),
+    ...histories.histories.map((row) => row.get('next_eligible_at')),
+  ];
+  const present = deadlines.filter(pyTruthy);
+  const deadline = present
+    .map((value) => ({ value: text(value!, 'deadline'), key: canonical(value) }))
+    .reduce((best, value) => (value.key > best.key ? value : best)).value;
+  const holds = object(queue.get('backfill_reservations') ?? empty(), 'reservations');
+  const attempt = item.get('attempt_id');
+  const hold = typeof attempt === 'string' ? holds.get(attempt) : undefined;
+  if (!pyTruthy(hold) || typeof attempt !== 'string')
+    throw new LedgerIntegrityError('quota refusal requires retained reservation');
+  const family = text(required(item, 'family'), 'family');
+  const families = object(histories.queue.get('backfill_families'), 'families');
+  const scopes = object(histories.queue.get('backfill_scope_failures'), 'scope histories');
+  const updatedItem = withObjectKeys(item, [
+    ['vendor_state', 'terminal'],
+    ['run', null],
+    ['state', 'pending'],
+    ['not_before', deadline],
+    ['last_error', 'verified quota refusal'],
+  ]);
+  return {
+    item: updatedItem,
+    queue: withObjectKeys(histories.queue, [
+      [
+        'backfill_reservations',
+        withObjectKeys(holds, [
+          [attempt, withObjectKeys(object(hold, 'reservation'), [['terminal_at', at]])],
+        ]),
+      ],
+      [
+        'backfill_families',
+        withObjectKeys(families, [
+          [family, withObjectKeys(histories.histories[0]!, [['next_eligible_at', deadline]])],
+        ]),
+      ],
+      [
+        'backfill_scope_failures',
+        withObjectKeys(
+          scopes,
+          units(item).map(
+            (path, i) =>
+              [
+                path,
+                withObjectKeys(histories.histories[i + 1]!, [['next_eligible_at', deadline]]),
+              ] as const,
+          ),
+        ),
+      ],
+      ['items', items.map((row, i) => (i === index ? updatedItem : row))],
+    ]),
   };
 }
 

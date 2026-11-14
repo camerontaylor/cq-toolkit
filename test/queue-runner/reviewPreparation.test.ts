@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { JsonNumber, JsonObject } from '../../src/policy/crq/jsonValue.js';
 import {
+  ReviewCheckoutError,
   prepareOrdinaryReview,
+  prepareAndPersistOrdinaryReview,
   type ReviewPreparationEffects,
 } from '../../src/queue-runner/reviewPreparation.js';
 
@@ -251,5 +253,135 @@ describe('inactive ordinary review preparation', () => {
       'reviewing',
     );
     expect(f.calls).toEqual(['allocate', 'scan', 'checkout', 'meta', 'work', 'save', 'spawn']);
+  });
+});
+
+describe('ordinary preparation caller', () => {
+  it('saves the blocked queue after the event and preserves unknown fields', async () => {
+    const f = fixture();
+    f.effects.scan = async () => {
+      f.calls.push('scan');
+      return { clean: false, denylistHits: 1, gitleaksHits: 0, artifactPath: '/scan' };
+    };
+    const result = await prepareAndPersistOrdinaryReview(
+      f.queue,
+      { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
+      f.effects,
+    );
+    expect(f.calls).toEqual(['allocate', 'scan', 'blocked', 'save']);
+    expect(f.saved()).toBe(result.queue);
+    expect(result.queue.get('unknown')).toBe(f.queue.get('unknown'));
+    expect((result.queue.get('items') as JsonObject[])[0]?.get('unknown')).toBe(
+      (f.queue.get('items') as JsonObject[])[0]?.get('unknown'),
+    );
+  });
+  it('persists a checkout failure after its event without reserving or spawning', async () => {
+    const f = fixture();
+    f.effects.checkout = async () => {
+      f.calls.push('checkout');
+      throw new ReviewCheckoutError('git failed');
+    };
+    const result = await prepareAndPersistOrdinaryReview(
+      f.queue,
+      { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
+      f.effects,
+    );
+    expect(f.calls).toEqual(['allocate', 'scan', 'checkout', 'blocked', 'save']);
+    expect(f.saved()).toBe(result.queue);
+    expect(result.outcome).toBe('blocked');
+    const item = (result.queue.get('items') as JsonObject[])[0]!;
+    expect(item.get('last_error')).toBe('review worktree checkout failed: git failed');
+    expect(item.get('unknown')).toBe((f.queue.get('items') as JsonObject[])[0]?.get('unknown'));
+    expect(result.queue.get('unknown')).toBe(f.queue.get('unknown'));
+  });
+  it('waits for the checkout blocked event before saving', async () => {
+    const f = fixture();
+    f.effects.checkout = async () => {
+      throw new ReviewCheckoutError('git failed');
+    };
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.effects.blocked = async () => {
+      f.calls.push('blocked');
+      entered();
+      await gate;
+    };
+    const pending = prepareAndPersistOrdinaryReview(
+      f.queue,
+      { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
+      f.effects,
+    );
+    await ready;
+    expect(f.calls).toEqual(['allocate', 'scan', 'blocked']);
+    release();
+    await pending;
+    expect(f.calls).toEqual(['allocate', 'scan', 'blocked', 'save']);
+  });
+  it('propagates checkout failure event and save errors without spawning', async () => {
+    for (const fail of ['event', 'save']) {
+      const f = fixture();
+      f.effects.checkout = async () => {
+        f.calls.push('checkout');
+        throw new ReviewCheckoutError('git failed');
+      };
+      if (fail === 'event')
+        f.effects.blocked = async () => {
+          f.calls.push('blocked');
+          throw new Error('event failed');
+        };
+      else
+        f.effects.launch.saveQueue = async () => {
+          f.calls.push('save');
+          throw new Error('save failed');
+        };
+      await expect(
+        prepareAndPersistOrdinaryReview(
+          f.queue,
+          { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
+          f.effects,
+        ),
+      ).rejects.toThrow(`${fail} failed`);
+      expect(f.calls).toEqual(
+        fail === 'event'
+          ? ['allocate', 'scan', 'checkout', 'blocked']
+          : ['allocate', 'scan', 'checkout', 'blocked', 'save'],
+      );
+    }
+  });
+  it('propagates a blocked save failure', async () => {
+    const f = fixture();
+    f.effects.scan = async () => {
+      f.calls.push('scan');
+      return { clean: false, denylistHits: 1, gitleaksHits: 0, artifactPath: '/scan' };
+    };
+    f.effects.launch.saveQueue = async () => {
+      f.calls.push('save');
+      throw new Error('save failed');
+    };
+    await expect(
+      prepareAndPersistOrdinaryReview(
+        f.queue,
+        { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
+        f.effects,
+      ),
+    ).rejects.toThrow('save failed');
+    expect(f.calls).toEqual(['allocate', 'scan', 'blocked', 'save']);
+  });
+  it('returns the launched queue without another save', async () => {
+    const f = fixture();
+    const result = await prepareAndPersistOrdinaryReview(
+      f.queue,
+      { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
+      f.effects,
+    );
+    expect(result.outcome).toBe('launched');
+    expect(f.saved()).toBe(result.queue);
+    expect(f.calls.slice(-3)).toEqual(['spawn', 'save', 'event']);
   });
 });
