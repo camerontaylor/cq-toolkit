@@ -11,7 +11,10 @@ import {
 } from '../../../src/adapters/crq/reviewPreparation.js';
 import { GitPool } from '../../../src/adapters/crq/gitExec.js';
 import { JsonNumber, JsonObject } from '../../../src/policy/crq/jsonValue.js';
-import { prepareOrdinaryReview } from '../../../src/queue-runner/reviewPreparation.js';
+import {
+  prepareOrdinaryReview,
+  ReviewCheckoutError,
+} from '../../../src/queue-runner/reviewPreparation.js';
 const exec = promisify(execFile);
 const roots: string[] = [];
 afterEach(async () => {
@@ -69,7 +72,7 @@ describe('review preparation filesystem', () => {
     expect(await readFile(join(created.path, 'keep'), 'utf8')).toBe('untouched');
     const other = { ...options, runId: 'pr-2-20261114T170000Z' };
     await git('branch', `crq/wt-${other.runId}`, head);
-    await expect(checkoutReviewWorktree(other)).rejects.toThrow('checkout refused');
+    await expect(checkoutReviewWorktree(other)).rejects.toBeInstanceOf(ReviewCheckoutError);
     expect(await git('rev-parse', `crq/wt-${other.runId}`)).toBe(head);
     expect(root).toBeTruthy();
   });
