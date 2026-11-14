@@ -19,12 +19,7 @@
  *   recovers next tick on its own), and neither advances the watermark;
  * - dry runs fetch and inventory normally but never invoke the save callback.
  */
-import {
-  JsonNumber,
-  JsonObject,
-  parseJsonValue,
-  type JsonValue,
-} from './jsonValue.js';
+import { JsonNumber, JsonObject, parseJsonValue, type JsonValue } from './jsonValue.js';
 import { pythonJsonText } from './pythonJson.js';
 import {
   isJsonBool,
@@ -307,8 +302,7 @@ export function parsePage(
 ): { readonly records: JsonValue[]; readonly nextCursor: string | null } {
   if (
     isJsonRecord(value) &&
-    ((recordHas(value, 'incomplete_results') &&
-      recordGet(value, 'incomplete_results') !== false) ||
+    ((recordHas(value, 'incomplete_results') && recordGet(value, 'incomplete_results') !== false) ||
       (recordHas(value, 'truncated') && recordGet(value, 'truncated') !== false) ||
       pyTruthy(recordGet(value, 'errors')))
   ) {
@@ -358,7 +352,10 @@ export async function reconcile(
   const interval = normalizeInterval(options.after, options.before);
   const budget = normalizePageBudget(options.pageBudget);
   const dryRun = options.dryRun ?? false;
-  if (!isJsonBool(dryRun) || (options.checkpointSave !== undefined && typeof options.checkpointSave !== 'function')) {
+  if (
+    !isJsonBool(dryRun) ||
+    (options.checkpointSave !== undefined && typeof options.checkpointSave !== 'function')
+  ) {
     throw new ReconcileRefused('invalid dry-run or checkpoint callback');
   }
   let checkpoint =
@@ -384,7 +381,8 @@ export async function reconcile(
       throw new ReconcileRefused('page cap reached; restart with a smaller repository universe');
     }
     const cursorValue = recordGet(checkpoint, 'cursor');
-    const cursor = cursorValue === null || cursorValue === undefined ? null : (cursorValue as string);
+    const cursor =
+      cursorValue === null || cursorValue === undefined ? null : (cursorValue as string);
     let page: unknown;
     try {
       page = await pageFetch(cursor);
@@ -392,10 +390,7 @@ export async function reconcile(
       if (!(error instanceof PageFailed)) throw error;
       if (!(error instanceof BudgetExhausted)) {
         checkpoint = withObjectKeys(checkpoint, [
-          [
-            'transient_failures',
-            JsonNumber.int(counter(checkpoint, 'transient_failures') + 1n),
-          ],
+          ['transient_failures', JsonNumber.int(counter(checkpoint, 'transient_failures') + 1n)],
         ]);
       }
       const steps = [...arrayAt(checkpoint, 'steps')];
@@ -530,11 +525,7 @@ export async function freezeSource(
     }
     const countValue = jsonIntValue(count);
     total += countValue;
-    if (
-      !Array.isArray(nodes) ||
-      nodes.length > 1 ||
-      (nodes.length > 0) !== (countValue > 0n)
-    ) {
+    if (!Array.isArray(nodes) || nodes.length > 1 || nodes.length > 0 !== countValue > 0n) {
       throw new ReconcileRefused('forge ceiling connection incomplete');
     }
     for (const node of nodes) {
@@ -545,7 +536,8 @@ export async function freezeSource(
       numbers.push(jsonIntValue(number));
     }
   }
-  const ceiling = numbers.length === 0 ? 0n : numbers.reduce((max, value) => (value > max ? value : max));
+  const ceiling =
+    numbers.length === 0 ? 0n : numbers.reduce((max, value) => (value > max ? value : max));
   if (total !== ceiling) {
     throw new ReconcileRefused('ceiling/count mismatch; repository universe not proven');
   }
@@ -610,7 +602,8 @@ export async function numberPage(
       throw new ReconcileRefused('numeric cursor does not bind this source');
     }
   }
-  const stop = ceiling < start + BigInt(NUMBER_WINDOW) - 1n ? ceiling : start + BigInt(NUMBER_WINDOW) - 1n;
+  const stop =
+    ceiling < start + BigInt(NUMBER_WINDOW) - 1n ? ceiling : start + BigInt(NUMBER_WINDOW) - 1n;
   const fields: string[] = [];
   for (let number = start; number <= stop; number += 1n) {
     fields.push(
@@ -619,7 +612,10 @@ export async function numberPage(
         '{ number baseRefName mergedAt headRefOid mergeCommit { oid } } }',
     );
   }
-  const repository = repositoryOf(await forge(queryFor(options.repo, fields.join(' '))), options.repo);
+  const repository = repositoryOf(
+    await forge(queryFor(options.repo, fields.join(' '))),
+    options.repo,
+  );
   if (recordGet(repository, 'id') !== recordGet(source, 'repository_id')) {
     throw new ReconcileRefused('repository was replaced');
   }
@@ -675,7 +671,10 @@ const REPOSITORY = /^[\p{L}\p{N}_.-]+\/[\p{L}\p{N}_.-]+$/u;
 const BASE_QUERY = /^[A-Za-z0-9_.\/-]+$/;
 
 /** `merged_reconcile.reconcile`'s repository/base validation. */
-function validatedQuery(repo: unknown, base: unknown): { readonly repo: string; readonly base: string } {
+function validatedQuery(
+  repo: unknown,
+  base: unknown,
+): { readonly repo: string; readonly base: string } {
   if (
     typeof repo !== 'string' ||
     !REPOSITORY.test(repo) ||
@@ -699,10 +698,7 @@ function queryFor(repo: string, body: string): string {
 }
 
 /** `merged_reconcile._repository`: fail-closed repository identity. */
-function repositoryOf(
-  response: unknown,
-  repo: string,
-): JsonRecordLike {
+function repositoryOf(response: unknown, repo: string): JsonRecordLike {
   if (
     !isJsonRecord(response) ||
     pyTruthy(recordGet(response, 'errors')) ||

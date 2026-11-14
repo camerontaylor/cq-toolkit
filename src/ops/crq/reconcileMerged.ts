@@ -256,19 +256,10 @@ export async function reconcileMerged(
   if (raw instanceof JsonObject && raw.get('complete') === true) {
     // A completed scan revalidates from disk and costs no forge read; the
     // enrollment retry below is idempotent by binding.
-    result = loadCheckpoint(
-      raw,
-      interval,
-      budget,
-      effects.repo,
-      DISCOVERY_SELECTOR,
-      true,
-    );
+    result = loadCheckpoint(raw, interval, budget, effects.repo, DISCOVERY_SELECTOR, true);
   } else {
     if (recent && options.pageFetch === undefined) {
-      throw new ReconcileRefused(
-        'rolling closed-updated-v1 discovery page adapter is not ported',
-      );
+      throw new ReconcileRefused('rolling closed-updated-v1 discovery page adapter is not ported');
     }
     const pageFetch =
       options.pageFetch ??
@@ -376,8 +367,10 @@ export function parseReconcileArgv(argv: readonly string[]): ParsedReconcileArgv
   const after = values.get('--after');
   const before = values.get('--before');
   const pageBudgetText = values.get('--page-budget');
-  if (after === undefined) throw new ReconcileUsageError('the following arguments are required: --after');
-  if (before === undefined) throw new ReconcileUsageError('the following arguments are required: --before');
+  if (after === undefined)
+    throw new ReconcileUsageError('the following arguments are required: --after');
+  if (before === undefined)
+    throw new ReconcileUsageError('the following arguments are required: --before');
   if (pageBudgetText === undefined) {
     throw new ReconcileUsageError('the following arguments are required: --page-budget');
   }

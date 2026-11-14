@@ -12,10 +12,7 @@ import {
   runReconcileMergedUnit,
 } from '../../../src/adapters/crq/reconcileSource.js';
 import { ForgeBudget } from '../../../src/policy/crq/forgeBudget.js';
-import {
-  BudgetExhausted,
-  PageFailed,
-} from '../../../src/policy/crq/reconcileInventory.js';
+import { BudgetExhausted, PageFailed } from '../../../src/policy/crq/reconcileInventory.js';
 import {
   normalizeInterval,
   reconcileWrapperKey,

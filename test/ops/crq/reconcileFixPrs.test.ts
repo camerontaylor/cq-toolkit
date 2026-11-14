@@ -51,7 +51,9 @@ describe('reconcile report projections', () => {
     stats.starved = 7;
     stats.deferred = 2;
     stats.errors.push({ item: 'a', run: 'r1', error: 'RefreshExhausted: debt' });
-    expect(reconcileLogLine(stats)).toBe('reconcile: 12 examined, 3 projected, 7 starved, 2 deferred');
+    expect(reconcileLogLine(stats)).toBe(
+      'reconcile: 12 examined, 3 projected, 7 starved, 2 deferred',
+    );
     const report = reconcileTickReport(stats, '2026-11-14T00:00:00Z');
     const event = report.event as JsonObject;
     expect(event.get('at')).toBe('2026-11-14T00:00:00Z');
@@ -215,7 +217,9 @@ describe('runReconcileFixPrs', () => {
     expect(stats.examined).toBe(8);
     expect(stats.deferred).toBe(8);
     expect(stats.errors).toHaveLength(5);
-    expect(reconcileLogLine(stats)).toBe('reconcile: 8 examined, 0 projected, 0 starved, 8 deferred');
+    expect(reconcileLogLine(stats)).toBe(
+      'reconcile: 8 examined, 0 projected, 0 starved, 8 deferred',
+    );
     expect(reconcileIncompleteEvent(stats)?.get('errors')).toHaveLength(5);
   });
 });

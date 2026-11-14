@@ -83,8 +83,7 @@ export function fileReconcileMergedEffects(
       // With an injected transport the caller owns that bound; the default
       // spawn gets a fresh per-call timeout.
       const run: GhFn =
-        options.gh ??
-        makeGhRunner({ timeoutMs: Math.max(1, Math.ceil(timeoutSeconds * 1000)) });
+        options.gh ?? makeGhRunner({ timeoutMs: Math.max(1, Math.ceil(timeoutSeconds * 1000)) });
       try {
         // `ghJson` parses with JSON.parse; the policy layer needs the lossless
         // model so a Python `1.0` lexeme is never rewritten as `1`.

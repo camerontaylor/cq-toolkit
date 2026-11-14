@@ -198,7 +198,7 @@ function replayMergedReconcile(vector: VectorCase): unknown {
   const input = vector.input;
   switch (vector.source) {
     case 'merged_reconcile.normalize_interval':
-      return toPlainJson(normalizeInterval(input.get('after'), input.get('before')));
+      return normalizeInterval(input.get('after'), input.get('before'));
     case 'merged_reconcile.normalize_page_budget':
       return normalizePageBudget(valueAt(input, 'budget'));
     case 'merged_reconcile.record_identity':

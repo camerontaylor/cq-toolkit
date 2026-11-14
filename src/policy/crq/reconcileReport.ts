@@ -16,12 +16,7 @@
  * same counters, so an operator cannot see one without the other being true.
  */
 import { JsonNumber, JsonObject, type JsonValue } from './jsonValue.js';
-import {
-  isJsonRecord,
-  pyTruthy,
-  recordGet,
-  type JsonRecordLike,
-} from './queueDoc.js';
+import { isJsonRecord, pyTruthy, recordGet, type JsonRecordLike } from './queueDoc.js';
 import { RefreshExhausted } from './forgeBudget.js';
 
 /** `repair_tick.reconcile_fix_prs`'s first-five error cap. */
@@ -60,12 +55,7 @@ function errorText(error: unknown): string {
   return `${typeof error}: ${String(error)}`;
 }
 
-function pushError(
-  stats: ReconcileStats,
-  item: string | null,
-  run: string,
-  error: string,
-): void {
+function pushError(stats: ReconcileStats, item: string | null, run: string, error: string): void {
   if (stats.errors.length >= RECONCILE_ERROR_CAP) return;
   stats.errors.push({ item, run, error });
 }
@@ -166,7 +156,10 @@ export function reconcileTickReport(
     event:
       body === null
         ? null
-        : new JsonObject([['at', atIso], ...body.entries.map(([key, value]) => [key, value] as const)]),
+        : new JsonObject([
+            ['at', atIso],
+            ...body.entries.map(([key, value]) => [key, value] as const),
+          ]),
   };
 }
 

@@ -8,16 +8,9 @@
  * partial reports on transport failure, and durable-write ordering.
  */
 import { describe, expect, test } from 'vitest';
-import {
-  JsonObject,
-  parseJsonValue,
-  toPlainJson,
-} from '../../../src/policy/crq/jsonValue.js';
+import { JsonObject, parseJsonValue, toPlainJson } from '../../../src/policy/crq/jsonValue.js';
 import { fromPlainJson } from '../../../src/policy/crq/queueDoc.js';
-import {
-  PageFailed,
-  BudgetExhausted,
-} from '../../../src/policy/crq/reconcileInventory.js';
+import { PageFailed, BudgetExhausted } from '../../../src/policy/crq/reconcileInventory.js';
 import {
   RECONCILE_METHOD_CLOSED_UPDATED,
   checkpointDigest,
@@ -132,7 +125,7 @@ function harness(options: HarnessOptions = {}): Harness {
       }
       return response(fields);
     },
-    loadQueue: () => fromPlainJson(queuePlain) as JsonObject,
+    loadQueue: async () => fromPlainJson(queuePlain) as JsonObject,
     async saveQueue(queue) {
       saves += 1;
       if (options.failQueueSave === saves) throw new Error('queue write failed');
@@ -159,10 +152,7 @@ function harness(options: HarnessOptions = {}): Harness {
 
 function prs(count: number, mergedAt = '2026-10-02T00:00:00Z'): Map<number, Pr> {
   return new Map(
-    Array.from({ length: count }, (_, index) => [
-      index + 1,
-      { mergedAt } satisfies Pr,
-    ]),
+    Array.from({ length: count }, (_, index) => [index + 1, { mergedAt } satisfies Pr]),
   );
 }
 
@@ -184,6 +174,13 @@ function artifactValue(result: Awaited<ReturnType<typeof runReconcileMerged>>): 
     throw new Error(`expected ok, got ${result.artifact.error}`);
   }
   return result.artifact.value;
+}
+
+function plainRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('expected an object');
+  }
+  return value as Record<string, unknown>;
 }
 
 describe('reconcile-merged route', () => {
@@ -229,7 +226,7 @@ describe('reconcile-merged route', () => {
     const h = harness({ prs: prs(60) });
     const first = await runReconcileMerged(argv(1), h.effects);
     expect(first.exitCode).toBe(0);
-    const firstSummary = toPlainJson(asObject(artifactValue(first)));
+    const firstSummary = plainRecord(toPlainJson(asObject(artifactValue(first))));
     expect(firstSummary['complete']).toBe(false);
     expect(firstSummary['represented']).toBe(50);
     const firstCalls = h.forgeCalls.length;
@@ -239,7 +236,7 @@ describe('reconcile-merged route', () => {
 
     const second = await runReconcileMerged(argv(1), h.effects);
     expect(second.exitCode).toBe(0);
-    const secondSummary = toPlainJson(asObject(artifactValue(second)));
+    const secondSummary = plainRecord(toPlainJson(asObject(artifactValue(second))));
     expect(secondSummary['complete']).toBe(true);
     expect(secondSummary['represented']).toBe(60);
     // No second freeze; exactly the next numeric page.
@@ -251,14 +248,17 @@ describe('reconcile-merged route', () => {
     const h = harness({ prs: prs(2) });
     await runReconcileMerged(argv(), h.effects);
     const calls = h.forgeCalls.length;
-    const saved = h.queue() as { items: unknown[]; merged_current_requests: Record<string, unknown> };
+    const saved = h.queue() as {
+      items: unknown[];
+      merged_current_requests: Record<string, unknown>;
+    };
     const requestIds = Object.keys(saved.merged_current_requests);
 
     // Simulate a queue write that never reached disk after the wrapper did.
     let resetQueue: unknown = { items: [], merged_current_requests: {} };
     const retry: ReconcileMergedEffects = {
       ...h.effects,
-      loadQueue: () => fromPlainJson(resetQueue) as JsonObject,
+      loadQueue: async () => fromPlainJson(resetQueue) as JsonObject,
       saveQueue: async (queue) => {
         resetQueue = toPlainJson(queue);
       },
@@ -266,7 +266,10 @@ describe('reconcile-merged route', () => {
     const result = await runReconcileMerged(argv(), retry);
     expect(result.exitCode).toBe(0);
     expect(h.forgeCalls.length).toBe(calls);
-    const queue = resetQueue as { items: unknown[]; merged_current_requests: Record<string, unknown> };
+    const queue = resetQueue as {
+      items: unknown[];
+      merged_current_requests: Record<string, unknown>;
+    };
     expect(queue.items).toHaveLength(2);
     expect(Object.keys(queue.merged_current_requests)).toEqual(requestIds);
   });
@@ -275,7 +278,7 @@ describe('reconcile-merged route', () => {
     const h = harness({ prs: prs(2) });
     const result = await runReconcileMerged(argv(4, ['--dry-run']), h.effects);
     expect(result.exitCode).toBe(0);
-    expect(toPlainJson(asObject(artifactValue(result)))['complete']).toBe(true);
+    expect(plainRecord(toPlainJson(asObject(artifactValue(result))))['complete']).toBe(true);
     expect(h.wrapperWrites).toBe(0);
     expect(h.saves).toBe(0);
     expect((h.queue() as { items: unknown[] }).items).toEqual([]);
@@ -285,7 +288,7 @@ describe('reconcile-merged route', () => {
     const h = harness({ prs: prs(60), failOnPage: 2 });
     const result = await runReconcileMerged(argv(2), h.effects);
     expect(result.exitCode).toBe(0);
-    const summary = toPlainJson(asObject(artifactValue(result)));
+    const summary = plainRecord(toPlainJson(asObject(artifactValue(result))));
     expect(summary).toMatchObject({
       complete: false,
       represented: 50,
@@ -340,7 +343,8 @@ describe('reconcile-merged route', () => {
     const first = await runReconcileMerged(argv(), h.effects);
     expect(first.exitCode).toBe(3);
     expect(first.artifact.status).toBe('failed');
-    if (first.artifact.status === 'failed') expect(first.artifact.error).toContain('enrollment-save');
+    if (first.artifact.status === 'failed')
+      expect(first.artifact.error).toContain('enrollment-save');
     const calls = h.forgeCalls.length;
     const wrapper = asObject(parseJsonValue(h.wrappers.get(wrapperPath()) as string));
     expect(asObject(wrapper.get('checkpoint')).get('complete')).toBe(true);
@@ -452,9 +456,9 @@ describe('reconcile-merged argv', () => {
   test('missing, unknown and non-integer arguments are usage errors', () => {
     expect(() => parseReconcileArgv(['--after', A])).toThrow(/required/);
     expect(() => parseReconcileArgv(['--after', A, '--before', B])).toThrow(/required/);
-    expect(() =>
-      parseReconcileArgv(['--after', A, '--before', B, '--page-budget', 'x']),
-    ).toThrow(/invalid int/);
+    expect(() => parseReconcileArgv(['--after', A, '--before', B, '--page-budget', 'x'])).toThrow(
+      /invalid int/,
+    );
     expect(() =>
       parseReconcileArgv(['--after', A, '--before', B, '--page-budget', '1', '--wat']),
     ).toThrow(/unrecognized/);

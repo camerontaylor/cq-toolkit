@@ -7,11 +7,7 @@
  * `test_merged_reconcile_*` suite so the TS port cannot silently drift.
  */
 import { describe, expect, test } from 'vitest';
-import {
-  JsonNumber,
-  JsonObject,
-  type JsonValue,
-} from '../../../src/policy/crq/jsonValue.js';
+import { JsonNumber, JsonObject, type JsonValue } from '../../../src/policy/crq/jsonValue.js';
 import { fromPlainJson, withObjectKeys } from '../../../src/policy/crq/queueDoc.js';
 import {
   ForgeBudget,
@@ -88,7 +84,9 @@ class FakeForge {
       pages instanceof Map
         ? pages
         : new Map(
-            Object.entries(pages).map(([key, value]) => [key === 'null' ? null : key, value] as const),
+            Object.entries(pages).map(
+              ([key, value]) => [key === 'null' ? null : key, value] as const,
+            ),
           );
   }
 
@@ -178,12 +176,7 @@ describe('reconcilePage', () => {
   test('records outside the frozen window are counted, never represented', () => {
     const result = reconcilePage(
       checkpoint(),
-      json([
-        pr(1, '2026-09-30T23:59:59Z'),
-        pr(2, '2026-10-28T00:00:00Z'),
-        pr(3, B),
-        pr(4, A),
-      ]),
+      json([pr(1, '2026-09-30T23:59:59Z'), pr(2, '2026-10-28T00:00:00Z'), pr(3, B), pr(4, A)]),
     );
     const inventory = result.get('inventory');
     if (!Array.isArray(inventory)) throw new Error('missing inventory');
@@ -223,14 +216,16 @@ describe('reconcilePage', () => {
         'inventory',
         Array.from(
           { length: MAX_INVENTORY },
-          () => new JsonObject([['disposition', 'unsupported'], ['reason', 'prefilled']]),
+          () =>
+            new JsonObject([
+              ['disposition', 'unsupported'],
+              ['reason', 'prefilled'],
+            ]),
         ),
       ],
       [
         'record_keys',
-        Array.from({ length: MAX_INVENTORY }, (_, index) =>
-          index.toString(16).padStart(64, '0'),
-        ),
+        Array.from({ length: MAX_INVENTORY }, (_, index) => index.toString(16).padStart(64, '0')),
       ],
       ['records_read', JsonNumber.int(MAX_INVENTORY)],
     ]);
@@ -331,7 +326,14 @@ describe('reconcile page loop', () => {
           : cursorPage([pr(2, '2026-10-03T00:00:00Z')]),
       );
     };
-    const result = await reconcile(fetch, options({ checkpointSave: (snapshot) => saves.push(snapshot) }));
+    const result = await reconcile(
+      fetch,
+      options({
+        checkpointSave: (snapshot) => {
+          saves.push(snapshot);
+        },
+      }),
+    );
     expect(result.get('complete')).toBe(true);
     expect(fetches).toEqual([null, 'next']);
     expect(saves.length).toBe(3);
@@ -363,7 +365,9 @@ describe('reconcile page loop', () => {
     const result = await reconcile(new FakeForge({ null: cursorPage([pr(1, B)]) }).fetch, {
       ...options({ pageBudget: 1 }),
       dryRun: true,
-      checkpointSave: (snapshot) => saves.push(snapshot),
+      checkpointSave: (snapshot) => {
+        saves.push(snapshot);
+      },
     });
     expect(result.get('complete')).toBe(true);
     expect(saves).toEqual([]);
@@ -382,7 +386,9 @@ describe('reconcile page loop', () => {
       await expect(
         reconcile(() => Promise.resolve(withFlags), {
           ...options(),
-          checkpointSave: (snapshot) => saves.push(snapshot),
+          checkpointSave: (snapshot) => {
+            saves.push(snapshot);
+          },
         }),
       ).rejects.toThrow(ReconcileRefused);
       expect(saves).toHaveLength(1);
@@ -402,16 +408,13 @@ describe('reconcile page loop', () => {
   });
 
   test('a save callback cannot mutate the checkpoint the loop continues from', async () => {
-    const result = await reconcile(
-      new FakeForge({ null: cursorPage([pr(1, B)], 'next') }).fetch,
-      {
-        ...options({ pageBudget: 1 }),
-        checkpointSave: (snapshot) => {
-          const inventory = snapshot.get('inventory');
-          if (Array.isArray(inventory)) inventory.length = 0;
-        },
+    const result = await reconcile(new FakeForge({ null: cursorPage([pr(1, B)], 'next') }).fetch, {
+      ...options({ pageBudget: 1 }),
+      checkpointSave: (snapshot) => {
+        const inventory = snapshot.get('inventory');
+        if (Array.isArray(inventory)) inventory.length = 0;
       },
-    );
+    });
     expect(number(asObject(result.get('summary')).get('intents'))).toBe(1);
     expect(result.get('cursor')).toBe('next');
   });
@@ -421,15 +424,18 @@ describe('reconcile page loop', () => {
       new FakeForge({ null: cursorPage([pr(1, B)]) }).fetch,
       options({ pageBudget: 1 }),
     );
-    expect(() =>
-      loadCheckpoint(complete, normalizeInterval(A, B), 1, REPO, BASE),
-    ).toThrow(/already complete/);
+    expect(() => loadCheckpoint(complete, normalizeInterval(A, B), 1, REPO, BASE)).toThrow(
+      /already complete/,
+    );
   });
 });
 
 describe('enrollmentPlan', () => {
   async function completed(records: readonly unknown[]): Promise<JsonObject> {
-    return reconcile(new FakeForge({ null: cursorPage(records) }).fetch, options({ pageBudget: 1 }));
+    return reconcile(
+      new FakeForge({ null: cursorPage(records) }).fetch,
+      options({ pageBudget: 1 }),
+    );
   }
 
   test('a complete inventory plans deterministic Q1 bindings and no credit', async () => {
@@ -469,10 +475,7 @@ describe('enrollmentPlan', () => {
   });
 
   test('a conflicting source identity prevents enrollment', async () => {
-    const result = await completed([
-      pr(1, B),
-      pr(1, B, sha(88)),
-    ]);
+    const result = await completed([pr(1, B), pr(1, B, sha(88))]);
     expect(() => enrollmentPlan(result, { repo: REPO })).toThrow(/conflicting/);
   });
 });

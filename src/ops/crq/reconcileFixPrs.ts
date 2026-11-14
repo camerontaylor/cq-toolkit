@@ -83,9 +83,7 @@ export function repairRunEntries(item: JsonRecordLike): readonly ReconcileFixRun
 }
 
 /** Run the reconcile traversal and return its real counts. */
-export async function runReconcileFixPrs(
-  effects: ReconcileFixPrEffects,
-): Promise<ReconcileStats> {
+export async function runReconcileFixPrs(effects: ReconcileFixPrEffects): Promise<ReconcileStats> {
   const stats = newReconcileStats();
   for (const item of effects.items()) {
     const identity = itemIdentity(item);
