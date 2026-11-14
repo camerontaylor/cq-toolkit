@@ -24,8 +24,9 @@
  *   only a regular 100644/100755 entry may be installed into the index;
  * - pins are create-only (`update-ref <ref> <sha> 0000…`); an existing ref with
  *   a different object id is the `immutable subject pin conflict` refusal;
- * - the diff byte gate is the raw length of
- *   `git diff --no-ext-diff --no-textconv --binary <base> <head>`.
+ * - the diff byte gate is the raw length of the
+ *   `--no-ext-diff --no-textconv --binary` patch, written to a temporary file
+ *   so an oversized historical baseline is measured, not buffered.
  */
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
