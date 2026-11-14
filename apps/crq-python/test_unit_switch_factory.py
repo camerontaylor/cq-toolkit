@@ -199,11 +199,12 @@ class FactoryFixture(AdapterFixture):
         settings = {"queue_drain": self.queue, "error_type": dc.Refused,
                     "clock": Ticker(), "sleep": lambda _seconds: None}
         settings.update(options)
+        settings.setdefault("journal_source", self.source)
         return factory.compose(
             root=self.root, unit=unit, runtime=runtime,
             source_sha=self.before, unit_dir=self.unit_dir,
             systemd=self.systemd, identity=LiveIdentity(),
-            journal_source=self.source, **settings)
+            journal_source=settings.pop("journal_source"), **settings)
 
     def records(self):
         return [json.loads(path.read_text())
@@ -476,19 +477,64 @@ class FactorySwitchTests(FactoryFixture):
         self.assertEqual(recovery["phase"], "activation_pending")
         self.assertIn("digest", recovery["reason"])
 
-    def test_reboot_during_completion_is_recovery_required(self):
+    def test_reboot_during_completion_rolls_back_after_a_demonstrated_fence(self):
         self.systemd.after_service_start = \
             lambda _service: self.source.reboot()
         adapter, _selection = self.compose()
         with self.assertRaises(dc.RecoveryRequired) as failure:
             dc.switch_unit(self.effects, adapter, UNIT, "python")
         recovery = failure.exception.recovery
-        self.assertEqual(recovery["outcome"], "recovery_required")
-        self.assertEqual(recovery["phase"], "activation_pending")
+        self.assertEqual(recovery["outcome"], "rolled_back")
+        self.assertEqual(recovery["failed_phase"], "activation_pending")
         self.assertIn("boot ID changed", recovery["reason"])
+        self.assertIsInstance(recovery["fence"], dict)
+        prior = self.node_service(UNIT)
         service = self.unit_dir / UNIT
-        self.assertTrue(service.is_symlink())
-        self.assertEqual(os.readlink(service), "/dev/null")
+        self.assertEqual(service.read_bytes(), prior["bytes"])
+        self.assertEqual(service.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual(self.systemd.active["crq-tick.timer"], "active")
+
+    def test_completion_observation_failure_rolls_back_without_manual_recovery(self):
+        class FailingJournalSource(StructuredJournalSource):
+            def records(self, unit, *, after_monotonic):
+                raise factory.completion_module.CompletionRefused(
+                    "systemd read exceeds the byte bound")
+
+        timer = self.unit_dir / "crq-tick.timer"
+        original_timer = timer.read_bytes()
+        queue_path = self.runner / "state/queue.json"
+        heartbeat_path = self.runner / "state/heartbeat.json"
+        queue_before = queue_path.read_bytes()
+        heartbeat_before = heartbeat_path.read_bytes()
+        adapter, _selection = self.compose(
+            journal_source=FailingJournalSource(self.systemd),
+            require_journal_witness=True)
+        with self.assertRaises(dc.RecoveryRequired) as failure:
+            dc.switch_unit(self.effects, adapter, UNIT, "python")
+        recovery = failure.exception.recovery
+        self.assertEqual(recovery["outcome"], "rolled_back")
+        self.assertEqual(recovery["failed_phase"], "activation_pending")
+        self.assertIn("byte bound", recovery["reason"])
+        self.assertIsInstance(recovery["fence"], dict)
+        record_path = Path(recovery["record_path"])
+        final = json.loads(record_path.read_text())
+        self.assertEqual(final["outcome"], "rolled_back")
+        self.assertEqual(final["phase"], "restore_activation_pending")
+        self.assertEqual(dc._classify_record(record_path)[0], "finished")
+        prior = self.node_service(UNIT)
+        service = self.unit_dir / UNIT
+        self.assertEqual(service.read_bytes(), prior["bytes"])
+        self.assertEqual(service.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual(timer.read_bytes(), original_timer)
+        self.assertEqual(self.systemd.active["crq-tick.timer"], "active")
+        self.assertFalse((self.unit_dir
+                          / ("." + UNIT + ".staged")).exists())
+        self.assertEqual(queue_path.read_bytes(), queue_before)
+        self.assertEqual(heartbeat_path.read_bytes(), heartbeat_before)
+        # The rolled_back record is finished, so a later switch is not blocked.
+        forward, _selection = self.compose()
+        completed = dc.switch_unit(self.effects, forward, UNIT, "python")
+        self.assertEqual(completed["outcome"], "completed")
 
     def test_rollback_and_recovery_restore_the_prior_runtime(self):
         timer = self.unit_dir / "crq-tick.timer"

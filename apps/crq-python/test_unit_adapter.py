@@ -1435,7 +1435,7 @@ class ControllerIntegrationTests(AdapterFixture):
         self.assertEqual(self.records(), [])
         self.assertEqual(_tree(self.unit_dir), before)
 
-    def test_switch_unit_leaves_safe_mask_on_tampered_staged_file(self):
+    def test_switch_unit_rolls_back_a_tampered_staged_file_after_fencing(self):
         current = self.make_adapter()
         install = current.install
 
@@ -1449,20 +1449,19 @@ class ControllerIntegrationTests(AdapterFixture):
             dc.switch_unit(self.effects, current, "crq-tick.service",
                            NODE_RUNTIME)
         recovery = failure.exception.recovery
-        self.assertEqual(recovery["outcome"], "recovery_required")
+        self.assertEqual(recovery["outcome"], "rolled_back")
+        self.assertEqual(recovery["failed_phase"], "activation_pending")
+        self.assertIn("staged target changed", recovery["reason"])
         path = Path(recovery["record_path"])
         service = self.unit_dir / "crq-tick.service"
-        self.assertTrue(service.is_symlink())
-        self.assertEqual(os.readlink(service), "/dev/null")
-        # The controller refuses to auto-restore from activation_pending; the
-        # durable mask remains the safe recovery anchor rather than an unsafe
-        # installed service.
-        with self.assertRaises(dc.RecoveryRequired) as blocked:
+        self.assertEqual(service.read_bytes(),
+                         self.python_service("crq-tick.service")["bytes"])
+        self.assertEqual(service.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual(self.fake.active["crq-tick.timer"], "active")
+        # The rolled_back record is finished; it is not a recovery request.
+        with self.assertRaisesRegex(dc.Refused, "invalid unit recovery"):
             dc.recover_unit(self.effects, self.make_adapter(), path)
-        self.assertIn("activation may have occurred",
-                      str(blocked.exception))
-        self.assertTrue(service.is_symlink())
-        self.assertEqual(os.readlink(service), "/dev/null")
+        self.assertEqual(json.loads(path.read_text())["outcome"], "rolled_back")
 
     def test_recover_unit_restores_prior_service(self):
         current = self.make_adapter()

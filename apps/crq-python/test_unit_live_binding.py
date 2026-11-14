@@ -8,6 +8,7 @@ actual ``deploy_controller.switch_unit`` seam and asserts a discovery refusal
 before any journal or unit mutation.
 """
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -20,6 +21,11 @@ from unittest import mock
 
 from test_deploy_controller_fixtures import ControllerFixture, dc
 from test_unit_adapter import LiveIdentity, _write
+from test_unit_completion import (
+    FakeJournalPopen,
+    journal_text,
+    realistic_journal_record,
+)
 from test_unit_switch_factory import FactoryFixture, UNIT
 
 ROOT = Path(__file__).resolve().parent
@@ -1107,6 +1113,87 @@ class ProductionAdapterTests(FactoryFixture):
 
     def write(self, name, text, mode=0o644):
         _write(self.unit_dir / name, text.encode(), mode)
+
+
+class BoundedJournalSeamTests(FactoryFixture):
+    """The production composition over the real bounded journal source.
+
+    The host boundary is still injected, but ``SystemdJournalSource`` is the
+    production class and ``_read_bounded`` is the production reader. The fake
+    child emits the same record volume as a real 256-record user-journal tail,
+    projected only when the source asks for ``--output-fields``.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.overlay_records = Path(self.overlay["record_dir"])
+        self.overlay_records.mkdir(mode=0o700)
+        self.overlay_records.chmod(0o700)
+        self.effects = dc.Effects(self.root, self.overlay_records)
+
+    def journal_records(self, unit):
+        padding = [realistic_journal_record("%032x" % (index + 1),
+                                            1000 + index,
+                                            boot=self.systemd.boot,
+                                            unit=unit)
+                   for index in range(256)]
+        return padding + list(self.systemd.journal.get(unit, []))
+
+    def responder(self, *, honor_projection):
+        def respond(command):
+            if command[0].endswith("journalctl"):
+                unit = command[command.index("--user-unit") + 1]
+                return journal_text(command, self.journal_records(unit),
+                                    honor_projection=honor_projection)
+            unit = command[command.index("show") + 1]
+            props = [command[index + 1] for index, argument
+                     in enumerate(command) if argument == "--property"]
+            values = self.systemd.show(unit, props)
+            return "".join("%s=%s\n" % (prop, values.get(prop, ""))
+                           for prop in props)
+        return respond
+
+    def compose_live(self, *, honor_projection=True):
+        popen = FakeJournalPopen(
+            self.responder(honor_projection=honor_projection))
+        self.addCleanup(popen.cleanup)
+        source = live.completion.SystemdJournalSource(popen=popen)
+        patch = mock.patch.object(live.completion, "read_boot_id",
+                                  return_value=self.systemd.boot)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return live.production_adapter(
+            self.effects, self.overlay, unit=UNIT, runtime="python",
+            systemd=self.systemd, journal_source=source,
+            identity=LiveIdentity(), queue_drain=self.queue)
+
+    def test_large_realistic_journal_completes_through_the_live_source(self):
+        full = "".join(json.dumps(record) + "\n"
+                       for record in self.journal_records(UNIT))
+        self.assertGreater(len(full.encode()), 256 * 1024)
+        adapter, _selection = self.compose_live()
+        record = dc.switch_unit(self.effects, adapter, UNIT, "python")
+        self.assertEqual(record["outcome"], "completed")
+        self.assertEqual(len(record["completions"]), 2)
+        for evidence in record["completions"]:
+            self.assertEqual(evidence["witness"], "manager")
+            self.assertEqual(evidence["boot_id"], self.systemd.boot)
+
+    def test_unprojected_large_journal_rolls_back_after_the_byte_bound(self):
+        adapter, _selection = self.compose_live(honor_projection=False)
+        with self.assertRaises(dc.RecoveryRequired) as failure:
+            dc.switch_unit(self.effects, adapter, UNIT, "python")
+        recovery = failure.exception.recovery
+        self.assertEqual(recovery["outcome"], "rolled_back")
+        self.assertEqual(recovery["failed_phase"], "activation_pending")
+        self.assertIn("byte bound", recovery["reason"])
+        records = [json.loads(path.read_text()) for path in
+                   sorted(self.effects.record_dir.glob("controller-*.json"))]
+        self.assertEqual(records[-1]["outcome"], "rolled_back")
+        service = self.unit_dir / UNIT
+        self.assertEqual(service.read_bytes(),
+                         self.node_service(UNIT)["bytes"])
+        self.assertEqual(self.systemd.active["crq-tick.timer"], "active")
 
 
 if __name__ == "__main__":

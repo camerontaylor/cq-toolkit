@@ -51,7 +51,10 @@ systemctl --user --no-pager stop|reset-failed|daemon-reload|start <unit>
 It returns `{rc, stdout, stderr, timeout}`. The default runner reuses
 `unit-completion._read_bounded` and `_stop_process`: both streams are drained
 concurrently, each is capped at 256 KiB, the whole read is bounded by the
-timeout, only the owned child is terminated, and non-UTF-8 output refuses.
+timeout, only the owned child is terminated, and non-UTF-8 output refuses. The
+completion provider's own `SystemdJournalSource` reads `journalctl` under the
+same bound and asks `--output-fields` for only the witness fields it consults,
+so a full 256-record tail stays inside the cap without dropping evidence.
 
 `show(unit, props)` emits `systemctl --user --no-pager show <unit>
 --property <p>...` and parses with the existing `parse_show_output`. `jobs()`
@@ -155,8 +158,10 @@ unsupported discovery topology refuses before any journal or unit mutation.
 The binding is reached through the controller CLI's switch and recover paths.
 The recovery wiring tests drive `recover --record` with the real production
 adapter and injected systemd and journal ports over a real temporary unit
-directory and record directory; an `activation_pending` record still stops and
-drains owned work, then refuses with rc 3 and unchanged record bytes. `watchdog`
+directory and record directory; an `activation_pending` record stops and drains
+owned work, then restores the snapshot and reports rc 0 with a `rolled_back`
+record only when the fence demonstrated absence. A fence that cannot be
+demonstrated still refuses with rc 3 and unchanged record bytes. `watchdog`
 is the only Node command the verified artifact currently declares; `tick`,
 `slot`, `publisher`, `backfill` and `repair` still refuse for a Node target. The
 binding does not call `switch_unit` or `recover_unit` itself; the controller
