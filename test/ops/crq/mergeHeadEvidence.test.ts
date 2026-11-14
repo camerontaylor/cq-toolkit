@@ -178,3 +178,47 @@ describe('containment oracle bounds and edge cases', () => {
     await expect(mergeHeadEvidence(input, undo)).rejects.toThrow('source changed');
   });
 });
+
+describe('root publication with real Git', () => {
+  test('compares the complete publication span against the empty tree', async () => {
+    const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { execFileSync } = await import('node:child_process');
+    const { runGitIn } = await import('../../../src/adapters/crq/publishSource.js');
+    const dir = await mkdtemp(join(tmpdir(), 'merge-head-root-'));
+    const run = (...args: string[]): string =>
+      execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
+    const commit = async (content: string, message: string): Promise<string> => {
+      await writeFile(join(dir, 'a.ts'), content);
+      run('add', 'a.ts');
+      run(
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.invalid',
+        'commit',
+        '-qm',
+        message,
+      );
+      return run('rev-parse', 'HEAD');
+    };
+    try {
+      run('init', '-q', '--object-format=sha1');
+      const root = await commit('old\n', 'root');
+      const fixed = await commit('fixed\n', 'fix');
+      const retained = await commit('fixed\nextra\n', 'extra');
+      const reverted = await commit('old\n', 'revert');
+      const input = { published: fixed, commits: [root, fixed], anchors: ['a.ts'] };
+      const git = runGitIn(dir);
+      expect(
+        (await mergeHeadEvidence({ ...input, actual: retained }, git))?.containment?.['a.ts'],
+      ).toMatchObject({ status: 'contained' });
+      await expect(mergeHeadEvidence({ ...input, actual: reverted }, git)).rejects.toThrow(
+        'source changed',
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
