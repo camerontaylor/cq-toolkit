@@ -515,14 +515,17 @@ async function gitleaksScan(parts: readonly string[], pool: GitPool): Promise<vo
   const scanner = makeGitleaksDefaultsScanner({
     async runCommand(command, args, opts) {
       return new Promise((resolve) => {
-        const child = spawn(command, [...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+        const child = spawn(command, [...args], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          detached: process.platform !== 'win32',
+        });
         pool.track(child);
         let stdout = '';
         let stderr = '';
         let timedOut = false;
         const timer = setTimeout(() => {
           timedOut = true;
-          child.kill('SIGKILL');
+          killProcessTree(child);
         }, opts.timeoutMs);
         child.stdout.on('data', (chunk: Buffer) => {
           stdout += chunk.toString('utf8');
