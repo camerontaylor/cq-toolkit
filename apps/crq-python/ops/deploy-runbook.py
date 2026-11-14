@@ -649,6 +649,24 @@ class Run:
         self.recheck_baseline()
         self.phase("drained")
 
+        # deploy_plan runs the controller's unfinished-transaction guard on the
+        # controller record directory before its switch; this runbook bypasses
+        # deploy_plan, so run the same guard here on an Effects bound to the
+        # controller record directory (--record-dir, where deploy-controller.py
+        # journals its controller-*.json records). The Effects above binds this
+        # run's private run directory, which never holds controller records, so
+        # it cannot stand in: a pending checkout deploy/rollback, an unfinished
+        # unit switch or an unresolved recovery record there must refuse this
+        # deploy before the checkout moves.
+        try:
+            self.controller.refuse_unfinished_transactions(
+                self.controller.Effects(self.root,
+                                        Path(self.args.record_dir)))
+        except self.controller.Refused as exc:
+            raise Refused("unfinished controller transaction in the "
+                          "controller record directory; recover it before "
+                          "deploying: " + str(exc)) from exc
+
         self.narrate("switching to " + self.target)
         self.switch_attempted = True
         self.helper.switch(self.root, self.overlay, self.overlay_raw,
