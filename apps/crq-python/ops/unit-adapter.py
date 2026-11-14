@@ -29,6 +29,7 @@ import errno
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shlex
@@ -53,6 +54,11 @@ DURATION_RE = re.compile(r"(?P<value>\d+)(?P<unit>ms|s|min|h)?")
 UNIT_FILE_STATES = {"enabled", "disabled", "static", "masked", "alias",
                     "indirect", "generated", "transient", "bad"}
 RESTORABLE_ACTIVE = {"active", "inactive"}
+# Fixed supported maximum for a calendar-scheduled timer. Its next activation
+# is a scheduled point that can be hours away, not a bounded repeat after the
+# completed invocation. A repeat-after-active/inactive timer derives its own
+# finite maximum from the declared topology instead (see
+# ``_supported_completion_window``).
 DEFAULT_COMPLETION_WINDOW = 1800.0
 COMPLETION_MARGIN_SECONDS = 60
 
@@ -183,6 +189,19 @@ def _valid_runtime(value) -> bool:
         isinstance(value, str) and RUNTIME_RE.fullmatch(value) is not None)
 
 
+def _finite_positive_seconds(value):
+    """Return a finite positive seconds value, or None for refused input."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
 def _valid_template_name(name: str) -> None:
     path = Path(name)
     if path.is_absolute() or ".." in path.parts or not path.parts:
@@ -259,31 +278,44 @@ def _calendar_interval_seconds(text: str) -> int | None:
     return max(gaps) * 60
 
 
-def _timer_bound_seconds(text: str) -> int | None:
-    intervals = []
+def _timer_schedule_seconds(text: str):
+    """Return ``(overall bound, repeat bound)`` for one timer template.
+
+    ``OnUnitActiveSec`` and ``OnUnitInactiveSec`` re-fire relative to the
+    unit's own state, so they bound the gap between the completed invocation
+    and the next one. ``OnCalendar`` fires at scheduled points, which can be
+    arbitrarily far away, so it does not extend the supported completion
+    maximum. ``OnBootSec`` fires once at boot and is not a repeat.
+    """
+    calendar = []
     for value in _section_values(text, "Timer", "OnCalendar"):
         parsed = _calendar_interval_seconds(value)
         if parsed is None:
-            return None
-        intervals.append(parsed)
+            return None, None
+        calendar.append(parsed)
+    repeat = []
     for key in ("OnUnitActiveSec", "OnUnitInactiveSec"):
         for value in _section_values(text, "Timer", key):
             parsed = _duration_seconds(value)
             if parsed is None:
-                return None
-            intervals.append(parsed)
+                return None, None
+            repeat.append(parsed)
     accuracies = []
     for value in _section_values(text, "Timer", "AccuracySec"):
         parsed = _duration_seconds(value)
         if parsed is None:
-            return None
+            return None, None
         accuracies.append(parsed)
     # systemd defaults AccuracySec to 1min when a timer declares none, so a
     # timer without the key can fire up to 60 s after its interval.
     accuracy = max(accuracies, default=60)
+    intervals = calendar + repeat
     if not intervals:
-        return None
-    return max(intervals) + accuracy
+        return None, None
+    overall = max(intervals) + accuracy
+    repeat_bound = (max(repeat) + accuracy
+                    if repeat and not calendar else None)
+    return overall, repeat_bound
 
 
 def _single_value(values: list[str], name: str, default=None):
@@ -357,6 +389,7 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
         timer_wants = None
         path_wants = None
         timer_bound = None
+        timer_repeat = None
         timer_sha256 = None
         blobs = {unit: service_oid}
         declared_templates.add(unit)
@@ -373,7 +406,7 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
                 raise ValueError("timer template names another unit: " + timer)
             timer_wants = wanted[0] + ".wants/" + timer
             _valid_template_name(timer_wants)
-            timer_bound = _timer_bound_seconds(timer_text)
+            timer_bound, timer_repeat = _timer_schedule_seconds(timer_text)
             timer_sha256 = hashlib.sha256(timer_raw).hexdigest()
             blobs[timer] = timer_oid
             declared_templates.add(timer)
@@ -401,6 +434,7 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
             "service_type": service_type,
             "service_timeout_seconds": service_timeout,
             "timer_bound_seconds": timer_bound,
+            "timer_repeat_seconds": timer_repeat,
             "timer_sha256": timer_sha256,
             "blobs": blobs,
         }
@@ -421,8 +455,8 @@ class ProductionUnitAdapter:
     def __init__(self, *, root, source_sha, unit_dir, artifact_root,
                  systemd, identity, capability, completion, queue_drain,
                  error_type=RuntimeError, drain_timeout=30.0,
-                 completion_timeout=DEFAULT_COMPLETION_WINDOW,
-                 max_completion_window=DEFAULT_COMPLETION_WINDOW,
+                 completion_timeout=None,
+                 max_completion_window=None,
                  expected_render=None,
                  clock=time.monotonic, sleep=time.sleep):
         if systemd is None or identity is None or capability is None:
@@ -430,13 +464,17 @@ class ProductionUnitAdapter:
         if expected_render is not None \
                 and not isinstance(expected_render, dict):
             raise TypeError("expected render identity must be an object")
-        if (not isinstance(completion_timeout, (int, float))
-                or isinstance(completion_timeout, bool)
-                or completion_timeout <= 0
-                or not isinstance(max_completion_window, (int, float))
-                or isinstance(max_completion_window, bool)
-                or max_completion_window <= 0):
-            raise TypeError("completion window must be a positive number")
+        if completion_timeout is not None:
+            completion_timeout = _finite_positive_seconds(completion_timeout)
+            if completion_timeout is None:
+                raise TypeError(
+                    "completion window must be a finite positive number")
+        if max_completion_window is not None:
+            max_completion_window = _finite_positive_seconds(
+                max_completion_window)
+            if max_completion_window is None:
+                raise TypeError(
+                    "completion window must be a finite positive number")
         self.root = Path(root)
         self.source_sha = source_sha
         self.unit_dir = Path(unit_dir)
@@ -1155,8 +1193,10 @@ class ProductionUnitAdapter:
         The controller requires two strictly advancing completions after one
         ``start``. The first is produced by the started service; the second is
         produced by the restored timer. An inactive timer cannot produce it
-        without spawning unrecorded work, and a schedule whose worst-case
-        interval exceeds the supported maximum is refused before mutation.
+        without spawning unrecorded work. A calendar schedule whose worst-case
+        interval exceeds the fixed supported maximum is refused before
+        mutation. A repeat-after-active/inactive timer instead derives its
+        finite maximum from its own declared bound.
         """
         timer = inventory[unit]["timer"]
         if timer is None:
@@ -1173,19 +1213,46 @@ class ProductionUnitAdapter:
         service_timeout = inventory[unit]["service_timeout_seconds"]
         if type(service_timeout) is not int or service_timeout <= 0:
             self.refuse("declared service start timeout is not bounded")
-        required = float(service_timeout + bound + COMPLETION_MARGIN_SECONDS)
-        if required > self.max_completion_window:
+        try:
+            required = float(
+                service_timeout + bound + COMPLETION_MARGIN_SECONDS)
+        except OverflowError:
+            self.refuse("declared completion bound exceeds a supported "
+                        "duration; no switch was attempted")
+        supported = self._supported_completion_window(inventory[unit],
+                                                      required)
+        if required > supported:
             self.refuse(
                 "declared completion bound %.0fs exceeds the supported "
                 "maximum %.0fs; no switch was attempted"
-                % (required, self.max_completion_window))
-        if self.completion_timeout < required:
+                % (required, supported))
+        if self.completion_timeout is not None \
+                and self.completion_timeout < required:
             self.refuse(
                 "completion deadline %.0fs is below the declared bound %.0fs; "
                 "no switch was attempted"
                 % (self.completion_timeout, required))
-        self._completion_window = required
-        return required
+        self._completion_window = (self.completion_timeout
+                                   if self.completion_timeout is not None
+                                   else required)
+        return self._completion_window
+
+    def _supported_completion_window(self, entry, required):
+        """The unit's own finite maximum, or the fixed calendar maximum.
+
+        An explicit caller cap always wins. Without one, a timer that re-fires
+        ``OnUnitActiveSec``/``OnUnitInactiveSec`` after the unit's own state
+        change bounds the next invocation by its declared interval, so the
+        whole declared completion path is finite and is its own maximum. A
+        calendar timer's next fire is a scheduled point that can be hours
+        away, so it keeps the fixed supported maximum.
+        """
+        if self.max_completion_window is not None:
+            return self.max_completion_window
+        repeat = entry.get("timer_repeat_seconds")
+        if type(repeat) is int and repeat > 0:
+            return required
+        return DEFAULT_COMPLETION_WINDOW
 
     def _service_start_timeout(self, unit, inventory):
         declared = inventory[unit]["service_timeout_seconds"]
