@@ -218,6 +218,44 @@ function pythonShapedQueue(f: Fixture): JsonObject {
 }
 
 describe('review-v1 forced command over the TypeScript client', () => {
+  test('a deadline returns the typed retryable unavailable response', async () => {
+    let out = '';
+    let err = '';
+    let terminated = false;
+    const code = await runReviewCapabilityMain({
+      argv: [],
+      env: (name) => {
+        if (name === 'SSH_ORIGINAL_COMMAND') return 'review-v1';
+        if (name === 'CRQ_QUEUE_POLICY') return '/policy.json';
+        if (name === 'CRQ_QUEUE_PRINCIPAL') return PRINCIPAL;
+        return undefined;
+      },
+      readStdin: () => new Promise<Uint8Array>(() => undefined),
+      stdout: (bytes) => {
+        out += Buffer.from(bytes).toString('utf8');
+      },
+      stderr: (message) => {
+        err += message;
+      },
+      terminate: () => {
+        terminated = true;
+      },
+      root: '/tmp/missing-review-root',
+      deadlineMs: 5,
+    });
+    expect(code).toBe(0);
+    expect(terminated).toBe(true);
+    expect(err).toBe('');
+    expect(JSON.parse(out)).toMatchObject({
+      v: 1,
+      error: {
+        code: 'unavailable',
+        retryable: true,
+        message: 'review worker outcome unavailable; retry the same request id',
+      },
+    });
+  });
+
   test('capabilities, submit, replay, status and cancel round-trip', async () => {
     const f = await fixture();
     const client = makeReviewClient(f.transport);

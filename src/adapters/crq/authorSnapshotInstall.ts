@@ -17,7 +17,7 @@
 import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { JsonObject } from '../../policy/crq/jsonValue.js';
 import {
   makeGitleaksDefaultsScanner,
@@ -72,7 +72,7 @@ export async function installAuthorSnapshot(input: InstallSnapshotInput): Promis
   )
     .toString('utf8')
     .trim();
-  const alternates = join(clone, objectDir);
+  const alternates = resolve(clone, objectDir);
   const quarantine = await mkdtemp(join(tmpdir(), 'cq-author-snapshot-'));
   try {
     await gitOk(input.pool, quarantine, ['init', '--bare', '--template=', '-q']);

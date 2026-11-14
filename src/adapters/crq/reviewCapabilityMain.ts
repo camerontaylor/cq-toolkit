@@ -11,7 +11,12 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { JsonObject } from '../../policy/crq/jsonValue.js';
 import { parseJsonValue } from '../../policy/crq/jsonValue.js';
-import { runReviewCapability, safeHandle } from '../../ops/crq/reviewCapability.js';
+import {
+  encode,
+  errorDocument,
+  runReviewCapability,
+  safeHandle,
+} from '../../ops/crq/reviewCapability.js';
 import { createReviewEffects } from './reviewEffects.js';
 import { GitPool } from './gitExec.js';
 
@@ -32,6 +37,7 @@ export interface ReviewCapabilityMainDeps {
 }
 
 const REFUSAL = 'review capability refused; no permission';
+const DEADLINE = -1;
 
 function envRequired(deps: ReviewCapabilityMainDeps, name: string): string {
   const value = deps.env(name);
@@ -51,10 +57,6 @@ export async function runReviewCapabilityMain(deps: ReviewCapabilityMainDeps): P
   const pool = deps.pool ?? new GitPool();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let expired = false;
-  const terminate = (): void => {
-    pool.killAll();
-    deps.terminate();
-  };
   const work = async (): Promise<number> => {
     if (deps.argv.length !== 0) return refuse(deps);
     const command = deps.env('SSH_ORIGINAL_COMMAND');
@@ -90,13 +92,30 @@ export async function runReviewCapabilityMain(deps: ReviewCapabilityMainDeps): P
   const deadline = new Promise<number>((resolve) => {
     timer = setTimeout(() => {
       expired = true;
-      resolve(refuse(deps));
+      resolve(DEADLINE);
     }, deps.deadlineMs ?? REVIEW_DEADLINE_MS);
     timer.unref?.();
   });
   try {
     const code = await Promise.race([work().catch(() => refuse(deps)), deadline]);
-    if (expired) terminate();
+    if (expired || code === DEADLINE) {
+      // A deadline cannot prove whether a write committed. Answer with the
+      // typed retryable outcome before terminating outstanding Git work, so
+      // the client keeps the same request id instead of seeing exit 2.
+      pool.killAll();
+      deps.stdout(
+        encode(
+          errorDocument(
+            'unavailable',
+            'review worker outcome unavailable; retry the same request id',
+            true,
+          ),
+        ),
+      );
+      await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
+      deps.terminate();
+      return 0;
+    }
     return code;
   } finally {
     if (timer !== undefined) clearTimeout(timer);
