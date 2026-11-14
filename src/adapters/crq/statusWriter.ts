@@ -139,6 +139,10 @@ export function fileStatusWriterEffects(
         now,
       };
       const core = await readSummaryCore(coreEffects);
+      // publishSummary's merged_current and repair digest hash raw bytes, so
+      // they need the lossless queue (the same one readSummaryCore keeps);
+      // the materialised document cannot recover `5.0` from a collapsed `5`.
+      const publishQueue = documents.queueExact ?? documents.queue;
       const effects = await summaryStateEffects(
         { stateRoot: roots.stateRoot, xdgStateHome: roots.xdgStateHome, home: roots.home },
         runCommand,
@@ -148,7 +152,7 @@ export function fileStatusWriterEffects(
       );
       const outcome = await publishSummaryAtomically(
         core.value,
-        documents.queue,
+        publishQueue,
         documents.config,
         scheduleProbeForPublish(documents),
         effects,

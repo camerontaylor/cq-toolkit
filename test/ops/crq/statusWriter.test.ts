@@ -232,10 +232,14 @@ describe('jsonScalar and Python spellings', () => {
 
 describe('status.json projection', () => {
   it('carries the exact historical key order with repo last', () => {
+    // tier: 1 is load-bearing: the decorated markdown column for this row is
+    // `open t1`, so asserting the raw `open` actually distinguishes the raw
+    // kind from the decorated spelling the table renders.
     const docs = documents([
       {
         id: 'pr1',
         kind: 'open',
+        tier: 1,
         state: 'pending',
         cycles: [],
         prior_cycles: 0,
@@ -247,6 +251,7 @@ describe('status.json projection', () => {
     const items = docs.queue['items'] as Record<string, unknown>[];
     const rows = [{ row: statusRow(items[0]!, 'owner/main'), raw: items[0]! }];
     const status = statusJsonDocument(docs, ISO_NOW, triage, rows);
+    expect(statusRow(items[0]!, 'owner/main').kind).toBe('open t1');
     expect(Object.keys(status)).toEqual([
       'generated_at',
       'paused',

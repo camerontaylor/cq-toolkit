@@ -3,13 +3,35 @@
 // the injected command port, the summary publish through the shared A1
 // pipeline, and the summary_failed event isolation.
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Buffer } from 'node:buffer';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runStatusWriter } from '../../../src/adapters/crq/statusWriter.js';
 import { fileStatusWriterEffects } from '../../../src/adapters/crq/statusWriter.js';
 import { resolveComposerSeams } from '../../../src/adapters/crq/statusWriter.js';
+import {
+  JsonObject,
+  parseJsonValue,
+  toPlainJson,
+  toPlainJsonRetainingNumbers,
+  type JsonValue,
+} from '../../../src/policy/crq/jsonValue.js';
+import { mergedCurrent } from '../../../src/policy/crq/statusSummary.js';
 import { parseCrqState } from '../../../src/policy/crq/state.js';
+import { pythonJsonText } from '../../../src/policy/crq/pythonJson.js';
+
+/** JSON text for a lossless queue record: numbers render through JsonNumber. */
+function toQueueText(queue: Record<string, unknown>): string {
+  return pythonJsonText(queue, {
+    asciiOnly: true,
+    sortKeys: false,
+    keyOrder: 'insertion',
+    indent: 2,
+    trailingNewline: true,
+  });
+}
 
 const NOW = 1_763_000_000;
 const NOW_STAMP = '2025-11-13T02:13:20Z';
@@ -117,6 +139,10 @@ describe('runStatusWriter over a real state root', () => {
       expect(items).toHaveLength(1);
       expect(items[0]!['id']).toBe('pr101');
       expect(items[0]!['repo']).toBe('owner/main');
+      // RAW kind: the table row above renders the decorated `open t1`, but
+      // Python copies `i.get("kind")` into status.json, so the projection
+      // must publish `open` (fails with `open t1` on the pre-fix code).
+      expect(items[0]!['kind']).toBe('open');
     }
   });
 
@@ -212,7 +238,9 @@ describe('runStatusWriter over a real state root', () => {
     const roots = await makeRoots();
     await seedRoots(roots.stateRoot, roots.runnerRoot);
     await mkdir(join(roots.stateRoot, 'repair', 'inbox'), { recursive: true });
-    await writeFile(join(roots.stateRoot, 'repair', 'inbox', 'crq-fix.json'), 'job-bytes');
+    // Valid JSON: the digest parses the job content inline (a plain string
+    // would be the producer's JSONDecodeError refusal, a different path).
+    await writeFile(join(roots.stateRoot, 'repair', 'inbox', 'crq-fix.json'), '{"job": "crq-fix"}');
     const queue = {
       ...QUEUE,
       items: [
@@ -233,7 +261,19 @@ describe('runStatusWriter over a real state root', () => {
     const entry = seams.inbox.entries.find((candidate) => candidate.stem === 'crq-fix');
     expect(entry).toBeDefined();
     expect(entry?.jobBytes).not.toBeNull();
-    expect(new TextDecoder().decode(entry?.jobBytes ?? new Uint8Array())).toBe('job-bytes');
+    expect(new TextDecoder().decode(entry?.jobBytes ?? new Uint8Array())).toBe(
+      '{"job": "crq-fix"}',
+    );
+
+    // The production wiring regression: runStatusWriter itself (not the
+    // caller) must feed the lenient queue read to resolveComposerSeams, so
+    // a queued repair job captures its job bytes without any explicit queue
+    // argument. Without the wiring, repairDigest's job-content gate raises
+    // where Python opens the file inline, and the whole run refuses.
+    await runStatusWriter(roots, { write: () => {}, error: () => {} }, () => NOW);
+    const markdown = await readFile(join(roots.stateRoot, 'status.md'), 'utf8');
+    expect(markdown).toContain('## Repair and utilization');
+    expect(markdown).not.toContain('OSError');
   });
 
   it('keeps the composer seam reads on the state root', async () => {
@@ -242,5 +282,88 @@ describe('runStatusWriter over a real state root', () => {
     const seams = await resolveComposerSeams(roots.stateRoot);
     expect(seams.triageRows).toEqual([]);
     expect(seams.inbox.entries).toEqual([]);
+  });
+
+  it('publishes float-lexeme queue paths as verified, not unverified', async () => {
+    // Round-2 P2 regression: the summary pipeline hashes capture paths
+    // through receiptJsonDigest, which distinguishes the float lexeme 5.0
+    // from the int 5. The materialised documents.queue collapses that
+    // lexeme, so the adapter must feed publishSummary the exact queue
+    // (documents.queueExact). Without it a valid receipt reads
+    // `unverified` where Python publishes `proven_terminal`.
+    const fixture = parseJsonValue(
+      readFileSync('apps/crq-python/fixtures/a1-status/passthrough-receipt.json', 'utf8'),
+    );
+    if (!(fixture instanceof JsonObject)) throw new Error('fixture root is not an object');
+    const cases = fixture.get('cases');
+    if (!Array.isArray(cases) || !(cases[0] instanceof JsonObject)) {
+      throw new Error('fixture has no case 0');
+    }
+    const input = cases[0].get('input');
+    if (!(input instanceof JsonObject)) throw new Error('fixture case has no input');
+    // The exact queue: every number lossless (the fixture loader's pattern).
+    const exactQueue = toPlainJsonRetainingNumbers(input.get('queue') as JsonValue) as Record<
+      string,
+      unknown
+    >;
+    // The same queue fully materialised: `bytes: 5.0` collapsed to `5`.
+    const materializedQueue = toPlainJson(input.get('queue') as JsonValue) as Record<
+      string,
+      unknown
+    >;
+    const receiptBytes = new Map<string, Uint8Array>();
+    const encoded = input.get('receipt_bytes');
+    if (encoded instanceof JsonObject) {
+      for (const [id, base64] of encoded.entries) {
+        if (typeof base64 !== 'string') throw new Error('receipt bytes not text');
+        receiptBytes.set(id, new Uint8Array(Buffer.from(base64, 'base64')));
+      }
+    }
+    const readReceipt = (receiptId: string) => receiptBytes.get(receiptId) ?? null;
+
+    const roots = await makeRoots();
+    await seedRoots(roots.stateRoot, roots.runnerRoot);
+    await mkdir(join(roots.stateRoot, 'receipts'), { recursive: true });
+    for (const [id, bytes] of receiptBytes) {
+      await writeFile(join(roots.stateRoot, 'receipts', `${id}.json`), bytes);
+    }
+    // The fixture's items-only receipt document rides on the seeded queue;
+    // the fixture item carries no id (the vector strips it), so give it the
+    // id Python's live queue rows always carry. Re-encode losslessly:
+    // JsonNumber bigint values are not valid JSON.stringify input, but the
+    // fixture only carries safe integers (subject.pr = 1).
+    const mergedItem = (exactQueue['items'] as Record<string, unknown>[]).map((item, index) => ({
+      ...item,
+      id: `mc${index}`,
+      order: index,
+    }));
+    const queue = {
+      ...QUEUE,
+      items: [...QUEUE.items, ...mergedItem],
+    };
+    const queueText = toQueueText(queue);
+    await writeFile(join(roots.stateRoot, 'queue.json'), queueText);
+
+    const stderr: string[] = [];
+    const exitCode = await runStatusWriter(
+      roots,
+      { write: () => {}, error: (text) => stderr.push(text) },
+      () => NOW,
+    );
+    expect(`exit=${exitCode} stderr=${stderr.join('').slice(0, 240)}`).toBe('exit=0 stderr=');
+    const summaryText = await readFile(join(roots.xdgStateHome, 'crq', 'summary.json'), 'utf8');
+    const counts = /"receipts":\{[^}]*\}/.exec(summaryText)?.[0] ?? 'missing';
+    // With the exact queue the receipt verifies (Python parity). The
+    // materialised-only probe below pins the divergence this guards
+    // against: identical bytes, collapsed `5.0` -> `5` -> `unverified`.
+    expect(counts).toContain('"proven_terminal":1');
+    expect(counts).toContain('"unverified":0');
+
+    // Pin the mechanism: identical bytes, materialised queue only -> the
+    // scope digest differs from the retained receipt capture and the item
+    // falls to `unverified`.
+    const materializedView = mergedCurrent(materializedQueue, readReceipt);
+    expect(materializedView.receipts['proven_terminal']).toBe(0);
+    expect(materializedView.receipts['unverified']).toBe(1);
   });
 });

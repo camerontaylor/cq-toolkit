@@ -46,7 +46,11 @@ import {
   pythonEqual,
   type CrqRecord,
 } from '../../policy/crq/receiptIdentity.js';
-import { parseCrqState } from '../../policy/crq/state.js';
+import {
+  parseCrqState,
+  stateValueWithNumbers,
+  type StateValuePath,
+} from '../../policy/crq/state.js';
 import { utilizationDigest } from '../../policy/crq/coverageUtilization.js';
 import { mergedCurrent, type MergedCurrentView } from '../../policy/crq/statusSummary.js';
 import { parseIso, parseUtc, formatUtcMicros } from '../../policy/crq/utc.js';
@@ -149,10 +153,20 @@ export interface StatusWriterEffects {
 
 /** The validated queue/config pair the route works from. */
 export interface CrqDocuments {
-  /** The exact lossless queue document. */
+  /** The schema-validated queue document, numbers materialised. */
   readonly queue: CrqRecord;
   /** The exact lossless config document. */
   readonly config: CrqRecord;
+  /**
+   * The queue's receipt-relevant subtrees with every number retained as the
+   * lossless value (`items`, `usage`, discovery blocks, as in the A1 read
+   * route's `EXACT_QUEUE_SUBTREES`): `toPlainJson` collapses `3` vs `3.0`,
+   * and `merged_current`'s scope digests hash those lexemes, so a valid
+   * receipt would read `unverified` from a fully materialised document.
+   * Optional for direct route callers; the receipt-bearing consumers fall
+   * back to the materialised queue without it.
+   */
+  readonly queueExact?: CrqRecord;
   /**
    * The live `paseo schedule inspect` outcome this invocation probed (the
    * `schedule` dict Python passes to `status_summary.publish`). Undefined
@@ -882,6 +896,45 @@ export function validateQueue(text: string): CrqRecord {
 }
 
 /**
+ * The queue's receipt-relevant subtrees: the same split the A1 read route
+ * keeps (readOnlyStatus `EXACT_QUEUE_SUBTREES`). The materialised document
+ * drives the route's arithmetic, but `merged_current` hashes the capture
+ * paths through `receiptJsonDigest`, which distinguishes the int `5` from
+ * the float-lexeme `5.0` Python wrote, so those subtrees keep every number
+ * lossless or a valid receipt publishes as `unverified`.
+ */
+const EXACT_QUEUE_SUBTREES: readonly StateValuePath[] = [
+  ['items'],
+  ['usage'],
+  ['merged_reconcile'],
+  ['merged_discovery'],
+  ['push_discovery'],
+];
+
+/** The lossless projection of a validated queue for the receipt-bearing path. */
+export function validateQueueExact(text: string): CrqRecord {
+  const accepted = parseCrqState('queue.schema.json', text);
+  if (!accepted.ok) {
+    throw new StatusWriterError(
+      `queue.json rejected by policy/crq/queue.schema.json: ${
+        accepted.issues.join('; ') || 'no detail'
+      }`,
+      'ValueError',
+    );
+  }
+  let exact: unknown;
+  try {
+    exact = stateValueWithNumbers(accepted, [], { subtrees: EXACT_QUEUE_SUBTREES });
+  } catch (error) {
+    throw new StatusWriterError(messageOf(error), 'ValueError');
+  }
+  if (!isRecord(exact)) {
+    throw new StatusWriterError('queue.json is not an object', 'TypeError');
+  }
+  return exact;
+}
+
+/**
  * The config object: `parseJsonValue` with duplicate-key-last semantics (the
  * producer's `json.loads`), then the plain-object gate. No schema exists for
  * config.json, so none is invented here.
@@ -939,6 +992,10 @@ export async function writeStatus(effects: StatusWriterEffects): Promise<StatusW
   const documents: CrqDocuments = {
     queue: validateQueue(queueText),
     config: parseConfig(configText),
+    // The receipt-bearing consumers (the banner's merged_current and the
+    // published summary's core) need the lossless subtrees: the materialised
+    // numbers would collapse the float lexemes the scope digests hash.
+    queueExact: validateQueueExact(queueText),
   };
   return writeStatusForDocuments(effects, documents);
 }
@@ -978,7 +1035,7 @@ export async function writeStatusForDocuments(
 
   const recent = recentEventLines(await readEventsOrEmpty(effects));
   const triage = findingTriage(effects.composerSeams.triageRows);
-  const mergedCurrentView = await mergedCurrentWithReceipts(queue, effects);
+  const mergedCurrentView = await mergedCurrentWithReceipts(documents.queueExact ?? queue, effects);
   const repair = repairDigest(queue, effects.composerSeams.inbox, now);
   const utilization = utilizationAtConfigCap(queue, config, now);
   const repairUtilization = { repair, utilization };
