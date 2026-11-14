@@ -589,13 +589,13 @@
     },
     "1771": {
       "tuple": {
-        "head": "9d97f92eb62f98ad1228a5603d18c553d595d8af",
+        "head": "f4e489552d7c1bab1fa63a75a7d69f305ef4245e",
         "base": "1503bc658f57ac2bd2b03951ee3a4449645e164d",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-14T10:48:00.550Z",
+          "observedAt": "2026-11-14T11:02:05.732Z",
           "by": "self-merge-prs:observe"
         }
       ]
@@ -609,6 +609,58 @@
       "observations": [
         {
           "observedAt": "2026-11-14T10:47:20.311Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "1773": {
+      "tuple": {
+        "head": "b3b00a27c71f8a77af3486d8149ec81dfed28751",
+        "base": "b5f5aa2c27ceeecae8344cca8ee278ab50925965",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-14T11:02:05.732Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "1774": {
+      "tuple": {
+        "head": "fa5fcbb81c6d62c2bbdec54172880d37a737f89e",
+        "base": "b5f5aa2c27ceeecae8344cca8ee278ab50925965",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-14T11:02:05.732Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "1775": {
+      "tuple": {
+        "head": "bb798ddcc1b87b67b9e101b815e357ee6af8d4a6",
+        "base": "b5f5aa2c27ceeecae8344cca8ee278ab50925965",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-14T11:02:05.732Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "1776": {
+      "tuple": {
+        "head": "05ea810165c8629a3140a6b654f0300268bde22d",
+        "base": "b5f5aa2c27ceeecae8344cca8ee278ab50925965",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-14T11:02:05.732Z",
           "by": "self-merge-prs:observe"
         }
       ]
