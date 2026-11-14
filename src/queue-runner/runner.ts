@@ -70,7 +70,15 @@ export interface Plan {
   value: unknown;
 }
 export type Planner = (command: string, args: string[]) => Promise<Plan>;
-export type LiveDispatch = (command: string, args: string[]) => Promise<OpResult<unknown>>;
+/**
+ * A live unit's result, optionally carrying an explicit exit code. Python's
+ * publisher exits 1 when only the coverage refresh failed: publication
+ * succeeded and is still reported, but the unit must be visibly unhealthy.
+ * The runner strips `exitCode` from the artifact it prints.
+ */
+export type LiveDispatchResult = OpResult<unknown> & { readonly exitCode?: number };
+
+export type LiveDispatch = (command: string, args: string[]) => Promise<LiveDispatchResult>;
 export type OperatorLiveDispatch = (command: string, args: string[]) => Promise<RunnerResult>;
 
 /**
@@ -158,7 +166,11 @@ export async function run(
       };
     try {
       const result = await options.live(command, []);
-      return { artifact: result, exitCode: result.status === 'ok' ? 0 : 1 };
+      const { exitCode, ...artifact } = result;
+      return {
+        artifact,
+        exitCode: exitCode ?? (result.status === 'ok' ? 0 : 1),
+      };
     } catch (error) {
       return {
         artifact: {

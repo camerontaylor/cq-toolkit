@@ -19,9 +19,12 @@
 // `./<base>` rule): readOnlyStatus.ts and statusWriter.ts are deliberately
 // surface, not orphan op modules.
 import type { OpRegistryEntry } from '../../kernel/types.js';
+import type { CoverageRunResult, runCoverageRefresh } from './coverageRefresh.js';
+import type { drainNotifications } from './notifyDrain.js';
 import type { runQueueCapability } from './queueCapability.js';
 import type { CommandResult, ReadOnlyStatusEffects } from './readOnlyStatus.js';
 import type { PublishRunResult } from './publishRun.js';
+import type { PublishUnitOutcome, runPublishMain } from './publishUnit.js';
 import type { CrqDocuments, StatusWriterEffects } from './statusWriter.js';
 
 /** The A1 read-only route's callable surface, bound to effects by its adapter. */
@@ -58,5 +61,25 @@ export const registry: OpRegistryEntry[] = [];
  * live runner (queue-runner LIVE_UNIT_COMMANDS -> crq.ts -> publishSource),
  * not a JSON-dispatchable op: the type-only import above declares it so the
  * family scan does not classify it as an orphan module.
+ *
+ * The same holds for the unit's two daemon phases: `./notifyDrain.js` (the
+ * `review-notify.lock` delivery drain) and `./coverageRefresh.js` (the
+ * off-lock `backfill/coverage.lock` snapshot refresher), composed by
+ * `./publishUnit.js`, which is Python's `backfill_publisher.main`.
  */
 export type { PublishRunResult };
+
+/** The notification drain's callable surface, bound by publishSource. */
+export type CrqNotifyDrain = typeof drainNotifications;
+
+/** The coverage refresher's callable surface, bound by publishSource. */
+export type CrqCoverageRefresh = typeof runCoverageRefresh;
+
+/** The composed publisher unit's callable surface, bound by publishSource. */
+export type CrqPublishUnitMain = typeof runPublishMain;
+
+/** The composed publisher unit's JSON outcome (Python's `main` result). */
+export type CrqPublishUnitOutcome = PublishUnitOutcome;
+
+/** The coverage refresher's JSON result (`{"head", "targets"}`). */
+export type CrqCoverageRunResult = CoverageRunResult;

@@ -1,4 +1,6 @@
 {
+  "test/adapters/crq/coverageSource.test.ts": "pure",
+  "test/adapters/crq/notifyCoverageVectors.test.ts": "process",
   "test/adapters/crq/repairPreparation.test.ts": "process",
   "test/adapters/crq/repairScan.test.ts": "pure",
   "test/adapters/crq/summarySource.test.ts": "process",
@@ -322,6 +324,7 @@
   "test/ops/crq/findingInbox.test.ts": "pure",
   "test/ops/crq/outbox.test.ts": "pure",
   "test/ops/crq/publisher.test.ts": "pure",
+  "test/ops/crq/publishUnit.test.ts": "pure",
   "test/ops/crq/repairDispatch.test.ts": "process",
   "test/ops/crq/repairHarvestExecution.test.ts": "pure",
   "test/ops/crq/repairPrepare.test.ts": "pure",

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { OpResult } from '../kernel/types.js';
 import { runRepairPrepare } from '../adapters/crq/repairPreparation.js';
@@ -100,7 +100,7 @@ if (command === 'queue-capability') {
         exitCode: 1,
       });
     },
-    live: async (liveCommand): Promise<OpResult<unknown>> => {
+    live: async (liveCommand): Promise<OpResult<unknown> & { readonly exitCode?: number }> => {
       if (liveCommand === 'watchdog') {
         return runWatchdog(stateHome === undefined ? {} : { stateHome });
       }
@@ -115,57 +115,29 @@ if (command === 'queue-capability') {
 }
 
 /**
- * The publisher roots from the runner's own `config.json` (Python's CONFIG:
- * `clone` and the rollout's `durable_artifact_root`), resolved against the
- * runner root. Absent or unusable config is a refusal, never a guess.
- */
-async function isRolloutAbsent(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return false;
-  } catch (error) {
-    // Only a missing file is "absent". EACCES/EIO and friends must surface:
-    // reporting a disabled success for an inaccessible rollout would stop a
-    // live publisher with exit 0.
-    if (
-      error instanceof Error &&
-      'code' in error &&
-      (error as { code?: string }).code === 'ENOENT'
-    ) {
-      return true;
-    }
-    throw error;
-  }
-}
-
-/**
  * The `publish` live unit over the runner's own roots. Mirrors Python's
  * crq.py: the CONFIG load (config.json with a clone path) happens before
- * `runtime.settings`, so a missing, malformed or clone-less config.json is a
- * failure (Python raises at import), never a disabled outcome. A usable
- * configuration whose rollout file is genuinely absent is Python's
- * `settings() -> None` (disabled); a present-but-incomplete rollout is the
- * IntegrityError failure path. An unusable config must not let
- * publisherStateRoot's default guess stand in for the configured state root.
+ * `runtime.settings`, so a missing or clone-less config.json is a failure
+ * (Python raises at import), never a disabled outcome. Every other outcome is
+ * the unit's own: an absent rollout reports `publication`/`coverage` disabled
+ * (exit 0) after the notification drain, a present-but-incomplete rollout is
+ * the integrity refusal, and a failed coverage refresh exits 1 while still
+ * reporting the publication result.
  */
-export async function publishLiveCommand(runnerRoot: string): Promise<OpResult<unknown>> {
+export async function publishLiveCommand(
+  runnerRoot: string,
+): Promise<OpResult<unknown> & { readonly exitCode?: number }> {
   if (!(await readRunnerConfig(runnerRoot))) {
     return {
       status: 'failed',
       error: 'runner config.json missing, malformed, or has no clone path',
     };
   }
-  const stateRoot = await publisherStateRoot(runnerRoot);
   const validated = await readPublisherRoots(runnerRoot);
   if (validated === null) {
-    if (await isRolloutAbsent(join(stateRoot, 'backfill-rollout.json'))) {
-      // A usable configuration whose rollout file is missing: Python's
-      // settings() returns None, run() reports {"publication":"disabled"}.
-      return { status: 'ok', value: { publication: 'disabled' } };
-    }
     return {
       status: 'failed',
-      error: 'backfill rollout prerequisites incomplete',
+      error: 'runner config.json missing, malformed, or has no clone path',
     };
   }
   return runPublishUnit(validated);
@@ -210,7 +182,13 @@ export async function publisherStateRoot(runnerRoot: string): Promise<string> {
   return join(runnerRoot, 'state');
 }
 
-/** The publisher roots from the runner's own config.json, state_root resolved. */
+/**
+ * The publisher roots from the runner's own config.json, state_root resolved.
+ * Returns null only when config.json is unusable (missing, malformed or without
+ * a clone path): Python raises at import in that case. The durable artifact
+ * root is null when the rollout file is absent or unusable, which the unit
+ * itself reports as `disabled` or as the integrity refusal.
+ */
 export async function readPublisherRoots(runnerRoot: string) {
   let config: unknown;
   try {
@@ -233,7 +211,7 @@ export async function readPublisherRoots(runnerRoot: string) {
   const stateRoot = isAbsolute(configuredStateRoot)
     ? configuredStateRoot
     : resolve(runnerRoot, configuredStateRoot);
-  let durableArtifactRoot: string;
+  let durableArtifactRoot: string | null = null;
   try {
     const rollout = JSON.parse(
       await readFile(join(stateRoot, 'backfill-rollout.json'), 'utf8'),
@@ -242,12 +220,11 @@ export async function readPublisherRoots(runnerRoot: string) {
       typeof rollout === 'object' && rollout !== null && !Array.isArray(rollout)
         ? (rollout as Record<string, unknown>)['durable_artifact_root']
         : undefined;
-    if (typeof durable !== 'string' || durable === '') return null;
-    durableArtifactRoot = durable;
+    if (typeof durable === 'string' && durable !== '') durableArtifactRoot = durable;
   } catch {
-    return null;
+    durableArtifactRoot = null;
   }
-  return { stateRoot, cloneRoot: clone, durableArtifactRoot };
+  return { stateRoot, cloneRoot: clone, runnerRoot, durableArtifactRoot };
 }
 
 /** `crq status [--state-root <dir>]` argv; the runner root is the cwd. */

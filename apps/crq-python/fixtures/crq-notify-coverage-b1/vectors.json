@@ -1,0 +1,4906 @@
+{
+  "clock": "2026-11-14T12:00:00+00:00",
+  "families": [
+    {
+      "cases": [
+        {
+          "expect": {
+            "destination": {
+              "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+              "paseo_host": "alpha"
+            },
+            "validation": {
+              "state": "pending"
+            },
+            "validation_optional": {
+              "state": "not-required"
+            }
+          },
+          "input": {
+            "config": {
+              "error_backoff_min": 5,
+              "notify": {
+                "hosts": [
+                  "alpha",
+                  "beta",
+                  null
+                ]
+              }
+            },
+            "value": {
+              "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+              "paseo_host": "alpha"
+            }
+          },
+          "name": "listed-host",
+          "source": "review_notify.destination/review_notify.validation"
+        },
+        {
+          "expect": {
+            "destination": {
+              "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+              "paseo_host": null
+            },
+            "validation": {
+              "state": "pending"
+            },
+            "validation_optional": {
+              "state": "not-required"
+            }
+          },
+          "input": {
+            "config": {
+              "error_backoff_min": 5,
+              "notify": {
+                "hosts": [
+                  "alpha",
+                  "beta",
+                  null
+                ]
+              }
+            },
+            "value": {
+              "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+              "paseo_host": null
+            }
+          },
+          "name": "listed-null-host",
+          "source": "review_notify.destination/review_notify.validation"
+        },
+        {
+          "expect": {
+            "destination": null,
+            "validation": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            },
+            "validation_optional": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            }
+          },
+          "input": {
+            "config": {
+              "error_backoff_min": 5,
+              "notify": {
+                "hosts": [
+                  "alpha",
+                  "beta",
+                  null
+                ]
+              }
+            },
+            "value": {
+              "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+              "paseo_host": "gamma"
+            }
+          },
+          "name": "unlisted-host",
+          "source": "review_notify.destination/review_notify.validation"
+        },
+        {
+          "expect": {
+            "destination": null,
+            "validation": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            },
+            "validation_optional": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            }
+          },
+          "input": {
+            "config": {
+              "error_backoff_min": 5,
+              "notify": {
+                "hosts": [
+                  "alpha",
+                  "beta",
+                  null
+                ]
+              }
+            },
+            "value": {
+              "extra": 1,
+              "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+              "paseo_host": "alpha"
+            }
+          },
+          "name": "extra-key",
+          "source": "review_notify.destination/review_notify.validation"
+        },
+        {
+          "expect": {
+            "destination": null,
+            "validation": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            },
+            "validation_optional": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            }
+          },
+          "input": {
+            "config": {
+              "error_backoff_min": 5,
+              "notify": {
+                "hosts": [
+                  "alpha",
+                  "beta",
+                  null
+                ]
+              }
+            },
+            "value": {
+              "paseo_agent_id": "11111111-2222-3333-4444-555555555555"
+            }
+          },
+          "name": "missing-host-key",
+          "source": "review_notify.destination/review_notify.validation"
+        },
+        {
+          "expect": {
+            "destination": {
+              "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+              "paseo_host": "alpha"
+            },
+            "validation": {
+              "state": "pending"
+            },
+            "validation_optional": {
+              "state": "not-required"
+            }
+          },
+          "input": {
+            "config": {
+              "error_backoff_min": 5,
+              "notify": {
+                "hosts": [
+                  "alpha",
+                  "beta",
+                  null
+                ]
+              }
+            },
+            "value": {
+              "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+              "paseo_host": "alpha"
+            }
+          },
+          "name": "uppercase-agent",
+          "source": "review_notify.destination/review_notify.validation"
+        },
+        {
+          "expect": {
+            "destination": null,
+            "validation": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            },
+            "validation_optional": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            }
+          },
+          "input": {
+            "config": {
+              "notify": {
+                "hosts": [
+                  "-alpha"
+                ]
+              }
+            },
+            "value": {
+              "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+              "paseo_host": "-alpha"
+            }
+          },
+          "name": "dash-host",
+          "source": "review_notify.destination/review_notify.validation"
+        },
+        {
+          "expect": {
+            "destination": null,
+            "validation": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            },
+            "validation_optional": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            }
+          },
+          "input": {
+            "config": {
+              "notify": {
+                "hosts": [
+                  "alpha beta"
+                ]
+              }
+            },
+            "value": {
+              "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+              "paseo_host": "alpha beta"
+            }
+          },
+          "name": "bad-host-grammar",
+          "source": "review_notify.destination/review_notify.validation"
+        },
+        {
+          "expect": {
+            "destination": null,
+            "validation": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            },
+            "validation_optional": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            }
+          },
+          "input": {
+            "config": {
+              "notify": []
+            },
+            "value": {
+              "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+              "paseo_host": "alpha"
+            }
+          },
+          "name": "malformed-section",
+          "source": "review_notify.destination/review_notify.validation"
+        },
+        {
+          "expect": {
+            "destination": null,
+            "validation": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            },
+            "validation_optional": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            }
+          },
+          "input": {
+            "config": {
+              "notify": {
+                "hosts": "alpha"
+              }
+            },
+            "value": {
+              "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+              "paseo_host": "alpha"
+            }
+          },
+          "name": "hosts-not-list",
+          "source": "review_notify.destination/review_notify.validation"
+        },
+        {
+          "expect": {
+            "destination": null,
+            "validation": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            },
+            "validation_optional": {
+              "reason": "unsupported-destination",
+              "state": "error"
+            }
+          },
+          "input": {
+            "config": {
+              "error_backoff_min": 5,
+              "notify": {
+                "hosts": [
+                  "alpha",
+                  "beta",
+                  null
+                ]
+              }
+            },
+            "value": []
+          },
+          "name": "not-object",
+          "source": "review_notify.destination/review_notify.validation"
+        },
+        {
+          "expect": {
+            "message": "Review request req-1: item item, state reviewed, result r-ev-1. event_id=ev-1. cq review.result --requestId req-1"
+          },
+          "input": {
+            "event": {
+              "item": "item",
+              "state": "reviewed"
+            },
+            "row": {
+              "event_id": "ev-1",
+              "receipt_id": "r-ev-1",
+              "request_id": "req-1"
+            }
+          },
+          "name": "message-shape",
+          "source": "review_notify.message"
+        },
+        {
+          "expect": {
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "attempts": 1,
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "next_at": "2026-11-14T12:05:00+00:00",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "sent",
+                  "v": 1
+                },
+                "k-pending-later": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "next_at": "2026-11-14T12:01:00+00:00",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                },
+                "k-sent": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "sent",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "notify_status": {
+                    "state": "sent"
+                  }
+                }
+              }
+            },
+            "saves": 1,
+            "selected": 1,
+            "sent": [
+              {
+                "destination": {
+                  "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                  "paseo_host": "alpha"
+                },
+                "message": "Review request req-1: item item, state reviewed, result r-ev-1. event_id=ev-1. cq review.result --requestId req-1"
+              }
+            ]
+          },
+          "input": {
+            "busy": [],
+            "config": {
+              "error_backoff_min": 5,
+              "notify": {
+                "hosts": [
+                  "alpha",
+                  "beta",
+                  null
+                ]
+              }
+            },
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                },
+                "k-pending-later": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "next_at": "2026-11-14T12:01:00+00:00",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                },
+                "k-sent": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "sent",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  }
+                }
+              }
+            },
+            "replies": []
+          },
+          "name": "drain-delivers",
+          "source": "review_notify.drain"
+        },
+        {
+          "expect": {
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "attempts": 1,
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "next_at": "2026-11-14T12:05:00+00:00",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "notify_status": {
+                    "reason": "delivery-failed",
+                    "state": "pending"
+                  }
+                }
+              }
+            },
+            "saves": 1,
+            "selected": 1,
+            "sent": [
+              {
+                "destination": {
+                  "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                  "paseo_host": "alpha"
+                },
+                "message": "Review request req-1: item item, state reviewed, result r-ev-1. event_id=ev-1. cq review.result --requestId req-1"
+              }
+            ]
+          },
+          "input": {
+            "busy": [],
+            "config": {
+              "error_backoff_min": 5,
+              "notify": {
+                "hosts": [
+                  "alpha",
+                  "beta",
+                  null
+                ]
+              }
+            },
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  }
+                }
+              }
+            },
+            "replies": [
+              {
+                "paseo_send": "1: boom"
+              }
+            ]
+          },
+          "name": "drain-failure-backoff",
+          "source": "review_notify.drain"
+        },
+        {
+          "expect": {
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "attempts": 5,
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "next_at": "2026-11-14T13:20:00+00:00",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "error",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "notify_status": {
+                    "reason": "delivery-failed",
+                    "state": "error"
+                  }
+                }
+              }
+            },
+            "saves": 1,
+            "selected": 1,
+            "sent": [
+              {
+                "destination": {
+                  "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                  "paseo_host": "alpha"
+                },
+                "message": "Review request req-1: item item, state reviewed, result r-ev-1. event_id=ev-1. cq review.result --requestId req-1"
+              }
+            ]
+          },
+          "input": {
+            "busy": [],
+            "config": {
+              "error_backoff_min": 5,
+              "notify": {
+                "hosts": [
+                  "alpha",
+                  "beta",
+                  null
+                ]
+              }
+            },
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "attempts": 4,
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  }
+                }
+              }
+            },
+            "replies": [
+              {
+                "paseo_send": "1: boom"
+              }
+            ]
+          },
+          "name": "drain-terminal-attempt",
+          "source": "review_notify.drain"
+        },
+        {
+          "expect": {
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "attempts": 1,
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "next_at": "2026-11-14T12:05:00+00:00",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "error",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "notify_status": {
+                    "reason": "unsupported-destination",
+                    "state": "error"
+                  }
+                }
+              }
+            },
+            "saves": 1,
+            "selected": 1,
+            "sent": []
+          },
+          "input": {
+            "busy": [],
+            "config": {
+              "error_backoff_min": 5,
+              "notify": {
+                "hosts": []
+              }
+            },
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  }
+                }
+              }
+            },
+            "replies": []
+          },
+          "name": "drain-unsupported-destination",
+          "source": "review_notify.drain"
+        },
+        {
+          "expect": {
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "attempts": 1,
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "next_at": "2026-11-14T12:05:00+00:00",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "notify_status": {
+                    "reason": "delivery-failed",
+                    "state": "pending"
+                  }
+                }
+              }
+            },
+            "saves": 1,
+            "selected": 1,
+            "sent": [
+              {
+                "destination": {
+                  "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                  "paseo_host": "alpha"
+                },
+                "message": "Review request req-1: item item, state reviewed, result r-ev-1. event_id=ev-1. cq review.result --requestId req-1"
+              }
+            ]
+          },
+          "input": {
+            "busy": [],
+            "config": {
+              "error_backoff_min": 5,
+              "notify": {
+                "hosts": [
+                  "alpha",
+                  "beta",
+                  null
+                ]
+              }
+            },
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  }
+                }
+              }
+            },
+            "replies": [
+              {
+                "raised": true
+              }
+            ]
+          },
+          "name": "drain-transport-raises",
+          "source": "review_notify.drain"
+        },
+        {
+          "expect": {
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-0": {
+                  "attempts": 1,
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "next_at": "2026-11-14T12:05:00+00:00",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "sent",
+                  "v": 1
+                },
+                "k-1": {
+                  "attempts": 1,
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "next_at": "2026-11-14T12:05:00+00:00",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "sent",
+                  "v": 1
+                },
+                "k-2": {
+                  "attempts": 1,
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "next_at": "2026-11-14T12:05:00+00:00",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "sent",
+                  "v": 1
+                },
+                "k-3": {
+                  "attempts": 1,
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "next_at": "2026-11-14T12:05:00+00:00",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "sent",
+                  "v": 1
+                },
+                "k-4": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                },
+                "k-5": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "notify_status": {
+                    "state": "sent"
+                  }
+                }
+              }
+            },
+            "saves": 4,
+            "selected": 4,
+            "sent": [
+              {
+                "destination": {
+                  "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                  "paseo_host": "alpha"
+                },
+                "message": "Review request req-1: item item, state reviewed, result r-ev-1. event_id=ev-1. cq review.result --requestId req-1"
+              },
+              {
+                "destination": {
+                  "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                  "paseo_host": "alpha"
+                },
+                "message": "Review request req-1: item item, state reviewed, result r-ev-1. event_id=ev-1. cq review.result --requestId req-1"
+              },
+              {
+                "destination": {
+                  "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                  "paseo_host": "alpha"
+                },
+                "message": "Review request req-1: item item, state reviewed, result r-ev-1. event_id=ev-1. cq review.result --requestId req-1"
+              },
+              {
+                "destination": {
+                  "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                  "paseo_host": "alpha"
+                },
+                "message": "Review request req-1: item item, state reviewed, result r-ev-1. event_id=ev-1. cq review.result --requestId req-1"
+              }
+            ]
+          },
+          "input": {
+            "busy": [],
+            "config": {
+              "error_backoff_min": 5,
+              "notify": {
+                "hosts": [
+                  "alpha",
+                  "beta",
+                  null
+                ]
+              }
+            },
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-0": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                },
+                "k-1": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                },
+                "k-2": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                },
+                "k-3": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                },
+                "k-4": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                },
+                "k-5": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  }
+                }
+              }
+            },
+            "replies": []
+          },
+          "name": "drain-limit",
+          "source": "review_notify.drain"
+        },
+        {
+          "expect": {
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  }
+                }
+              }
+            },
+            "saves": 0,
+            "selected": 0,
+            "sent": []
+          },
+          "input": {
+            "busy": [
+              "busy"
+            ],
+            "config": {
+              "error_backoff_min": 5,
+              "notify": {
+                "hosts": [
+                  "alpha",
+                  "beta",
+                  null
+                ]
+              }
+            },
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  }
+                }
+              }
+            },
+            "replies": []
+          },
+          "name": "drain-busy-selection",
+          "source": "review_notify.drain"
+        },
+        {
+          "expect": {
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  }
+                }
+              }
+            },
+            "saves": 0,
+            "selected": 1,
+            "sent": [
+              {
+                "destination": {
+                  "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                  "paseo_host": "alpha"
+                },
+                "message": "Review request req-1: item item, state reviewed, result r-ev-1. event_id=ev-1. cq review.result --requestId req-1"
+              }
+            ]
+          },
+          "input": {
+            "busy": [
+              "fn",
+              "fn",
+              "busy"
+            ],
+            "config": {
+              "error_backoff_min": 5,
+              "notify": {
+                "hosts": [
+                  "alpha",
+                  "beta",
+                  null
+                ]
+              }
+            },
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  }
+                }
+              }
+            },
+            "replies": []
+          },
+          "name": "drain-busy-reconcile",
+          "source": "review_notify.drain"
+        },
+        {
+          "expect": {
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "attempts": 1,
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "next_at": "2026-11-14T12:00:00.000006+00:00",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "notify_status": {
+                    "reason": "delivery-failed",
+                    "state": "pending"
+                  }
+                }
+              }
+            },
+            "saves": 1,
+            "selected": 1,
+            "sent": [
+              {
+                "destination": {
+                  "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                  "paseo_host": "alpha"
+                },
+                "message": "Review request req-1: item item, state reviewed, result r-ev-1. event_id=ev-1. cq review.result --requestId req-1"
+              }
+            ]
+          },
+          "input": {
+            "busy": [],
+            "config": {
+              "error_backoff_min": 1e-07,
+              "notify": {
+                "hosts": [
+                  "alpha"
+                ]
+              }
+            },
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  }
+                }
+              }
+            },
+            "replies": [
+              {
+                "paseo_send": 1
+              }
+            ]
+          },
+          "name": "drain-backoff-fractional",
+          "source": "review_notify.drain"
+        },
+        {
+          "expect": {
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "attempts": 8,
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "next_at": "2026-11-14T16:00:00+00:00",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "error",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "notify_status": {
+                    "reason": "delivery-failed",
+                    "state": "error"
+                  }
+                }
+              }
+            },
+            "saves": 1,
+            "selected": 1,
+            "sent": [
+              {
+                "destination": {
+                  "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                  "paseo_host": "alpha"
+                },
+                "message": "Review request req-1: item item, state reviewed, result r-ev-1. event_id=ev-1. cq review.result --requestId req-1"
+              }
+            ]
+          },
+          "input": {
+            "busy": [],
+            "config": {
+              "error_backoff_min": 60,
+              "notify": {
+                "hosts": [
+                  "alpha"
+                ]
+              }
+            },
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "observers": []
+                }
+              ],
+              "review_events": {
+                "ev-1": {
+                  "item": "item",
+                  "receipt_id": "r-ev-1",
+                  "state": "reviewed"
+                }
+              },
+              "review_notify_outbox": {
+                "k-due": {
+                  "attempts": 7,
+                  "destination": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  },
+                  "event_id": "ev-1",
+                  "receipt_id": "r-ev-1",
+                  "request_id": "req-1",
+                  "state": "pending",
+                  "v": 1
+                }
+              },
+              "review_requests": {
+                "req-1": {
+                  "item": "item",
+                  "notify": {
+                    "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+                    "paseo_host": "alpha"
+                  }
+                }
+              }
+            },
+            "replies": [
+              {
+                "paseo_send": 1
+              }
+            ]
+          },
+          "name": "drain-backoff-cap",
+          "source": "review_notify.drain"
+        },
+        {
+          "expect": {
+            "destination": null
+          },
+          "input": {
+            "config": {},
+            "value": {
+              "paseo_agent_id": "11111111-2222-3333-4444-555555555555",
+              "paseo_host": "alpha"
+            }
+          },
+          "name": "destination-unknown-config",
+          "source": "review_notify.destination"
+        }
+      ],
+      "family": "notify"
+    },
+    {
+      "cases": [
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ],
+              [
+                "fold",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                [
+                  "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                  "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d"
+                ]
+              ]
+            ],
+            "outcome": {
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "full"
+            },
+            "remaining": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+            ],
+            "written": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "events": 2,
+              "gaps": [],
+              "prefix": "5ea8f9682f1f9034b5acd457937ff410432975b1d149e5a3eb1b22d94782bb84",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "version": 1
+            }
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              },
+              {
+                "event_type": "job-state",
+                "id": "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "attempt": 0,
+                  "failures": 0,
+                  "family": "fixture",
+                  "generation": 0,
+                  "job_id": "fixture:e2",
+                  "next_eligible_at": null,
+                  "reason": "inventory enqueue",
+                  "state": "pending",
+                  "subject_id": "subject"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "job:fixture:e2:dd131ce56ca7b75e1f934937bc460390d24209fc535c9d7fb9ad84d5392f76c2"
+              }
+            ],
+            "extra_files": [],
+            "gap": null,
+            "keep": [],
+            "script": {},
+            "snapshot": null,
+            "stale_prefix": false,
+            "targets": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ]
+          },
+          "name": "refresh-full",
+          "source": "backfill_coverage.refresh"
+        },
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ]
+            ],
+            "outcome": {
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "current"
+            },
+            "remaining": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+            ],
+            "written": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "events": 2,
+              "gaps": [],
+              "prefix": "5ea8f9682f1f9034b5acd457937ff410432975b1d149e5a3eb1b22d94782bb84",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "version": 1
+            }
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              },
+              {
+                "event_type": "job-state",
+                "id": "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "attempt": 0,
+                  "failures": 0,
+                  "family": "fixture",
+                  "generation": 0,
+                  "job_id": "fixture:e2",
+                  "next_eligible_at": null,
+                  "reason": "inventory enqueue",
+                  "state": "pending",
+                  "subject_id": "subject"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "job:fixture:e2:dd131ce56ca7b75e1f934937bc460390d24209fc535c9d7fb9ad84d5392f76c2"
+              }
+            ],
+            "extra_files": [],
+            "gap": null,
+            "keep": [],
+            "script": {},
+            "snapshot": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "events": 2,
+              "gaps": [],
+              "prefix": "5ea8f9682f1f9034b5acd457937ff410432975b1d149e5a3eb1b22d94782bb84",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "version": 1
+            },
+            "stale_prefix": false,
+            "targets": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ]
+          },
+          "name": "refresh-current",
+          "source": "backfill_coverage.refresh"
+        },
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ],
+              [
+                "fold",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                []
+              ]
+            ],
+            "outcome": {
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "unchanged"
+            },
+            "remaining": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+            ],
+            "written": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "events": 3,
+              "gaps": [],
+              "prefix": "183f871046568d51106dc3df1a726d1c369ca8ee1d06b135662b5929053b9d62",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "version": 1
+            }
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              },
+              {
+                "event_type": "job-state",
+                "id": "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "attempt": 0,
+                  "failures": 0,
+                  "family": "fixture",
+                  "generation": 0,
+                  "job_id": "fixture:e2",
+                  "next_eligible_at": null,
+                  "reason": "inventory enqueue",
+                  "state": "pending",
+                  "subject_id": "subject"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "job:fixture:e2:dd131ce56ca7b75e1f934937bc460390d24209fc535c9d7fb9ad84d5392f76c2"
+              },
+              {
+                "event_type": "job-state",
+                "id": "a1640913a3ac86e95b173bd36c4de542a8858c6830d1c7dcabc95c406496d30a",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "attempt": 0,
+                  "failures": 0,
+                  "family": "fixture",
+                  "generation": 0,
+                  "job_id": "fixture:e3",
+                  "next_eligible_at": null,
+                  "reason": "inventory enqueue",
+                  "state": "pending",
+                  "subject_id": "subject"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "job:fixture:e3:dcdba3387a34a520b569613eea69217463bc668ea1f9cb531b295f154eb98fcb"
+              }
+            ],
+            "extra_files": [],
+            "gap": null,
+            "keep": [],
+            "script": {},
+            "snapshot": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "events": 2,
+              "gaps": [],
+              "prefix": "5ea8f9682f1f9034b5acd457937ff410432975b1d149e5a3eb1b22d94782bb84",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "version": 1
+            },
+            "stale_prefix": false,
+            "targets": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ]
+          },
+          "name": "refresh-unchanged",
+          "source": "backfill_coverage.refresh"
+        },
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ],
+              [
+                "fold",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                [
+                  "ce38874f6db23c6acd14e9ee937bc4045e31ec4c1f083494e3b436333810ece7"
+                ]
+              ]
+            ],
+            "outcome": {
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "extended"
+            },
+            "remaining": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+            ],
+            "written": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    4
+                  ]
+                ]
+              },
+              "events": 3,
+              "gaps": [],
+              "prefix": "8ac4a2757fcbba4860d035603991efbd13e3d06216a4d208a5a4abbd062ed086",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "version": 1
+            }
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              },
+              {
+                "event_type": "job-state",
+                "id": "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "attempt": 0,
+                  "failures": 0,
+                  "family": "fixture",
+                  "generation": 0,
+                  "job_id": "fixture:e2",
+                  "next_eligible_at": null,
+                  "reason": "inventory enqueue",
+                  "state": "pending",
+                  "subject_id": "subject"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "job:fixture:e2:dd131ce56ca7b75e1f934937bc460390d24209fc535c9d7fb9ad84d5392f76c2"
+              },
+              {
+                "event_type": "review",
+                "id": "ce38874f6db23c6acd14e9ee937bc4045e31ec4c1f083494e3b436333810ece7",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          3,
+                          4
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          3,
+                          4
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          3,
+                          4
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "2b23d0aebfd8a3a1fb19c7b19934f3ec23f8e02f42a3b9503c17b409665bd3e9",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e3",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e3"
+              }
+            ],
+            "extra_files": [],
+            "gap": null,
+            "keep": [],
+            "script": {},
+            "snapshot": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "events": 2,
+              "gaps": [],
+              "prefix": "5ea8f9682f1f9034b5acd457937ff410432975b1d149e5a3eb1b22d94782bb84",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "version": 1
+            },
+            "stale_prefix": false,
+            "targets": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ]
+          },
+          "name": "refresh-extended",
+          "source": "backfill_coverage.refresh"
+        },
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ],
+              [
+                "fold",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                [
+                  "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                  "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d",
+                  "ce38874f6db23c6acd14e9ee937bc4045e31ec4c1f083494e3b436333810ece7"
+                ]
+              ]
+            ],
+            "outcome": {
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "full"
+            },
+            "remaining": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+            ],
+            "written": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    4
+                  ]
+                ]
+              },
+              "events": 3,
+              "gaps": [],
+              "prefix": "8ac4a2757fcbba4860d035603991efbd13e3d06216a4d208a5a4abbd062ed086",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "version": 1
+            }
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              },
+              {
+                "event_type": "job-state",
+                "id": "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "attempt": 0,
+                  "failures": 0,
+                  "family": "fixture",
+                  "generation": 0,
+                  "job_id": "fixture:e2",
+                  "next_eligible_at": null,
+                  "reason": "inventory enqueue",
+                  "state": "pending",
+                  "subject_id": "subject"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "job:fixture:e2:dd131ce56ca7b75e1f934937bc460390d24209fc535c9d7fb9ad84d5392f76c2"
+              },
+              {
+                "event_type": "review",
+                "id": "ce38874f6db23c6acd14e9ee937bc4045e31ec4c1f083494e3b436333810ece7",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          3,
+                          4
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          3,
+                          4
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          3,
+                          4
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "2b23d0aebfd8a3a1fb19c7b19934f3ec23f8e02f42a3b9503c17b409665bd3e9",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e3",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e3"
+              }
+            ],
+            "extra_files": [],
+            "gap": null,
+            "keep": [],
+            "script": {},
+            "snapshot": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "events": 2,
+              "gaps": [],
+              "prefix": "5ea8f9682f1f9034b5acd457937ff410432975b1d149e5a3eb1b22d94782bb84",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "version": 1
+            },
+            "stale_prefix": true,
+            "targets": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ]
+          },
+          "name": "refresh-stale-prefix",
+          "source": "backfill_coverage.refresh"
+        },
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ],
+              [
+                "fold",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                [
+                  "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467"
+                ]
+              ]
+            ],
+            "outcome": {
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "extended"
+            },
+            "remaining": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+            ],
+            "written": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "events": 2,
+              "gaps": [],
+              "prefix": "5ea8f9682f1f9034b5acd457937ff410432975b1d149e5a3eb1b22d94782bb84",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "version": 1
+            }
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              },
+              {
+                "event_type": "job-state",
+                "id": "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "attempt": 0,
+                  "failures": 0,
+                  "family": "fixture",
+                  "generation": 0,
+                  "job_id": "fixture:e2",
+                  "next_eligible_at": null,
+                  "reason": "inventory enqueue",
+                  "state": "pending",
+                  "subject_id": "subject"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "job:fixture:e2:dd131ce56ca7b75e1f934937bc460390d24209fc535c9d7fb9ad84d5392f76c2"
+              }
+            ],
+            "extra_files": [],
+            "gap": null,
+            "keep": [],
+            "script": {},
+            "snapshot": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "events": 2,
+              "gaps": [
+                {
+                  "reason": "artifact missing",
+                  "review": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467"
+                }
+              ],
+              "prefix": "5ea8f9682f1f9034b5acd457937ff410432975b1d149e5a3eb1b22d94782bb84",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "version": 1
+            },
+            "stale_prefix": false,
+            "targets": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ]
+          },
+          "name": "refresh-gap-cleared",
+          "source": "backfill_coverage.refresh"
+        },
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ],
+              [
+                "fold",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                [
+                  "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467"
+                ]
+              ]
+            ],
+            "outcome": {
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "unchanged"
+            },
+            "remaining": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+            ],
+            "written": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "events": 2,
+              "gaps": [
+                {
+                  "reason": "artifact missing",
+                  "review": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467"
+                }
+              ],
+              "prefix": "5ea8f9682f1f9034b5acd457937ff410432975b1d149e5a3eb1b22d94782bb84",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "version": 1
+            }
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              },
+              {
+                "event_type": "job-state",
+                "id": "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "attempt": 0,
+                  "failures": 0,
+                  "family": "fixture",
+                  "generation": 0,
+                  "job_id": "fixture:e2",
+                  "next_eligible_at": null,
+                  "reason": "inventory enqueue",
+                  "state": "pending",
+                  "subject_id": "subject"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "job:fixture:e2:dd131ce56ca7b75e1f934937bc460390d24209fc535c9d7fb9ad84d5392f76c2"
+              }
+            ],
+            "extra_files": [],
+            "gap": {
+              "skip": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467"
+            },
+            "keep": [],
+            "script": {},
+            "snapshot": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "events": 2,
+              "gaps": [
+                {
+                  "reason": "artifact missing",
+                  "review": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467"
+                }
+              ],
+              "prefix": "5ea8f9682f1f9034b5acd457937ff410432975b1d149e5a3eb1b22d94782bb84",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "version": 1
+            },
+            "stale_prefix": false,
+            "targets": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ]
+          },
+          "name": "refresh-gap-still-failing",
+          "source": "backfill_coverage.refresh"
+        },
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ],
+              [
+                "fold",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                [
+                  "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                  "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d"
+                ]
+              ],
+              [
+                "fold",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                [
+                  "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                  "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d"
+                ]
+              ]
+            ],
+            "outcome": {
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "error: boom",
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "full"
+            },
+            "remaining": [
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json"
+            ],
+            "written": null
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              },
+              {
+                "event_type": "job-state",
+                "id": "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "attempt": 0,
+                  "failures": 0,
+                  "family": "fixture",
+                  "generation": 0,
+                  "job_id": "fixture:e2",
+                  "next_eligible_at": null,
+                  "reason": "inventory enqueue",
+                  "state": "pending",
+                  "subject_id": "subject"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "job:fixture:e2:dd131ce56ca7b75e1f934937bc460390d24209fc535c9d7fb9ad84d5392f76c2"
+              }
+            ],
+            "extra_files": [],
+            "gap": null,
+            "keep": [],
+            "script": {
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "raise"
+            },
+            "snapshot": null,
+            "stale_prefix": false,
+            "targets": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            ]
+          },
+          "name": "refresh-error-isolation",
+          "source": "backfill_coverage.refresh"
+        },
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ],
+              [
+                "fold",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                [
+                  "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                  "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d"
+                ]
+              ]
+            ],
+            "outcome": {
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "full",
+              "not-an-object-id": "invalid-target"
+            },
+            "remaining": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+            ],
+            "written": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "events": 2,
+              "gaps": [],
+              "prefix": "5ea8f9682f1f9034b5acd457937ff410432975b1d149e5a3eb1b22d94782bb84",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "version": 1
+            }
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              },
+              {
+                "event_type": "job-state",
+                "id": "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "attempt": 0,
+                  "failures": 0,
+                  "family": "fixture",
+                  "generation": 0,
+                  "job_id": "fixture:e2",
+                  "next_eligible_at": null,
+                  "reason": "inventory enqueue",
+                  "state": "pending",
+                  "subject_id": "subject"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "job:fixture:e2:dd131ce56ca7b75e1f934937bc460390d24209fc535c9d7fb9ad84d5392f76c2"
+              }
+            ],
+            "extra_files": [],
+            "gap": null,
+            "keep": [],
+            "script": {},
+            "snapshot": null,
+            "stale_prefix": false,
+            "targets": [
+              "not-an-object-id",
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ]
+          },
+          "name": "refresh-invalid-target",
+          "source": "backfill_coverage.refresh"
+        },
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ],
+              [
+                "fold",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                [
+                  "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467"
+                ]
+              ]
+            ],
+            "outcome": {
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "full"
+            },
+            "remaining": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+            ],
+            "written": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "events": 1,
+              "gaps": [],
+              "prefix": "341c1093f180ecec9d0f8193ff1cfddd55a4c75cf87b54453b337739a36f1598",
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "version": 1
+            }
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              }
+            ],
+            "extra_files": [
+              "dddddddddddddddddddddddddddddddddddddddd",
+              "gone"
+            ],
+            "gap": null,
+            "keep": [
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            ],
+            "script": {},
+            "snapshot": null,
+            "stale_prefix": false,
+            "targets": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ]
+          },
+          "name": "refresh-prunes-dead",
+          "source": "backfill_coverage.refresh"
+        },
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ]
+            ],
+            "outcome": {},
+            "remaining": [],
+            "written": null
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              },
+              {
+                "event_type": "job-state",
+                "id": "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "attempt": 0,
+                  "failures": 0,
+                  "family": "fixture",
+                  "generation": 0,
+                  "job_id": "fixture:e2",
+                  "next_eligible_at": null,
+                  "reason": "inventory enqueue",
+                  "state": "pending",
+                  "subject_id": "subject"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "job:fixture:e2:dd131ce56ca7b75e1f934937bc460390d24209fc535c9d7fb9ad84d5392f76c2"
+              }
+            ],
+            "extra_files": [],
+            "gap": null,
+            "keep": [],
+            "script": {},
+            "snapshot": null,
+            "stale_prefix": false,
+            "targets": []
+          },
+          "name": "refresh-no-targets",
+          "source": "backfill_coverage.refresh"
+        },
+        {
+          "expect": {
+            "load": {
+              "covered": {
+                "src/app.ts": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "gaps": []
+            }
+          },
+          "input": {
+            "appended": [
+              {
+                "event_type": "job-state",
+                "id": "a1640913a3ac86e95b173bd36c4de542a8858c6830d1c7dcabc95c406496d30a",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "attempt": 0,
+                  "failures": 0,
+                  "family": "fixture",
+                  "generation": 0,
+                  "job_id": "fixture:e3",
+                  "next_eligible_at": null,
+                  "reason": "inventory enqueue",
+                  "state": "pending",
+                  "subject_id": "subject"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "job:fixture:e3:dcdba3387a34a520b569613eea69217463bc668ea1f9cb531b295f154eb98fcb"
+              }
+            ],
+            "covered": {
+              "src/app.ts": [
+                [
+                  1,
+                  2
+                ]
+              ]
+            },
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              },
+              {
+                "event_type": "job-state",
+                "id": "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "attempt": 0,
+                  "failures": 0,
+                  "family": "fixture",
+                  "generation": 0,
+                  "job_id": "fixture:e2",
+                  "next_eligible_at": null,
+                  "reason": "inventory enqueue",
+                  "state": "pending",
+                  "subject_id": "subject"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "job:fixture:e2:dd131ce56ca7b75e1f934937bc460390d24209fc535c9d7fb9ad84d5392f76c2"
+              }
+            ]
+          },
+          "name": "load-state-only-append",
+          "source": "backfill_coverage.load"
+        },
+        {
+          "expect": {
+            "load": null
+          },
+          "input": {
+            "appended": [
+              {
+                "event_type": "review",
+                "id": "ce38874f6db23c6acd14e9ee937bc4045e31ec4c1f083494e3b436333810ece7",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          3,
+                          4
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          3,
+                          4
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          3,
+                          4
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "2b23d0aebfd8a3a1fb19c7b19934f3ec23f8e02f42a3b9503c17b409665bd3e9",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e3",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e3"
+              }
+            ],
+            "covered": {
+              "src/app.ts": [
+                [
+                  1,
+                  2
+                ]
+              ]
+            },
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              },
+              {
+                "event_type": "job-state",
+                "id": "14bb677292e2349a9e6aa2f9e8206adfb9019f024a3121585eb1f55890174c9d",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "attempt": 0,
+                  "failures": 0,
+                  "family": "fixture",
+                  "generation": 0,
+                  "job_id": "fixture:e2",
+                  "next_eligible_at": null,
+                  "reason": "inventory enqueue",
+                  "state": "pending",
+                  "subject_id": "subject"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "job:fixture:e2:dd131ce56ca7b75e1f934937bc460390d24209fc535c9d7fb9ad84d5392f76c2"
+              }
+            ]
+          },
+          "name": "load-creditable-append",
+          "source": "backfill_coverage.load"
+        },
+        {
+          "expect": {
+            "failed": [
+              false,
+              false,
+              true,
+              false,
+              true,
+              true,
+              false
+            ]
+          },
+          "input": {
+            "values": [
+              "disabled",
+              "idle",
+              "failed: boom",
+              {
+                "head": "dddddddddddddddddddddddddddddddddddddddd",
+                "targets": {
+                  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "extended"
+                }
+              },
+              {
+                "head": "dddddddddddddddddddddddddddddddddddddddd",
+                "targets": {
+                  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "invalid-target"
+                }
+              },
+              {
+                "head": "dddddddddddddddddddddddddddddddddddddddd",
+                "targets": {
+                  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "error: boom"
+                }
+              },
+              {
+                "head": "dddddddddddddddddddddddddddddddddddddddd",
+                "targets": {}
+              }
+            ]
+          },
+          "name": "coverage-failed",
+          "source": "backfill_publisher.coverage_failed"
+        },
+        {
+          "expect": {
+            "live": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            ],
+            "pending": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ]
+          },
+          "input": {
+            "queue": {
+              "items": [
+                {
+                  "kind": "backfill",
+                  "state": "pending",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                {
+                  "kind": "backfill",
+                  "state": "reviewing",
+                  "target": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                {
+                  "kind": "backfill",
+                  "state": "done",
+                  "target": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                },
+                {
+                  "kind": "backfill",
+                  "state": "quarantined",
+                  "target": "ffffffffffffffffffffffffffffffffffffffff"
+                },
+                {
+                  "kind": "review",
+                  "state": "pending",
+                  "target": "9999999999999999999999999999999999999999"
+                }
+              ]
+            }
+          },
+          "name": "pending-and-live-targets",
+          "source": "backfill_coverage.pending_targets/live_targets"
+        }
+      ],
+      "family": "coverage"
+    },
+    {
+      "cases": [
+        {
+          "expect": {
+            "calls": [],
+            "marker": null,
+            "remaining": [],
+            "result": "disabled",
+            "wakes": []
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              }
+            ],
+            "published_head": null,
+            "queue": {
+              "items": []
+            },
+            "request": null,
+            "rewrite_request": false,
+            "settings": null
+          },
+          "name": "run-disabled",
+          "source": "backfill_coverage.run"
+        },
+        {
+          "expect": {
+            "calls": [],
+            "marker": null,
+            "remaining": [],
+            "result": "idle",
+            "wakes": []
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              }
+            ],
+            "published_head": null,
+            "queue": {
+              "items": []
+            },
+            "request": null,
+            "rewrite_request": false,
+            "settings": {
+              "durable_artifact_root": "/synthetic"
+            }
+          },
+          "name": "run-idle",
+          "source": "backfill_coverage.run"
+        },
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ],
+              [
+                "fold",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                [
+                  "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467"
+                ]
+              ]
+            ],
+            "marker": null,
+            "remaining": [],
+            "result": {
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "targets": {
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "full"
+              }
+            },
+            "wakes": [
+              "next-review-at:2026-11-14T12:00:00Z"
+            ]
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              }
+            ],
+            "published_head": null,
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "kind": "backfill",
+                  "state": "pending",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ]
+            },
+            "request": {
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "targets": [
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              ]
+            },
+            "rewrite_request": false,
+            "settings": {
+              "durable_artifact_root": "/synthetic"
+            }
+          },
+          "name": "run-request-consumed",
+          "source": "backfill_coverage.run"
+        },
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ],
+              [
+                "fold",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                [
+                  "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467"
+                ]
+              ]
+            ],
+            "marker": null,
+            "remaining": [],
+            "result": {
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "targets": {
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "full"
+              }
+            },
+            "wakes": [
+              "next-review-at:2026-11-14T12:00:00Z"
+            ]
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              }
+            ],
+            "published_head": "dddddddddddddddddddddddddddddddddddddddd",
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "kind": "backfill",
+                  "state": "pending",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ]
+            },
+            "request": null,
+            "rewrite_request": false,
+            "settings": {
+              "durable_artifact_root": "/synthetic"
+            }
+          },
+          "name": "run-published-head-only",
+          "source": "backfill_coverage.run"
+        },
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ]
+            ],
+            "marker": null,
+            "remaining": [],
+            "result": {
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "targets": {}
+            },
+            "wakes": []
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              }
+            ],
+            "published_head": "dddddddddddddddddddddddddddddddddddddddd",
+            "queue": {
+              "items": []
+            },
+            "request": null,
+            "rewrite_request": false,
+            "settings": {
+              "durable_artifact_root": "/synthetic"
+            }
+          },
+          "name": "run-no-targets",
+          "source": "backfill_coverage.run"
+        },
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ],
+              [
+                "fold",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                [
+                  "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467"
+                ]
+              ]
+            ],
+            "marker": {
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "targets": [
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+              ]
+            },
+            "remaining": [
+              "coverage-request.json"
+            ],
+            "result": {
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "targets": {
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "full"
+              }
+            },
+            "wakes": [
+              "next-review-at:2026-11-14T12:00:00Z"
+            ]
+          },
+          "input": {
+            "events": [
+              {
+                "event_type": "review",
+                "id": "cab9cf4a97f60ae81eacf7777666c1ee274f7ec96293d6479b3a620a60506467",
+                "occurred_at": "2026-10-30T00:00:00Z",
+                "payload": {
+                  "artifacts": [
+                    {
+                      "location": "/fixtures/artifacts/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    }
+                  ],
+                  "attempt_id": "subject:0:1",
+                  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "completion": {
+                    "errors": [],
+                    "exit_code": 0,
+                    "scope_verified": true,
+                    "skipped": false,
+                    "terminal": true
+                  },
+                  "findings": [],
+                  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "head_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "input_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "job_id": "subject:0",
+                  "outcome": "completed",
+                  "paths": [
+                    {
+                      "baseline": {},
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "disposition": "included",
+                      "mode": "100644",
+                      "path": "src/app.ts",
+                      "reason": "verified"
+                    }
+                  ],
+                  "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "repo": "camerontaylor/cq-toolkit",
+                  "requested_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "reviewed_scope": [
+                    {
+                      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "intervals": [
+                        [
+                          1,
+                          2
+                        ]
+                      ],
+                      "path": "src/app.ts"
+                    }
+                  ],
+                  "scope_digest": "81885a8977ee0789177e9301ba1db916d7d0eb3fa9570e932356806ff02c6d9a",
+                  "source": {
+                    "authenticated": true,
+                    "id": "e1",
+                    "producer": "crq-runner-app",
+                    "repo": "camerontaylor/cq-toolkit",
+                    "type": "crq-run"
+                  },
+                  "subject_id": "subject",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "target_tree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "schema": "cq.review-ledger/v1",
+                "source_key": "camerontaylor/cq-toolkit:crq-runner-app:e1"
+              }
+            ],
+            "published_head": null,
+            "queue": {
+              "items": [
+                {
+                  "id": "item",
+                  "kind": "backfill",
+                  "state": "pending",
+                  "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ]
+            },
+            "request": {
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "targets": [
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              ]
+            },
+            "rewrite_request": true,
+            "settings": {
+              "durable_artifact_root": "/synthetic"
+            }
+          },
+          "name": "run-request-preserved",
+          "source": "backfill_coverage.run"
+        },
+        {
+          "expect": {
+            "calls": [
+              [
+                "begin"
+              ]
+            ],
+            "marker": null,
+            "remaining": [],
+            "result": {
+              "head": "dddddddddddddddddddddddddddddddddddddddd",
+              "targets": {}
+            },
+            "wakes": []
+          },
+          "input": {
+            "events": [],
+            "published_head": "dddddddddddddddddddddddddddddddddddddddd",
+            "queue": {
+              "items": []
+            },
+            "request": null,
+            "rewrite_request": false,
+            "settings": {
+              "durable_artifact_root": "/synthetic"
+            }
+          },
+          "name": "run-current-no-wake",
+          "source": "backfill_coverage.run"
+        }
+      ],
+      "family": "run"
+    }
+  ],
+  "schema": "cq.crq-notify-coverage-b1-vector/v1",
+  "source": "apps/crq-python/notify_coverage_vector_emit_b1.py"
+}

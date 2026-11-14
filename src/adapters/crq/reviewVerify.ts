@@ -98,8 +98,9 @@ export async function restoreArtifacts(
   }
 }
 
-/** Python's `Repository.entries`: `ls-tree -r -z` mapped path -> {mode, blob}. */
-async function entries(
+/** Python's `Repository.entries`: `ls-tree -r -z` mapped path -> {mode, blob}.
+ * Exported so the coverage fold uses the same path/blob parser. */
+export async function repositoryEntries(
   runGit: RunGit,
   commit: string,
 ): Promise<Map<string, { mode: string; blob: string }>> {
@@ -242,8 +243,8 @@ export async function verifyReview(
     throw integrity('review tree mismatch');
   }
   const [targetEntries, headEntries] = await Promise.all([
-    entries(runGit, target as string),
-    entries(runGit, head as string),
+    repositoryEntries(runGit, target as string),
+    repositoryEntries(runGit, head as string),
   ]);
   const changed = await changedIntervals(runGit, base as string, head as string);
   const reviewedScope = payload.get('reviewed_scope');
