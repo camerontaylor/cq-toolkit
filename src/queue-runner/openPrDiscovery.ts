@@ -21,7 +21,7 @@ export interface PrDiscoveryRepo {
 }
 export interface PrDiscoveryEffects {
   list(repo: PrDiscoveryRepo): Promise<readonly OpenPr[]>;
-  /** Foreign clones must fetch their default branch before any range read. */
+  /** Refresh primary tracking refs before listing, or the foreign default before range reads. */
   fetchDefault(repo: PrDiscoveryRepo): Promise<void>;
   rangeBase(repo: PrDiscoveryRepo, pr: OpenPr): Promise<string | null>;
   /** Includes any immutable link/staleness updates, even when no association exists. */
