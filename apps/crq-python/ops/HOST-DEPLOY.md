@@ -493,11 +493,12 @@ its own marker (exit 2). A foreign marker is never removed.
 Exit codes: 0 completed, 1 failed but rolled back cleanly, 2 refused with the
 host unchanged, 3 recovery required. The run directory under `--record-dir`
 holds `deploy.json` (the result), `phase.json` (the last phase), `drain.json`,
-`health.json`, `rollback-drain.json` after a rollback, and the target
-helper/controller it executed. `deploy.json` carries `original_triggers` as
-well as `final_triggers`, so a recovery record still names the measured
-pre-deploy map; an interrupted run is routed through recovery (rollback or
-restore) before the deployment lock is released.
+`health.json`, `rollback-drain.json` after a rollback,
+`recovery-receipt.json` (the immutable pre-admission measurements), and the
+target helper/controller it executed. `deploy.json` carries
+`original_triggers` as well as `final_triggers`, so a recovery record still
+names the measured pre-deploy map; an interrupted run is routed through
+recovery (rollback or restore) before the deployment lock is released.
 
 `--json` is machine mode: narration is suppressed, stderr stays empty, and a
 usage error is one `{"error": {"kind": "usage", "subcommand": "<name>",
