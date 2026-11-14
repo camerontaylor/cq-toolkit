@@ -28,6 +28,15 @@ unit only in memory, transient or generated state, another namespace, or an
 activation created between the scan and the fence is outside this scope and
 is not claimed by ``supported``. Production enablement still requires actual
 topology evidence; until then this module is an offline-tested seam.
+
+The exception is the declared environment drop-in topology shared with
+``unit-adapter.py``: for the named CRQ service units, exactly the declared
+entry names are accepted in a real directory of the declared shape. The
+selected unit's entries are validated as environment-only by the adapter.
+The dependency scanner still reads declared drop-in text for unit dependency
+directives and allows the declared absolute symlink targets, so a co-installed
+drop-in cannot introduce an unaccounted incoming activator. It never follows
+an ``EnvironmentFile`` target.
 """
 from __future__ import annotations
 
@@ -62,6 +71,7 @@ dc = _load("crq_unit_live_binding_controller", OPS / "deploy-controller.py")
 completion = _load("crq_unit_live_binding_completion",
                    OPS / "unit-completion.py")
 factory = _load("crq_unit_live_binding_factory", OPS / "unit-switch-factory.py")
+adapter = factory.adapter_module
 
 MAX_UNIT_ENTRIES = 4096
 MAX_SCAN_ENTRIES = 512
@@ -395,7 +405,52 @@ class SubprocessSystemd:
                 detail[:300] or "rc " + str(result["rc"]))
         return result["stdout"].splitlines(), None
 
-    def _scan_dependencies(self, base, expected, declared, foreign):
+    def _declared_dropin_dirs(self, units):
+        """Declared environment drop-in directories for the expected units."""
+        declared = {}
+        for name in sorted(units):
+            names = adapter.DECLARED_DROPINS.get(name)
+            if names:
+                declared[str(self.unit_dir / (name + ".d"))] = names
+        return declared
+
+    def _all_declared_dropin_dirs(self):
+        """Every declared drop-in directory, including co-installed units."""
+        return {str(self.unit_dir / (name + ".d")): names
+                for name, names in adapter.DECLARED_DROPINS.items()}
+
+    @staticmethod
+    def _declared_dropin_error(path, declared):
+        """Check the declared drop-in shape without reading entry contents."""
+        try:
+            info = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            return ("declared drop-in directory is unreadable: "
+                    + str(path) + ": " + str(exc)[:120])
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            return "declared drop-in path is not a real directory: " + str(path)
+        try:
+            entries = sorted(path.iterdir())
+        except OSError as exc:
+            return ("declared drop-in directory is unreadable: "
+                    + str(path) + ": " + str(exc)[:120])
+        if {entry.name for entry in entries} != set(declared):
+            return ("declared drop-in directory does not contain exactly the "
+                    "declared entries: " + str(path))
+        for entry in entries:
+            try:
+                entry_info = os.stat(entry, follow_symlinks=False)
+            except OSError as exc:
+                return ("declared drop-in entry is unreadable: "
+                        + str(entry) + ": " + str(exc)[:120])
+            if not (stat.S_ISREG(entry_info.st_mode)
+                    or stat.S_ISLNK(entry_info.st_mode)):
+                return ("declared drop-in entry is not a regular file or "
+                        "symlink: " + str(entry))
+        return None
+
+    def _scan_dependencies(self, base, expected, declared, foreign,
+                           declared_dropins):
         root = base.resolve()
         declared_paths = {str(path) for path in declared}
         declared_resolved = set()
@@ -416,6 +471,10 @@ class SubprocessSystemd:
                             return "unit directory exceeds the dependency scan bound"
                         path = Path(entry.path)
                         if entry.is_symlink():
+                            declared_source = (
+                                str(path.parent) in declared_dropins
+                                and path.name
+                                in declared_dropins[str(path.parent)])
                             try:
                                 target = path.resolve(strict=False)
                             except (OSError, RuntimeError) as exc:
@@ -424,13 +483,18 @@ class SubprocessSystemd:
                             if target == path:
                                 return ("dependency scan cannot resolve a symlink: "
                                         + str(path))
-                            try:
-                                if target == Path(os.devnull):
-                                    continue
-                                target.relative_to(root)
-                            except ValueError:
-                                return ("dependency scan found a symlink outside "
-                                        "the unit directory: " + str(path))
+                            if target == Path(os.devnull):
+                                continue
+                            if not declared_source:
+                                # Only declared drop-in symlinks may resolve
+                                # outside the unit directory; their text is
+                                # still scanned for dependency directives.
+                                try:
+                                    target.relative_to(root)
+                                except ValueError:
+                                    return ("dependency scan found a symlink "
+                                            "outside the unit directory: "
+                                            + str(path))
                             try:
                                 info = path.stat()
                             except (OSError, RuntimeError) as exc:
@@ -450,6 +514,10 @@ class SubprocessSystemd:
                             data = _read_file(path, max_bytes=MAX_UNIT_BYTES)
                         except LiveBindingRefused as exc:
                             return str(exc)
+                        declared_file = (
+                            str(path.parent) in declared_dropins
+                            and path.name
+                            in declared_dropins[str(path.parent)])
                         source_declared = str(path) in declared_paths
                         if not source_declared:
                             try:
@@ -459,6 +527,10 @@ class SubprocessSystemd:
                         text = _text(data, str(path))
                         for number, line in enumerate(text.splitlines(), 1):
                             stripped = line.strip()
+                            if declared_file and stripped.endswith("\\"):
+                                return ("dependency scan found a line "
+                                        "continuation in a declared drop-in: "
+                                        + str(path))
                             if not stripped or stripped.startswith(("#", ";")):
                                 continue
                             match = DEPENDENCY_RE.match(stripped)
@@ -509,6 +581,8 @@ class SubprocessSystemd:
             paths[str(path)] = {"type": self._path_type(path)}
         units, units_error = self._expected_units(unit, declared)
         units = units or set()
+        declared_dropins = self._declared_dropin_dirs(units)
+        all_dropins = self._all_declared_dropin_dirs()
         foreign = []
         unsupported = []
         error = units_error
@@ -553,6 +627,21 @@ class SubprocessSystemd:
         prefix = unit.split(".")[0]
         for entry in sorted(entries):
             name = entry.name
+            if str(entry) in declared_dropins:
+                dropin_error = self._declared_dropin_error(
+                    entry, declared_dropins[str(entry)])
+                if dropin_error is not None:
+                    foreign.append(dropin_error)
+                continue
+            if str(entry) in all_dropins:
+                # A co-installed declared drop-in is not part of this unit's
+                # topology, but its shape is still validated and its text is
+                # still scanned for dependencies on the selected unit.
+                dropin_error = self._declared_dropin_error(
+                    entry, all_dropins[str(entry)])
+                if dropin_error is not None:
+                    foreign.append(dropin_error)
+                continue
             if name.startswith(prefix) and str(entry) not in declared_set:
                 foreign.append("unexpected installed entry: " + str(entry))
             is_dir, probe_failure = _directory_probe(entry)
@@ -576,7 +665,7 @@ class SubprocessSystemd:
                                        + str(child))
 
         scan_error = self._scan_dependencies(
-            self.unit_dir, units, declared, foreign)
+            self.unit_dir, units, declared, foreign, all_dropins)
         if scan_error is not None:
             error = error or scan_error
 

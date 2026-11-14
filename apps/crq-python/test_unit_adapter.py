@@ -430,6 +430,44 @@ class AdapterFixture(ControllerFixture):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.symlink_to("../" + target)
 
+    def make_declared_dropins(self, unit):
+        """Install the declared production drop-in topology for one unit.
+
+        The watchdog and tick paseo entries are symlinks to the shared
+        messaging environment; slot uses the same content as a regular file.
+        The coderabbit-managed entry is always a regular file.
+        """
+        names = adapter_mod.DECLARED_DROPINS.get(unit)
+        if names is None:
+            raise AssertionError("unit has no declared drop-in topology: "
+                                 + unit)
+        target = self.base / ".local/infra/systemd/crq-messaging.conf"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "# Shared CRQ messaging environment\n"
+            "[Service]\n"
+            "EnvironmentFile=%h/.local/state/paseo/env\n")
+        target.chmod(0o644)
+        dropin = self.unit_dir / (unit + ".d")
+        dropin.mkdir(parents=True, exist_ok=True)
+        linked = {"crq-watchdog.service": {"20-paseo-env.conf"},
+                  "crq-tick.service": {"20-paseo-env.conf"}}
+        for name in sorted(names):
+            entry = dropin / name
+            if name == "20-paseo-env.conf":
+                text = ("# Shared CRQ messaging environment\n"
+                        "[Service]\n"
+                        "EnvironmentFile=%h/.local/state/paseo/env\n")
+            else:
+                text = ("[Service]\n"
+                        "Environment=CODERABBIT_CLI_DISABLE_AUTO_UPDATE=true\n")
+            if name in linked.get(unit, set()):
+                entry.symlink_to(target)
+            else:
+                entry.write_text(text)
+                entry.chmod(0o644)
+        return dropin
+
     def make_adapter(self, **overrides):
         options = {
             "root": self.root,
@@ -723,6 +761,155 @@ class AdapterTests(AdapterFixture):
         (self.unit_dir / "crq-tick.socket").write_text("[Socket]\n")
         with self.assertRaisesRegex(dc.Refused, "outside the declared inventory"):
             self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+
+    def test_preflight_accepts_declared_dropin_topology(self):
+        self.fake.active["crq-watchdog.timer"] = "active"
+        for unit in ("crq-watchdog.service", "crq-tick.service",
+                     "crq-slot.service"):
+            with self.subTest(unit=unit):
+                dropin = self.make_declared_dropins(unit)
+                before = _tree(dropin)
+                prior = self.make_adapter().preflight(unit, NODE_RUNTIME)
+                self.assertEqual(prior["runtime"], "python")
+                self.assertEqual(_tree(dropin), before)
+
+    def test_switch_and_rollback_preserve_declared_dropins(self):
+        dropin = self.make_declared_dropins("crq-tick.service")
+        target = self.base / ".local/infra/systemd/crq-messaging.conf"
+        dropin_before = _tree(dropin)
+        target_before = (target.stat().st_mode & 0o7777,
+                         hashlib.sha256(target.read_bytes()).hexdigest())
+
+        def assert_preserved():
+            self.assertEqual(_tree(dropin), dropin_before)
+            self.assertTrue(target.is_file())
+            self.assertEqual(
+                (target.stat().st_mode & 0o7777,
+                 hashlib.sha256(target.read_bytes()).hexdigest()),
+                target_before)
+
+        current, _prior, snapshot = self.switch_ready(
+            "crq-tick.service", NODE_RUNTIME)
+        current.stop_and_drain("crq-tick.service")
+        current.install("crq-tick.service", NODE_RUNTIME)
+        current.start("crq-tick.service")
+        first = current.completion("crq-tick.service", NODE_RUNTIME, 0)
+        current.completion("crq-tick.service", NODE_RUNTIME,
+                           first["sequence"])
+        assert_preserved()
+
+        recovery = self.make_adapter()
+        recovery.validate_snapshot("crq-tick.service", snapshot)
+        recovery.stop_and_drain("crq-tick.service")
+        recovery.restore("crq-tick.service", snapshot)
+        recovery.restore_activation("crq-tick.service", snapshot)
+        assert_preserved()
+
+    def test_preflight_refuses_unknown_declared_dropin_entry(self):
+        dropin = self.make_declared_dropins("crq-tick.service")
+        (dropin / "10-rogue.conf").write_text("[Service]\nEnvironment=X=1\n")
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(
+                dc.Refused,
+                "does not contain exactly the declared entries"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_missing_declared_dropin_entry(self):
+        dropin = self.make_declared_dropins("crq-tick.service")
+        (dropin / "coderabbit-managed.conf").unlink()
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(
+                dc.Refused,
+                "does not contain exactly the declared entries"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_unit_shaping_dropin_override(self):
+        dropin = self.make_declared_dropins("crq-tick.service")
+        entry = dropin / "coderabbit-managed.conf"
+        for key, value in (("Type", "simple"),
+                           ("TimeoutStartSec", "1s"),
+                           ("ExecStart", "/bin/true"),
+                           ("Slice", "system.slice")):
+            with self.subTest(key=key):
+                entry.write_text("[Service]\n" + key + "=" + value + "\n")
+                before = _tree(self.unit_dir)
+                with self.assertRaisesRegex(
+                        dc.Refused, "unsupported service key " + key):
+                    self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+                self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_non_service_dropin_directive(self):
+        dropin = self.make_declared_dropins("crq-tick.service")
+        entry = dropin / "coderabbit-managed.conf"
+        cases = {
+            "non-service section": "[Unit]\nDescription=other\n",
+            "line continuation": "[Service]\nEnvironment=A=1\\\nType=simple\n",
+            "malformed line": "[Service]\nEnvironment\n",
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                entry.write_text(text)
+                before = _tree(self.unit_dir)
+                with self.assertRaises(dc.Refused):
+                    self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+                self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_undeclared_dropin_directory(self):
+        dropin = self.unit_dir / "crq-tick.timer.d"
+        dropin.mkdir()
+        (dropin / "override.conf").write_text("[Timer]\nOnCalendar=hourly\n")
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused, "undeclared drop-in directory"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_symlinked_dropin_directory(self):
+        held = self.unit_dir / "held-dropin"
+        held.mkdir()
+        (held / "20-paseo-env.conf").write_text("[Service]\n")
+        (self.unit_dir / "crq-tick.service.d").symlink_to(held)
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused, "not a real directory"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_unsafe_dropin_symlink_target(self):
+        self.make_declared_dropins("crq-tick.service")
+        target = self.base / ".local/infra/systemd/crq-messaging.conf"
+        target.chmod(0o666)
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "symlink target is group- or "
+                                    "world-writable"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_special_bits_dropin_symlink_target(self):
+        self.make_declared_dropins("crq-tick.service")
+        target = self.base / ".local/infra/systemd/crq-messaging.conf"
+        for bits in (0o4644, 0o2644, 0o1644):
+            with self.subTest(bits=oct(bits)):
+                target.chmod(bits)
+                before = _tree(self.unit_dir)
+                with self.assertRaisesRegex(
+                        dc.Refused,
+                        "symlink target has unsupported special bits"):
+                    self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+                self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_dropin_symlink_inside_unit_dir(self):
+        dropin = self.make_declared_dropins("crq-tick.service")
+        link = dropin / "20-paseo-env.conf"
+        link.unlink()
+        link.symlink_to(self.unit_dir / "crq-tick.timer")
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(
+                dc.Refused,
+                "symlink target resolves inside the unit directory"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
 
     def test_preflight_refuses_foreign_activator(self):
         self.fake.foreign = ["crq-other.timer"]
