@@ -74,6 +74,15 @@ export type LiveDispatch = (command: string, args: string[]) => Promise<OpResult
 export type OperatorLiveDispatch = (command: string, args: string[]) => Promise<RunnerResult>;
 
 /**
+ * A planner's argv refusal. The runner reports it as the usage artifact
+ * (exit 2) instead of the generic thrown-error artifact (exit 1), so doctrine
+ * I1's arg-error code survives the planner boundary.
+ */
+export class PlannerUsageError extends Error {
+  override name = 'PlannerUsageError';
+}
+
+/**
  * A structured operator artifact. It is the runner's one JSON document, not a
  * new op status: the typed fields (`refusal`, `detail`, `steps`, ...) are
  * evidence for the operator and never persisted state.
@@ -196,6 +205,7 @@ export async function run(
     }
     return { artifact: { status: 'ok', value: plan.value }, exitCode: 0 };
   } catch (error) {
+    if (error instanceof PlannerUsageError) return usage(error.message);
     return {
       artifact: { status: 'failed', error: error instanceof Error ? error.message : String(error) },
       exitCode: 1,

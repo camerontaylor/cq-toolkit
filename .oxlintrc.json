@@ -126,26 +126,7 @@
     {
       "files": ["src/**"],
       "rules": {
-        "cq/no-process-env": "error",
-        "cq/no-process-env-accessor": "error"
-      }
-    },
-    {
-      "files": [
-        "src/config/**",
-        "src/config/process-env.ts",
-        "src/driver/acp/binaries.ts",
-        "src/driver/claude-code/routing.ts",
-        "src/driver/sessions-dir.ts",
-        "src/ops/fix/runFix.ts",
-        "src/ops/review/addressMany.ts",
-        "src/ops/review/internal/addressEvidence.ts",
-        "src/sandbox/launcher.ts",
-        "src/selfhost/observe-prs.ts",
-        "src/selfhost/self-review-loop.ts"
-      ],
-      "rules": {
-        "cq/no-process-env-accessor": "off"
+        "cq/no-process-env": "error"
       }
     },
     {

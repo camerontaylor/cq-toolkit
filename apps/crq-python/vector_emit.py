@@ -26,6 +26,7 @@ from pathlib import Path
 import tempfile
 from typing import Any, Callable, Dict, List
 
+import author_quota
 import backfill_accounting
 import backfill_inventory
 import backfill_jobs
@@ -1504,6 +1505,438 @@ def summary_vectors() -> Dict[str, Any]:
 # --------------------------------------------------------------- assembly
 
 
+AT = "2026-11-14T00:00:00Z"
+PRIMARY = "example/primary"
+OTHER = "example/other"
+
+
+def _oracle_patches(primary: str, repos: List[Dict[str, Any]], now: str,
+                    aging_minutes: int):
+    """Bind the module globals the scheduling oracle reads, then restore them.
+
+    ``crq.rank`` reads ``REPO``/``REPOS`` for non-primary ranking and
+    ``CONFIG["local_review_aging_minutes"]`` for the local-review aging gate;
+    ``starts_last_hour`` and the cooldown gate read ``now()``. Vectors record
+    the binding as input, never as an absolute host fact.
+    """
+    from unittest.mock import patch
+
+    config = {**crq.CONFIG, "local_review_aging_minutes": aging_minutes}
+    return patch.multiple(
+        crq,
+        REPO=primary,
+        REPOS=repos,
+        CONFIG=config,
+        now=lambda: queue_time.parse_utc(now),
+    )
+
+
+def _schedule_input(queue: Any = None, item: Any = None, *, now: str = AT,
+                    primary: str = PRIMARY, repos: Any = None) -> Dict[str, Any]:
+    return {
+        "primary_repo": primary,
+        "repos": [] if repos is None else repos,
+        "local_review_aging_minutes": 60,
+        "now": now,
+        "queue": {"items": []} if queue is None else queue,
+        "item": {} if item is None else item,
+    }
+
+
+def _schedule_case(name: str, function: str, inputs: Dict[str, Any],
+                   call: Callable[[], Any]) -> Dict[str, Any]:
+    def run() -> Any:
+        with _oracle_patches(inputs["primary_repo"], inputs["repos"], inputs["now"],
+                             inputs["local_review_aging_minutes"]):
+            return call()
+
+    return _capture(name, f"crq.{function}", inputs, run)
+
+
+def tick_schedule_vectors() -> Dict[str, Any]:
+    """Scheduling decisions the tick makes before it plans any item."""
+    cases: List[Dict[str, Any]] = []
+
+    def rank_case(name: str, item: Dict[str, Any], *, queue=None, repos=None,
+                  now: str = AT) -> None:
+        inputs = _schedule_input(queue, item, now=now, repos=repos)
+        cases.append(_schedule_case(name, "rank", inputs, lambda: crq.rank(inputs["item"])))
+
+    rank_case("open-is-required", {"id": "pr1", "kind": "open", "state": "pending"})
+    rank_case("delta-is-first-followup", {"id": "pr1-range", "kind": "delta",
+                                          "state": "pending", "followup": "open"})
+    rank_case("merged-followup-delta-is-tier-2", {"id": "m1", "kind": "delta",
+                                                  "state": "pending", "followup": "merged"})
+    rank_case("merged-current-is-tier-2", {"id": "m2", "kind": "merged-current",
+                                           "state": "pending"})
+    rank_case("merged-is-tier-2", {"id": "m3", "kind": "merged", "state": "pending"})
+    rank_case("backlog-merged-source-is-tier-3", {"id": "m4", "kind": "merged",
+                                                  "state": "pending", "source": "backlog"})
+    rank_case("followup-source-is-tier-2", {"id": "m5", "kind": "merged",
+                                            "state": "pending", "source": "followup"})
+    rank_case("coverage-is-rank-4", {"id": "c1", "kind": "coverage", "state": "pending"})
+    rank_case("backfill-is-rank-4", {"id": "b1", "kind": "backfill", "state": "pending"})
+    rank_case("author-is-rank-4", {"id": "a1", "kind": "author", "state": "pending",
+                                   "author": {"cycle": 1}})
+    rank_case("second-author-cycle-is-optional", {"id": "a2", "kind": "author",
+                                                  "state": "pending",
+                                                  "author": {"cycle": 2}})
+    rank_case("completed-open-cycle-is-optional", {"id": "pr2", "kind": "open",
+                                                   "state": "pending",
+                                                   "cycles": [{"run_id": "open-2-20261101T000000Z"}]})
+    rank_case("foreign-repo-uses-configured-tier", {"id": "x1", "kind": "merged",
+                                                    "state": "pending", "repo": OTHER},
+              repos=[{"repo": OTHER, "rank_tier": 2}])
+    rank_case("unknown-foreign-repo-defaults-to-tier-3", {"id": "x2", "kind": "open",
+                                                          "state": "pending",
+                                                          "repo": "example/removed"})
+    rank_case("local-review-first-generation-is-required",
+              {"id": "l1", "kind": "local-review", "state": "pending"})
+    rank_case("local-review-repeat-is-aged-in", {"id": "l2", "kind": "local-review",
+                                                 "state": "pending", "generation": 2,
+                                                 "created_at": "2026-11-13T22:00:00Z"})
+    rank_case("local-review-repeat-not-yet-aged", {"id": "l3", "kind": "local-review",
+                                                   "state": "pending", "generation": 2,
+                                                   "created_at": "2026-11-13T23:30:00Z"})
+    rank_case("local-review-aged-at-the-boundary", {"id": "l4", "kind": "local-review",
+                                                    "state": "pending", "generation": 2,
+                                                    "created_at": "2026-11-13T23:00:00Z"})
+    rank_case("local-review-ancestry-repeat-is-aged-in", {"id": "l5", "kind": "local-review",
+                                                          "state": "pending",
+                                                          "ancestry_repeat": True})
+
+    def simple(name: str, function: str, queue=None, item=None, repos=None,
+               now: str = AT) -> None:
+        inputs = _schedule_input(queue, item, repos=repos, now=now)
+        calls = {
+            "deps_met": lambda: crq.deps_met(inputs["queue"], inputs["item"]),
+            "optional_wait": lambda: crq.optional_wait(inputs["queue"], inputs["item"]),
+            "parked_merged_linked_receipt": lambda: crq.parked_merged_linked_receipt(
+                inputs["queue"], inputs["item"]),
+            "sort_key": lambda: list(crq.sort_key(inputs["item"])),
+            "launch_band": lambda: crq.launch_band(inputs["item"]),
+            "inflight": lambda: [i["id"] for i in crq.inflight(inputs["queue"])],
+            "has_collectable_runs": lambda: crq.has_collectable_runs(inputs["queue"]),
+            "background_turn": lambda: crq.background_turn(inputs["queue"]),
+            "starts_last_hour": lambda: crq.starts_last_hour(inputs["queue"]),
+            "item_repo": lambda: crq.item_repo(inputs["item"]),
+        }
+        cases.append(_schedule_case(name, function, inputs, calls[function]))
+
+    dependency_queue = {"items": [
+        {"id": "dep-done", "kind": "merged", "state": "done"},
+        {"id": "dep-blocked", "kind": "merged", "state": "blocked"},
+        {"id": "dep-optional", "kind": "open", "state": "pending",
+         "cycles": [{"run_id": "open-1-20261101T000000Z"}]},
+        {"id": "promotion-dep", "kind": "promotion", "state": "pending"},
+    ]}
+    simple("deps-met-without-dependency", function="deps_met", queue=dependency_queue,
+           item={"id": "x", "kind": "merged", "state": "pending"})
+    simple("deps-met-done", function="deps_met", queue=dependency_queue,
+           item={"id": "x", "kind": "merged", "state": "pending", "depends_on": "dep-done"})
+    simple("deps-unmet-blocked", function="deps_met", queue=dependency_queue,
+           item={"id": "x", "kind": "merged", "state": "pending", "depends_on": "dep-blocked"})
+    simple("deps-met-optional-cycle", function="deps_met", queue=dependency_queue,
+           item={"id": "x", "kind": "merged", "state": "pending", "depends_on": "dep-optional"})
+    simple("deps-met-missing-item", function="deps_met", queue=dependency_queue,
+           item={"id": "x", "kind": "merged", "state": "pending", "depends_on": "gone"})
+    simple("deps-met-retired-promotion", function="deps_met", queue=dependency_queue,
+           item={"id": "x", "kind": "merged", "state": "pending", "depends_on": "promotion-dep"})
+    simple("deps-met-list-dependency", function="deps_met", queue=dependency_queue,
+           item={"id": "x", "kind": "merged", "state": "pending",
+                 "depends_on": ["dep-blocked"]})
+
+    optional_item = {"id": "pr-opt", "kind": "open", "state": "pending",
+                     "cycles": [{"run_id": "open-9-20261101T000000Z"}]}
+    simple("optional-waits-for-pending-required", function="optional_wait",
+           queue={"items": [optional_item, {"id": "pr0", "kind": "open", "state": "pending"}]},
+           item=optional_item)
+    simple("optional-runs-when-only-backlog-pending", function="optional_wait",
+           queue={"items": [optional_item, {"id": "b", "kind": "merged", "state": "pending",
+                                            "source": "backlog"}]},
+           item=optional_item)
+    simple("optional-ignores-parked-merged", function="optional_wait",
+           queue={"items": [optional_item,
+                            {"id": "m", "kind": "merged", "state": "pending", "pr": 3},
+                            {"id": "cur", "kind": "merged-current", "state": "pending", "pr": 3}]},
+           item=optional_item)
+    simple("required-item-never-waits", function="optional_wait",
+           queue={"items": [{"id": "pr1", "kind": "open", "state": "pending"}]},
+           item={"id": "pr1", "kind": "open", "state": "pending"})
+
+    simple("parked-merged-and-current-linked", function="parked_merged_linked_receipt",
+           queue={"items": [{"id": "cur", "kind": "merged-current", "state": "pending", "pr": 7}]},
+           item={"id": "m", "kind": "merged", "state": "pending", "pr": 7})
+    simple("parked-merged-without-current", function="parked_merged_linked_receipt",
+           queue={"items": []}, item={"id": "m", "kind": "merged", "state": "pending", "pr": 7})
+    simple("parked-open-item-is-never-parked", function="parked_merged_linked_receipt",
+           queue={"items": [{"id": "cur", "kind": "merged-current", "state": "pending", "pr": 7}]},
+           item={"id": "o", "kind": "open", "state": "pending", "pr": 7})
+
+    simple("sort-priority-precedes-rank", function="sort_key",
+           item={"id": "b", "kind": "merged", "state": "pending", "operator_priority": True,
+                 "order": 9})
+    simple("sort-order-breaks-rank-ties", function="sort_key",
+           item={"id": "b", "kind": "merged", "state": "pending", "order": 4})
+    simple("launch-band-interactive", function="launch_band",
+           item={"id": "o", "kind": "open", "state": "pending"})
+    simple("launch-band-background", function="launch_band",
+           item={"id": "m", "kind": "merged", "state": "pending"})
+
+    simple("inflight-reviewing-and-rank4", function="inflight", queue={"items": [
+        {"id": "rev", "kind": "open", "state": "reviewing"},
+        {"id": "cov", "kind": "coverage", "state": "pending", "vendor_state": "live"},
+        {"id": "bf", "kind": "backfill", "state": "launch-unknown"},
+        {"id": "bf-run", "kind": "backfill", "state": "pending", "run": {"run_id": "r"}},
+        {"id": "idle", "kind": "backfill", "state": "pending"},
+        {"id": "done", "kind": "open", "state": "done"},
+    ]})
+    simple("collectable-reviewing-run", function="has_collectable_runs", queue={"items": [
+        {"id": "rev", "kind": "open", "state": "reviewing", "run": {"run_id": "r"}},
+    ]})
+    simple("collectable-ignores-pending", function="has_collectable_runs", queue={"items": [
+        {"id": "p", "kind": "open", "state": "pending"},
+    ]})
+
+    simple("background-turn-two-interactive", function="background_turn", queue={"items": [
+        {"id": "a", "kind": "open", "state": "done", "attempts": [
+            {"run_id": "open-a-20261113T000000Z", "started_at": "2026-11-13T00:00:00Z",
+             "band": "interactive"}]},
+        {"id": "b", "kind": "open", "state": "done", "attempts": [
+            {"run_id": "open-b-20261113T010000Z", "started_at": "2026-11-13T01:00:00Z",
+             "band": "interactive"}]},
+    ]})
+    simple("background-turn-mixed-bands", function="background_turn", queue={"items": [
+        {"id": "a", "kind": "open", "state": "done", "attempts": [
+            {"run_id": "open-a-20261113T000000Z", "started_at": "2026-11-13T00:00:00Z",
+             "band": "interactive"}]},
+        {"id": "b", "kind": "merged", "state": "done", "attempts": [
+            {"run_id": "merged-b-20261113T010000Z", "started_at": "2026-11-13T01:00:00Z",
+             "band": "background"}]},
+    ]})
+    simple("background-turn-uses-run-chronology", function="background_turn", queue={"items": [
+        {"id": "a", "kind": "open", "state": "reviewing",
+         "run": {"run_id": "open-a-20261113T020000Z", "started_at": "2026-11-13T02:00:00Z",
+                 "band": "interactive"}},
+        {"id": "b", "kind": "open", "state": "done", "attempts": [
+            {"run_id": "open-b-20261113T010000Z", "started_at": "2026-11-13T01:00:00Z",
+             "band": "interactive"}]},
+    ]})
+    simple("background-turn-run-id-only", function="background_turn", queue={"items": [
+        {"id": "a", "kind": "open", "state": "done", "attempts": [
+            {"run_id": "open-a-20261113T010000Z", "band": "interactive"}]},
+        {"id": "b", "kind": "open", "state": "done", "attempts": [
+            {"run_id": "open-b-20261113T020000Z", "band": "interactive"}]},
+    ]})
+    simple("background-turn-malformed-timestamp-never-extends", function="background_turn",
+           queue={"items": [
+               {"id": "a", "kind": "open", "state": "done", "attempts": [
+                   {"run_id": "open-a-20261113T010000Z", "started_at": "not-a-time",
+                    "band": "interactive"}]},
+               {"id": "b", "kind": "open", "state": "done", "attempts": [
+                   {"run_id": "open-b-20261113T020000Z",
+                    "started_at": "2026-11-13T02:00:00Z", "band": "interactive"}]},
+           ]})
+
+    simple("starts-last-hour-window", function="starts_last_hour", queue={
+        "starts": ["2026-11-13T23:00:01Z", "2026-11-13T23:00:00Z",
+                   "2026-11-13T22:59:59Z", "2026-11-14T00:00:00Z"],
+    })
+    simple("starts-last-hour-absent", function="starts_last_hour", queue={"items": []})
+    simple("item-repo-defaults-to-primary", function="item_repo",
+           item={"id": "x", "kind": "open", "state": "pending"})
+    simple("item-repo-keeps-explicit", function="item_repo",
+           item={"id": "x", "kind": "open", "state": "pending", "repo": OTHER})
+
+    return _family("tick-schedule", cases)
+
+
+def liveness_vectors() -> Dict[str, Any]:
+    """Detached-run identity and the fail-closed liveness matrix."""
+    cases: List[Dict[str, Any]] = []
+
+    def identity(name: str, pidfile: Any, **options: Any) -> None:
+        inputs = {"pidfile": pidfile, **options}
+        cases.append(_capture(
+            name, "author_quota.identity_kind", inputs,
+            lambda: author_quota.identity_kind(
+                inputs["pidfile"], run_id=inputs.get("run_id"),
+                queue_pid=inputs.get("queue_pid"))))
+
+    identity("managed-detached-session", {"pid": 42, "pgid": 42, "sid": 42,
+                                          "run_id": "run-1", "group_owner": "foreground-v1"},
+             run_id="run-1", queue_pid=42)
+    identity("managed-queue-pid-unknown", {"pid": 42, "pgid": 42, "sid": 42,
+                                           "run_id": "run-1", "group_owner": "foreground-v1"},
+             run_id="run-1")
+    identity("managed-foreign-run-binding", {"pid": 42, "pgid": 42, "sid": 42,
+                                             "run_id": "run-2", "group_owner": "foreground-v1"},
+             run_id="run-1")
+    identity("managed-without-session-shape", {"pid": 42, "pgid": 42, "sid": 43,
+                                               "run_id": "run-1", "group_owner": "foreground-v1"},
+             run_id="run-1")
+    identity("managed-disagrees-with-queue-pid", {"pid": 42, "pgid": 42, "sid": 42,
+                                                  "run_id": "run-1",
+                                                  "group_owner": "foreground-v1"},
+             run_id="run-1", queue_pid=41)
+    identity("unknown-marker-is-invalid", {"pid": 42, "pgid": 42, "sid": 42,
+                                           "run_id": "run-1", "group_owner": "other"})
+    identity("legacy-valid", {"pid": 42, "pgid": 42}, queue_pid=42)
+    identity("legacy-disagrees-with-queue-pid", {"pid": 42, "pgid": 42}, queue_pid=41)
+    identity("legacy-without-queue-pid", {"pid": 42, "pgid": 42})
+    identity("missing-pgid-is-invalid", {"pid": 42})
+    identity("boolean-pid-is-invalid", {"pid": True, "pgid": 42})
+    identity("string-pid-is-invalid", {"pid": "42", "pgid": 42})
+    identity("absent-pidfile-is-invalid", None)
+    identity("bare-pid-is-invalid", 42)
+    identity("empty-object-is-invalid", {})
+
+    def state(identity_name: str, has_exit: bool, wrapper: Any) -> None:
+        inputs = {"has_exit": has_exit, "identity": identity_name, "runner_alive": False,
+                  "cli_alive": False, "runner_group_alive": False,
+                  "wrapper_group_alive": wrapper}
+        cases.append(_capture(
+            f"{identity_name}-exit-{str(has_exit).lower()}-wrapper-{wrapper}",
+            "author_quota.run_state", inputs,
+            lambda: author_quota.run_state(**inputs)))
+
+    for identity_name in ("managed", "legacy", "invalid"):
+        for has_exit in (False, True):
+            for wrapper in (None, False, True):
+                state(identity_name, has_exit, wrapper)
+
+    def alive(name: str, **probes: Any) -> None:
+        inputs = {"has_exit": True, "identity": "managed", "runner_alive": False,
+                  "cli_alive": False, "runner_group_alive": False,
+                  "wrapper_group_alive": None, **probes}
+        cases.append(_capture(name, "author_quota.run_state", inputs,
+                              lambda: author_quota.run_state(**inputs)))
+
+    alive("alive-runner-outranks-exit", runner_alive=True)
+    alive("alive-cli-outranks-exit", cli_alive=True)
+    alive("alive-runner-group-outranks-exit", runner_group_alive=True)
+    alive("alive-legacy-wrapper-group", identity="legacy", wrapper_group_alive=True)
+
+    for name, value in (("positive", 42), ("boolean", True), ("string", "42"),
+                        ("zero", 0), ("negative", -1), ("float", 42.0),
+                        ("absent", None)):
+        inputs = {"value": value}
+        cases.append(_capture(name, "crq.ident_pid", inputs,
+                              lambda: crq.ident_pid(inputs["value"])))
+
+    return _family("liveness", cases)
+
+
+def _admission_probe(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """`crq.admit_available` with launch and the backfill usage context stubbed.
+
+    The stub journals one deterministic reservation per loop iteration, so the
+    recorded `admissions` count, `remaining`, gate, log and usage/start
+    projections are the oracle's own arithmetic. The backfill usage context is
+    a later slice: it is stubbed here rather than reimplemented.
+    """
+    from unittest.mock import patch
+
+    queue = copy.deepcopy(inputs["queue"])
+    queue["starts"] = list(queue.get("starts", []))
+    calls: List[int] = []
+
+    def stub_start_one(q, log, dry, only, ignore_quiet, capture_current=True):
+        calls.append(len(q["starts"]))
+        q["starts"].append("2026-11-14T00:00:00Z")
+        return "stub-run", False
+
+    log: List[str] = []
+    config = {"max_starts_per_hour": inputs["max_starts_per_hour"],
+              "max_starts_per_tick": inputs["max_starts_per_tick"],
+              "max_inflight": inputs["max_inflight"]}
+    with patch.object(crq, "start_one", stub_start_one), \
+            patch.object(crq.backfill_runtime, "usage_context", lambda *a, **k: None), \
+            patch.multiple(crq, CONFIG=config, now=lambda: queue_time.parse_utc(inputs["now"])):
+        _, gate, remaining = crq.admit_available(
+            queue, inputs["usage"], log, reserved=tuple(inputs["reserved"]))
+    return {
+        "gate": gate,
+        "remaining": remaining,
+        "start_attempts": len(calls),
+        "log": log,
+        "starts": len(queue["starts"]),
+        "usage": queue.get("usage"),
+        "backfill_starts_at_observation": queue.get("backfill_starts_at_observation"),
+    }
+
+
+def tick_admission_vectors() -> Dict[str, Any]:
+    """The ordered admission gate, slot arithmetic and operator log lines."""
+    cases: List[Dict[str, Any]] = []
+
+    def admission(name: str, *, queue: Dict[str, Any], usage: Any = None,
+                  reserved: Any = None, hour: int = 5, tick: int = 10,
+                  inflight: int = 10, now: str = AT) -> None:
+        inputs = {"queue": queue, "usage": usage,
+                  "reserved": [] if reserved is None else reserved,
+                  "max_starts_per_hour": hour, "max_starts_per_tick": tick,
+                  "max_inflight": inflight, "now": now}
+        cases.append(_capture(name, "crq.admit_available", inputs,
+                              lambda: _admission_probe(inputs)))
+
+    def reviewing(item_id: str = "rev", run_id: str = "open-1-20261113T230000Z") -> Dict[str, Any]:
+        return {"id": item_id, "kind": "open", "state": "reviewing",
+                "run": {"run_id": run_id, "started_at": "2026-11-13T23:00:00Z"}}
+
+    admission("usage-slot-budget", queue={"items": []},
+              usage={"remaining": 3, "limit": 10})
+    admission("usage-reservations-reduce-slots",
+              queue={"items": [reviewing()]},
+              usage={"remaining": 3, "limit": 10},
+              reserved=["2026-11-13T23:00:00Z"])
+    admission("usage-below-reservations-is-zero",
+              queue={"items": [reviewing()]},
+              usage={"remaining": 0, "limit": 10},
+              reserved=["2026-11-13T23:00:00Z"])
+    admission("per-tick-ceiling", queue={"items": []},
+              usage={"remaining": 9, "limit": 10}, tick=2)
+    admission("inflight-ceiling", queue={"items": [reviewing()]},
+              usage={"remaining": 9, "limit": 10}, inflight=1)
+    admission("paused-gate-outranks-slots", queue={"items": [], "paused": True,
+                                                   "pause_reason": "auth on run-9"},
+              usage={"remaining": 0, "limit": 10})
+    admission("paused-without-reason", queue={"items": [], "paused": True},
+              usage={"remaining": 2, "limit": 10})
+    admission("cooldown-gate", queue={"items": [],
+                                      "cooldown_until": "2026-11-14T00:30:00Z"},
+              usage={"remaining": 2, "limit": 10})
+    admission("expired-cooldown-is-open", queue={"items": [],
+                                                 "cooldown_until": "2026-11-13T23:30:00Z"},
+              usage={"remaining": 2, "limit": 10})
+    admission("slots-exhausted-with-usage", queue={"items": []},
+              usage={"remaining": 0, "limit": 10})
+    admission("hourly-fallback-usage-unavailable", queue={
+        "items": [],
+        "starts": ["2026-11-13T23:30:00Z", "2026-11-13T22:00:00Z"],
+    })
+    admission("hourly-fallback-protects-undated-holds", queue={"items": [], "starts": []},
+              reserved=["2026-11-13T22:00:00Z", None])
+    admission("hourly-fallback-ignores-recent-dated-holds", queue={"items": [], "starts": []},
+              reserved=["2026-11-13T23:30:00Z"])
+    admission("hourly-fallback-exhausted", queue={
+        "items": [],
+        "starts": ["2026-11-13T23:10:00Z", "2026-11-13T23:20:00Z",
+                   "2026-11-13T23:30:00Z", "2026-11-13T23:40:00Z",
+                   "2026-11-13T23:50:00Z"],
+    })
+    admission("inflight-gate", queue={"items": [reviewing(), reviewing("rev2", "open-2-20261113T230000Z")]},
+              usage={"remaining": 4, "limit": 10}, inflight=2)
+    admission("rank4-vendor-owner-counts-inflight", queue={"items": [
+        {"id": "cov", "kind": "coverage", "state": "pending", "vendor_state": "live"},
+    ]}, usage={"remaining": 4, "limit": 10}, inflight=1)
+
+    return _family("tick-admission", cases)
+
+
+# --------------------------------------------------------------- assembly
+
+
 BUILDERS: Dict[str, Callable[[], Dict[str, Any]]] = {
     "canonical": canonical_vectors,
     "queue-bytes": queue_bytes_vectors,
@@ -1520,6 +1953,9 @@ BUILDERS: Dict[str, Callable[[], Dict[str, Any]]] = {
     "status-helpers": status_helpers_vectors,
     "ledger": ledger_vectors,
     "summary": summary_vectors,
+    "tick-schedule": tick_schedule_vectors,
+    "liveness": liveness_vectors,
+    "tick-admission": tick_admission_vectors,
 }
 
 

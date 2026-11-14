@@ -39,7 +39,7 @@ ruleTester.run('no-process-env', rule, {
     ok('let p = process; p++; p.env;'),
     ok('var p = process; var p = other; p.env;'),
     ok('function f(process) { const p = process; return p.env; }'),
-    ok("import { processEnv } from '../config/process-env.js'; const v = processEnv()['A'];"),
+    ok("import { currentEntryEnv } from '../config/run-env.js'; const v = currentEntryEnv()['A'];"),
     ok('const env = { PATH: "/bin" }; env.PATH;'),
     ok('process.argv.slice(2);'),
     ok('process.cwd();'),

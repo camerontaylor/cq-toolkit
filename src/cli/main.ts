@@ -93,7 +93,7 @@ import { get, list } from '../registry/index.js';
 import { getPlan } from '../registry/plans.js';
 import { KnownUsageSummarySchema, OpResultSchema } from '../kernel/schema.js';
 import type { OpRegistryEntry } from '../kernel/types.js';
-import { checkEntryEnv, runWithCqEnv, type CqEnv } from '../registry/entry-env.js';
+import { checkEntryEnv, runWithCqEnv, type CqEnv, type EntryEnv } from '../registry/entry-env.js';
 import { EXIT_CODES, exitCodeForOpResult } from './exit.js';
 import {
   assertJsonLossless,
@@ -524,6 +524,10 @@ async function dispatchCli(
   // (--json). `cq config` reports the same diagnostics itself, so it is the
   // one subcommand that skips the gate (it exits 2 after printing its report).
   let cqEnv: CqEnv | undefined;
+  // The entry's environment record: pinned in the run context and on the
+  // importer wiring, so a foreign-name reader takes these values, not a
+  // mid-run ambient re-read.
+  let entryEnv: EntryEnv | undefined;
   // `cq config` still runs when the snapshot carries errors (the report must reach
   // stdout so the operator sees what failed); it then exits 2 like every other entry.
   // Its snapshot is RETAINED and rides the importer wiring (and the run context)
@@ -534,6 +538,7 @@ async function dispatchCli(
     const check = checkEntryEnv();
     configErrorLines = check.errorLines;
     cqEnv = check.cqEnv;
+    entryEnv = check.env;
   }
   if (sub !== 'config') {
     const check = checkEntryEnv();
@@ -555,6 +560,7 @@ async function dispatchCli(
     // I1: machine mode keeps stderr EMPTY; warnings are human narration only.
     if (rawMode !== 'json') for (const line of check.warningLines) io.stderr(`${line}\n`);
     cqEnv = check.cqEnv;
+    entryEnv = check.env;
   }
 
   // Flag syntax first: duplicate flags throw here → narrated usage error (2);
@@ -628,6 +634,7 @@ async function dispatchCli(
         ...opts,
         failOnVerdict,
         ...(cqEnv !== undefined ? { cqEnv } : {}),
+        ...(entryEnv !== undefined ? { env: entryEnv } : {}),
       });
     } catch (err) {
       // Runtime throw → 1; machine mode writes the error artifact instead —
@@ -683,6 +690,7 @@ async function dispatchCli(
           ...opts,
           failOnVerdict,
           ...(cqEnv !== undefined ? { cqEnv } : {}),
+          ...(entryEnv !== undefined ? { env: entryEnv } : {}),
         });
       } catch (err) {
         // Runtime throw → 1; machine mode writes the error artifact instead —
@@ -788,6 +796,7 @@ async function dispatchCli(
       ? {
           ...(mode === 'json' ? { onDeprecatedAlias: (): void => {} } : {}),
           ...(cqEnv !== undefined ? { cqEnv } : {}),
+          ...(entryEnv !== undefined ? { env: entryEnv } : {}),
         }
       : undefined;
   try {
@@ -799,7 +808,9 @@ async function dispatchCli(
     // runPlan's executeOp; this is their direct-path counterpart).
     // The op runs inside the entry's snapshot (resolve once; ADR-0009).
     const raw: unknown =
-      cqEnv === undefined ? await op(check.data) : await runWithCqEnv(cqEnv, () => op(check.data));
+      cqEnv === undefined
+        ? await op(check.data)
+        : await runWithCqEnv(cqEnv, () => op(check.data), entryEnv);
     // I1 permits optional report and typed usage envelopes on every status.
     // Keep the frozen result mirror strict: no other extension key is accepted.
     let base = raw;

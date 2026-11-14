@@ -19,6 +19,7 @@
 // `./<base>` rule): readOnlyStatus.ts and statusWriter.ts are deliberately
 // surface, not orphan op modules.
 import type { OpRegistryEntry } from '../../kernel/types.js';
+import type { runQueueCapability } from './queueCapability.js';
 import type { CommandResult, ReadOnlyStatusEffects } from './readOnlyStatus.js';
 import type { CrqDocuments, StatusWriterEffects } from './statusWriter.js';
 
@@ -38,6 +39,15 @@ export type CrqStatusWriterRoute = (
   readonly summary: Record<string, unknown> | null;
   readonly publishFailure?: { readonly event: 'summary_failed'; readonly error: string };
 }>;
+
+/**
+ * The queue-v1 capability's callable surface. It registers no dispatch name: it
+ * is served as the SSH forced command (`crq queue-capability`), with policy and
+ * principal from the environment and the request frame on stdin, so
+ * `src/adapters/crq/queueCapabilityMain.ts` binds its effects instead of the
+ * central dispatcher calling it by name.
+ */
+export type CrqQueueCapability = typeof runQueueCapability;
 
 /** No dispatchable ops yet: A1 ships the route plus its file adapter. */
 export const registry: OpRegistryEntry[] = [];
