@@ -1179,16 +1179,21 @@ class BoundedJournalSeamTests(FactoryFixture):
             self.assertEqual(evidence["witness"], "manager")
             self.assertEqual(evidence["boot_id"], self.systemd.boot)
 
-    def test_unprojected_large_journal_reproduces_recovery_required(self):
+    def test_unprojected_large_journal_rolls_back_after_the_byte_bound(self):
         adapter, _selection = self.compose_live(honor_projection=False)
         with self.assertRaises(dc.RecoveryRequired) as failure:
             dc.switch_unit(self.effects, adapter, UNIT, "python")
         recovery = failure.exception.recovery
-        self.assertEqual(recovery["outcome"], "recovery_required")
+        self.assertEqual(recovery["outcome"], "rolled_back")
+        self.assertEqual(recovery["failed_phase"], "activation_pending")
         self.assertIn("byte bound", recovery["reason"])
         records = [json.loads(path.read_text()) for path in
                    sorted(self.effects.record_dir.glob("controller-*.json"))]
-        self.assertEqual(records[-1]["outcome"], "recovery_required")
+        self.assertEqual(records[-1]["outcome"], "rolled_back")
+        service = self.unit_dir / UNIT
+        self.assertEqual(service.read_bytes(),
+                         self.node_service(UNIT)["bytes"])
+        self.assertEqual(self.systemd.active["crq-tick.timer"], "active")
 
 
 if __name__ == "__main__":
