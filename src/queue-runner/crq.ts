@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { randomUUID } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import type { OpResult } from '../kernel/types.js';
 import { runRepairPrepare } from '../adapters/crq/repairPreparation.js';
 import { runPublishUnit } from '../adapters/crq/publishSource.js';
@@ -109,21 +109,27 @@ async function isRolloutAbsent(path: string): Promise<boolean> {
 }
 
 /** The state root `readPublisherRoots` would use: config.state_root or default. */
-async function publisherStateRoot(runnerRoot: string): Promise<string> {
+export async function publisherStateRoot(runnerRoot: string): Promise<string> {
+  // Mirrors readPublisherRoots' derivation, including resolving a relative
+  // configured state_root against the runner root, so the rollout-absence
+  // probe and the effects binding always target the same directory.
   try {
     const config = JSON.parse(await readFile(join(runnerRoot, 'config.json'), 'utf8')) as unknown;
     const stateRoot =
       typeof config === 'object' && config !== null && !Array.isArray(config)
         ? (config as Record<string, unknown>)['state_root']
         : undefined;
-    if (typeof stateRoot === 'string' && stateRoot !== '') return stateRoot;
+    if (typeof stateRoot === 'string' && stateRoot !== '') {
+      return isAbsolute(stateRoot) ? stateRoot : resolve(runnerRoot, stateRoot);
+    }
   } catch {
     // fall through to the default
   }
   return join(runnerRoot, 'state');
 }
 
-async function readPublisherRoots(runnerRoot: string) {
+/** The publisher roots from the runner's own config.json, state_root resolved. */
+export async function readPublisherRoots(runnerRoot: string) {
   let config: unknown;
   try {
     config = JSON.parse(await readFile(join(runnerRoot, 'config.json'), 'utf8'));
@@ -134,10 +140,17 @@ async function readPublisherRoots(runnerRoot: string) {
   const record = config as Record<string, unknown>;
   const clone = record['clone'];
   if (typeof clone !== 'string' || clone === '') return null;
-  const stateRoot =
+  // A configured state_root may be relative (Python resolves paths against
+  // cwd); resolve it against the runner root so the effects always bind an
+  // absolute root (a relative root makes git -C init into publisher.git/
+  // <relative> instead of the intended directory).
+  const configuredStateRoot =
     typeof record['state_root'] === 'string' && record['state_root'] !== ''
       ? record['state_root']
       : join(runnerRoot, 'state');
+  const stateRoot = isAbsolute(configuredStateRoot)
+    ? configuredStateRoot
+    : resolve(runnerRoot, configuredStateRoot);
   let durableArtifactRoot: string;
   try {
     const rollout = JSON.parse(

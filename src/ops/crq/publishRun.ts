@@ -320,8 +320,9 @@ async function readRollout(effects: PublishRunEffects): Promise<JsonObject> {
     'publisher_spool',
   ];
   for (const key of required) {
-    const entry = value.get(key);
-    if (entry === undefined || entry === null || entry === false || entry === '') {
+    // Python: any(not value.get(k) for k in required) raises. bool() over the
+    // JSON domain, so {}, [], 0 and "" are all refusals (shared truthy helper).
+    if (!truthy(value.get(key))) {
       throw integrity('backfill rollout prerequisites incomplete');
     }
   }

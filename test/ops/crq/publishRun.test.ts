@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
   GitLedger,
@@ -819,6 +819,38 @@ describe('malformed rollout refuses publication', () => {
         message = error instanceof LedgerIntegrityError ? error.message : '';
       }
       expect(message).toBe('backfill rollout prerequisites incomplete');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('an empty-object evidence field refuses with Python truthiness', async () => {
+    // Python settings(): any(not value.get(k) for k in required). An empty
+    // object, empty list or numeric zero for any prerequisite is a refusal,
+    // not an accepted rollout.
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-empty-'));
+    try {
+      for (const bad of [{}, [], 0]) {
+        const effects = await makeEffects(root);
+        await writeFile(
+          join(effects.stateRoot, 'backfill-rollout.json'),
+          `${JSON.stringify({
+            operational_ruling: 'fixture',
+            no_live_run_verification: bad,
+            owner_branch_ruleset_evidence: 'fixture',
+            durable_artifact_root: '/unused',
+            runner_identity: 'crq-runner-app',
+            publisher_spool: { ssh_alias: 'crq@spool.invalid', ssh_key: '/unused/key' },
+          })}\n`,
+        );
+        let message = '';
+        try {
+          await runPublish(effects);
+        } catch (error) {
+          message = error instanceof Error ? error.message : '';
+        }
+        expect(message).toBe('backfill rollout prerequisites incomplete');
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1755,6 +1787,38 @@ describe('round-2 coverage: publisher clone ownership and durable transitions', 
       await expect(
         stat(join(stateRoot, 'backfill', 'publication-failure.json')),
       ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a relative config state_root resolves against the runner root', async () => {
+    // readPublisherRoots resolves a relative state_root before binding
+    // effects; a relative root would make git -C state/backfill/publisher.git
+    // init into publisher.git/state/... (reproduced by the reviewer). The
+    // exported helpers pin both derivations: roots resolve, and the probe
+    // (publisherStateRoot) targets the same resolved directory.
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-relstate-'));
+    try {
+      await writeFile(
+        join(root, 'config.json'),
+        `${JSON.stringify({ clone: join(root, 'clone'), state_root: 'state' })}\n`,
+      );
+      const clone = join(root, 'clone');
+      await import('node:fs/promises').then((fs) => fs.mkdir(clone, { recursive: true }));
+      const crq = (await import('../../../src/queue-runner/crq.js')) as {
+        publisherStateRoot: (runnerRoot: string) => Promise<string>;
+        readPublisherRoots: (
+          runnerRoot: string,
+        ) => Promise<{ stateRoot: string; cloneRoot: string } | null>;
+      };
+      const probed = await crq.publisherStateRoot(root);
+      expect(isAbsolute(probed)).toBe(true);
+      expect(probed).toBe(join(root, 'state'));
+      // No rollout at the resolved root: readPublisherRoots reports null and
+      // the CLI branch reports disabled (already covered above).
+      const roots = await crq.readPublisherRoots(root);
+      expect(roots).toBeNull();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
