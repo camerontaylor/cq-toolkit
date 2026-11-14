@@ -664,6 +664,19 @@
           "by": "self-merge-prs:observe"
         }
       ]
+    },
+    "1793": {
+      "tuple": {
+        "head": "a028b152820e49bd7bb6dc35782c5626fbf78ce9",
+        "base": "1b48a0154d69822714f38ea19e12441b92a5a393",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-14T16:02:35.240Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
     }
   }
 }
