@@ -1,6 +1,6 @@
 /* Inactive review process bindings. No runner route or capability is installed. */
 import { spawn, execFile } from 'node:child_process';
-import { open, readFile, writeFile } from 'node:fs/promises';
+import { open, readFile, stat, writeFile } from 'node:fs/promises';
 import { constants as osConstants } from 'node:os';
 import { join } from 'node:path';
 import { getSystemErrorMap, promisify } from 'node:util';
@@ -16,7 +16,7 @@ function runDirectory(root: string, runId: string): string {
 }
 
 /** Python OSError string, only for actual OS errors, not arbitrary adapter failures. */
-function spawnError(error: unknown): never {
+function spawnError(error: unknown, omitPath = false): never {
   if (
     error instanceof Error &&
     'errno' in error &&
@@ -26,7 +26,8 @@ function spawnError(error: unknown): never {
     const description = getSystemErrorMap().get(error.errno)?.[1];
     if (description) {
       const message = description.charAt(0).toUpperCase() + description.slice(1);
-      const path = 'path' in error && typeof error.path === 'string' ? `: '${error.path}'` : '';
+      const path =
+        !omitPath && 'path' in error && typeof error.path === 'string' ? `: '${error.path}'` : '';
       throw new ReviewSpawnError(`[Errno ${-error.errno}] ${message}${path}`, { cause: error });
     }
   }
@@ -49,6 +50,16 @@ export async function spawnReviewWrapper(options: {
     return spawnError(error);
   }
   try {
+    // Check the cwd before spawn so a known missing directory is not misreported
+    // as a missing executable by Node. A later ENOENT remains ambiguous.
+    try {
+      const info = await stat(options.cwd);
+      if (!info.isDirectory())
+        throw new ReviewSpawnError(`[Errno 20] Not a directory: '${options.cwd}'`);
+    } catch (error) {
+      if (error instanceof ReviewSpawnError) throw error;
+      return spawnError(error);
+    }
     try {
       return await launchDetached(options.executable, [...options.args, options.runId], {
         cwd: options.cwd,
@@ -56,7 +67,10 @@ export async function spawnReviewWrapper(options: {
         stderr: log.fd,
       });
     } catch (error) {
-      return spawnError(error);
+      return spawnError(
+        error,
+        error instanceof Error && 'code' in error && error.code === 'ENOENT',
+      );
     }
   } finally {
     await log.close();

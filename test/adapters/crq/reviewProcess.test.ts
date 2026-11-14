@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -68,6 +68,18 @@ describe('inactive detached review process', () => {
     expect(await readFile(join(dir, 'review.ndjson'), 'utf8')).toBe('hello');
     expect(await readFile(join(dir, 'stderr.log'), 'utf8')).toBe('problem');
   });
+  it.each([124, 137])('passes foreground timeout arguments and records exit %i', async (exit) => {
+    const { root, dir } = await setup('open', ['/bin/echo', 'hello']);
+    const timeout = join(root, 'fake-timeout');
+    await writeFile(timeout, `#!/bin/sh\nprintf '%s\\n' "$@"\nexit ${exit}\n`);
+    await chmod(timeout, 0o700);
+    await start(root, timeout);
+    const result: unknown = JSON.parse(await waitFor(join(dir, 'exit.json')));
+    expect(result).toMatchObject({ exit, timed_out: true });
+    expect(await readFile(join(dir, 'review.ndjson'), 'utf8')).toBe(
+      '--foreground\n--kill-after=60\n1m\n/bin/echo\nhello\n',
+    );
+  });
   it('refuses backfill before invoking any command', async () => {
     const { root, dir } = await setup('backfill', ['/bin/false']);
     await writeFile(
@@ -110,6 +122,19 @@ describe('inactive detached review process', () => {
     }
     expect(output).toContain('ENOENT');
     await expect(readFile(join(dir, 'exit.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+  it('reports a missing working directory rather than the executable', async () => {
+    const { root } = await setup('open', ['/bin/true']);
+    const cwd = join(root, 'missing');
+    await expect(
+      spawnReviewWrapper({
+        stateRoot: root,
+        runId: 'run-1',
+        cwd,
+        executable: process.execPath,
+        args: [],
+      }),
+    ).rejects.toThrow(`[Errno 2] No such file or directory: '${cwd}'`);
   });
   it('converts an OS spawn failure and rejects unsafe paths', async () => {
     const { root } = await setup('open', ['/bin/true']);
