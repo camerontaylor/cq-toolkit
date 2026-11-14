@@ -19,6 +19,7 @@
 // `./<base>` rule): readOnlyStatus.ts and statusWriter.ts are deliberately
 // surface, not orphan op modules.
 import type { OpRegistryEntry } from '../../kernel/types.js';
+import type { BackfillInventoryEffects, BackfillRouteResult } from './backfillInventory.js';
 import type { runQueueCapability } from './queueCapability.js';
 import type { CommandResult, ReadOnlyStatusEffects } from './readOnlyStatus.js';
 import type { PublishRunResult } from './publishRun.js';
@@ -60,3 +61,12 @@ export const registry: OpRegistryEntry[] = [];
  * family scan does not classify it as an orphan module.
  */
 export type { PublishRunResult };
+
+/**
+ * The S4 backfill inventory route (`./backfillInventory.js`) is family surface
+ * wired by the live runner (`queue-runner` operator-live `backfill` ->
+ * `crq.ts` -> `adapters/crq/backfillSource`), not a JSON-dispatchable op: the
+ * type-only import above declares it so the family scan does not classify it as
+ * an orphan module.
+ */
+export type { BackfillInventoryEffects, BackfillRouteResult };
