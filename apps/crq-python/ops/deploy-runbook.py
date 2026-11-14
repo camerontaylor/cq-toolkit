@@ -1108,7 +1108,15 @@ class Run:
                     rollback_error) + ") after: " + reason[:200])
             return "rolled_back"
         if self.switch_attempted:
-            head = self.git("rev-parse", "HEAD")
+            try:
+                head = self.git("rev-parse", "HEAD")
+            except Exception as exc:
+                # A switch was attempted, so an unreadable HEAD means the
+                # checkout cannot be proven unchanged; it may have moved.
+                # That is recovery required, never an unchanged-host
+                # refusal: keep the hold and leave recovery to the owner.
+                self.fail_stop("the post-switch HEAD could not be observed ("
+                               + repr(exc)[:200] + "): " + reason[:200])
             if head == self.target:
                 try:
                     self.rollback_to_prior(reason)
