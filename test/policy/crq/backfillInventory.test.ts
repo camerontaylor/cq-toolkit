@@ -206,10 +206,23 @@ test('an unverified reviewer limit blocks enqueue but not replay', () => {
     max_files: 4,
     max_file_bytes: 1000,
     max_total_bytes: 2000,
-    reviewer: { verified: false, max_files: 4 },
+    // Even a complete limit set is refused while the reviewer has not verified
+    // the deployment: this is the go-live gate, not a smaller construction.
+    reviewer: { verified: false, evidence: 'deployed', max_files: 4, max_diff_bytes: 4096 },
   };
-  expect(effectiveLimits(limits, { requireVerified: false }).diff).toBeNull();
+  expect(effectiveLimits(limits, { requireVerified: false }).diff).toBe(4096);
   expect(() => effectiveLimits(limits, { requireVerified: true })).toThrow(
+    'deployed reviewer limits not verified; go-live blocked',
+  );
+  const unproven = { ...limits, reviewer: { ...limits.reviewer, verified: true, evidence: '' } };
+  expect(() => effectiveLimits(unproven, { requireVerified: true })).toThrow(
+    'deployed reviewer limits not verified; go-live blocked',
+  );
+  const noDiff = {
+    ...limits,
+    reviewer: { ...limits.reviewer, verified: true, evidence: 'x', max_diff_bytes: 0 },
+  };
+  expect(() => effectiveLimits(noDiff, { requireVerified: true })).toThrow(
     'invalid construction limits',
   );
 });

@@ -209,6 +209,13 @@ export function effectiveLimits(
 ): EffectiveLimits {
   const policy = asDoc(limits, 'construction limits');
   const reviewer = asDoc(need(policy, 'reviewer', 'construction limits'), 'reviewer limits');
+  // Enqueue never proceeds on limits the reviewer did not verify: an unverified
+  // deployment is a go-live refusal, not a smaller construction.
+  if (options.requireVerified) {
+    if (opt(reviewer, 'verified') !== true || !pyTruthy(opt(reviewer, 'evidence'))) {
+      fail('deployed reviewer limits not verified; go-live blocked');
+    }
+  }
   const reviewerFiles = pyTruthy(opt(reviewer, 'max_files')) ? opt(reviewer, 'max_files') : 8;
   const files = Math.min(
     8,
