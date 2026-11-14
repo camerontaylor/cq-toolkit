@@ -1,5 +1,5 @@
-import { JsonNumber, JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
-import { pyTruthy, pythonValueEqual, withObjectKeys } from '../../policy/crq/queueDoc.js';
+import { JsonNumber, JsonObject, type JsonValue } from '../../../policy/crq/jsonValue.js';
+import { pyTruthy, pythonValueEqual, withObjectKeys } from '../../../policy/crq/queueDoc.js';
 
 /** Seconds, matching backfill.inventory_unlocked. */
 export const SNAPSHOT_LOCK_WAIT = 180;

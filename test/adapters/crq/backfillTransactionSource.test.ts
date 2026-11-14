@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createBackfillTransactionEffects } from '../../../src/adapters/crq/backfillTransactionSource.js';
-import { inventoryTransaction } from '../../../src/ops/crq/backfillTransaction.js';
+import { inventoryTransaction } from '../../../src/ops/crq/internal/backfillTransaction.js';
 import { JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
 
 const obj = (text: string): JsonObject => {

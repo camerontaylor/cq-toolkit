@@ -11,7 +11,7 @@ import { Outbox, type OutboxFiles } from '../../ops/review/internal/crq/outbox.j
 import type {
   InventoryTransactionEffects,
   PreparedInventory,
-} from '../../ops/crq/backfillTransaction.js';
+} from '../../ops/crq/internal/backfillTransaction.js';
 import { JsonNumber, JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
 import {
   ledgerCanonicalBytes,

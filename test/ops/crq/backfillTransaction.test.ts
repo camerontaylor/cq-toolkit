@@ -5,7 +5,7 @@ import {
   inventoryTransaction,
   mergeInventory,
   type InventoryTransactionEffects,
-} from '../../../src/ops/crq/backfillTransaction.js';
+} from '../../../src/ops/crq/internal/backfillTransaction.js';
 
 function doc(text: string): JsonObject {
   const value = parseJsonValue(text);

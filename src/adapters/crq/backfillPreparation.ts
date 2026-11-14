@@ -18,7 +18,7 @@ import {
   withObjectKeys,
 } from '../../policy/crq/queueDoc.js';
 import type { GitAccountingRepository } from './backfillAccounting.js';
-import type { PreparedInventory } from '../../ops/crq/backfillTransaction.js';
+import type { PreparedInventory } from '../../ops/crq/internal/backfillTransaction.js';
 
 /** Inputs acquired after the invocation cache has been reset. */
 export interface InventoryInputs {

@@ -38,7 +38,7 @@ import { gitSubjectRepository } from './backfillSubjects.js';
 import { collectRequired, fetchRequiredPr } from './backfillRequired.js';
 import { prepareInventory } from './backfillPreparation.js';
 import { createBackfillTransactionEffects } from './backfillTransactionSource.js';
-import { inventoryTransaction } from '../../ops/crq/backfillTransaction.js';
+import { inventoryTransaction } from '../../ops/crq/internal/backfillTransaction.js';
 import { GitLedger } from './ledgerGit.js';
 import { runGitIn } from './publishSource.js';
 
