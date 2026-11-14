@@ -25,6 +25,32 @@ async function waitDead(pid: number): Promise<boolean> {
 }
 
 describe('gitCall process ownership', () => {
+  test('checkout override is scoped and does not leak ambient Git redirection', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-git-env-'));
+    const savedPath = process.env.PATH;
+    const savedGitDir = process.env.GIT_DIR;
+    const pool = new GitPool();
+    try {
+      await writeFile(
+        join(dir, 'git'),
+        '#!/bin/sh\nprintf "%s|%s" "$GIT_LFS_SKIP_SMUDGE" "$GIT_DIR"\n',
+        { mode: 0o755 },
+      );
+      process.env.PATH = `${dir}:${savedPath ?? ''}`;
+      process.env.GIT_DIR = '/unsafe';
+      const scoped = await gitCall(pool, dir, ['status'], { skipLfsSmudge: true });
+      const ordinary = await gitCall(pool, dir, ['status']);
+      expect(new TextDecoder().decode(scoped.stdout)).toBe('1|');
+      expect(new TextDecoder().decode(ordinary.stdout)).toBe('|');
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      if (savedGitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = savedGitDir;
+      pool.killAll();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
   test.skipIf(process.platform === 'win32')(
     'a timeout kills the descendant process group',
     async () => {

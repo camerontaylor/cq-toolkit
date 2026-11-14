@@ -78,6 +78,8 @@ export function gitCall(
     readonly input?: Uint8Array;
     readonly timeoutMs?: number;
     readonly maxOutput?: number;
+    /** Scoped checkout-only override after the ambient GIT_* scrub. */
+    readonly skipLfsSmudge?: boolean;
   } = {},
 ): Promise<GitResult> {
   const timeoutMs = options.timeoutMs ?? GIT_CALL_TIMEOUT_MS;
@@ -87,7 +89,7 @@ export function gitCall(
       'git',
       ['-C', cwd, '--no-replace-objects', '-c', 'core.hooksPath=/dev/null', ...GIT_HARDEN, ...args],
       {
-        env: childEnv(),
+        env: { ...childEnv(), ...(options.skipLfsSmudge ? { GIT_LFS_SKIP_SMUDGE: '1' } : {}) },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
         detached: process.platform !== 'win32',
