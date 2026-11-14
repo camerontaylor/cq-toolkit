@@ -360,6 +360,9 @@ class Hold:
     def __init__(self, root):
         self.path = Path(root) / MARKER_RELPATH
         self.token = (uuid.uuid4().hex + "-" + str(os.getpid()) + "\n").encode()
+        # ``created`` tracks a marker that exists on disk; ``acquired``
+        # additionally requires this run's token to be persisted.
+        self.created = False
         self.acquired = False
 
     def acquire(self):
@@ -371,10 +374,37 @@ class Hold:
             raise Refused(
                 "admission is already held by " + str(self.path)
                 + "; another deploy or a manual hold owns it") from exc
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(self.token)
-            handle.flush()
-            os.fsync(handle.fileno())
+        # From here the marker exists even if the token never lands.
+        self.created = True
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(self.token)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            if not self.owns():
+                # The bytes cannot prove this run's ownership, so the
+                # marker must stay: it holds admission, and only the owner
+                # may verify and remove it. Report recovery with the
+                # retained identity rather than a refusal that claims the
+                # host is unchanged.
+                raise RecoveryRequired(
+                    "the admission marker " + str(self.path)
+                    + " was created but its token could not be persisted ("
+                    + repr(exc)[:200] + "); the marker is retained and "
+                    "admission stays disabled; remove it only after "
+                    "verifying its contents are "
+                    + self.token.decode().strip()) from exc
+            # The persisted bytes match this run's token, so ownership is
+            # proven: remove the marker as release() would and refuse with
+            # the host genuinely unchanged.
+            self.path.unlink()
+            raise Refused(
+                "the admission marker " + str(self.path)
+                + " could not be persisted (" + repr(exc)[:200]
+                + "); its bytes matched this run's token, so ownership was "
+                "proven and the marker was removed; the host is unchanged"
+            ) from exc
         self.acquired = True
 
     def owns(self):

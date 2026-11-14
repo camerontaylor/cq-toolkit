@@ -799,5 +799,69 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertFalse(self.marker().exists())
 
 
+class HoldPersistenceTest(unittest.TestCase):
+    """A marker that exists but whose token never persisted is acquired
+    admission: the run must not report an unchanged-host refusal while
+    admission stays disabled."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="crq-hold-")
+        self.addCleanup(self.temp.cleanup)
+        self.hold = rb.Hold(Path(self.temp.name))
+
+    def test_fragment_token_demands_recovery_and_keeps_the_marker(self):
+        # Only a fragment of the token lands before storage gives up, so the
+        # marker's bytes cannot prove this run's ownership. The marker must
+        # stay (it holds admission) and the failure must be recovery
+        # required carrying the retained marker identity -- never a plain
+        # refusal that claims the host is unchanged.
+        class FragmentingHandle:
+            def __init__(self, descriptor):
+                self.descriptor = descriptor
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exception):
+                os.close(self.descriptor)
+                return False
+
+            def write(self, data):
+                os.write(self.descriptor, data[:4])
+                raise OSError(28, "No space left on device")
+
+            def flush(self):
+                pass
+
+            def fileno(self):
+                return self.descriptor
+
+        def fragmenting_fdopen(descriptor, mode):
+            return FragmentingHandle(descriptor)
+
+        with mock.patch.object(rb.os, "fdopen",
+                               side_effect=fragmenting_fdopen):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                self.hold.acquire()
+        self.assertIn(str(self.hold.path), str(caught.exception))
+        self.assertIn("admission stays disabled", str(caught.exception))
+        self.assertTrue(self.hold.path.exists())
+        self.assertNotEqual(self.hold.path.read_bytes(), self.hold.token)
+        self.assertTrue(self.hold.created)
+        self.assertFalse(self.hold.acquired)
+
+    def test_proven_ownership_removes_an_unsyncable_marker(self):
+        # The token bytes landed but the fsync failed. The marker's bytes
+        # still prove this run's ownership, so the run removes it and
+        # refuses with the host genuinely unchanged.
+        full = OSError(28, "No space left on device")
+        with mock.patch.object(rb.os, "fsync", side_effect=full):
+            with self.assertRaisesRegex(rb.Refused, "ownership was proven"):
+                self.hold.acquire()
+        self.assertFalse(self.hold.path.exists())
+        self.assertTrue(self.hold.created)
+        self.assertFalse(self.hold.acquired)
+
+
 if __name__ == "__main__":
     unittest.main()
