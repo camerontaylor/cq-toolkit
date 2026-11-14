@@ -348,9 +348,24 @@ def fsync_dir(directory):
         os.close(fd)
 
 
+def make_dirs(directory):
+    """Create missing directories, synchronizing each new entry in its parent."""
+    directory = Path(directory)
+    if directory.is_dir():
+        return
+    missing = []
+    probe = directory
+    while not probe.exists():
+        missing.append(probe)
+        probe = probe.parent
+    for entry in reversed(missing):
+        entry.mkdir(exist_ok=True)
+        fsync_dir(entry.parent)
+
+
 def atomic(filename, data):
     filename = Path(filename)
-    filename.parent.mkdir(parents=True, exist_ok=True)
+    make_dirs(filename.parent)
     with tempfile.NamedTemporaryFile(dir=filename.parent, delete=False) as stream:
         stream.write(data)
         stream.flush()
@@ -404,7 +419,7 @@ class ArtifactStore:
                 hasher.update(chunk)
         ident = hasher.hexdigest()
         destination = self.root / "sha256" / ident
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        make_dirs(destination.parent)
         if not destination.exists():
             with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
                 with Path(filename).open("rb") as source:
