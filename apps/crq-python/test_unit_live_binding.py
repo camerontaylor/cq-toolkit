@@ -472,6 +472,48 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("declared entries", " ".join(evidence["foreign"]))
 
+    def test_type_wide_inherited_dropin_directory_is_unsupported(self):
+        declared = self.declare()
+        override = self.unit_dir / "service.d"
+        override.mkdir()
+        # systemd merges the type-wide directory into every service unit, so
+        # an ExecStart override there would execute outside the verified
+        # bytes even though FragmentPath still names the main unit file.
+        (override / "override.conf").write_text(
+            "[Service]\nExecStart=/bin/false\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("undeclared drop-in directory: " + str(override),
+                      " ".join(evidence["foreign"]))
+
+    def test_dash_prefix_inherited_dropin_directory_is_unsupported(self):
+        declared = self.declare()
+        override = self.unit_dir / "crq-.service.d"
+        override.mkdir()
+        # The dash-prefix directory applies to crq-tick.service even though
+        # it is not named after the unit, so discovery must reject it too.
+        (override / "override.conf").write_text(
+            "[Service]\nExecStart=/bin/false\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("undeclared drop-in directory: " + str(override),
+                      " ".join(evidence["foreign"]))
+
+    def test_symlinked_type_wide_dropin_directory_is_unsupported(self):
+        declared = self.declare()
+        held = self.base / "repos/held.service.d"
+        held.mkdir(parents=True)
+        (held / "override.conf").write_text(
+            "[Service]\nExecStart=/bin/false\n")
+        (self.unit_dir / "service.d").symlink_to(held)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("undeclared drop-in directory: " + str(
+            self.unit_dir / "service.d"), " ".join(evidence["foreign"]))
+
     def test_symlinked_dropin_directory_is_unsupported(self):
         declared = self.declare()
         held = self.unit_dir / "held-dropin"
