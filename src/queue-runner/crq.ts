@@ -191,7 +191,12 @@ if (command === 'queue-capability') {
   });
   const output =
     command === 'backfill'
-      ? pythonJsonText(result.artifact, { asciiOnly: false, sortKeys: false })
+      ? pythonJsonText(result.artifact, {
+          asciiOnly: true,
+          sortKeys: true,
+          keyOrder: 'code-point',
+          spacedSeparators: true,
+        })
       : JSON.stringify(result.artifact);
   process.stdout.write(`${output}\n`);
   process.exitCode = result.exitCode;

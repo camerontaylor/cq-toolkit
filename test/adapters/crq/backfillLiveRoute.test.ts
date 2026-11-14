@@ -3,14 +3,18 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { ledgerLoads } from '../../../src/policy/crq/ledger.js';
 
+const seen = vi.hoisted(() => ({ required: [] as unknown[] }));
 vi.mock('../../../src/adapters/crq/backfillRequired.js', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('../../../src/adapters/crq/backfillRequired.js')>();
   return {
     ...original,
-    collectRequired: (options: Parameters<typeof original.collectRequired>[0]) =>
-      original.collectRequired({ ...options, required: { rows: [] } }),
+    collectRequired: (options: Parameters<typeof original.collectRequired>[0]) => {
+      seen.required.push(options.required);
+      return original.collectRequired({ ...options, required: { rows: [] } });
+    },
     fetchRequiredPr: async () => {
       throw new Error('unexpected external forge request in local fixture');
     },
@@ -26,7 +30,6 @@ describe('live backfill inventory route', () => {
     const runnerRoot = join(root, 'runner');
     const origin = join(root, 'origin.git');
     await mkdir(stateRoot);
-    await mkdir(join(runnerRoot, 'policy'), { recursive: true });
     const git = (cwd: string, ...args: string[]): string =>
       execFileSync('git', args, {
         cwd,
@@ -49,16 +52,6 @@ describe('live backfill inventory route', () => {
     const emptyTree = git(cloneRoot, 'mktree');
     const genesis = git(cloneRoot, 'commit-tree', emptyTree, '-m', 'ledger genesis');
     git(cloneRoot, 'push', 'origin', `${genesis}:refs/heads/cq/review-ledger`);
-    for (const name of ['review-tiers.json', 'review-limits.json', 'protected-paths.json']) {
-      await writeFile(
-        join(runnerRoot, 'policy', name),
-        await readFile(new URL(`../../../policy/${name}`, import.meta.url)),
-      );
-    }
-    await writeFile(
-      join(runnerRoot, 'policy', 'review-required-list.json'),
-      JSON.stringify({ version: 1, rows: [], explicit_unions: [] }),
-    );
     await writeFile(join(stateRoot, 'queue.json'), '{"items":[]}');
     await writeFile(
       join(stateRoot, 'backfill-rollout.json'),
@@ -79,6 +72,11 @@ describe('live backfill inventory route', () => {
     });
     if (result.artifact.status === 'failed') throw new Error(result.artifact.error);
     expect(result.exitCode).toBe(0);
+    expect(seen.required[0]).toEqual(
+      ledgerLoads(
+        await readFile(new URL('../../../policy/review-required-list.json', import.meta.url)),
+      ),
+    );
     expect(
       JSON.parse(await readFile(join(stateRoot, 'backfill/latest-ranked.json'), 'utf8')),
     ).toHaveProperty('candidates');
