@@ -12,8 +12,14 @@
  * command surface stays argument-free. The tick lock is the same persistent
  * `tick.lock` flock inode Python holds, through the existing `fs-ext`
  * adapter, with Python's `with_lock` busy semantics (null after the wait).
+ *
+ * The unit (not just the publication body) also binds the two daemon effects
+ * Python's `main` runs: the notification drain under `review-notify.lock`
+ * (`./notifySource.ts`) and the off-lock coverage refresh under
+ * `backfill/coverage.lock` (`./coverageSource.ts`).
  */
 import { execFile, spawn } from 'node:child_process';
+import { mkdir, readFile } from 'node:fs/promises';
 import { devNull } from 'node:os';
 import { join } from 'node:path';
 import { atomicWrite } from './atomic.js';
@@ -22,11 +28,22 @@ import { GIT_HARDEN } from '../../shared/gitHarden.js';
 import { JsonObject } from '../../policy/crq/jsonValue.js';
 import { pythonJsonText } from '../../policy/crq/pythonJson.js';
 import {
-  runPublish,
+  readRollout,
+  publisherLedger,
   PublishRolloutDisabled,
   type PublishRunEffects,
-  type PublishRunResult,
 } from '../../ops/crq/publishRun.js';
+import { drainNotifications } from '../../ops/crq/notifyDrain.js';
+import { runCoverageRefresh, type CoverageRunEffects } from '../../ops/crq/coverageRefresh.js';
+import {
+  publishUnitFailed,
+  runPublishMain,
+  type PublishUnitEffects,
+  type PublishUnitOutcome,
+} from '../../ops/crq/publishUnit.js';
+import { readNotifyConfig, spawnNotifySend } from './notifySource.js';
+import { gitCoverageRepository } from './coverageSource.js';
+import { fileArtifactStore } from './findingStore.js';
 import type { GitCall, RunGit } from './ledgerGit.js';
 import { SlotBusyError } from '../lock/slotLock.js';
 import type { OpResult } from '../../kernel/types.js';
@@ -36,8 +53,13 @@ export interface PublisherRoots {
   readonly stateRoot: string;
   /** The scheduler clone (`config.json`'s `clone`). */
   readonly cloneRoot: string;
-  /** The separately provisioned durable artifact volume. */
-  readonly durableArtifactRoot: string;
+  /** The runner root, holding `config.json` (Python's `crq.ROOT`). */
+  readonly runnerRoot: string;
+  /**
+   * The separately provisioned durable artifact volume, or null when the
+   * rollout is absent (no publication can run, so no artifact is read).
+   */
+  readonly durableArtifactRoot: string | null;
 }
 
 const MAX_BUFFER = 64 * 1024 * 1024;
@@ -201,37 +223,42 @@ export function pythonQueueText(queue: JsonObject): string {
   return text;
 }
 
-/** The production effects over explicit roots. */
+/** The tick-lock seam (`tick.lock`, Python's `with_lock` busy semantics). */
+function fileTickLock(stateRoot: string) {
+  return async function withTickLock<T>(
+    fn: () => Promise<T>,
+    options?: { readonly lockWait?: number },
+  ): Promise<T | null> {
+    const lock = join(stateRoot, 'tick.lock');
+    await mkdir(stateRoot, { recursive: true });
+    // Python with_lock: wait up to lock_wait seconds, then report busy as
+    // null. A callback that throws under a held lock propagates: only
+    // exhausted contention is contention.
+    const waitMs = (options?.lockWait ?? 0) * 1000;
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      try {
+        return await withLock(lock, { wait: false }, fn);
+      } catch (error) {
+        if (!(error instanceof SlotBusyError)) throw error;
+        if (Date.now() >= deadline) return null;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+  };
+}
+
+/** The publication effects over explicit roots (a rollout must be configured). */
 export function filePublishEffects(roots: PublisherRoots): PublishRunEffects {
   return {
     stateRoot: roots.stateRoot,
-    durableArtifactRoot: roots.durableArtifactRoot,
+    // The unit binds this when the rollout provisions a durable volume; the
+    // publication body refuses an unconfigured root before any artifact read.
+    durableArtifactRoot: roots.durableArtifactRoot ?? '',
     runSchedulerGit: runGitIn(roots.cloneRoot),
     runPublisherGit: runGitIn(join(roots.stateRoot, 'backfill', 'publisher.git')),
-    async withTickLock<T>(
-      fn: () => Promise<T>,
-      options?: { readonly lockWait?: number },
-    ): Promise<T | null> {
-      const lock = join(roots.stateRoot, 'tick.lock');
-      const { mkdir } = await import('node:fs/promises');
-      await mkdir(roots.stateRoot, { recursive: true });
-      // Python with_lock: wait up to lock_wait seconds, then report busy as
-      // null. A callback that throws under a held lock propagates: only
-      // exhausted contention is contention.
-      const waitMs = (options?.lockWait ?? 0) * 1000;
-      const deadline = Date.now() + waitMs;
-      for (;;) {
-        try {
-          return await withLock(lock, { wait: false }, fn);
-        } catch (error) {
-          if (!(error instanceof SlotBusyError)) throw error;
-          if (Date.now() >= deadline) return null;
-          await new Promise((resolve) => setTimeout(resolve, 250));
-        }
-      }
-    },
+    withTickLock: fileTickLock(roots.stateRoot),
     async readQueue(): Promise<Uint8Array> {
-      const { readFile } = await import('node:fs/promises');
       return new Uint8Array(await readFile(join(roots.stateRoot, 'queue.json')));
     },
     async writeQueue(queue: JsonObject): Promise<void> {
@@ -244,20 +271,98 @@ export function filePublishEffects(roots: PublisherRoots): PublishRunEffects {
 }
 
 /**
- * The `publish` unit command: run the publisher route and return its JSON
- * outcome as the runner artifact. Exit codes follow the Python unit: 0 for
- * reconciled/idle, 1 for reconciliation-pending or a thrown failure.
+ * The full `publish` unit effects: publication plus the two daemon phases.
+ *
+ * - The notification drain reads `config.json` (`notify.hosts`,
+ *   `error_backoff_min`) and delivers by argv.
+ * - The coverage refresh reads the rollout (`runtime.settings`), folds through
+ *   the scheduler clone, fetches through the publisher-owned clone under the
+ *   publisher lock, and wakes the slot by writing `state/next-review-at`.
  */
-export async function runPublishUnit(roots: PublisherRoots): Promise<OpResult<PublishRunResult>> {
+export function filePublishUnitEffects(roots: PublisherRoots): PublishUnitEffects {
+  const base = filePublishEffects(roots);
+  const durableRoot = roots.durableArtifactRoot;
+  const artifacts = durableRoot === null ? null : fileArtifactStore(durableRoot);
+  const verifyArtifact =
+    artifacts === null
+      ? async (): Promise<void> => {
+          // Unreachable while the rollout is absent: publication and coverage
+          // both report disabled before any artifact is read.
+          throw new Error('durable artifact root is not configured');
+        }
+      : artifacts.verify.bind(artifacts);
+  const coverage: CoverageRunEffects = {
+    stateRoot: roots.stateRoot,
+    repository: gitCoverageRepository(base.runSchedulerGit),
+    verifyArtifact,
+    async settings(): Promise<JsonObject | null> {
+      try {
+        return await readRollout(base);
+      } catch (error) {
+        // Python `settings()` returns None only when the file is absent; a
+        // present-but-incomplete rollout stays an integrity refusal.
+        if (error instanceof PublishRolloutDisabled) return null;
+        throw error;
+      }
+    },
+    readQueue: base.readQueue,
+    withCoverageLock: (fn) =>
+      withLock(join(roots.stateRoot, 'backfill', 'coverage.lock'), { wait: true }, fn),
+    // Python's resource lock, not the ledger's internal one:
+    // `backfill_coverage.run` wraps only its `worker_services(...).fetch()` in
+    // `ledger.locked(STATE / "backfill/publisher.lock")`, the same lock
+    // `backfill_publisher.run` holds for the whole publication. The
+    // publisher-owned clone's `review-ledger-publisher.lock` is a different,
+    // shorter-lived lock inside `GitLedger.publish` and would not exclude a
+    // concurrent publication's clone initialisation.
+    withPublisherLock: (fn) =>
+      withLock(join(roots.stateRoot, 'backfill', 'publisher.lock'), { wait: true }, fn),
+    fetchLedger: async (config) => publisherLedger(base, config).then((ledger) => ledger.fetch()),
+    async wakeSlot(isoSeconds: string): Promise<void> {
+      // `usage_slots.write_next`: one atomic hint, separate from the queue.
+      await mkdir(roots.stateRoot, { recursive: true });
+      await atomicWrite(join(roots.stateRoot, 'next-review-at'), `${isoSeconds}\n`);
+    },
+    nowIso: () => `${new Date().toISOString().slice(0, 19)}Z`,
+  };
+  return {
+    ...base,
+    async drainNotifications(): Promise<number> {
+      return drainNotifications({
+        stateRoot: roots.stateRoot,
+        config: await readNotifyConfig(roots.runnerRoot),
+        nowMicros: () => BigInt(Date.now()) * 1000n,
+        readQueue: base.readQueue,
+        writeQueue: base.writeQueue,
+        withTickLock: base.withTickLock,
+        notify: spawnNotifySend,
+      });
+    },
+    refreshCoverage: (publishedHead) => runCoverageRefresh(coverage, publishedHead),
+  };
+}
+
+/**
+ * The `publish` unit command: Python's `main` (notifications, publication,
+ * coverage refresh) as the runner artifact.
+ *
+ * Exit 0 for a reconciled/pending/idle/disabled outcome with fresh or idle
+ * coverage; exit 1 when publication threw (the run route already persisted the
+ * failure marker and halt) or when the coverage refresh failed or errored for
+ * a target. The coverage case still reports the publication outcome, exactly
+ * Python's `coverage_failed` exit.
+ */
+export async function runPublishUnit(
+  roots: PublisherRoots,
+): Promise<OpResult<PublishUnitOutcome> & { readonly exitCode?: number }> {
   try {
-    const result = await runPublish(filePublishEffects(roots));
-    return { status: 'ok', value: result };
+    const outcome = await runPublishMain(filePublishUnitEffects(roots));
+    return {
+      status: 'ok',
+      value: outcome,
+      exitCode: publishUnitFailed(outcome) ? 1 : 0,
+    };
   } catch (error) {
-    // An absent rollout is Python's {"publication": "disabled"}: a unit exit
-    // 0, not a failure. Only genuine defects fail the unit.
-    if (error instanceof PublishRolloutDisabled) {
-      return { status: 'ok', value: { publication: 'disabled' } };
-    }
     return {
       status: 'failed',
       error: error instanceof Error ? error.message : String(error),
