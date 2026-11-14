@@ -39,7 +39,7 @@ import {
   type RepairDispatchCallerContext,
   type RepairDispatchEffects,
   type RepairGuidanceScanEvidence,
-  type RepairHarvestEffects,
+  type RepairRunEffects,
   type RepairSelectionContext,
   type RepairSourceScanEvidence,
   type RunRepairDispatchResult,
@@ -176,7 +176,7 @@ interface EffectOptions {
   readonly runnerDisabled?: readonly boolean[];
 }
 
-function effects(options: EffectOptions = {}): RepairDispatchEffects & RepairHarvestEffects {
+function effects(options: EffectOptions = {}): RepairDispatchEffects & RepairRunEffects {
   let markerReads = 0;
   const tip = options.tip ?? sourceSha;
   const observedBlob = options.blobOid ?? blob;
@@ -209,7 +209,7 @@ function effects(options: EffectOptions = {}): RepairDispatchEffects & RepairHar
   };
 }
 
-function harvestEffects(options: EffectOptions = {}): RepairHarvestEffects {
+function harvestEffects(options: EffectOptions = {}): RepairRunEffects {
   return effects(options);
 }
 
@@ -602,7 +602,7 @@ describe('repair dispatch bridge', () => {
   test('the invocation guard refuses mechanical/retry payload changes made after preflight, inside the lease', async () => {
     const journalDir = await tempJournal();
     let prepared = preparedJobText;
-    const mutable: RepairHarvestEffects = {
+    const mutable: RepairRunEffects = {
       ...effects(),
       readPreparedJob: async () => prepared,
     };
@@ -682,7 +682,7 @@ describe('repair dispatch bridge', () => {
     runOk(first.run);
 
     let prepared = preparedJobText;
-    const mutable: RepairHarvestEffects = {
+    const mutable: RepairRunEffects = {
       ...effects(),
       readPreparedJob: async () => prepared,
     };

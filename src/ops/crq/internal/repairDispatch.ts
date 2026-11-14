@@ -101,6 +101,16 @@ export interface RepairDispatchEffects {
 export interface RepairHarvestEffects {
   readonly git: RepairDispatchGit;
   readonly readPreparedJob: (jobId: string) => Promise<string>;
+}
+
+/**
+ * Selection facts the bridge cannot observe. They are the caller's explicit
+ * preconditions, not a persisted attestation. The bridge checks the enum
+ * values and every fact it can recompute from the prepared job, then records
+ * `selection: 'caller-asserted'` and keeps the caller-owned gates.
+ */
+/** Run-path effects: harvest effects plus the admission marker. */
+export interface RepairRunEffects extends RepairHarvestEffects {
   /**
    * Host-handover marker (`state/runner-disabled`, Python #1716). Consulted only
    * at admission points, never inside a running job: a refusal here means no
@@ -110,12 +120,6 @@ export interface RepairHarvestEffects {
   readonly runnerDisabled: () => Promise<boolean>;
 }
 
-/**
- * Selection facts the bridge cannot observe. They are the caller's explicit
- * preconditions, not a persisted attestation. The bridge checks the enum
- * values and every fact it can recompute from the prepared job, then records
- * `selection: 'caller-asserted'` and keeps the caller-owned gates.
- */
 export interface RepairSelectionContext {
   readonly state: 'queued' | 'not-queued' | 'unknown';
   readonly canonicalDelivery: 'verified' | 'unverified' | 'failed';
@@ -1280,7 +1284,7 @@ async function revalidateAtInvocation(
 function withInvocationGuard(
   dispatch: RepairDispatchPlan,
   registry: OpRegistryView,
-  effects: RepairHarvestEffects,
+  effects: RepairRunEffects,
 ): OpRegistryView {
   const entry = registry.get('review.fixFinding');
   if (entry === undefined) return registry;
@@ -1354,7 +1358,7 @@ function guardRefusalOf(
 export async function runRepairDispatch(
   dispatch: RepairDispatchPlan,
   options: RepairRunOptions,
-  effects: RepairHarvestEffects,
+  effects: RepairRunEffects,
 ): Promise<RunRepairDispatchResult> {
   if (options.resume !== dispatch.resume) return refusal('attempt-inconsistent');
   if (dispatch.plan.jobs.length !== 1) return refusal('attempt-inconsistent');
