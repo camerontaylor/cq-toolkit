@@ -19,7 +19,8 @@ const types = new Set([
 ]);
 const blocking = new Set(['critical', 'major']);
 const safeCode = /^[A-Za-z0-9_-]{1,80}$(?![\s\S])/;
-const noFresh = /no fresh (detailed )?(file )?review|review (was )?skipped|skipped (this )?review/i;
+const noFresh =
+  /no fresh (detailed )?(file )?review|review (was )?skipped|skipped (this )?review/iu;
 const int = (n: number | bigint) => JsonNumber.int(n);
 const object = (entries: [string, JsonValue][]) => new JsonObject(entries);
 
@@ -47,6 +48,17 @@ export function classify(bytes: Uint8Array | null, exitCode: number | null): Jso
     for (const raw of text.split(/\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/u)) {
       const line = pythonStrip(raw);
       if (!line) continue;
+      // CPython json.loads applies its default 4300-digit int limit even to
+      // duplicate keys subsequently overwritten. Ignore digits inside strings.
+      const tokens = line.matchAll(/"(?:\\[\s\S]|[^"\\])*"|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g);
+      if (
+        [...tokens].some(
+          (m) => m[1] !== undefined && !/[.eE]/.test(m[1]) && m[1].replace('-', '').length > 4300,
+        )
+      ) {
+        bad++;
+        continue;
+      }
       try {
         const event = parseJsonValue(line, {
           duplicates: 'last',
@@ -155,8 +167,8 @@ export function classify(bytes: Uint8Array | null, exitCode: number | null): Jso
         const metadata = e.get('metadata');
         const value = metadata instanceof JsonObject ? metadata.get('waitTime') : undefined;
         // Python regex whitespace includes C0 separators and excludes the BOM.
-        // eslint-disable-next-line no-control-regex
         const waitPattern =
+          // eslint-disable-next-line no-control-regex
           /^(\p{Decimal_Number}+)([\s\x1c-\x1f]*)(second|minute|hour)s?$(?![\s\S])/u;
         const m = typeof value === 'string' ? waitPattern.exec(value) : null;
         if (m && !m[2]!.includes('\ufeff'))
@@ -178,7 +190,10 @@ export function classify(bytes: Uint8Array | null, exitCode: number | null): Jso
   } else if (bad) {
     outcome = 'malformed';
     message = 'stream contains malformed or unrecognized events';
-  } else if (complete.length && noFresh.test(pythonStr(complete[0]!.get('message') ?? ''))) {
+  } else if (
+    complete.length &&
+    noFresh.test(pythonStr(complete[0]!.get('message') ?? '').replace(/[\u0130\u0131]/gu, 'i'))
+  ) {
     outcome = 'skipped';
     message = 'affirmative no-fresh/skipped completion';
   } else if (complete.length !== 1 || last?.get('type') !== 'complete') {
