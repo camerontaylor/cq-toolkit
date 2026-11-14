@@ -27,7 +27,7 @@
  * - the diff byte gate is the raw length of
  *   `git diff --no-ext-diff --no-textconv --binary <base> <head>`.
  */
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pythonInt } from '../../policy/crq/backfillInventory.js';
@@ -172,8 +172,11 @@ export class GitSubjectRepository implements BackfillSubjectRepo {
     this.accounting = options.accounting;
   }
 
-  private async gitOk(args: readonly string[], env?: Record<string, string>): Promise<Uint8Array> {
-    const call = await this.runGit(args, env === undefined ? undefined : { env });
+  private async gitOk(
+    args: readonly string[],
+    options: { readonly env?: Record<string, string>; readonly input?: Uint8Array } = {},
+  ): Promise<Uint8Array> {
+    const call = await this.runGit(args, options);
     if (call.code !== 0) throw new SubjectGitError(args, call.code, call.stderr);
     return call.stdout;
   }
@@ -193,6 +196,16 @@ export class GitSubjectRepository implements BackfillSubjectRepo {
 
   private async isAncestor(a: string, b: string): Promise<boolean> {
     return (await this.runGit(['merge-base', '--is-ancestor', a, b])).code === 0;
+  }
+
+  /** One throwaway directory for a file-producing Git call. */
+  private async withTemp<T>(run: (directory: string) => Promise<T>): Promise<T> {
+    const directory = await mkdtemp(join(tmpdir(), 'cq-crq-subject-diff-'));
+    try {
+      return await run(directory);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 
   resolve(value: string): Promise<string> {
@@ -215,12 +228,12 @@ export class GitSubjectRepository implements BackfillSubjectRepo {
   async projection(target: string, names: readonly string[]): Promise<SubjectProjection> {
     const resolved = await this.accounting.resolve(target);
     const tree = await this.withIndex(async (env) => {
-      await this.gitOk(['read-tree', resolved], env);
+      await this.gitOk(['read-tree', resolved], { env });
       for (const name of sortedUnique(names)) {
         ledgerPath(name);
-        await this.gitOk(['update-index', '--force-remove', '--', name], env);
+        await this.gitOk(['update-index', '--force-remove', '--', name], { env });
       }
-      return decode(await this.gitOk(['write-tree'], env)).trim();
+      return decode(await this.gitOk(['write-tree'], { env })).trim();
     });
     const base = await this.commitTree(tree, resolved, 'crq current projection base');
     const head = await this.commitTree(
@@ -244,14 +257,16 @@ export class GitSubjectRepository implements BackfillSubjectRepo {
       compareCodePoints(left.merge, right.merge),
     );
     for (const member of ordered) await this.accounting.resolve(member.merge);
-    const keyed = await Promise.all(
-      ordered.map(async (member) => {
-        const ancestors = await Promise.all(
-          ordered.map((other) => this.isAncestor(other.merge, member.merge)),
-        );
-        return { member, depth: ancestors.filter(Boolean).length };
-      }),
-    );
+    // Python probes serially. An N² fan-out would launch every Git process at
+    // once, so a large stack could exhaust the process or descriptor budget.
+    const keyed: Array<{ readonly member: ParsedMember; readonly depth: number }> = [];
+    for (const member of ordered) {
+      let depth = 0;
+      for (const other of ordered) {
+        if (await this.isAncestor(other.merge, member.merge)) depth += 1;
+      }
+      keyed.push({ member, depth });
+    }
     keyed.sort(
       (left, right) =>
         left.depth - right.depth || compareCodePoints(left.member.merge, right.member.merge),
@@ -291,22 +306,22 @@ export class GitSubjectRepository implements BackfillSubjectRepo {
     }
 
     const tree = await this.withIndex(async (env) => {
-      await this.gitOk(['read-tree', resolved], env);
+      await this.gitOk(['read-tree', resolved], { env });
       for (const [name, baseline] of Object.entries(baselines)) {
         const entry = baseline.entry;
         if (entry !== null && (entry['mode'] === '100644' || entry['mode'] === '100755')) {
           await this.gitOk(
             ['update-index', '--add', '--cacheinfo', `${entry['mode']},${entry['blob']},${name}`],
-            env,
+            { env },
           );
         } else if (entry !== null) {
           // Python returns the projection fallback without writing a tree.
           return NON_REGULAR;
         } else {
-          await this.gitOk(['update-index', '--force-remove', '--', name], env);
+          await this.gitOk(['update-index', '--force-remove', '--', name], { env });
         }
       }
-      return decode(await this.gitOk(['write-tree'], env)).trim();
+      return decode(await this.gitOk(['write-tree'], { env })).trim();
     });
     if (tree === NON_REGULAR) {
       return this.projectionFallback(resolved, names, 'non-regular baseline');
@@ -376,17 +391,41 @@ export class GitSubjectRepository implements BackfillSubjectRepo {
 
   /** `backfill_subjects._commit`: fixed identity and date. */
   async commitTree(tree: string, parent: string, message: string): Promise<string> {
+    // `-m` would put the whole context on argv; stdin keeps the same commit
+    // bytes (`-F` reads the message verbatim) without an argv-size ceiling.
+    // `-m` ensures one trailing newline, so a message that lacks one gets it.
+    const input = new TextEncoder().encode(message.endsWith('\n') ? message : `${message}\n`);
     return decode(
-      await this.gitOk(['commit-tree', tree, '-p', parent, '-m', message], {
-        ...COMMITTER_ENV,
+      await this.gitOk(['commit-tree', tree, '-p', parent, '-F', '-'], {
+        env: { ...COMMITTER_ENV },
+        input,
       }),
     ).trim();
   }
 
   /** The raw `--binary` diff length; no repository config can reshape it. */
   async diffBytes(base: string, head: string): Promise<number> {
-    return (await this.gitOk(['diff', '--no-ext-diff', '--no-textconv', '--binary', base, head]))
-      .length;
+    // `--output` writes the patch to disk, so an oversized historical baseline
+    // is measured instead of overflowing the runner's stdout buffer. The file
+    // content is exactly the stdout bytes the oracle measured.
+    return this.withTemp(async (directory) => {
+      const output = join(directory, 'patch');
+      await this.gitOk([
+        'diff',
+        '--no-ext-diff',
+        '--no-textconv',
+        '--binary',
+        `--output=${output}`,
+        base,
+        head,
+      ]);
+      try {
+        return (await stat(output)).size;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+        throw error;
+      }
+    });
   }
 
   private async projectionFallback(

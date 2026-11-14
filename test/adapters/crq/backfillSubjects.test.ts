@@ -34,6 +34,15 @@ const FIXTURE_ENV: Readonly<Record<string, string>> = {
   GIT_COMMITTER_DATE: '2026-10-29T00:00:00Z',
 };
 
+const SUBJECT_COMMIT_ENV: Readonly<Record<string, string>> = {
+  GIT_AUTHOR_NAME: 'crq',
+  GIT_AUTHOR_EMAIL: 'crq@localhost',
+  GIT_COMMITTER_NAME: 'crq',
+  GIT_COMMITTER_EMAIL: 'crq@localhost',
+  GIT_AUTHOR_DATE: '2000-01-01T00:00:00Z',
+  GIT_COMMITTER_DATE: '2000-01-01T00:00:00Z',
+};
+
 function decode(bytes: Uint8Array): string {
   return new TextDecoder('utf-8').decode(bytes);
 }
@@ -479,6 +488,55 @@ describe('backfill subject adapter', () => {
       );
       expect(existsSync(marker)).toBe(false);
       expect(await accounting.tree(partition.head)).toBe(await accounting.tree(target));
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a stdin commit message is byte-identical to the oracle -m form', async () => {
+    const fixture = await fixtureRepo();
+    try {
+      const parent = await fixture.commit({ a: 'one\n' });
+      const { accounting, repo } = await subjectRepo(fixture);
+      const tree = await accounting.tree(parent);
+      const messages = [
+        'crq pinned current subject',
+        'crq pinned current subject\n\nbody\n\nwith a trailing newline',
+        'crq pinned current subject\n\nbody\n',
+      ];
+      for (const message of messages) {
+        const viaStdin = await repo.commitTree(tree, parent, message);
+        const viaArgv = decode(
+          await ok(fixture.runGit, ['commit-tree', tree, '-p', parent, '-m', message], {
+            ...SUBJECT_COMMIT_ENV,
+          }),
+        ).trim();
+        expect(viaStdin).toBe(viaArgv);
+      }
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  test('the diff byte count matches the oracle stdout length', async () => {
+    const fixture = await fixtureRepo();
+    try {
+      const parent = await fixture.commit({ a: 'one\n', big: 'x'.repeat(1000) });
+      const target = await fixture.commit({ a: 'two\n', big: 'y'.repeat(2000) });
+      const { repo } = await subjectRepo(fixture);
+      const expected = (
+        await ok(fixture.runGit, [
+          'diff',
+          '--no-ext-diff',
+          '--no-textconv',
+          '--binary',
+          parent,
+          target,
+        ])
+      ).length;
+
+      expect(await repo.diffBytes(parent, target)).toBe(expected);
+      expect(await repo.diffBytes(target, target)).toBe(0);
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }
