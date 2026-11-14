@@ -75,6 +75,17 @@ function setup() {
   return { queue, item, calls, effects };
 }
 describe('local-review exit harvest lifecycle', () => {
+  it('uses an explicit zero wait instead of the configured default', async () => {
+    const x = setup();
+    const result = await harvestLocalReviewExit(x.queue, x.item, false, 5, {
+      ...x.effects,
+      classify: () =>
+        doc(
+          '{"outcome":"rate_limited","counted":false,"findings":0,"severity_counts":{},"wait_seconds":0}',
+        ),
+    });
+    expect(result.queue.get('cooldown_until')).toBe('2026-11-14T12:00:00Z');
+  });
   it('retains ambiguous ownership and records its event', async () => {
     const x = setup();
     const result = await harvestLocalReviewExit(x.queue, x.item, false, 5, {
