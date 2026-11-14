@@ -78,6 +78,9 @@ describe('open PR discovery source', () => {
       gh: async () => ({ code: 0, stdout: '[{"number":7}]', stderr: '' }),
     });
     await expect(effects.list(repo)).rejects.toThrow('invalid PR inventory');
-    await expect(effects.list({ ...repo })).rejects.toThrow('invalid PR repository');
+    await expect(effects.list({ ...repo })).rejects.toThrow('invalid PR inventory');
+    await expect(effects.list({ ...repo, repo: 'unknown/repo' })).rejects.toThrow(
+      'invalid PR repository',
+    );
   });
 });

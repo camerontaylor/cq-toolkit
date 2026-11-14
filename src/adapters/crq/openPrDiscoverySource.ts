@@ -25,9 +25,11 @@ export interface OpenPrSourceOptions {
 /** tick.lock remains caller-owned. Association and repair proof are required, not guessed. */
 export function openPrDiscoveryEffects(options: OpenPrSourceOptions): PrDiscoveryEffects {
   const configured = (requested: PrDiscoveryRepo): OpenPrRepository => {
-    const repo = options.repos.find((candidate) => candidate === requested);
+    const matches = options.repos.filter((candidate) => candidate.repo === requested.repo);
+    const repo = matches[0];
     const parts = repo?.repo.split('/') ?? [];
     if (
+      matches.length !== 1 ||
       !repo ||
       parts.length !== 2 ||
       !parts.every(ghNameOk) ||

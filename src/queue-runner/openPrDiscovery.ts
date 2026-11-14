@@ -16,6 +16,7 @@ export interface PrDiscoveryRepo {
   readonly name: string;
   readonly primary: boolean;
   readonly enabled: boolean;
+  readonly defaultBranch: string;
   readonly branches: readonly string[];
 }
 export interface PrDiscoveryEffects {
@@ -112,15 +113,27 @@ export async function discoverOpenPrs(
     let opened: readonly OpenPr[];
     try {
       opened = await effects.list(repo);
-      if (!repo.primary) await effects.fetchDefault(repo);
     } catch {
-      log.push(`pr discovery skipped ${repo.repo}`);
+      log.push(`pr discovery skipped ${repo.repo}: forge listing unavailable`);
       continue;
+    }
+    if (!repo.primary) {
+      try {
+        await effects.fetchDefault(repo);
+      } catch {
+        log.push(`pr discovery ${repo.repo}: default branch fetch failed`);
+        continue;
+      }
     }
     for (const pr of [...opened].sort((a, b) => a.number - b.number)) {
       if (!valid(pr) || pr.draft) continue;
-      if (repo.primary ? !chain(pr, opened, repo.branches) : !repo.branches.includes(pr.base))
+      if (repo.primary && !chain(pr, opened, repo.branches)) continue;
+      if (!repo.primary && pr.base !== repo.defaultBranch) {
+        log.push(
+          `pr discovery ${repo.repo}: PR #${pr.number} targets ${pr.base.slice(0, 100)}, not ${repo.defaultBranch.slice(0, 100)}; skipped`,
+        );
         continue;
+      }
       let pin: string | null = null;
       try {
         pin = await effects.rangeBase(repo, pr);

@@ -15,6 +15,7 @@ const primary: PrDiscoveryRepo = {
   name: 'main',
   primary: true,
   enabled: true,
+  defaultBranch: 'main',
   branches: ['main'],
 };
 const foreign: PrDiscoveryRepo = {
@@ -22,6 +23,7 @@ const foreign: PrDiscoveryRepo = {
   name: 'other',
   primary: false,
   enabled: true,
+  defaultBranch: 'trunk',
   branches: ['trunk'],
 };
 const pr: OpenPr = { number: 7, draft: false, base: 'main', headRef: 'feature', head };
@@ -47,6 +49,132 @@ function effects(overrides: Partial<PrDiscoveryEffects> = {}): PrDiscoveryEffect
   };
 }
 describe('open PR discovery', () => {
+  it('emits one enrollment event and none for associated or equivalent work', async () => {
+    const events: string[][] = [];
+    const emit = async (id: string, reason: string) => {
+      events.push([id, reason]);
+    };
+    await discoverOpenPrs(queue(), [primary], false, 'o/r', effects({ event: emit }));
+    expect(events).toEqual([['pr7', 'now auto-enrolled: open PR not yet enrolled']]);
+    events.length = 0;
+    await discoverOpenPrs(
+      queue(),
+      [primary],
+      false,
+      'o/r',
+      effects({ event: emit, associate: async (q) => ({ queue: q, associated: true }) }),
+    );
+    const cycle = {
+      base,
+      head,
+      range_policy: 'full-range-once-v1',
+      run_id: 'run',
+      completed_at: '2025',
+    };
+    await discoverOpenPrs(
+      queue([{ id: 'pr7', pr: 7, kind: 'open', state: 'done', cycles: [cycle] }]),
+      [primary],
+      false,
+      'o/r',
+      effects({ event: emit }),
+    );
+    expect(events).toEqual([]);
+  });
+  it('retains owed delta when repair proof throws and handles optional pending cycles', async () => {
+    const previous = {
+      id: 'pr7',
+      pr: 7,
+      kind: 'open',
+      state: 'pending',
+      cycles: [
+        {
+          base,
+          head: old,
+          range_policy: 'full-range-once-v1',
+          run_id: 'run',
+          completed_at: '2025',
+        },
+      ],
+    };
+    const result = await discoverOpenPrs(
+      queue([previous]),
+      [primary],
+      false,
+      'o/r',
+      effects({
+        ownRange: async () => {
+          throw new Error('unavailable');
+        },
+      }),
+    );
+    expect(items(result.queue)[1]?.get('kind')).toBe('delta');
+  });
+  it('fetches foreign default and never applies primary repair proof to it', async () => {
+    const calls: string[] = [];
+    const previous = {
+      id: 'other-pr7',
+      repo: 'x/y',
+      pr: 7,
+      kind: 'open',
+      state: 'done',
+      cycles: [{ base, head: old, run_id: 'run', completed_at: '2025' }],
+    };
+    const result = await discoverOpenPrs(
+      queue([previous]),
+      [foreign],
+      false,
+      'o/r',
+      effects({
+        list: async () => [{ ...pr, base: 'trunk' }],
+        fetchDefault: async () => {
+          calls.push('fetch');
+        },
+        ownRange: async () => {
+          calls.push('ownRange');
+          return true;
+        },
+      }),
+    );
+    expect(calls).toEqual(['fetch']);
+    expect(items(result.queue)[1]?.get('kind')).toBe('delta');
+  });
+  it('skips non-default foreign bases and distinguishes list from fetch failure', async () => {
+    const configured = { ...foreign, branches: ['trunk', 'other'] };
+    const skipped = await discoverOpenPrs(
+      queue(),
+      [configured],
+      false,
+      'o/r',
+      effects({ list: async () => [{ ...pr, base: 'other' }] }),
+    );
+    expect(items(skipped.queue)).toHaveLength(0);
+    expect(skipped.log[0]).toContain('targets other, not trunk');
+    const noList = await discoverOpenPrs(
+      queue(),
+      [foreign],
+      false,
+      'o/r',
+      effects({
+        list: async () => {
+          throw new Error('secret');
+        },
+      }),
+    );
+    const noFetch = await discoverOpenPrs(
+      queue(),
+      [foreign],
+      false,
+      'o/r',
+      effects({
+        fetchDefault: async () => {
+          throw new Error('secret');
+        },
+      }),
+    );
+    expect(noList.log[0]).toContain('forge listing unavailable');
+    expect(noFetch.log[0]).toContain('default branch fetch failed');
+    expect([...noList.log, ...noFetch.log].join()).not.toContain('secret');
+  });
   it('enrolls primary including stacked PR and filters drafts and unconnected chains', async () => {
     const parent = { ...pr, number: 3, headRef: 'parent' };
     const stacked = { ...pr, number: 4, base: 'parent', headRef: 'child' };
