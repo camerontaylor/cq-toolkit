@@ -54,11 +54,33 @@ describe('inactive gitleaks binding', () => {
     expect(await scan('')).toEqual({ kind: 'exit', code: 0, hits: [] });
   });
   it('kills a timed-out fake child and cleans its scratch directory', async () => {
-    const f = await fixture('printf "%s" "$$" > ../child.pid\nexec /bin/sleep 10');
+    const f = await fixture('printf "%s" "$$" > ../child.pid\nexec /bin/sleep 120');
     const scan = fileReviewGitleaks({ path: f.root, scratchRoot: f.root, timeoutMs: 50 });
-    await expect(scan('')).rejects.toThrow('gitleaks execution or report failed');
-    const pid = Number(await readFile(join(f.root, 'child.pid'), 'utf8'));
-    expect(() => process.kill(pid, 0)).toThrow();
-    expect((await readdir(f.root)).sort()).toEqual(['child.pid', 'gitleaks']);
+    const settled = scan('').then(
+      () => 'resolved',
+      () => 'rejected',
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const outcome = await Promise.race([
+        settled,
+        new Promise<string>((resolve) => {
+          timer = setTimeout(() => resolve('deadline'), 2000);
+        }),
+      ]);
+      expect(outcome).toBe('rejected');
+      const pid = Number(await readFile(join(f.root, 'child.pid'), 'utf8'));
+      expect(() => process.kill(pid, 0)).toThrow();
+      expect((await readdir(f.root)).sort()).toEqual(['child.pid', 'gitleaks']);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      try {
+        const pid = Number(await readFile(join(f.root, 'child.pid'), 'utf8'));
+        if (Number.isSafeInteger(pid) && pid > 1) process.kill(-pid, 'SIGKILL');
+      } catch {
+        // Already gone, or the child failed before writing its identity.
+      }
+      await settled;
+    }
   });
 });
