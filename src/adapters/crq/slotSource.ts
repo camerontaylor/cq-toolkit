@@ -5,9 +5,22 @@ import { SlotBusyError } from '../lock/slotLock.js';
 import type { SlotPreflightEffects } from '../../queue-runner/slot.js';
 import { withLock } from './lock.js';
 
-/** Python strptime's UTC hint format, including its unpadded components. */
+/**
+ * Python's UTC hint format and whitespace, with one conservative difference:
+ * non-ASCII digits are refused rather than skipping a timer invocation.
+ */
 export function futureSlotHint(text: string, now: number): boolean {
-  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})T(\d{1,2}):(\d{1,2}):(\d{1,2})Z$/i.exec(text.trim());
+  const whitespace = (char: string): boolean => {
+    const code = char.codePointAt(0) ?? 0;
+    return char !== '\uFEFF' && (/\s/u.test(char) || (code >= 28 && code <= 31) || code === 133);
+  };
+  const chars = [...text];
+  let start = 0;
+  let end = chars.length;
+  while (start < end && whitespace(chars[start]!)) start++;
+  while (end > start && whitespace(chars[end - 1]!)) end--;
+  const stripped = chars.slice(start, end).join('');
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})T(\d{1,2}):(\d{1,2}):(\d{1,2})Z$/i.exec(stripped);
   if (!match) return false;
   const [, y, m, d, h, min, s] = match;
   const [year, month, day, hour, minute, second] = [y, m, d, h, min, s].map(Number) as [

@@ -12,6 +12,9 @@ describe('slot preflight', () => {
   it('validates hints and requires a strictly future timestamp', () => {
     expect(futureSlotHint('2026-10-28T01:01:01Z\n', now)).toBe(true);
     expect(futureSlotHint('2026-10-28t01:01:01z', now)).toBe(true);
+    expect(futureSlotHint('\u001c2026-10-28T01:01:01Z\u001c', now)).toBe(true);
+    expect(futureSlotHint('\ufeff2026-10-28T01:01:01Z', now)).toBe(false);
+    expect(futureSlotHint('٢٠٢٦-10-28T01:01:01Z', now)).toBe(false);
     expect(futureSlotHint('2026-10-28T1:1:00Z', now)).toBe(false);
     expect(futureSlotHint('2026-02-30T00:00:00Z', now)).toBe(false);
     expect(futureSlotHint('invalid', now)).toBe(false);
@@ -62,9 +65,86 @@ describe('slot preflight', () => {
     ).toEqual([]);
     expect(calls).toBe(0);
   });
+
+  it('maps a real held tick flock to a busy preflight', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'slot-busy-'));
+    const effects = fileSlotPreflightEffects(
+      root,
+      async () => ['unexpected'],
+      () => now,
+    );
+    await withLock(join(root, 'tick.lock'), { wait: false }, async () => {
+      expect(await effects.withTickLock(async () => 'unexpected')).toEqual({ acquired: false });
+      expect(await slotPreflight(effects)).toEqual([]);
+    });
+  });
 });
 
 describe('scheduled slot transaction', () => {
+  it('does not acquire the lock or load a queue when initially disabled', async () => {
+    const effects: SlotEffects<object, null> = {
+      disabled: async () => true,
+      withTickLock: async () => {
+        throw new Error('lock attempted');
+      },
+      loadQueue: async () => {
+        throw new Error('queue loaded');
+      },
+      copyQueue: (q) => q,
+      equalQueue: () => true,
+      readUsage: async () => null,
+      admit: async () => [],
+    };
+    expect(await scheduledSlot(effects)).toEqual(['runner disabled for host handover']);
+  });
+
+  it('returns quietly when either lock attempt is busy', async () => {
+    for (const busyAt of [1, 2]) {
+      let attempts = 0;
+      let probes = 0;
+      const effects: SlotEffects<{ count: number }, null> = {
+        disabled: async () => false,
+        withTickLock: async (work) =>
+          ++attempts === busyAt ? { acquired: false } : { acquired: true, value: await work() },
+        loadQueue: async () => ({ count: 1 }),
+        copyQueue: (q) => ({ ...q }),
+        equalQueue: (a, b) => a.count === b.count,
+        readUsage: async () => {
+          probes++;
+          return null;
+        },
+        admit: async () => {
+          throw new Error('unexpected admission');
+        },
+      };
+      expect(await scheduledSlot(effects)).toEqual([]);
+      expect(probes).toBe(busyAt - 1);
+    }
+  });
+
+  it('detaches a live queue while under the first lock', async () => {
+    const live = { count: 1 };
+    let admitted = false;
+    const effects: SlotEffects<typeof live, null> = {
+      disabled: async () => false,
+      withTickLock: async (work) => ({ acquired: true, value: await work() }),
+      loadQueue: async () => live,
+      copyQueue: (q) => ({ ...q }),
+      equalQueue: (a, b) => a.count === b.count,
+      readUsage: async () => {
+        live.count = 2;
+        return null;
+      },
+      admit: async () => {
+        admitted = true;
+        return [];
+      },
+    };
+    expect(await scheduledSlot(effects)).toEqual([
+      'queue changed during quota probe; retry next slot tick',
+    ]);
+    expect(admitted).toBe(false);
+  });
   it('probes outside the lock and refuses any changed queue', async () => {
     let queue = { items: [1], extra: 'preserved' };
     let locked = false;
