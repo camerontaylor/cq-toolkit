@@ -256,6 +256,26 @@ describe('installAuthorSnapshot', () => {
     }
   });
 
+  test('refuses when an installed scanner fails its probe', async () => {
+    const repo = await clone();
+    const bin = await mkdtemp(join(tmpdir(), 'cq-broken-gitleaks-'));
+    const savedPath = process.env.PATH;
+    try {
+      await writeFile(join(bin, 'gitleaks'), '#!/bin/sh\nexit 7\n', { mode: 0o755 });
+      process.env.PATH = `${bin}:${savedPath ?? ''}`;
+      const fixture = snapshotFor(repo.base, 'hello\n');
+      await expect(installAuthorSnapshot(input(repo, fixture))).rejects.toThrow(
+        'snapshot secret scanner probe failed (exit 7)',
+      );
+      expect(await objectExists(repo.dir, fixture.head)).toBe(false);
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      repo.pool.killAll();
+      await rm(bin, { recursive: true, force: true });
+    }
+  });
+
   test('refuses a removed denylisted line', async () => {
     const repo = await cloneWithFile('.env', 'SECRET_TOKEN\n');
     try {

@@ -27,7 +27,7 @@ import {
 } from '../../ops/dev/denylist.js';
 import { AuthorRefused } from '../../policy/crq/authorWire.js';
 import { decodeSnapshot, type SnapshotObject } from '../../policy/crq/authorSnapshot.js';
-import { GitPool, gitCall, gitOk } from './gitExec.js';
+import { GitPool, gitCall, gitOk, killProcessTree } from './gitExec.js';
 
 const SNAPSHOT_REF_PREFIX = 'refs/crq/author-snapshots/v1/';
 const MAX_WIRE_BYTES = 6 * 1024 * 1024;
@@ -504,7 +504,12 @@ function longestComponent(path: Uint8Array): number {
   return length > longest ? length : longest;
 }
 
-/** Refuse on any gitleaks hit; an unavailable binary is skipped like Python. */
+/**
+ * Refuse on any gitleaks hit. Only a genuinely absent binary is skipped, as
+ * Python's `secret_scan_diff` does; an installed scanner whose probe fails is
+ * an operator fault and must refuse the snapshot rather than silently scan
+ * with the project denylist alone.
+ */
 async function gitleaksScan(parts: readonly string[], pool: GitPool): Promise<void> {
   if (!(await gitleaksAvailable(pool))) return;
   const scanner = makeGitleaksDefaultsScanner({
@@ -559,10 +564,46 @@ async function gitleaksScan(parts: readonly string[], pool: GitPool): Promise<vo
 }
 
 function gitleaksAvailable(pool: GitPool): Promise<boolean> {
-  return new Promise((resolve) => {
-    const child = spawn('gitleaks', ['version'], { stdio: 'ignore' });
+  return new Promise((resolve, reject) => {
+    const child = spawn('gitleaks', ['version'], {
+      stdio: 'ignore',
+      detached: process.platform !== 'win32',
+    });
     pool.track(child);
-    child.on('error', () => resolve(false));
-    child.on('close', (code) => resolve(code === 0));
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (settle: () => void): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      settle();
+    };
+    timer = setTimeout(() => {
+      killProcessTree(child);
+      finish(() =>
+        reject(new AuthorRefused('snapshot secret scanner probe failed (timed out after 10000ms)')),
+      );
+    }, 10_000);
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') {
+        finish(() => resolve(false));
+        return;
+      }
+      finish(() =>
+        reject(
+          new AuthorRefused(
+            `snapshot secret scanner probe failed (${error.message || 'spawn failed'})`,
+          ),
+        ),
+      );
+    });
+    child.on('close', (code, signal) => {
+      if (code === 0) {
+        finish(() => resolve(true));
+        return;
+      }
+      const detail = code === null ? `signal ${signal ?? 'unknown'}` : `exit ${String(code)}`;
+      finish(() => reject(new AuthorRefused(`snapshot secret scanner probe failed (${detail})`)));
+    });
   });
 }

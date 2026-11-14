@@ -33,18 +33,33 @@ function childEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/**
+ * Kill a child and, on POSIX, its process group. Git transports and remote
+ * helpers are descendants of the tracked process; killing only the direct
+ * child can leave them holding the stdout/stderr pipes after a timeout or
+ * deadline.
+ */
+export function killProcessTree(child: ChildProcess): void {
+  if (process.platform !== 'win32' && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+    } catch {
+      // The group is already gone.
+    }
+  }
+  try {
+    child.kill('SIGKILL');
+  } catch {
+    // Already gone.
+  }
+}
+
 /** Live git children, killed when the forced command hits its deadline. */
 export class GitPool {
   private readonly children = new Set<ChildProcess>();
 
   killAll(): void {
-    for (const child of this.children) {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // Already gone.
-      }
-    }
+    for (const child of this.children) killProcessTree(child);
     this.children.clear();
   }
 
@@ -75,6 +90,7 @@ export function gitCall(
         env: childEnv(),
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
+        detached: process.platform !== 'win32',
       },
     );
     pool.track(child);
@@ -84,13 +100,13 @@ export function gitCall(
     let overflow = false;
     const timer = setTimeout(() => {
       overflow = true;
-      child.kill('SIGKILL');
+      killProcessTree(child);
     }, timeoutMs);
     child.stdout.on('data', (chunk: Buffer) => {
       size += chunk.length;
       if (size > maxOutput) {
         overflow = true;
-        child.kill('SIGKILL');
+        killProcessTree(child);
         return;
       }
       stdout.push(chunk);
