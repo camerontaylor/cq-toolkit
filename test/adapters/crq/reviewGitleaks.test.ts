@@ -1,6 +1,6 @@
-import { chmod, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { fileReviewGitleaks } from '../../../src/adapters/crq/reviewGitleaks.js';
 
@@ -44,10 +44,21 @@ describe('inactive gitleaks binding', () => {
     await expect(malformed.scan('')).rejects.toThrow('gitleaks execution or report failed');
     expect(await readdir(malformed.root)).toEqual(['gitleaks']);
   });
+  it('resolves relative PATH and scratch paths before changing the child cwd', async () => {
+    const f = await fixture(`${reportPath}\nIFS= read -r value || :\nhelper > "$report"`);
+    const helper = join(f.root, 'helper');
+    await writeFile(helper, "#!/bin/sh\nprintf '[]'\n");
+    await chmod(helper, 0o700);
+    const path = relative(process.cwd(), f.root);
+    const scan = fileReviewGitleaks({ path, scratchRoot: path });
+    expect(await scan('')).toEqual({ kind: 'exit', code: 0, hits: [] });
+  });
   it('kills a timed-out fake child and cleans its scratch directory', async () => {
-    const f = await fixture('exec /bin/sleep 10');
+    const f = await fixture('printf "%s" "$$" > ../child.pid\nexec /bin/sleep 10');
     const scan = fileReviewGitleaks({ path: f.root, scratchRoot: f.root, timeoutMs: 50 });
     await expect(scan('')).rejects.toThrow('gitleaks execution or report failed');
-    expect(await readdir(f.root)).toEqual(['gitleaks']);
+    const pid = Number(await readFile(join(f.root, 'child.pid'), 'utf8'));
+    expect(() => process.kill(pid, 0)).toThrow();
+    expect((await readdir(f.root)).sort()).toEqual(['child.pid', 'gitleaks']);
   });
 });

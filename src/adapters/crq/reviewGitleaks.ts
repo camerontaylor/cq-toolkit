@@ -15,9 +15,10 @@ export function fileReviewGitleaks(options: {
   timeoutMs?: number;
 }): ReviewScannerEffects['gitleaks'] {
   return async (diff) => {
+    const directories = options.path.split(delimiter).map((entry) => resolve(entry || '.'));
     let executable: string | null = null;
-    for (const entry of options.path.split(delimiter)) {
-      const candidate = resolve(entry || '.', 'gitleaks');
+    for (const directory of directories) {
+      const candidate = join(directory, 'gitleaks');
       try {
         if (!(await stat(candidate)).isFile()) continue;
         await access(candidate, constants.X_OK);
@@ -31,12 +32,12 @@ export function fileReviewGitleaks(options: {
     }
     if (executable === null) return { kind: 'not-run' };
     if (Buffer.byteLength(diff) > maxBytes) throw new Error('gitleaks input too large');
-    const scratch = await mkdtemp(join(options.scratchRoot, 'crq-gitleaks-'));
+    const scratch = await mkdtemp(join(resolve(options.scratchRoot), 'crq-gitleaks-'));
     try {
       const report = join(scratch, 'report.json');
       const code = await runGitleaks(
         executable,
-        options.path,
+        directories.join(delimiter),
         scratch,
         report,
         diff,
