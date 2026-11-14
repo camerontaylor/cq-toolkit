@@ -25,7 +25,13 @@ are kept:
   rollback; any difference is a failed deploy, never a migration.
 * **Whole deploys are serialized.** An advisory ``state/deploy.lock`` is held
   from before the first measurement through the released health window and
-  recovery, so two runs cannot switch the checkout under each other.
+  recovery, so two runs cannot switch the checkout under each other. The
+  controller's own ``controller.lock`` is held for the same window through
+  ``Effects.controller_lock`` (every controller mutation — checkout deploy
+  or rollback, a ``--unit`` switch, recovery — serializes on it), so a
+  controller transaction cannot overlap the switches or the health window:
+  controller transactions read neither ``deploy.lock`` nor the admission
+  marker.
 * **Admission is held and work is drained.** The ``state/runner-disabled``
   marker is claimed with ``O_EXCL`` and run-unique bytes before any unit is
   stopped. Triggers stop, services settle, and the controller's own
@@ -72,6 +78,7 @@ Python stdlib only.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import importlib.util
@@ -455,6 +462,7 @@ class Run:
         self.sleep = sleep
         self.hold = None
         self.lock = DeployLock(self.root)
+        self.controller_guard = None
         self.run_dir = None
         self.target = None
         self.prior_sha = None
@@ -602,6 +610,16 @@ class Run:
             Path(self.args.overlay))
         self.helper.root_check(self.root, self.overlay)
         self.effects = self.controller.Effects(self.root, self.run_dir)
+        # One shared exclusion with controller transactions, entered before
+        # any mutation: every controller mutation (checkout deploy or
+        # rollback, a --unit switch, recovery) holds this same controller
+        # lock through Effects.controller_lock, and this driver is the only
+        # other checkout/unit mutator. deploy.lock cannot provide this:
+        # controller transactions read neither it nor the admission marker.
+        # Held through the switches, the released health window and any
+        # rollback; released in run().
+        self.controller_guard = contextlib.ExitStack()
+        self.controller_guard.enter_context(self.effects.controller_lock())
         if self.units is None:
             self.units = RealUnits()
         self.original_config = read_config(self.root)
@@ -1150,6 +1168,8 @@ class Run:
                 return self.document("rolled_back", reason=str(exc)[:400])
             raise Refused(str(exc)) from exc
         finally:
+            if self.controller_guard is not None:
+                self.controller_guard.close()
             self.lock.release()
 
 
