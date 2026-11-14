@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { JsonObject, parseJsonValue } from '../../policy/crq/jsonValue.js';
+import { classify } from '../../policy/crq/classification.js';
 import { atomicJsonText, pythonJsonText } from '../../policy/crq/pythonJson.js';
 import type { LocalExitHarvestEffects } from '../../ops/crq/internal/localReviewExit.js';
 import {
@@ -10,10 +11,9 @@ import {
 import { runLiveness } from '../process/liveness.js';
 import { atomicWrite } from './atomic.js';
 
-/** Bind local files, existing liveness probes and receipt completion. The caller supplies classification and safe cleanup. */
+/** Bind local files, liveness, canonical classification and receipt completion. The caller supplies safe cleanup. */
 export function fileLocalExitHarvestEffects(options: {
   stateRoot: string;
-  classify: LocalExitHarvestEffects['classify'];
   harvest: LocalHarvestEffects;
   cleanup: LocalExitHarvestEffects['cleanup'];
   now?: () => Date;
@@ -57,7 +57,7 @@ export function fileLocalExitHarvestEffects(options: {
     },
     readMeta: (id) => readObject(join(runDir(id), 'meta.json')),
     readStream: (id) => optional(join(runDir(id), 'review.ndjson')),
-    classify: options.classify,
+    classify,
     async writeClassification(id, cls) {
       await writeFile(join(runDir(id), 'classification.json'), atomicJsonText(cls));
     },

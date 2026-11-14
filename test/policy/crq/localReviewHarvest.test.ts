@@ -75,7 +75,7 @@ describe('local review completion', () => {
       );
       await writeFile(
         join(dir, 'review.ndjson'),
-        '{"type":"finding","severity":"minor","fileName":"x","comment":"hello","number":NaN}\n',
+        '{"type":"finding","severity":"minor","fileName":"x","comment":"hello","number":NaN}\n{"type":"complete","status":"review_completed"}\n',
       );
       let saved = queue;
       const saveQueue = async (q: JsonObject) => {
@@ -94,8 +94,6 @@ describe('local review completion', () => {
       const effects = fileLocalExitHarvestEffects({
         stateRoot: root,
         harvest,
-        classify: () =>
-          doc('{"outcome":"completed","counted":true,"findings":1,"severity_counts":{"minor":1}}'),
         cleanup: async () => {},
         now: () => new Date('2026-11-14T12:00:00Z'),
       });
@@ -106,6 +104,9 @@ describe('local review completion', () => {
       expect(result.queue).toBe(saved);
       const updated = (result.queue.get('items') as JsonObject[])[0]!;
       expect(updated.get('state')).toBe('done');
+      expect(doc(await readFile(join(dir, 'classification.json'), 'utf8')).get('outcome')).toBe(
+        'completed',
+      );
       expect(updated.get('publication_reason')).toBe('publication-spooled');
       expect((result.queue.get('review_notify_outbox') as JsonObject).entries).toHaveLength(1);
       expect(await readFile(join(dir, 'findings.md'), 'utf8')).toContain('## F1 [minor] x');
