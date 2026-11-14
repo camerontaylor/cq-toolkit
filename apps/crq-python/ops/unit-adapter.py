@@ -12,8 +12,9 @@ derives its declared unit inventory from the pinned template tree. It does not
 claim exhaustive installed-host activation discovery, root coverage or caller
 coverage. Injected discovery evidence must enumerate the supported topology and
 reject foreign entries. The host's declared environment drop-in directories are
-accepted only by exact entry name, type, ownership and mode; their contents are
-never read and they are never written, removed or renamed. Unknown or failed
+accepted only by exact entry name, type, ownership, mode and environment-only
+service directives; the adapter never reads an ``EnvironmentFile`` target and
+never writes, removes or renames a drop-in entry. Unknown or failed
 observations refuse before mutation.
 
 The snapshot payload reuses the guest adapter's schema version 1 top-level keys,
@@ -56,10 +57,10 @@ DEFAULT_COMPLETION_WINDOW = 1800.0
 COMPLETION_MARGIN_SECONDS = 60
 
 # Installed environment drop-ins the production host carries under the CRQ
-# units. The names are exact and the adapter never reads their contents: it
-# validates each declared directory and entry by type, ownership and mode, and
-# leaves them untouched across switch and rollback. A drop-in directory for a
-# unit outside this declaration still refuses.
+# units. The names are exact. The adapter validates each declared directory
+# and entry by type, ownership and mode, reads only the declared drop-in text
+# to reject unit-shaping service keys, and leaves every entry untouched across
+# switch and rollback. A drop-in directory outside this declaration refuses.
 DECLARED_DROPINS = {
     "crq-watchdog.service": frozenset({"20-paseo-env.conf"}),
     "crq-tick.service": frozenset({"20-paseo-env.conf",
@@ -67,6 +68,10 @@ DECLARED_DROPINS = {
     "crq-slot.service": frozenset({"20-paseo-env.conf",
                                    "coderabbit-managed.conf"}),
 }
+# The declared drop-ins only contribute environment. Any other [Service] key
+# could change the service type, start timeout, execution shape or activation
+# identity that preflight has already certified from the main unit template.
+DROPIN_SERVICE_KEYS = frozenset({"Environment", "EnvironmentFile"})
 
 
 class SystemdPort(Protocol):
@@ -624,9 +629,10 @@ class ProductionUnitAdapter:
 
         Acceptance is exact: a real directory owned by the adapter identity
         with no group or world write bits, containing exactly the declared
-        entry names. Contents are never read. Entries must be identity-owned
-        regular files, or absolute symlinks to an identity-owned regular file
-        outside the unit directory, with no group or world write bits.
+        entry names. Entries must be identity-owned regular files, or absolute
+        symlinks to an identity-owned regular file outside the unit directory,
+        with no group or world write bits. Only the declared drop-in text is
+        read, and only to reject unit-shaping service keys.
         """
         path = Path(path)
         try:
@@ -700,6 +706,7 @@ class ProductionUnitAdapter:
             try:
                 resolved.relative_to(self.unit_dir.resolve())
             except ValueError:
+                self._validate_dropin_text(path)
                 return
             self.refuse("declared drop-in symlink target resolves inside the "
                         "unit directory: " + str(path))
@@ -716,6 +723,51 @@ class ProductionUnitAdapter:
         if info.st_size > MAX_DROPIN_BYTES:
             self.refuse("declared drop-in entry exceeds the adapter bound: "
                         + str(path))
+        self._validate_dropin_text(path)
+
+    def _validate_dropin_text(self, path):
+        """Reject drop-in directives outside the declared environment keys.
+
+        The declared drop-ins may only contribute environment entries. Reading
+        the declared drop-in text itself, never an ``EnvironmentFile`` target,
+        keeps a future ``Type=``, ``TimeoutStartSec=`` or execution-shape
+        override from invalidating the completion bound that preflight derives
+        from the main unit template.
+        """
+        path = Path(path)
+        try:
+            with path.open("rb") as handle:
+                data = handle.read(MAX_DROPIN_BYTES + 1)
+        except OSError as exc:
+            self.refuse("declared drop-in entry is unreadable: "
+                        + str(path) + ": " + str(exc)[:160])
+        if len(data) > MAX_DROPIN_BYTES:
+            self.refuse("declared drop-in entry exceeds the adapter bound: "
+                        + str(path))
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            self.refuse("declared drop-in entry is not valid UTF-8: "
+                        + str(path))
+        section = None
+        for number, line in enumerate(text.splitlines(), 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith(("#", ";")):
+                continue
+            if stripped.endswith("\\"):
+                self.refuse("declared drop-in entry uses an unsupported line "
+                            "continuation: " + str(path))
+            if stripped.startswith("[") and stripped.endswith("]"):
+                section = stripped[1:-1].strip()
+                continue
+            if section != "Service" or "=" not in stripped:
+                self.refuse("declared drop-in entry has an unsupported "
+                            "directive at line " + str(number) + ": "
+                            + str(path))
+            key = stripped.split("=", 1)[0].strip()
+            if key not in DROPIN_SERVICE_KEYS:
+                self.refuse("declared drop-in entry sets an unsupported "
+                            "service key " + key + ": " + str(path))
 
     def _installed_entries(self, unit, inventory):
         paths = self._unit_paths(unit, inventory)

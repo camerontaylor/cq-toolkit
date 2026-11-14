@@ -34,7 +34,8 @@ The exception is the declared environment drop-in topology shared with
 entry names are accepted in a real directory of the declared shape. Those
 entries are opaque here. Their contents are never read and their absolute
 symlink targets are not scanned as unit dependency sources; the adapter
-revalidates ownership and mode before any mutation.
+revalidates ownership, mode and environment-only service keys before any
+mutation.
 """
 from __future__ import annotations
 

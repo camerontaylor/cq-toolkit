@@ -825,6 +825,37 @@ class AdapterTests(AdapterFixture):
             self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
         self.assertEqual(_tree(self.unit_dir), before)
 
+    def test_preflight_refuses_unit_shaping_dropin_override(self):
+        dropin = self.make_declared_dropins("crq-tick.service")
+        entry = dropin / "coderabbit-managed.conf"
+        for key, value in (("Type", "simple"),
+                           ("TimeoutStartSec", "1s"),
+                           ("ExecStart", "/bin/true"),
+                           ("Slice", "system.slice")):
+            with self.subTest(key=key):
+                entry.write_text("[Service]\n" + key + "=" + value + "\n")
+                before = _tree(self.unit_dir)
+                with self.assertRaisesRegex(
+                        dc.Refused, "unsupported service key " + key):
+                    self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+                self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_non_service_dropin_directive(self):
+        dropin = self.make_declared_dropins("crq-tick.service")
+        entry = dropin / "coderabbit-managed.conf"
+        cases = {
+            "non-service section": "[Unit]\nDescription=other\n",
+            "line continuation": "[Service]\nEnvironment=A=1\\\nType=simple\n",
+            "malformed line": "[Service]\nEnvironment\n",
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                entry.write_text(text)
+                before = _tree(self.unit_dir)
+                with self.assertRaises(dc.Refused):
+                    self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+                self.assertEqual(_tree(self.unit_dir), before)
+
     def test_preflight_refuses_undeclared_dropin_directory(self):
         dropin = self.unit_dir / "crq-tick.timer.d"
         dropin.mkdir()
