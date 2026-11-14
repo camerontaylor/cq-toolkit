@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileDiscoveryEffects } from '../../src/adapters/crq/discoverySource.js';
+import { withLock } from '../../src/adapters/crq/lock.js';
+import { ForgeBudget } from '../../src/policy/crq/forgeBudget.js';
 import { JsonObject, parseJsonValue } from '../../src/policy/crq/jsonValue.js';
 import { withObjectKeys } from '../../src/policy/crq/queueDoc.js';
+import { InventoryCapExceeded, PageFailed } from '../../src/policy/crq/reconcileInventory.js';
 import {
   discoverRolling,
   rollingInterval,
@@ -14,6 +21,35 @@ function object(value: unknown): JsonObject {
 }
 
 describe('rolling discovery lifecycle', () => {
+  it('persists a real empty rolling scan using an offline forge seam', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'discovery-file-'));
+    await mkdir(join(root, 'reconcile'));
+    await writeFile(
+      join(root, 'queue.json'),
+      '{"items":[],"merged_current_requests":{},"unknown":42}\n',
+    );
+    let calls = 0;
+    const effects = fileDiscoveryEffects({
+      repo: 'acme/repo',
+      stateRoot: root,
+      now: () => clock,
+      budget: new ForgeBudget({ requests: 4, seconds: 30, clock: () => 0 }),
+      gh: async () => {
+        calls++;
+        return { code: 0, stdout: '[]', stderr: '' };
+      },
+    });
+    const result = await withLock(join(root, 'tick.lock'), { wait: false }, () =>
+      discoverRolling(interval, effects),
+    );
+    expect(result.summary.get('complete')).toBe(true);
+    expect(calls).toBeGreaterThan(0);
+    expect(JSON.parse(await readFile(join(root, 'queue.json'), 'utf8'))).toMatchObject({
+      unknown: 42,
+      merged_watermark: interval.before,
+      merged_discovery: { complete: true },
+    });
+  });
   it('freezes in-progress bounds and overlaps a completed watermark', () => {
     expect(
       rollingInterval(
@@ -85,21 +121,70 @@ describe('rolling discovery lifecycle', () => {
     expect(prunes).toBe(0);
   });
 
-  it('refuses unimplemented partition hints before any effectful write', async () => {
-    const queue = object({ merged_discovery: { ...interval, complete: false, span: 30 } });
+  it('persists inventory-cap debt and resumes the frozen smaller interval', async () => {
+    let queue = object({ items: [] });
     const effects: DiscoveryEffects = {
       loadQueue: async () => queue,
-      saveQueue: async () => {
-        throw new Error('unexpected save');
+      saveQueue: async (next) => {
+        queue = next;
       },
       reconcile: async () => {
-        throw new Error('unexpected reconcile');
+        throw new InventoryCapExceeded('inventory cap');
       },
       prune: async () => 0,
       now: () => clock,
     };
-    await expect(discoverRolling(interval, effects)).rejects.toThrow(
-      'partition hints are not implemented',
-    );
+    const result = await discoverRolling(interval, effects);
+    expect(result.summary.get('reason')).toBe('inventory-cap-partitioned');
+    expect(queue.get('merged_watermark')).toBeUndefined();
+    expect(rollingInterval(queue, interval.after, clock)).toEqual({
+      after: interval.after,
+      before: '2026-09-01T12:00:00Z',
+    });
+  });
+
+  it('persists page failure debt without advancing watermark', async () => {
+    let queue = object({ items: [] });
+    const result = await discoverRolling(interval, {
+      loadQueue: async () => queue,
+      saveQueue: async (next) => {
+        queue = next;
+      },
+      reconcile: async () => {
+        throw new PageFailed('offline');
+      },
+      prune: async () => {
+        throw new Error('unexpected prune');
+      },
+      now: () => clock,
+    });
+    expect(result.summary.get('reason')).toBe('transport-failure');
+    const debt = queue.get('merged_discovery');
+    expect(debt).toBeInstanceOf(JsonObject);
+    expect((debt as JsonObject).get('error')).toBe('offline');
+    expect(queue.get('merged_watermark')).toBeUndefined();
+  });
+
+  it('does not prune again within an hour, but treats future stamps as stale', async () => {
+    for (const [stamp, expected] of [
+      ['2026-09-30T23:30:00Z', 0],
+      ['2026-10-01T01:00:00Z', 1],
+    ] as const) {
+      let queue = object({ items: [], merged_wrappers_pruned_at: stamp });
+      let calls = 0;
+      await discoverRolling(interval, {
+        loadQueue: async () => queue,
+        saveQueue: async (next) => {
+          queue = next;
+        },
+        reconcile: async () => object({ complete: true }),
+        prune: async () => {
+          calls++;
+          return 0;
+        },
+        now: () => clock,
+      });
+      expect(calls).toBe(expected);
+    }
   });
 });
