@@ -6,6 +6,7 @@ import {
   type JsonValue,
 } from './jsonValue.js';
 import { pyTruthy } from './queueDoc.js';
+import { compareCodePoints } from './pythonJson.js';
 import { backgroundTurn, rank, type ScheduleContext } from './tickSchedule.js';
 
 function launchRecord(value: JsonValue): Record<string, unknown> | null {
@@ -22,6 +23,12 @@ function project(item: JsonObject): Record<string, unknown> {
   const cycles = item.get('cycles');
   const author = item.get('author');
   const cycle = author instanceof JsonObject ? author.get('cycle') : undefined;
+  if (
+    item.get('kind') === 'author' &&
+    cycle !== undefined &&
+    comparePythonNumbers(cycle, 1) === null
+  )
+    throw new Error('invalid author cycle');
   const generation = item.get('generation');
   const attempts = item.get('attempts');
   const run = item.get('run');
@@ -67,7 +74,12 @@ export function admissionOrder(
       Number(!pyTruthy(b.item.get('operator_priority')));
     const tier = rank(a.fields, context) - rank(b.fields, context);
     if (priority || tier) return priority || tier;
-    const ordering = comparePythonNumbers(order(a.item), order(b.item));
+    const left = order(a.item);
+    const right = order(b.item);
+    const ordering =
+      typeof left === 'string' && typeof right === 'string'
+        ? compareCodePoints(left, right)
+        : comparePythonNumbers(left, right);
     if (ordering === null) throw new Error('invalid item order');
     return ordering || a.index - b.index;
   });
