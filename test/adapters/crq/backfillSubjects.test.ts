@@ -3,22 +3,12 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import {
-  GitSubjectRepository,
-  type BackfillSubjectAccounting,
-} from '../../../src/adapters/crq/backfillSubjects.js';
-import { GitCoverageRepository } from '../../../src/adapters/crq/coverageSource.js';
+import { GitAccountingRepository } from '../../../src/adapters/crq/backfillAccounting.js';
+import { GitSubjectRepository } from '../../../src/adapters/crq/backfillSubjects.js';
 import type { RunGit } from '../../../src/adapters/crq/ledgerGit.js';
 import { runGitIn } from '../../../src/adapters/crq/publishSource.js';
-import { changedIntervals } from '../../../src/adapters/crq/reviewVerify.js';
-import { ledgerPath } from '../../../src/policy/crq/ledger.js';
-import { compareCodePoints, ledgerJsonDigest } from '../../../src/policy/crq/pythonJson.js';
-import {
-  construct,
-  type ConstructResult,
-  type SubjectInventoryRow,
-  type SubjectTreeEntry,
-} from '../../../src/policy/crq/backfillSubjects.js';
+import { ledgerJsonDigest } from '../../../src/policy/crq/pythonJson.js';
+import { construct, type ConstructResult } from '../../../src/policy/crq/backfillSubjects.js';
 
 interface Fixture {
   readonly root: string;
@@ -89,137 +79,6 @@ function lineCount(data: Uint8Array): number {
   return data[data.length - 1] === 0x0a ? newlines : newlines + 1;
 }
 
-/**
- * The Stage 1 accounting surface over real Git for this suite. It reuses the
- * merged `changedIntervals` parser and coverage repository rather than faking
- * any Git fact; only `inventory` and `entries` are read here directly.
- */
-class RealAccounting implements BackfillSubjectAccounting {
-  private readonly coverage: GitCoverageRepository;
-
-  constructor(private readonly runGit: RunGit) {
-    this.coverage = new GitCoverageRepository(runGit);
-  }
-
-  private async ok(args: readonly string[]): Promise<Uint8Array> {
-    const call = await this.runGit(args);
-    if (call.code !== 0) throw new Error(`git ${args[0] ?? ''} failed: ${call.stderr}`);
-    return call.stdout;
-  }
-
-  async resolve(value: string): Promise<string> {
-    if (!/^[0-9a-f]{40,64}$/.test(value)) {
-      throw new Error('target must be an immutable full object ID');
-    }
-    return decode(await this.ok(['rev-parse', `${value}^{commit}`])).trim();
-  }
-
-  async tree(commit: string): Promise<string> {
-    return decode(await this.ok(['rev-parse', `${await this.resolve(commit)}^{tree}`])).trim();
-  }
-
-  async entries(commit: string): Promise<ReadonlyMap<string, SubjectTreeEntry>> {
-    const raw = Buffer.from(await this.ok(['ls-tree', '-r', '-z', await this.resolve(commit)]));
-    const result = new Map<string, SubjectTreeEntry>();
-    let cursor = 0;
-    while (cursor < raw.length) {
-      const end = raw.indexOf(0, cursor);
-      if (end < 0) break;
-      const record = raw.subarray(cursor, end);
-      cursor = end + 1;
-      const tab = record.indexOf(0x09);
-      if (tab < 0) throw new Error('malformed ls-tree entry');
-      const [mode, kind, blob] = record.subarray(0, tab).toString('utf8').split(' ');
-      const nameBytes = record.subarray(tab + 1);
-      const name = nameBytes.toString('utf8');
-      let path: string;
-      try {
-        path = ledgerPath(name);
-      } catch {
-        path = `git-path-bytes:${nameBytes.toString('hex')}`;
-      }
-      result.set(path, { path, mode: mode as string, kind: kind as string, blob: blob as string });
-    }
-    return result;
-  }
-
-  async inventory(target: string, maxFileBytes: number): Promise<readonly SubjectInventoryRow[]> {
-    const entries = [...(await this.entries(target)).values()].sort((left, right) =>
-      compareCodePoints(left.path, right.path),
-    );
-    const rows: SubjectInventoryRow[] = [];
-    for (const entry of entries) {
-      const row: {
-        path: string;
-        blob: string;
-        mode: string;
-        kind: string;
-        lines: number | null;
-        bytes: number | null;
-        disposition: string;
-        reason: string;
-      } = {
-        path: entry.path,
-        blob: entry.blob,
-        mode: entry.mode,
-        kind: entry.kind,
-        lines: null,
-        bytes: null,
-        disposition: 'unsupported',
-        reason: 'non-regular object',
-      };
-      if (entry.path.startsWith('git-path-bytes:')) {
-        row.reason = 'non-canonical or non-UTF8 path';
-        rows.push(row);
-        continue;
-      }
-      if ((entry.mode !== '100644' && entry.mode !== '100755') || entry.kind !== 'blob') {
-        rows.push(row);
-        continue;
-      }
-      const call = await this.runGit(['cat-file', 'blob', entry.blob]);
-      if (call.code !== 0) {
-        row.reason = 'unreadable blob';
-        rows.push(row);
-        continue;
-      }
-      const data = call.stdout;
-      row.bytes = data.length;
-      try {
-        new TextDecoder('utf-8', { fatal: true }).decode(data);
-      } catch {
-        row.reason = 'non-UTF8 blob';
-        rows.push(row);
-        continue;
-      }
-      if (data.includes(0)) {
-        row.reason = 'binary blob';
-      } else {
-        row.lines = lineCount(data);
-        if (data.length > maxFileBytes) {
-          row.reason = 'current content exceeds per-file limit';
-        } else if (data.length > 0) {
-          row.disposition = 'included';
-          row.reason = 'tracked regular UTF8 text';
-        } else {
-          row.disposition = 'empty';
-          row.reason = 'empty current blob';
-        }
-      }
-      rows.push(row);
-    }
-    return rows;
-  }
-
-  changedIntervals(base: string, head: string): Promise<ReadonlyMap<string, ReadonlySet<number>>> {
-    return changedIntervals(this.runGit, base, head);
-  }
-
-  lineage(old: string, next: string, path: string): Promise<string | null> {
-    return this.coverage.lineage(old, next, path);
-  }
-}
-
 interface Policy {
   max_files: number;
   max_file_bytes: number;
@@ -269,7 +128,7 @@ function partitionAt(result: ConstructResult, index = 0): Partition {
 
 async function candidate(
   fixture: Fixture,
-  accounting: RealAccounting,
+  accounting: GitAccountingRepository,
   target: string,
   names: readonly string[],
   kind: 'A' | 'B' = 'B',
@@ -302,10 +161,14 @@ async function candidate(
 }
 
 async function subjectRepo(fixture: Fixture): Promise<{
-  accounting: RealAccounting;
+  accounting: GitAccountingRepository;
   repo: GitSubjectRepository;
 }> {
-  const accounting = new RealAccounting(fixture.runGit);
+  const accounting = new GitAccountingRepository({
+    repo: fixture.root,
+    runGit: fixture.runGit,
+  });
+  accounting.beginInvocation();
   const repo = new GitSubjectRepository({ runGit: fixture.runGit, accounting });
   return { accounting, repo };
 }

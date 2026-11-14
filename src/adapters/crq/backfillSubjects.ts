@@ -3,13 +3,11 @@
  * pre-merge baselines, and create-only generation pins.
  *
  * The write half lives here because it commits objects and updates refs.
- * Accounting reads are delegated to the Stage 1 repository through
- * {@link BackfillSubjectAccounting}: the concrete `GitAccountingRepository`
- * (policy `BackfillCaptureRepo` plus its public `entries`, `changedIntervals`
- * and `lineage`) satisfies this interface structurally, so this module can land
- * before that adapter merges without reimplementing its parsers or caches.
- * Ancestry probes, index rewrites, `commit-tree` and ref updates run on the
- * injected `RunGit` directly.
+ * Accounting reads are delegated to the merged Stage 1
+ * {@link GitAccountingRepository}: its public `entries`, `changedIntervals` and
+ * `lineage` methods are the exact read surface this adapter uses, so no parser
+ * or cache is reimplemented here. Ancestry probes, index rewrites,
+ * `commit-tree` and ref updates run on the injected `RunGit` directly.
  *
  * Exact behaviours kept from the Python oracle:
  *
@@ -51,6 +49,7 @@ import {
   recordHas,
   type JsonRecordLike,
 } from '../../policy/crq/queueDoc.js';
+import type { GitAccountingRepository } from './backfillAccounting.js';
 import type { RunGit } from './ledgerGit.js';
 
 /** A Git invocation the construction step cannot continue past. */
@@ -66,26 +65,11 @@ export class SubjectGitError extends Error {
   }
 }
 
-/**
- * The Stage 1 accounting read surface construction needs. Method names and
- * return shapes match `GitAccountingRepository`; `entries`, `changedIntervals`
- * and `lineage` are public there even though `BackfillCaptureRepo` does not
- * declare them.
- */
-export interface BackfillSubjectAccounting {
-  resolve(value: string): Promise<string>;
-  tree(commit: string): Promise<string>;
-  entries(commit: string): Promise<ReadonlyMap<string, SubjectTreeEntry>>;
-  inventory(target: string, maxFileBytes: number): Promise<readonly SubjectInventoryRow[]>;
-  changedIntervals(base: string, head: string): Promise<ReadonlyMap<string, ReadonlySet<number>>>;
-  lineage(old: string, next: string, path: string): Promise<string | null>;
-}
-
 export interface GitSubjectOptions {
   /** Hardened runner bound to the repository (`runGitIn(repo)`). */
   readonly runGit: RunGit;
-  /** Stage 1 accounting reads over the same repository. */
-  readonly accounting: BackfillSubjectAccounting;
+  /** The merged Stage 1 accounting repository over the same clone. */
+  readonly accounting: GitAccountingRepository;
 }
 
 interface ParsedMember {
@@ -166,7 +150,7 @@ function parseMembers(members: readonly SubjectMember[]): ParsedMember[] {
  */
 export class GitSubjectRepository implements BackfillSubjectRepo {
   private readonly runGit: RunGit;
-  private readonly accounting: BackfillSubjectAccounting;
+  private readonly accounting: GitAccountingRepository;
 
   constructor(options: GitSubjectOptions) {
     this.runGit = options.runGit;
