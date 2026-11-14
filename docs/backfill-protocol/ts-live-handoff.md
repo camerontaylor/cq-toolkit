@@ -18,8 +18,21 @@ an interrupted inventory can otherwise mix ranked rows with older provenance.
 
 - Scheduler: port `usage_context`, `rank4_gate` and `select` in
   `apps/crq-python/backfill_runtime.py`, and the remaining transitions in
-  `apps/crq-python/backfill_jobs.py`. The existing TypeScript
-  `src/policy/crq/backfillJobs.ts` only covers enqueue, histories and ownership.
+  `apps/crq-python/backfill_jobs.py`. The TypeScript
+  `src/policy/crq/backfillJobs.ts` supplies enqueue, eligibility, admission,
+  bind and pre-vendor cancellation as lossless pure queue transitions. It does
+  not acquire a lock, save a queue, refresh usage, emit state events or launch.
+  The caller must use the freshly loaded queue under `tick.lock`, compute the
+  observation and ordinary-work priority as `rank4_gate` does, and durably save
+  the reservation before any vendor spawn. An admission decision alone is not
+  an authorization to launch.
+  For the next slice, use `apps/crq-python/backfill_runtime.py` at main commit
+  `0cb627ebf38dafb3089b2fe7eb4f1e153665f307`: `usage_context` reflects or
+  expires terminal holds and subtracts unrepresented starts; `rank4_gate`
+  refreshes stale observations, subtracts later ordinary starts, records the
+  state event and daily capacity, then saves the queue before launch. Preserve
+  that ordering and retry behavior rather than treating this pure policy as a
+  live reservation endpoint.
   Selection must consume fresh coverage snapshots, preserve ordinary-work
   priority and reserve quota durably before vendor launch. Coordinate the
   exported seam with the worker integrating `src/queue-runner/tick.ts` and
