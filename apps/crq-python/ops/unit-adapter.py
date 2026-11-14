@@ -73,6 +73,20 @@ DECLARED_DROPINS = {
 # identity that preflight has already certified from the main unit template.
 DROPIN_SERVICE_KEYS = frozenset({"Environment", "EnvironmentFile"})
 
+# Units whose execution can create or advance queue work. Every unit is
+# treated as issuing unless it is named here, so a future unit stays
+# fail-closed until someone can show it shares no state with the queue. The
+# watchdog reads the completed-tick heartbeat and sends an alert; it never
+# launches a run, advances queue.json or writes the heartbeat. Only an issuing
+# unit's fence therefore observes queue ownership, and an unrelated live run
+# cannot refuse or roll back a watchdog switch.
+NON_QUEUE_ISSUING_UNITS = frozenset({"crq-watchdog.service"})
+
+
+def unit_issues_queue_work(unit):
+    """Whether this unit's fence must observe recorded queue ownership."""
+    return unit not in NON_QUEUE_ISSUING_UNITS
+
 
 class SystemdPort(Protocol):
     """Injected host observation and command port. No implementation here."""
@@ -1115,7 +1129,7 @@ class ProductionUnitAdapter:
         if runtime == "python":
             self._check_python_entry(rendered)
         self._rendered[(unit, runtime)] = rendered
-        if self.queue_drain is None:
+        if self.queue_drain is None and unit_issues_queue_work(unit):
             self.refuse("no recorded queue drain observation provider")
         sequence = self.sequence(unit)
         self._requested_runtime = runtime
@@ -1396,8 +1410,11 @@ class ProductionUnitAdapter:
             self.refuse("service stop did not complete during fence")
         self._run("reset-failed", unit, timeout=60)
         drained = self._wait_drain(unit, inventory)
-        queue = self._observe_queue()
-        if not queue["drained"]:
+        # The watchdog is non-issuing: the queue is not its state, and a live
+        # run owned by another unit must not refuse its fence. Issuing units
+        # keep the fail-closed post-fence ownership observation.
+        queue = self._observe_queue() if unit_issues_queue_work(unit) else None
+        if queue is not None and not queue["drained"]:
             self.refuse("queue-owned work is alive or ambiguous after the "
                         "systemd fence: "
                         + json.dumps(queue["blocked"], sort_keys=True)[:400])

@@ -183,6 +183,31 @@ avoids killing a path-triggered publisher run after the path is restarted.
 Injected capability and completion-sequence failures are converted to refusals
 in preflight, so a port exception cannot bypass the adapter's error type.
 
+## Non-issuing watchdog transactions
+
+The controller's queue-drain gate and the adapter's post-fence queue
+observation serialize a transaction that stops a unit which can create or
+advance queue work. `crq-watchdog.service` is not such a unit: it reads the
+completed-tick heartbeat and sends an alert, and writes only its own
+`watchdog-state.json`; it never launches a run, advances `queue.json` or
+rewrites the heartbeat. `deploy-controller.py` and `unit-adapter.py` therefore
+share one explicit classification (`QUEUE_NON_ISSUING_UNITS`, currently only
+the watchdog). Every other declared unit is treated as issuing, so a future
+unit stays fail-closed until this declaration is extended deliberately. Both
+the switch and recovery gates, and the adapter's own post-systemd
+observation, are skipped for a non-issuing unit. Its systemd job, cgroup and
+activator drain, snapshot/restore, completion evidence and activation fences
+are unchanged.
+
+The preservation digest scope follows the same classification. A queue-issuing
+transaction captures and compares `queue.json` and the completed heartbeat
+byte-for-byte; a non-issuing watchdog transaction captures no queue surface.
+That is what makes concurrency safe rather than merely permitted: a live run
+owned by another unit may legitimately harvest progress, and the watchdog
+switch neither reads that progress as a conflict nor restores a stale
+snapshot over it. No queue or heartbeat bytes are ever written or restored
+from this evidence; the journal retains the unit snapshot only.
+
 ## Offline factory composition
 
 `ops/unit-switch-factory.py` is the internal composition of the merged pieces:
