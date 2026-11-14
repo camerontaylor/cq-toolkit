@@ -40,7 +40,13 @@ const input = {
 function fixture() {
   let report = '';
   const effects: ReviewScannerEffects = {
-    compile: (pattern) => (text) => text.includes(pattern),
+    match: async ({ rules, lines }) => {
+      const hits: [number, number][] = [];
+      for (const [lineIndex, line] of lines.entries())
+        for (const [ruleIndex, rule] of rules.entries())
+          if (line.text.includes(rule.regex)) hits.push([lineIndex, ruleIndex]);
+      return hits;
+    },
     gitleaks: async () => ({ kind: 'not-run' }),
     writeReport: async (text) => {
       report = text;
@@ -100,7 +106,7 @@ describe('review scan evidence', () => {
   });
   it('refuses unavailable matchers and scanner effects', async () => {
     const f = fixture();
-    f.effects.compile = () => {
+    f.effects.match = async () => {
       throw new Error('unavailable');
     };
     await expect(scanReviewDiff(input, f.effects)).rejects.toThrow('matcher unavailable');
@@ -108,8 +114,18 @@ describe('review scan evidence', () => {
   });
   it('uses Python splitlines and the injected Unicode matcher', async () => {
     const f = fixture();
-    f.effects.compile = (pattern) => (text) =>
-      pattern === 'MARK0' ? /(?<![\p{L}\p{N}_])MARK0/u.test(text) : text.includes(pattern);
+    f.effects.match = async ({ rules, lines }) => {
+      const hits: [number, number][] = [];
+      for (const [lineIndex, line] of lines.entries())
+        for (const [ruleIndex, rule] of rules.entries()) {
+          const matched =
+            rule.regex === 'MARK0'
+              ? /(?<![\p{L}\p{N}_])MARK0/u.test(line.text)
+              : line.text.includes(rule.regex);
+          if (matched) hits.push([lineIndex, ruleIndex]);
+        }
+      return hits;
+    };
     const text = 'diff --git a/x b/x\r--- a/x\r+++ b/x\r@@ -1 +1 @@\r+λMARK0\u2028+ MARK0\r';
     const result = await scanReviewDiff({ ...input, diff: text }, f.effects);
     expect(result.denylistHits).toBe(1);
