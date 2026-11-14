@@ -275,6 +275,25 @@ class FakeSystemd:
         path = self.unit_dir / unit
         return path.is_symlink() and os.readlink(path) == "/dev/null"
 
+    def _exec_start_record(self, unit, masked):
+        """Report the installed command the way ``systemctl show`` does."""
+        if masked:
+            return ""
+        try:
+            text = (self.unit_dir / unit).read_text()
+        except OSError:
+            return ""
+        lines = [line for line in text.splitlines()
+                 if line.startswith("ExecStart=")]
+        if len(lines) != 1:
+            return ""
+        argv = lines[0][len("ExecStart="):].split()
+        if not argv:
+            return ""
+        return ("{ path=" + argv[0] + " ; argv[]=" + " ".join(argv)
+                + " ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; "
+                "pid=0 ; code=(null) ; status=0/UNKNOWN }")
+
     def discover(self, unit, declared_paths):
         if self.fail == "discover":
             raise RuntimeError("discovery unavailable")
@@ -343,6 +362,8 @@ class FakeSystemd:
                 values[prop] = "dead"
             elif prop == "UnitFileState":
                 values[prop] = self._unit_file_state(unit)
+            elif prop == "ExecStart":
+                values[prop] = self._exec_start_record(unit, masked)
             else:
                 values[prop] = ""
         return values
