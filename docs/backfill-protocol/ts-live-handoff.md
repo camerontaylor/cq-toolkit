@@ -66,10 +66,22 @@ an interrupted inventory can otherwise mix ranked rows with older provenance.
   priority and reserve quota durably before vendor launch. Coordinate the
   exported seam with the worker integrating `src/queue-runner/tick.ts` and
   `src/adapters/crq/tickSource.ts` rather than independently changing that glue.
-- Harvest: port `completion_event` and `harvest` in
+- Harvest: `src/ops/crq/internal/backfillHarvest.ts` and
+  `src/adapters/crq/backfillHarvestArtifacts.ts` provide an unwired, bounded
+  failure-only seam. The caller must hold `tick.lock`, load the fresh durable
+  queue, and independently prove terminal liveness for the exact run and exit.
+  Artifact existence or an ambiguous PID is not proof. The seam verifies the
+  bound item, attempt and run, retains raw review and exit bytes, emits the
+  state event, saves terminal state and capacity plus attempt history, then
+  cleans up. Reload durable state after any error and never relaunch blindly.
+  Unlike Python, counted completions and all quota or mixed quota outcomes are
+  deliberately unhandled without retention or mutation, and attempt history is
+  saved atomically with the terminal state. The reader assumes the state tree
+  is not concurrently altered by an adversary during path resolution. Port the
+  remaining `completion_event` and `harvest` paths in
   `apps/crq-python/backfill_runtime.py` and their call site in
-  `apps/crq-python/crq.py`. Preserve terminal ownership, scope verification,
-  evidence retention, finding ingestion and publication ordering.
+  `apps/crq-python/crq.py`: counted git and scope verification, outbox,
+  finding ingestion, publication and Q49 quota handling remain missing.
 - History: port `collect_history_unlocked` and the `import-history` branch in
   `apps/crq-python/backfill.py`, together with `backfill_history.py`. Collection
   uses an output-specific persistent flock and snapshots the queue separately.
