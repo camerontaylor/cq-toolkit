@@ -560,6 +560,19 @@
           "by": "self-merge-prs:observe"
         }
       ]
+    },
+    "1767": {
+      "tuple": {
+        "head": "9920877c5bd4046483cdfb81fccf29e0e7b479fd",
+        "base": "dd0ed4ee47c45c5ba1ae87cf7a8a648413aeb06d",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-14T08:37:54.208Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
     }
   }
 }
