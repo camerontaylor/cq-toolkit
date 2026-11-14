@@ -49,8 +49,9 @@ export async function completeLocalReview(
   endedAt: string,
   exitCode: number | null,
   effects: LocalHarvestEffects,
+  classifiedBytes?: Uint8Array,
 ): Promise<{ queue: JsonObject; item: JsonObject; receiptId: string }> {
-  const bytes = await effects.readReview(runId);
+  const bytes = classifiedBytes ?? (await effects.readReview(runId));
   const raw = Buffer.from(bytes).toString('utf8');
   const findings: JsonValue[] = [];
   for (const line of splitLines(raw)) {

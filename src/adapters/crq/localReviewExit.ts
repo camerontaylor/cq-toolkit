@@ -10,6 +10,7 @@ import {
 } from '../../ops/crq/internal/localReviewHarvest.js';
 import { runLiveness } from '../process/liveness.js';
 import { atomicWrite } from './atomic.js';
+import { containedLocalRunArtifact } from './localReviewHarvest.js';
 
 /** Bind local files, liveness, canonical classification and receipt completion. The caller supplies safe cleanup. */
 export function fileLocalExitHarvestEffects(options: {
@@ -30,14 +31,6 @@ export function fileLocalExitHarvestEffects(options: {
     if (!(value instanceof JsonObject)) throw new Error('expected JSON object');
     return value;
   }
-  async function optional(path: string): Promise<Uint8Array | null> {
-    try {
-      return await readFile(path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-      throw error;
-    }
-  }
   return {
     async liveness(id, run) {
       const dir = runDir(id);
@@ -50,13 +43,20 @@ export function fileLocalExitHarvestEffects(options: {
       }
       return runLiveness(dir, run, exists);
     },
-    readExit: (id) => readObject(join(runDir(id), 'exit.json')),
+    readExit: async (id) => readObject(await containedLocalRunArtifact(root, id, 'exit.json')),
     async writeNext(stamp) {
       await mkdir(root, { recursive: true });
       await atomicWrite(join(root, 'next-review-at'), `${stamp}\n`);
     },
-    readMeta: (id) => readObject(join(runDir(id), 'meta.json')),
-    readStream: (id) => optional(join(runDir(id), 'review.ndjson')),
+    readMeta: async (id) => readObject(await containedLocalRunArtifact(root, id, 'meta.json')),
+    async readStream(id) {
+      try {
+        return await readFile(await containedLocalRunArtifact(root, id, 'review.ndjson'));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw error;
+      }
+    },
     classify,
     async writeClassification(id, cls) {
       await writeFile(join(runDir(id), 'classification.json'), atomicJsonText(cls));
@@ -82,9 +82,21 @@ export function fileLocalExitHarvestEffects(options: {
         }) + '\n',
       );
     },
-    complete: async (queue, item, runId, cls, endedAt, exitCode) =>
-      (await completeLocalReview(queue, item, runId, cls, endedAt, exitCode, options.harvest))
-        .queue,
+    complete: async (queue, item, runId, cls, endedAt, exitCode, stream) => {
+      if (stream === null) throw new Error('missing classified artifact');
+      return (
+        await completeLocalReview(
+          queue,
+          item,
+          runId,
+          cls,
+          endedAt,
+          exitCode,
+          options.harvest,
+          stream,
+        )
+      ).queue;
+    },
     cleanup: options.cleanup,
     nowIso: () => `${now().toISOString().slice(0, 19)}Z`,
   };

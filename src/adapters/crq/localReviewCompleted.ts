@@ -1,5 +1,4 @@
-import { lstat, readFile, realpath } from 'node:fs/promises';
-import { join, relative, isAbsolute } from 'node:path';
+import { readFile, realpath } from 'node:fs/promises';
 import { JsonObject, parseJsonValue } from '../../policy/crq/jsonValue.js';
 import { classify } from '../../policy/crq/classification.js';
 import type { ReviewCapabilityEffects } from '../../ops/crq/reviewCapability.js';
@@ -8,7 +7,11 @@ import { reconcileCompletedLocalReviews } from '../../ops/crq/internal/localRevi
 import { completeLocalReview } from '../../ops/crq/internal/localReviewHarvest.js';
 import { republishLocalReview } from '../../ops/crq/internal/localReviewPublish.js';
 import { localReviewFactsEffects } from './localReviewFacts.js';
-import { fileLocalHarvestEffects, validateLocalReviewIdentity } from './localReviewHarvest.js';
+import {
+  containedLocalRunArtifact,
+  fileLocalHarvestEffects,
+  validateLocalReviewIdentity,
+} from './localReviewHarvest.js';
 import { fileLocalReviewPublishEffects } from './localReviewPublish.js';
 
 /** Caller owns tick.lock throughout preparation, completion, and queue persistence. */
@@ -32,19 +35,6 @@ export function createLocalReviewCompletedCaller(options: {
   });
   const facts = localReviewFactsEffects(options.facts);
   const nowIso = () => `${(options.now ?? (() => new Date()))().toISOString().slice(0, 19)}Z`;
-  async function artifact(runId: string, name: string): Promise<string> {
-    if (!runId || runId === '.' || runId === '..' || /[/\\\0]/.test(runId))
-      throw new Error('invalid run id');
-    const root = await realpath(join(options.stateRoot, 'runs'));
-    const dir = join(root, runId);
-    if ((await lstat(dir)).isSymbolicLink() || (await lstat(join(dir, name))).isSymbolicLink())
-      throw new Error('symlinked run artifact unsupported');
-    const path = await realpath(join(dir, name));
-    const rel = relative(root, path);
-    if (!rel || rel.startsWith('..' + '/') || rel === '..' || isAbsolute(rel))
-      throw new Error('run artifact outside runs directory');
-    return path;
-  }
   async function prepare(
     queue: JsonObject,
     item: JsonObject,
@@ -52,23 +42,44 @@ export function createLocalReviewCompletedCaller(options: {
     completedOnly: boolean,
   ) {
     if (item.get('kind') !== 'local-review') throw new Error('unsupported review ownership');
+    let classifiedBytes: Uint8Array | undefined;
     return prepareLocalReview(queue, item, options.runnerRepo, dry, completedOnly, {
       ...facts,
       validateIdentity: validateLocalReviewIdentity,
       nowIso,
       async readRunMeta(runId) {
-        const value = parseJsonValue(await readFile(await artifact(runId, 'meta.json'), 'utf8'));
+        const value = parseJsonValue(
+          await readFile(
+            await containedLocalRunArtifact(options.stateRoot, runId, 'meta.json'),
+            'utf8',
+          ),
+        );
         if (!(value instanceof JsonObject)) throw new Error('invalid run metadata');
         return value;
       },
       async classifyCompleted(runId, ndjson) {
-        const canonical = await artifact(runId, 'review.ndjson');
+        const canonical = await containedLocalRunArtifact(
+          options.stateRoot,
+          runId,
+          'review.ndjson',
+        );
         if ((await realpath(ndjson)) !== canonical) throw new Error('cycle artifact mismatch');
-        return classify(await readFile(canonical), 0);
+        classifiedBytes = await readFile(canonical);
+        return classify(classifiedBytes, 0);
       },
       async completeFromCycle(current, runId, classification, endedAt) {
+        if (!classifiedBytes) throw new Error('missing classified artifact');
         return (
-          await completeLocalReview(current, item, runId, classification, endedAt, 0, harvest)
+          await completeLocalReview(
+            current,
+            item,
+            runId,
+            classification,
+            endedAt,
+            0,
+            harvest,
+            classifiedBytes,
+          )
         ).queue;
       },
     });
