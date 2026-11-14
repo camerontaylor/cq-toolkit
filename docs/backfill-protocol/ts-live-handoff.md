@@ -1,0 +1,42 @@
+# TypeScript live backfill continuation
+
+The live inventory and baseline routes do not establish backfill cutover readiness.
+The systemd backfill unit invokes `backfill.py inventory`; the TypeScript route
+is `runBackfillUnit` in `src/adapters/crq/backfillSource.ts`, with off-lock
+preparation and a guarded merge in `src/ops/crq/internal/backfillTransaction.ts`.
+The `baseline` route pins the existing ranked inventory under `tick.lock`.
+Do not declare the broader backfill capability or activate a unit on that basis.
+
+## Next implementation seams
+
+- Scheduler: port `usage_context`, `rank4_gate` and `select` in
+  `apps/crq-python/backfill_runtime.py`, and the remaining transitions in
+  `apps/crq-python/backfill_jobs.py`. The existing TypeScript
+  `src/policy/crq/backfillJobs.ts` only covers enqueue, histories and ownership.
+  Selection must consume fresh coverage snapshots, preserve ordinary-work
+  priority and reserve quota durably before vendor launch. Coordinate the
+  exported seam with the worker integrating `src/queue-runner/tick.ts` and
+  `src/adapters/crq/tickSource.ts` rather than independently changing that glue.
+- Harvest: port `completion_event` and `harvest` in
+  `apps/crq-python/backfill_runtime.py` and their call site in
+  `apps/crq-python/crq.py`. Preserve terminal ownership, scope verification,
+  evidence retention, finding ingestion and publication ordering.
+- History: port `collect_history_unlocked` and the `import-history` branch in
+  `apps/crq-python/backfill.py`, together with `backfill_history.py`. Collection
+  uses an output-specific persistent flock and snapshots the queue separately.
+- Findings: port `Inbox.triage` and `Inbox.deliver` from
+  `apps/crq-python/finding_delivery.py`, including their `backfill.py` service
+  wiring, retained events, repair transport and flock boundaries. The existing
+  `src/policy/crq/findingDelivery.ts` covers only finding identity and recovery
+  transitions, not these commands.
+- Operator recovery: `release`, `quarantine-release`, and
+  `reconcile-no-launch` also remain unavailable in the live route. Follow the
+  evidence binding and state-event order in `backfill.py` and `backfill_jobs.py`.
+
+`src/adapters/crq/backfillAccounting.ts` has cache primitives, but the live
+inventory adapter constructs its accounting repository without a disk cache.
+`src/adapters/crq/backfillQueueLoad.ts` performs a read-only compaction preview,
+not persistence of a compacted queue. These are residual performance and
+compaction gaps, not grounds to trust stale evidence or weaken transaction guards.
+Exercise future changes with local fixtures only, preserve unknown fields and
+lossless JSON, and use the focused-check contract rather than a local full suite.
