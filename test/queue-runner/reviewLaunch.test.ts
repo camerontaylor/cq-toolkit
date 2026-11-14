@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { JsonObject, parseJsonValue } from '../../src/policy/crq/jsonValue.js';
+import { withObjectKeys } from '../../src/policy/crq/queueDoc.js';
 import {
   reserveAndSpawnReview,
   recoverReviewOwnership,
@@ -25,6 +26,7 @@ const input: ReviewLaunchInput = {
   meta: obj({
     run_id: 'item-20261114T000000Z',
     item_id: 'item',
+    kind: 'open',
     started_at: '2026-11-14T00:00:00Z',
     band: 'interactive',
     base: 'base',
@@ -105,6 +107,21 @@ describe('detached review reservation', () => {
       expect(spawns).toBe(0);
     }
   });
+  it('rejects inconsistent metadata before writing or reserving', async () => {
+    let writes = 0;
+    await expect(
+      reserveAndSpawnReview(
+        queue('author'),
+        input,
+        effects({
+          writeMeta: async () => {
+            writes++;
+          },
+        }),
+      ),
+    ).rejects.toThrow('invalid launch metadata');
+    expect(writes).toBe(0);
+  });
   it('retains reservation on crash after spawn before PID save, never redispatches', async () => {
     let durable = queue();
     let saves = 0,
@@ -161,9 +178,12 @@ describe('detached review reservation', () => {
           order.push(name);
         },
       });
+      const matchingInput = { ...input, meta: withObjectKeys(input.meta, [['kind', kind]]) };
       if (kind === 'open')
-        await expect(reserveAndSpawnReview(durable, input, e)).rejects.toThrow('unavailable');
-      else await reserveAndSpawnReview(durable, input, e);
+        await expect(reserveAndSpawnReview(durable, matchingInput, e)).rejects.toThrow(
+          'unavailable',
+        );
+      else await reserveAndSpawnReview(durable, matchingInput, e);
       expect(item(durable).get('state')).toBe(
         kind === 'author' ? 'author_failed' : kind === 'local-review' ? 'failed' : 'reviewing',
       );

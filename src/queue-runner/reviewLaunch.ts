@@ -15,7 +15,7 @@ export interface ReviewLaunchInput {
   readonly runId: string;
   readonly startedAt: string;
   readonly band: 'interactive' | 'background';
-  /** Fully prepared metadata. Caller owns scan, worktree and author lease checks. */
+  /** Fully prepared metadata. Caller owns scan, worktree, author lease and unique run ID. */
   readonly meta: JsonObject;
 }
 export interface ReviewLaunchEffects {
@@ -75,8 +75,12 @@ export async function reserveAndSpawnReview(
     !input.startedAt ||
     input.meta.get('run_id') !== input.runId ||
     input.meta.get('item_id') !== itemId ||
+    input.meta.get('kind') !== kind ||
     input.meta.get('started_at') !== input.startedAt ||
-    input.meta.get('band') !== input.band
+    input.meta.get('band') !== input.band ||
+    typeof input.meta.get('base') !== 'string' ||
+    typeof input.meta.get('head') !== 'string' ||
+    typeof input.meta.get('label') !== 'string'
   )
     throw new Error('invalid launch metadata');
   const starts = queue.get('starts');
