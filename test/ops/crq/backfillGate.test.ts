@@ -45,6 +45,29 @@ describe('backfill usage context', () => {
     expect(failed.get('successful')).toBe(false);
     expect(failed.get('reflected_reservations')).toEqual([]);
   });
+  it('refuses null reservation state and rounds fractional window at microsecond precision', () => {
+    expect(() =>
+      usageContext(obj('{"items":[],"backfill_reservations":null}'), usage, [], at),
+    ).toThrow('backfill_reservations');
+    expect(() =>
+      usageContext(queue, obj('{"remaining":3,"reflected_reservations":null}'), [], at),
+    ).toThrow('reflected_reservations');
+    const input = obj(
+      '{"items":[],"backfill_reservations":{"a":{"terminal_at":"2026-10-30T00:09:59Z","quota_state":"reserved"}}}',
+    );
+    const exact = usageContext(input, obj('{"remaining":3,"rollingWindowMs":1000.0004}'), [], at);
+    const later = usageContext(input, obj('{"remaining":3,"rollingWindowMs":1000.0006}'), [], at);
+    expect(
+      ((exact.get('backfill_reservations') as JsonObject).get('a') as JsonObject).get(
+        'quota_state',
+      ),
+    ).toBe('expired');
+    expect(
+      ((later.get('backfill_reservations') as JsonObject).get('a') as JsonObject).get(
+        'quota_state',
+      ),
+    ).toBe('reserved');
+  });
 });
 
 describe('rank-four gate', () => {
@@ -55,7 +78,7 @@ describe('rank-four gate', () => {
       now: () => at,
       async refreshUsage(value) {
         calls.push('refresh');
-        return usageContext(value, usage, [], at);
+        return { queue: usageContext(value, usage, [], at), successful: true };
       },
       async stateEvent(value, item, _at, reason) {
         calls.push('event');
@@ -99,13 +122,34 @@ describe('rank-four gate', () => {
       'one-slot-reserve',
     );
   });
+  it('preserves the old checkpoint after a failed usage refresh', async () => {
+    const stale = obj(
+      '{"items":[{"id":"one"}],"starts":["a","b","c","d","e"],"backfill_starts_at_observation":2,"backfill_usage":{"successful":true,"remaining":5,"observed_at":"2026-10-30T00:08:00Z"}}',
+    );
+    const result = await rank4Gate(stale, 0, false, true, {
+      now: () => at,
+      async refreshUsage(q) {
+        return { queue: q, successful: false };
+      },
+      async stateEvent(q) {
+        return q;
+      },
+      async saveQueue() {
+        throw new Error('unexpected save');
+      },
+    });
+    expect(result.admitted).toBe(true);
+    expect(result.queue.get('backfill_starts_at_observation')).toEqual(obj('{"n":2}').get('n'));
+    const row = (result.queue.get('backfill_admissions') as JsonObject[])[0];
+    expect(row?.get('effective_remaining')).toEqual(obj('{"n":2}').get('n'));
+  });
   it('does not refresh under ordinary priority or repeat a recent failed probe', async () => {
     let refreshes = 0;
     const effects: Rank4GateEffects = {
       now: () => at,
       async refreshUsage(q) {
         refreshes++;
-        return q;
+        return { queue: q, successful: false };
       },
       async stateEvent(q) {
         return q;
@@ -181,5 +225,28 @@ describe('rank-four gate', () => {
         },
       }),
     ).rejects.toThrow('save failed');
+  });
+  it('refuses null daily capacity rather than silently overwriting it', async () => {
+    const ready = usageContext(
+      obj(
+        '{"items":[{"id":"one","job_id":"job","kind":"backfill","state":"pending","attempt":0}],"starts":[],"backfill_daily_capacity":null}',
+      ),
+      usage,
+      [],
+      at,
+    );
+    let saved = false;
+    await expect(
+      rank4Gate(ready, 0, false, false, {
+        now: () => at,
+        async stateEvent(q) {
+          return q;
+        },
+        async saveQueue() {
+          saved = true;
+        },
+      }),
+    ).rejects.toThrow('backfill_daily_capacity');
+    expect(saved).toBe(false);
   });
 });

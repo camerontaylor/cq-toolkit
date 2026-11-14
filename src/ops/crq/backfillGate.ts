@@ -27,6 +27,9 @@ function epoch(value: JsonValue | undefined): number {
   ledgerTimestamp(value);
   return Date.parse(value as string);
 }
+function defaultMissing(value: JsonValue | undefined, fallback: JsonValue): JsonValue {
+  return value === undefined ? fallback : value;
+}
 
 /** `backfill_runtime.usage_context`: bind a probe to holds and local starts. */
 export function usageContext(
@@ -36,8 +39,11 @@ export function usageContext(
   at: string,
 ): JsonObject {
   const observed = epoch(at);
-  let holds = object(queue.get('backfill_reservations') ?? empty(), 'backfill_reservations');
-  const initial = usage?.get('reflected_reservations') ?? [];
+  let holds = object(
+    defaultMissing(queue.get('backfill_reservations'), empty()),
+    'backfill_reservations',
+  );
+  const initial = usage === null ? [] : defaultMissing(usage.get('reflected_reservations'), []);
   const reflected = [...array(initial, 'reflected_reservations')];
   if (usage !== null) {
     const windowValue = usage.get('rollingWindowMs');
@@ -47,12 +53,19 @@ export function usageContext(
         : NaN
       : 3_600_000;
     if (!Number.isFinite(window)) throw new LedgerTypeError('invalid rollingWindowMs');
+    const microseconds = window * 1000;
+    if (!Number.isSafeInteger(Math.trunc(microseconds)))
+      throw new LedgerTypeError('rollingWindowMs is outside the supported range');
+    const lower = Math.floor(microseconds);
+    const fraction = microseconds - lower;
+    const roundedWindow =
+      fraction === 0.5 ? lower + (Math.abs(lower) % 2) : Math.round(microseconds);
     for (const [key, value] of holds.entries) {
       const hold = object(value, 'reservation');
       const terminal = hold.get('terminal_at');
       if (!pyTruthy(terminal)) continue;
       const terminalTime = epoch(terminal);
-      if (observed >= terminalTime + window) {
+      if ((observed - terminalTime) * 1000 >= roundedWindow) {
         holds = withObjectKeys(holds, [[key, withObjectKeys(hold, [['quota_state', 'expired']])]]);
       } else if (
         hold.get('quota_state') !== 'released' &&
@@ -63,7 +76,7 @@ export function usageContext(
         reflected.push(key);
     }
   }
-  const items = array(queue.get('items') ?? [], 'items');
+  const items = array(defaultMissing(queue.get('items'), []), 'items');
   let represented = 0;
   for (const value of items) {
     const item = object(value, 'item');
@@ -98,8 +111,10 @@ function age(at: string, value: JsonValue | undefined): number | null {
 /** The supplied effects must execute while the caller holds the shared tick flock. */
 export interface Rank4GateEffects {
   now(): string;
-  /** A failed probe must return a queue with an unsuccessful observation. */
-  refreshUsage?: (queue: JsonObject) => Promise<JsonObject>;
+  /** A failed probe retains the old observation and checkpoint. */
+  refreshUsage?: (
+    queue: JsonObject,
+  ) => Promise<{ readonly queue: JsonObject; readonly successful: boolean }>;
   /** Spool the state event durably before returning the updated queue. */
   stateEvent(queue: JsonObject, item: JsonObject, at: string, reason: string): Promise<JsonObject>;
   /** Atomically persist the complete queue before returning. */
@@ -130,11 +145,14 @@ export async function rank4Gate(
     (probeAge === null || probeAge < 0 || probeAge > 60)
   ) {
     queue = withObjectKeys(queue, [['backfill_usage_probe_at', effects.now()]]);
-    queue = await effects.refreshUsage(queue);
-    const starts = array(queue.get('starts') ?? [], 'starts');
-    queue = withObjectKeys(queue, [
-      ['backfill_starts_at_observation', JsonNumber.int(starts.length)],
-    ]);
+    const refreshed = await effects.refreshUsage(queue);
+    queue = refreshed.queue;
+    if (refreshed.successful) {
+      const starts = array(defaultMissing(queue.get('starts'), []), 'starts');
+      queue = withObjectKeys(queue, [
+        ['backfill_starts_at_observation', JsonNumber.int(starts.length)],
+      ]);
+    }
   }
   const rawObservation = queue.get('backfill_usage');
   let current =
@@ -148,14 +166,17 @@ export async function rank4Gate(
   ) {
     const remaining = current.get('remaining');
     if (remaining instanceof JsonNumber && remaining.kind === 'int' && remaining.integer !== null) {
-      const starts = array(queue.get('starts') ?? [], 'starts');
+      const starts = array(defaultMissing(queue.get('starts'), []), 'starts');
       const checkpoint = queue.get('backfill_starts_at_observation');
       let ordinary =
         BigInt(starts.length) -
         (checkpoint === undefined
           ? BigInt(starts.length)
           : integer(checkpoint, 'backfill_starts_at_observation'));
-      const holds = object(queue.get('backfill_reservations') ?? empty(), 'backfill_reservations');
+      const holds = object(
+        defaultMissing(queue.get('backfill_reservations'), empty()),
+        'backfill_reservations',
+      );
       const observedAt = current.get('observed_at');
       if (typeof observedAt !== 'string') throw new LedgerIntegrityError('invalid observed_at');
       for (const [, value] of holds.entries) {
@@ -193,15 +214,17 @@ export async function rank4Gate(
     );
     const dayKey = effects.now().slice(0, 10);
     const capacity = object(
-      queue.get('backfill_daily_capacity') ?? empty(),
+      defaultMissing(queue.get('backfill_daily_capacity'), empty()),
       'backfill_daily_capacity',
     );
     const day = object(
-      capacity.get(dayKey) ??
+      defaultMissing(
+        capacity.get(dayKey),
         new JsonObject([
           ['spare_admissions', JsonNumber.int(0)],
           ['completed_partitions', JsonNumber.int(0)],
         ]),
+      ),
       'daily capacity',
     );
     const count = integer(day.get('spare_admissions'), 'spare_admissions');
