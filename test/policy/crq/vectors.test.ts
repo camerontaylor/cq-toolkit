@@ -179,7 +179,7 @@ describe.each(loadFamily('classify'))('classify/$name', (vector) => {
  */
 const NOT_APPLICABLE: Readonly<Record<string, string>> = {
   'backfill-accounting':
-    'backfill_accounting.ranges is replayed in backfillInventory.test.ts; the blame/carry fold belongs to the capture adapter, which is not ported yet',
+    'backfill_accounting.line_bytes/_int/_opt_str/_rows/_hexstr/FACT_SHAPES are replayed in backfillAccounting.test.ts, and the Git repository/cache seams run against real repositories in test/adapters/crq/backfillAccounting.test.ts; ranges lives in backfillInventory.test.ts',
   'backfill-inventory': 'backfill_inventory.rank is replayed in backfillInventory.test.ts',
   'backfill-report': 'backfill_report.baseline/summary are replayed in backfillReport.test.ts',
   backfill:
