@@ -194,6 +194,7 @@ class UnitSwitchTests(ControllerFixture):
         final = json.loads(path.read_text())
         self.assertEqual(final["phase"], "restore_activation_pending")
         self.assertEqual(final["outcome"], "rolled_back")
+        self.assertEqual(final["reason"], "install failed")
 
     def test_rollback_release_follows_restore_activation_journal(self):
         fixture = self

@@ -1874,11 +1874,11 @@ def switch_unit(effects, adapter, unit, runtime):
                     preservation_check(effects, identity["state"],
                                        preserved_surfaces(unit))
                 identity = {**identity, "phase": "restore_activation_pending",
-                            "failed_phase": failed_phase, "fence": fence}
+                            "failed_phase": failed_phase, "fence": fence,
+                            "reason": str(exc)[:400]}
                 effects.journal_replace(path, identity)
                 adapter.restore_activation(unit, snapshot)
-                record = {**identity, "outcome": "rolled_back",
-                          "reason": str(exc)[:400]}
+                record = {**identity, "outcome": "rolled_back"}
                 effects.journal_replace(path, record)
             except (Exception, KeyboardInterrupt) as rollback_exc:
                 recovery = {**identity, "outcome": "recovery_required", "record_path": str(path),
