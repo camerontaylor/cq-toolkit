@@ -21,6 +21,7 @@
 import type { OpRegistryEntry } from '../../kernel/types.js';
 import type { runQueueCapability } from './queueCapability.js';
 import type { CommandResult, ReadOnlyStatusEffects } from './readOnlyStatus.js';
+import type { PublishRunResult } from './publishRun.js';
 import type { CrqDocuments, StatusWriterEffects } from './statusWriter.js';
 
 /** The A1 read-only route's callable surface, bound to effects by its adapter. */
@@ -51,3 +52,11 @@ export type CrqQueueCapability = typeof runQueueCapability;
 
 /** No dispatchable ops yet: A1 ships the route plus its file adapter. */
 export const registry: OpRegistryEntry[] = [];
+
+/**
+ * The S3 publish route (`./publishRun.js`) is family surface wired by the
+ * live runner (queue-runner LIVE_UNIT_COMMANDS -> crq.ts -> publishSource),
+ * not a JSON-dispatchable op: the type-only import above declares it so the
+ * family scan does not classify it as an orphan module.
+ */
+export type { PublishRunResult };

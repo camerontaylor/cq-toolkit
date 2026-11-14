@@ -110,6 +110,7 @@ export async function publish(
   options: PublishOptions = {},
 ): Promise<{ head: string }> {
   const attempts = options.attempts ?? PUBLICATION_ATTEMPTS;
+  let lastError: unknown = null;
   return effects.withPublisherLock(async () => {
     for (let attempt = 0; attempt < attempts; attempt++) {
       const fetched = await remote.fetch();
@@ -146,7 +147,10 @@ export async function publish(
         try {
           await remote.publish(batch.values, head);
         } catch (error) {
-          if (error instanceof PublicationPushError) break;
+          if (error instanceof PublicationPushError) {
+            lastError = error;
+            break;
+          }
           throw error;
         }
 
@@ -162,7 +166,14 @@ export async function publish(
       }
 
       if ((await outbox.pending()).length === 0) return { head };
+      // Clear before the next attempt, not after a failure: the exhausted-
+      // attempts exception must carry the last push failure as its cause.
+      lastError = null;
     }
-    throw new LedgerIntegrityError('publication pending; retain scope ownership and reconcile');
+    // Python raises `from last_error` so the exhausted attempts keep the
+    // underlying transport/planning cause visible in the report chain.
+    throw new LedgerIntegrityError('publication pending; retain scope ownership and reconcile', {
+      cause: lastError ?? undefined,
+    });
   });
 }
