@@ -49,6 +49,76 @@ function effects(overrides: Partial<PrDiscoveryEffects> = {}): PrDiscoveryEffect
   };
 }
 describe('open PR discovery', () => {
+  it('fetches primary before listing and stops if that fetch fails', async () => {
+    const calls: string[] = [];
+    await discoverOpenPrs(
+      queue(),
+      [primary],
+      false,
+      'o/r',
+      effects({
+        fetchDefault: async () => {
+          calls.push('fetch');
+        },
+        list: async () => {
+          calls.push('list');
+          return [];
+        },
+      }),
+    );
+    expect(calls).toEqual(['fetch', 'list']);
+    await expect(
+      discoverOpenPrs(
+        queue(),
+        [primary],
+        false,
+        'o/r',
+        effects({
+          fetchDefault: async () => {
+            throw new Error('fetch failed');
+          },
+          list: async () => {
+            throw new Error('should not list');
+          },
+        }),
+      ),
+    ).rejects.toThrow('fetch failed');
+  });
+  it('refuses ambiguous head names and logs stacks beyond Python eight-PR limit', async () => {
+    const parent = { ...pr, number: 1, headRef: 'parent' };
+    const fork = { ...parent, number: 2, base: 'elsewhere' };
+    const child = { ...pr, number: 3, base: 'parent', headRef: 'child' };
+    for (const opened of [
+      [parent, fork, child],
+      [fork, parent, child],
+    ]) {
+      const result = await discoverOpenPrs(
+        queue(),
+        [primary],
+        false,
+        'o/r',
+        effects({ list: async () => opened }),
+      );
+      expect(items(result.queue).map((item) => item.get('id'))).not.toContain('pr3');
+      expect(result.log.some((line) => line.includes('PR #3 target chain unavailable'))).toBe(true);
+    }
+    const stack = Array.from({ length: 9 }, (_, i) => ({
+      ...pr,
+      number: i + 1,
+      headRef: `p${i + 1}`,
+      base: i === 0 ? 'main' : `p${i}`,
+    }));
+    const result = await discoverOpenPrs(
+      queue(),
+      [primary],
+      false,
+      'o/r',
+      effects({ list: async () => stack }),
+    );
+    expect(items(result.queue).map((item) => item.get('id'))).toContain('pr8');
+    expect(items(result.queue).map((item) => item.get('id'))).not.toContain('pr9');
+    expect(result.log.some((line) => line.includes('PR #9 target chain unavailable'))).toBe(true);
+  });
   it('emits one enrollment event and none for associated or equivalent work', async () => {
     const events: string[][] = [];
     const emit = async (id: string, reason: string) => {

@@ -61,11 +61,13 @@ function valid(pr: OpenPr): boolean {
   return Number.isSafeInteger(pr.number) && pr.number > 0 && /^[0-9a-f]{40}$/.test(pr.head);
 }
 function chain(pr: OpenPr, opened: readonly OpenPr[], branches: readonly string[]): boolean {
-  const byHead = new Map(opened.map((p) => [p.headRef, p]));
   let current: OpenPr | undefined = pr;
   for (let i = 0; i < 8 && current; i++) {
     if (branches.includes(current.base)) return true;
-    current = byHead.get(current.base);
+    // Forks can have the same head name. Without proven repository identity,
+    // refuse ambiguity instead of letting inventory order pick a parent.
+    const parents = opened.filter((candidate) => candidate.headRef === current?.base);
+    current = parents.length === 1 ? parents[0] : undefined;
   }
   return false;
 }
@@ -110,6 +112,8 @@ export async function discoverOpenPrs(
   const log: string[] = [];
   for (const repo of repos) {
     if (!repo.enabled) continue;
+    // Python tick refreshes the primary clone before any discovery.
+    if (repo.primary) await effects.fetchDefault(repo);
     let opened: readonly OpenPr[];
     try {
       opened = await effects.list(repo);
@@ -127,7 +131,12 @@ export async function discoverOpenPrs(
     }
     for (const pr of [...opened].sort((a, b) => a.number - b.number)) {
       if (!valid(pr) || pr.draft) continue;
-      if (repo.primary && !chain(pr, opened, repo.branches)) continue;
+      if (repo.primary && !chain(pr, opened, repo.branches)) {
+        log.push(
+          `pr discovery ${repo.repo}: PR #${pr.number} target chain unavailable or exceeds eight PRs`,
+        );
+        continue;
+      }
       if (!repo.primary && pr.base !== repo.defaultBranch) {
         log.push(
           `pr discovery ${repo.repo}: PR #${pr.number} targets ${pr.base.slice(0, 100)}, not ${repo.defaultBranch.slice(0, 100)}; skipped`,

@@ -16,6 +16,37 @@ const repo: OpenPrRepository = {
   branches: ['main'],
 };
 describe('open PR discovery source', () => {
+  it('refreshes all primary tracking refs before resolving stacked bases', async () => {
+    const primary = { ...repo, primary: true };
+    const calls: string[][] = [];
+    const effects = openPrDiscoveryEffects({
+      repos: [primary],
+      associate: async (queue) => ({ queue, associated: false }),
+      ownRange: async () => false,
+      event: async () => {},
+      git: () => async (args) => {
+        calls.push([...args]);
+        return {
+          args,
+          code: 0,
+          stdout: new TextEncoder().encode(args[0] === 'merge-base' ? base : ''),
+          stderr: '',
+        };
+      },
+    });
+    await effects.fetchDefault(primary);
+    expect(
+      await effects.rangeBase(primary, {
+        number: 7,
+        draft: false,
+        base: 'parent',
+        headRef: 'child',
+        head,
+      }),
+    ).toBe(base);
+    expect(calls[0]).toEqual(['fetch', '--prune', '--quiet', 'origin']);
+    expect(calls).toContainEqual(['merge-base', 'origin/parent', head]);
+  });
   it('uses bounded forge listing and checks commit after fetching a PR ref', async () => {
     const calls: string[][] = [];
     let probes = 0;

@@ -84,12 +84,15 @@ export function openPrDiscoveryEffects(options: OpenPrSourceOptions): PrDiscover
     },
     async fetchDefault(requested) {
       const repo = configured(requested);
-      const result = await git(repo)([
-        'fetch',
-        '--quiet',
-        'origin',
-        `+refs/heads/${repo.defaultBranch}:refs/remotes/origin/${repo.defaultBranch}`,
-      ]);
+      const args = repo.primary
+        ? ['fetch', '--prune', '--quiet', 'origin']
+        : [
+            'fetch',
+            '--quiet',
+            'origin',
+            `+refs/heads/${repo.defaultBranch}:refs/remotes/origin/${repo.defaultBranch}`,
+          ];
+      const result = await git(repo)(args);
       if (result.code !== 0) throw new Error('default branch unavailable');
     },
     async rangeBase(requested, pr) {
