@@ -14,7 +14,7 @@
  */
 import { ledgerCreditable } from './ledger.js';
 import { ledgerJsonDigest } from './pythonJson.js';
-import { intervalsOf } from './backfillInventory.js';
+import { intervalsOf, pythonInt } from './backfillInventory.js';
 import {
   isJsonRecord,
   recordEntries,
@@ -71,6 +71,16 @@ export function coverageSnapshotTarget(target: unknown): string {
   return target;
 }
 
+/** The field as a Python `int`, or `null` when it is absent or not one. */
+function integerAt(value: JsonRecordLike, key: string): number | null {
+  if (!recordHas(value, key)) return null;
+  try {
+    return pythonInt(recordGet(value, key), `coverage snapshot ${key}`);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * `backfill_coverage._read`: the stored, already-decoded snapshot, or `null`.
  *
@@ -79,10 +89,14 @@ export function coverageSnapshotTarget(target: unknown): string {
  */
 export function readCoverageSnapshot(value: unknown, target: string): CoverageSnapshot | null {
   if (!isJsonRecord(value)) return null;
-  if (recordGet(value, 'version') !== COVERAGE_SNAPSHOT_VERSION) return null;
+  // A persisted snapshot is decoded losslessly, so `version` and `events` are
+  // `JsonNumber` there and native numbers in a hand-built object: read both
+  // through the same integer view the rest of the module uses, and treat a
+  // non-integer as stale rather than as a reason to fail.
+  if (integerAt(value, 'version') !== COVERAGE_SNAPSHOT_VERSION) return null;
   if (recordGet(value, 'target') !== target) return null;
-  const events = recordGet(value, 'events');
-  if (typeof events !== 'number' || !Number.isSafeInteger(events)) return null;
+  const events = integerAt(value, 'events');
+  if (events === null || events < 0) return null;
   const coveredValue = recordGet(value, 'covered');
   const gaps = recordGet(value, 'gaps');
   if (!isJsonRecord(coveredValue) || !Array.isArray(gaps)) return null;

@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'vitest';
+import { parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
+import { ledgerJsonBytes } from '../../../src/policy/crq/pythonJson.js';
 import {
   BackfillCoverageError,
   COVERAGE_SNAPSHOT_VERSION,
@@ -78,6 +80,20 @@ describe('coverage snapshots', () => {
     expect(readCoverageSnapshot({ ...stored, gaps: {} }, TARGET)).toBeNull();
     expect(readCoverageSnapshot({ ...stored, covered: null }, TARGET)).toBeNull();
     expect(readCoverageSnapshot(null, TARGET)).toBeNull();
+  });
+
+  test('a canonical snapshot decoded losslessly still reads and extends', () => {
+    // The refresher writes canonical bytes and the selection path decodes them,
+    // so `version` and `events` arrive as `JsonNumber`; a native-number check
+    // would read every real snapshot as stale.
+    const events = [event('a'), event('b')];
+    const stored = snapshot(events, { 'src/a.py': [[1, 4]] });
+    const decoded = parseJsonValue(new TextDecoder().decode(ledgerJsonBytes(stored)));
+    const read = readCoverageSnapshot(decoded, TARGET);
+    expect(read?.events).toBe(2);
+    expect(read?.version).toBe(COVERAGE_SNAPSHOT_VERSION);
+    expect([...(read?.covered.get('src/a.py') ?? [])]).toEqual([1, 2, 3, 4]);
+    expect(loadCoverageSnapshot(read, events)).not.toBeNull();
   });
 
   test('a snapshot extends only a sequence it is a prefix digest of', () => {

@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'vitest';
-import { JsonObject, toPlainJson, type JsonValue } from '../../../src/policy/crq/jsonValue.js';
+import {
+  JsonObject,
+  parseJsonValue,
+  toPlainJson,
+  type JsonValue,
+} from '../../../src/policy/crq/jsonValue.js';
 import {
   BackfillInventoryError,
   effectiveLimits,
@@ -183,6 +188,25 @@ test('ranges coalesce, de-duplicate and stay ascending', () => {
   expect(rangesOf([])).toEqual([]);
   // Python's `bool` is an `int`: the interval keeps the captured value.
   expect(rangesOf([true, false, 2])).toEqual([[false, 2]]);
+});
+
+test('construction limits read a deployment policy that was decoded losslessly', () => {
+  // `policy/review-limits.json` reaches the runner through `parseJsonValue`, so
+  // every bound (the diff limit included) arrives as a `JsonNumber`.
+  const decoded = parseJsonValue(
+    JSON.stringify({
+      max_files: 100,
+      max_file_bytes: 1_000_000,
+      max_total_bytes: 8_000_000,
+      reviewer: { verified: true, evidence: 'fixture', max_files: 12, max_diff_bytes: 4096 },
+    }),
+  );
+  expect(effectiveLimits(decoded, { requireVerified: true })).toEqual({
+    files: 8,
+    perFile: 256 * 1024,
+    total: 2 * 1024 * 1024,
+    diff: 4096,
+  });
 });
 
 test('construction limits are bounded by the hard caps', () => {

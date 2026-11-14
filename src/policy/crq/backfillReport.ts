@@ -177,7 +177,11 @@ export function findingTriage(rows: readonly TriageRow[]): Record<string, unknow
       row = asDoc(value, 'triage row');
       status = text(need(row, 'status', `triage row ${file}`), 'triage status');
       finding = asDoc(need(row, 'finding', `triage row ${file}`), 'triage finding');
+      // The oracle validates `status` with the same nonempty-string rule as the
+      // identity fields, so an empty status is malformed evidence, never a
+      // count under an empty bucket.
       for (const required of [
+        status,
         need(row, 'canonical_id', `triage row ${file}`),
         need(row, 'target', `triage row ${file}`),
         need(finding, 'id', `triage finding ${file}`),

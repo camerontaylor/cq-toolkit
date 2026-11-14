@@ -12,12 +12,22 @@
  *   {@link ADMISSION_HISTORY_LIMIT}, so the queue cannot grow without limit
  *   under ordinary work.
  *
- * `appendAdmission` mutates the queue document it is given, exactly like the
- * Python oracle, and records the version marker that tells a later reader which
+ * The oracle mutates its queue dictionary in place. This port takes the lossless
+ * queue document and returns the updated one, the same functional shape
+ * `queueReceipt.enrollMergedCurrent` uses: a `JsonObject` is immutable, so an
+ * in-place write would update a property no reader or writer can see. The
+ * returned document carries the version marker that tells a later reader which
  * shape the rows have.
  */
-import { toPlainJsonDeep } from './jsonValue.js';
-import { recordEntries, recordGet, recordHas, type JsonRecordLike } from './queueDoc.js';
+import { JsonNumber, JsonObject, toPlainJsonDeep } from './jsonValue.js';
+import {
+  fromPlainJson,
+  recordEntries,
+  recordGet,
+  recordHas,
+  withObjectKeys,
+  type JsonRecordLike,
+} from './queueDoc.js';
 
 /** `admission_history.VERSION`. */
 export const ADMISSION_HISTORY_VERSION = 1;
@@ -27,6 +37,9 @@ export const ADMISSION_HISTORY_LIMIT = 256;
 
 /** `admission_history.MARKER`: the queue key recording the row shape. */
 export const ADMISSION_HISTORY_MARKER = 'backfill_admission_history_version';
+
+/** The queue key holding the rows (`queue.setdefault("backfill_admissions")`). */
+const ADMISSION_ROWS = 'backfill_admissions';
 
 /** The decision fields a summarized row keeps, in the oracle's order. */
 const DECISION_FIELDS = [
@@ -95,27 +108,39 @@ export function summarizeAdmission(decision: unknown): Record<string, unknown> {
   }
   result['observation'] = observation;
   result['reservation_counts'] = reservationCounts;
-  // The oracle returns Python's own containers, so the row is plain JSON: the
-  // queue writer re-encodes the same bytes it read.
+  // The oracle returns Python's own containers, so the summary is plain JSON;
+  // `appendAdmission` mints it back into the lossless model for the queue.
   return toPlainJsonDeep(result) as Record<string, unknown>;
 }
 
+/** The queue document after an append, and the row that was recorded. */
+export interface AdmissionAppendResult {
+  readonly queue: JsonObject;
+  readonly row: JsonObject;
+}
+
 /**
- * `admission_history.append`: record one bounded row and return it.
+ * `admission_history.append`: record one bounded row.
  *
- * The queue document is mutated in place (the runner owns the document it
- * passes here), and the oldest rows past the limit are dropped.
+ * The caller keeps the returned queue (the oracle mutates in place); the oldest
+ * rows past the limit are dropped.
  */
-export function appendAdmission(queue: JsonRecordLike, decision: unknown): unknown {
-  const mutable = queue as Record<string, unknown>;
-  const existing = recordHas(queue, 'backfill_admissions')
-    ? recordGet(queue, 'backfill_admissions')
-    : [];
+export function appendAdmission(queue: JsonObject, decision: unknown): AdmissionAppendResult {
+  const existing = recordHas(queue, ADMISSION_ROWS) ? recordGet(queue, ADMISSION_ROWS) : [];
   if (!Array.isArray(existing)) fail('backfill_admissions must be an array');
-  const rows = existing as unknown[];
-  if (!recordHas(queue, 'backfill_admissions')) mutable['backfill_admissions'] = rows;
-  rows.push(summarizeAdmission(decision));
-  if (rows.length > ADMISSION_HISTORY_LIMIT) rows.splice(0, rows.length - ADMISSION_HISTORY_LIMIT);
-  mutable[ADMISSION_HISTORY_MARKER] = ADMISSION_HISTORY_VERSION;
-  return rows[rows.length - 1];
+  const summary = fromPlainJson(summarizeAdmission(decision));
+  if (!(summary instanceof JsonObject)) fail('admission summary must be an object');
+  const combined: unknown[] = [...(existing as unknown[]), summary];
+  const rows: JsonObject[] = [];
+  for (const row of combined.slice(-ADMISSION_HISTORY_LIMIT)) {
+    if (!(row instanceof JsonObject)) fail('admission row must be an object');
+    rows.push(row);
+  }
+  return {
+    queue: withObjectKeys(queue, [
+      [ADMISSION_ROWS, rows],
+      [ADMISSION_HISTORY_MARKER, JsonNumber.int(ADMISSION_HISTORY_VERSION)],
+    ]),
+    row: summary,
+  };
 }

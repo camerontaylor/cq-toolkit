@@ -211,6 +211,19 @@ test('finding triage refuses a malformed row instead of counting it', () => {
   ).toThrow('invalid finding row');
 });
 
+test('an empty status is malformed evidence, not a bucket', () => {
+  expect(() =>
+    findingTriage([
+      triageRow('empty-status.json', {
+        status: '',
+        canonical_id: 'c1',
+        target: 't1',
+        finding: { id: 'f1', title: 't', severity: 'major', path: 'src/a.py' },
+      }),
+    ]),
+  ).toThrow('invalid finding row');
+});
+
 test('an empty triage directory reports empty counts, never a stale backlog', () => {
   expect(findingTriage([])).toEqual({ counts: {}, needs_human: [] });
 });

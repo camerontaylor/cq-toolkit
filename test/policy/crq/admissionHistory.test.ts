@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'vitest';
-import { toPlainJson, type JsonValue } from '../../../src/policy/crq/jsonValue.js';
+import {
+  JsonObject,
+  parseJsonValue,
+  toPlainJson,
+  type JsonValue,
+} from '../../../src/policy/crq/jsonValue.js';
+import { recordGet } from '../../../src/policy/crq/queueDoc.js';
 import {
   ADMISSION_HISTORY_LIMIT,
   ADMISSION_HISTORY_MARKER,
@@ -34,10 +40,20 @@ function decision(at: string): Record<string, unknown> {
   };
 }
 
+/** A queue document as the runner decodes it: lossless, not a plain object. */
+function decodedQueue(value: unknown): JsonObject {
+  const parsed = parseJsonValue(JSON.stringify(value));
+  if (!(parsed instanceof JsonObject)) throw new Error('queue fixture is not an object');
+  return parsed;
+}
+
+function humanRow(index: number): Record<string, unknown> {
+  return { at: `old-${index}`, item: `job-${index}`, decision: 'defer' };
+}
+
 test('an appended row is the bounded summary, not the whole decision', () => {
-  const queue: Record<string, unknown> = {};
-  const row = appendAdmission(queue, decision('2026-11-09T00:00:00Z')) as Record<string, unknown>;
-  expect(row).toEqual({
+  const { queue, row } = appendAdmission(decodedQueue({}), decision('2026-11-09T00:00:00Z'));
+  expect(toPlainJson(row)).toEqual({
     at: '2026-11-09T00:00:00Z',
     item: 'job-1',
     ordinary_eligible: true,
@@ -46,18 +62,33 @@ test('an appended row is the bounded summary, not the whole decision', () => {
     observation: { successful: true, observed_at: '2026-11-09T00:00:00Z', remaining: 0 },
     reservation_counts: { reserved: 1 },
   });
-  expect(queue[ADMISSION_HISTORY_MARKER]).toBe(ADMISSION_HISTORY_VERSION);
-  expect(queue['backfill_admissions']).toEqual([row]);
+  expect(toPlainJson(recordGet(queue, ADMISSION_HISTORY_MARKER) as JsonValue)).toBe(
+    ADMISSION_HISTORY_VERSION,
+  );
+  expect(toPlainJson(recordGet(queue, 'backfill_admissions') as JsonValue)).toEqual([
+    toPlainJson(row),
+  ]);
+});
+
+test('appending keeps the queue lossless and leaves the given document alone', () => {
+  const original = decodedQueue({ items: [{ id: 'a' }] });
+  const { queue } = appendAdmission(original, decision('2026-11-09T00:00:00Z'));
+  // The oracle mutates in place; an immutable document returns the next one.
+  expect(recordGet(original, 'backfill_admissions')).toBeUndefined();
+  expect(Array.isArray(recordGet(queue, 'backfill_admissions'))).toBe(true);
+  expect(toPlainJson(recordGet(queue, 'items') as JsonValue)).toEqual([{ id: 'a' }]);
 });
 
 test('retention drops the oldest rows past the limit', () => {
   const rows: unknown[] = [];
-  for (let index = 0; index < ADMISSION_HISTORY_LIMIT; index += 1) {
-    rows.push({ at: `old-${index}` });
-  }
-  const queue: Record<string, unknown> = { backfill_admissions: rows };
-  appendAdmission(queue, decision('2026-11-09T00:00:00Z'));
-  const kept = queue['backfill_admissions'] as Array<Record<string, unknown>>;
+  for (let index = 0; index < ADMISSION_HISTORY_LIMIT; index += 1) rows.push(humanRow(index));
+  const { queue } = appendAdmission(
+    decodedQueue({ backfill_admissions: rows }),
+    decision('2026-11-09T00:00:00Z'),
+  );
+  const kept = toPlainJson(recordGet(queue, 'backfill_admissions') as JsonValue) as Array<
+    Record<string, unknown>
+  >;
   expect(kept).toHaveLength(ADMISSION_HISTORY_LIMIT);
   expect(kept[0]?.['at']).toBe('old-1');
   expect(kept[kept.length - 1]?.['at']).toBe('2026-11-09T00:00:00Z');
@@ -79,10 +110,9 @@ test('a malformed admission refuses instead of writing a partial row', () => {
   expect(() => summarizeAdmission({ reservations: { a: { quota_state: 7 } } })).toThrow(
     'reservation quota_state must be a string',
   );
-  const queue: Record<string, unknown> = { backfill_admissions: {} };
-  expect(() => appendAdmission(queue, decision('2026-11-09T00:00:00Z'))).toThrow(
-    'backfill_admissions must be an array',
-  );
+  expect(() =>
+    appendAdmission(decodedQueue({ backfill_admissions: {} }), decision('2026-11-09T00:00:00Z')),
+  ).toThrow('backfill_admissions must be an array');
 });
 
 test('a decision without an observation records an explicit null', () => {

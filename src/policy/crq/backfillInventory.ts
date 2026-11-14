@@ -230,9 +230,19 @@ export function effectiveLimits(
     2 * 1024 * 1024,
     pythonNumber(need(policy, 'max_total_bytes', 'construction limits'), 'max_total_bytes'),
   );
+  // A deployment policy read from disk carries this limit as a lossless
+  // `JsonNumber`, so it goes through the same Python-int view as every other
+  // bound; anything else is not an int (`type(diff) is not int` in the oracle).
   const rawDiff = opt(reviewer, 'max_diff_bytes');
-  const diff =
-    typeof rawDiff === 'number' && Number.isSafeInteger(rawDiff) && rawDiff >= 1 ? rawDiff : null;
+  let diff: number | null = null;
+  if (rawDiff !== undefined && rawDiff !== null) {
+    try {
+      const parsed = pythonInt(rawDiff, 'reviewer max_diff_bytes');
+      if (parsed >= 1) diff = parsed;
+    } catch {
+      diff = null;
+    }
+  }
   if (files < 1 || perFile < 1 || total < 1 || (options.requireVerified && diff === null)) {
     fail('invalid construction limits');
   }
