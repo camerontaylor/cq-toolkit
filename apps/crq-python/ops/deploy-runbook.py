@@ -672,6 +672,12 @@ class Run:
         self.phase("drained")
 
         self.narrate("switching to " + self.target)
+        # self.effects reads this run's private record directory (run_dir is
+        # what Effects was built with), so this is the same unfinished-
+        # transaction guard the controller's own checkout seams run before
+        # any helper switch: a pending or unresolved controller-*.json record
+        # must block the switch here too.
+        self.controller.refuse_unfinished_transactions(self.effects)
         self.switch_attempted = True
         self.helper.switch(self.root, self.overlay, self.overlay_raw,
                            self.target, self.args.tag)
@@ -970,6 +976,10 @@ class Run:
                 "automatic rollback is disabled after the rollback drain: "
                 + compatibility_reason(compatibility) + "; the hold is retained"
                 + " (after: " + reason[:200] + ")")
+        # The rollback switch is fenced by the same unfinished-transaction
+        # guard as the forward switch; a refusal keeps the hold and is
+        # surfaced as recovery_required.
+        self.controller.refuse_unfinished_transactions(self.effects)
         self.helper.switch(self.root, self.overlay, self.overlay_raw,
                            self.prior_sha, None)
         self.switched = False
