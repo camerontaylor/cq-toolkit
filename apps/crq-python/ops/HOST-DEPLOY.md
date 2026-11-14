@@ -370,10 +370,9 @@ Exit codes for `recover`:
   observes the fence under the controller lock rather than inferring it from
   the record's phase: no matching systemd job, no owned process, an inactive
   service, inactive activators and, for an issuing unit, a drained queue. If
-  any of those cannot be established, or the record is incoherent, the
-  controller prints the retained record with `record_path` and `reason` on
-  stdout and leaves the record bytes unchanged. Inspect runtime evidence
-  before deciding what happened.
+  any of those cannot be established, the controller prints the retained
+  record with `record_path` and `reason` on stdout and leaves the record bytes
+  unchanged. Inspect runtime evidence before deciding what happened.
 
 `recover` adds no automatic recovery path, boot hook, retry, flag, store or
 lock. Unit records are retained: only the pending intent is replaced by its
