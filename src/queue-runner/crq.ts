@@ -70,22 +70,25 @@ if (command === 'queue-capability') {
         // Python's run(): `config = runtime.settings(c.STATE); if not config:
         // return {"publication": "disabled"}`. settings returns None only for
         // a missing rollout file; a malformed rollout raises IntegrityError,
-        // and a missing config.json/clone raises before settings runs. So the
-        // unit reports disabled only when the rollout is absent at the
-        // resolved state root; configuration defects report failed.
-        const stateRoot = await publisherStateRoot(root);
-        if (await isRolloutAbsent(join(stateRoot, 'backfill-rollout.json'))) {
-          return { status: 'ok', value: { publication: 'disabled' } };
-        }
-        return readPublisherRoots(root).then(async (roots): Promise<OpResult<unknown>> => {
-          if (roots === null) {
-            return {
-              status: 'failed',
-              error: 'backfill rollout prerequisites incomplete',
-            };
+        // and a missing config.json/clone raises before settings runs.
+        // Configuration is therefore validated before any disabled outcome:
+        // a missing or malformed config.json, a missing clone, or an unusable
+        // rollout read is the IntegrityError path (failure), never disabled.
+        const validated = await readPublisherRoots(root);
+        if (validated === null) {
+          const stateRoot = await publisherStateRoot(root);
+          if (await isRolloutAbsent(join(stateRoot, 'backfill-rollout.json'))) {
+            // A usable configuration whose rollout file is missing: Python's
+            // settings() returns None, run() reports {"publication":"disabled"}.
+            // A config.json with a clone but absent rollout reaches here.
+            return { status: 'ok', value: { publication: 'disabled' } };
           }
-          return runPublishUnit(roots);
-        });
+          return {
+            status: 'failed',
+            error: 'backfill rollout prerequisites incomplete',
+          };
+        }
+        return runPublishUnit(validated);
       }
       return Promise.resolve({ status: 'failed', error: `${liveCommand} is not implemented` });
     },
@@ -103,8 +106,18 @@ async function isRolloutAbsent(path: string): Promise<boolean> {
   try {
     await stat(path);
     return false;
-  } catch {
-    return true;
+  } catch (error) {
+    // Only a missing file is "absent". EACCES/EIO and friends must surface:
+    // reporting a disabled success for an inaccessible rollout would stop a
+    // live publisher with exit 0.
+    if (
+      error instanceof Error &&
+      'code' in error &&
+      (error as { code?: string }).code === 'ENOENT'
+    ) {
+      return true;
+    }
+    throw error;
   }
 }
 

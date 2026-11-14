@@ -158,9 +158,13 @@ export class GitLedger {
     return call.stdout;
   }
 
-  /** `rev-parse --verify --quiet`: empty string when the ref is absent. */
+  /** `rev-parse --verify --quiet`: empty string only when the ref is absent. */
   private async revParseQuiet(ref: string): Promise<string> {
     const call = await this.git('rev-parse', '--verify', '--quiet', ref);
+    // A signal death (null) or unexpected failure is not "absent": treating
+    // it as absent would skip the rollback check and let an older remote head
+    // pass while a newer checkpoint is retained.
+    if (call.code !== 0 && call.code !== 1) throw transport(call.args[0] ?? '', call);
     if (call.code !== 0) return '';
     return decode(call.stdout).trim();
   }

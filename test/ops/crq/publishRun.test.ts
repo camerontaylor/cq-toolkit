@@ -565,11 +565,24 @@ describe('publisher route: fixture replay through the run composition', () => {
       const pendingDir = join(effects.stateRoot, 'backfill', 'publication', 'pending');
       expect((await readdir(pendingDir)).length).toBe(pending.length);
 
-      // Recovery: rebuild the roots with a working transport; the request
-      // marker written by the failed run drives one more publication.
+      // Recovery: keep the failed queue intact (makeEffects would reset
+      // queue.json and erase the fields recovery must clear) and rebuild only
+      // the transport-facing seams. The request marker written by the failed
+      // run drives one more publication.
+      const queueBeforeRecovery = parseJsonValue(
+        await readFile(join(effects.stateRoot, 'queue.json'), 'utf8'),
+      );
+      expect((queueBeforeRecovery as JsonObject).get('backfill_halted')).toBeDefined();
+      expect((queueBeforeRecovery as JsonObject).get('backfill_publication_error')).toBeDefined();
+      // seedRemoteBranch would overwrite the shared fake origin state, so
+      // give recovery its own fake git pair over the same state root: the
+      // queue file is reused byte-for-byte, only the transport heals.
       const healed = await makeEffects(root);
       await seedRollout(healed);
       await seedRemoteBranch(healed);
+      // Restore the failed run's queue (makeEffects reset it): recovery must
+      // clear these fields itself, not inherit their absence.
+      await writeFile(join(root, 'state', 'queue.json'), ledgerCanonicalBytes(queueBeforeRecovery));
       const recovered = await runPublish(healed);
       expect(recovered.publication).toBe('reconciled');
       const healedQueue = parseJsonValue(

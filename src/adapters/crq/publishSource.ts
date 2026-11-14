@@ -136,8 +136,27 @@ function pipedGit(
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
-    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    let stdoutSize = 0;
+    let stderrSize = 0;
+    // execFile enforces maxBuffer; the piped path must bound accumulation the
+    // same way (GitLedger.read streams whole-history diffs through here). On
+    // overflow kill the child and fail the call: never truncated output with
+    // a successful exit code.
+    const killForOverflow = (): void => {
+      overflow = true;
+      child.kill('SIGKILL');
+    };
+    let overflow = false;
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutSize += chunk.length;
+      if (stdoutSize > MAX_BUFFER) return killForOverflow();
+      stdout.push(chunk);
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrSize += chunk.length;
+      if (stderrSize > MAX_BUFFER) return killForOverflow();
+      stderr.push(chunk);
+    });
     // The child exits once it has read its input; a late write to the closed
     // pipe (EPIPE) must not crash the process. The close handler below is the
     // single completion authority.
@@ -147,6 +166,15 @@ function pipedGit(
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      if (overflow) {
+        resolve({
+          args,
+          code: null,
+          stdout: new Uint8Array(0),
+          stderr: `output exceeded ${MAX_BUFFER} bytes`,
+        });
+        return;
+      }
       resolve({
         args,
         code: code ?? null,

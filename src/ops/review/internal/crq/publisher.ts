@@ -166,6 +166,8 @@ export async function publish(
       }
 
       if ((await outbox.pending()).length === 0) return { head };
+      // Clear before the next attempt, not after a failure: the exhausted-
+      // attempts exception must carry the last push failure as its cause.
       lastError = null;
     }
     // Python raises `from last_error` so the exhausted attempts keep the
