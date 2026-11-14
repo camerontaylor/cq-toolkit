@@ -162,3 +162,18 @@ export async function prepareOrdinaryReview(
   );
   return { ...result, outcome: 'launched' };
 }
+
+/**
+ * Caller holds tick.lock and supplies an atomic queue save. A crash after the
+ * blocked event and before saving can duplicate events; orphaned artifacts are
+ * left untouched. On any error reload the durable queue and never retry spawn.
+ */
+export async function prepareAndPersistOrdinaryReview(
+  queue: JsonObject,
+  input: Parameters<typeof prepareOrdinaryReview>[1],
+  effects: ReviewPreparationEffects,
+): ReturnType<typeof prepareOrdinaryReview> {
+  const result = await prepareOrdinaryReview(queue, input, effects);
+  if (result.outcome === 'blocked') await effects.launch.saveQueue(result.queue);
+  return result;
+}
