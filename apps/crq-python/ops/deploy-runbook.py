@@ -1044,13 +1044,29 @@ class Run:
 
     # -- failure paths -------------------------------------------------
     def fail_stop(self, reason):
-        """Keep the hold and leave the host inert; owner recovery."""
+        """Keep the hold (reacquiring it if this run released admission)
+        and leave the host inert; owner recovery."""
+        reacquire_refusal = None
+        if self.hold is not None and not getattr(self.hold, "acquired", False):
+            # Admission was released for the health window: reclaim this
+            # run's marker before stopping triggers so the host stays inert
+            # behind it. A refusal (typically a foreign marker) still holds
+            # admission, so keep it and report it below rather than hide it;
+            # triggers are only ever stopped under a hold this run owns.
+            try:
+                self.hold.acquire()
+            except Exception as exc:
+                reacquire_refusal = repr(exc)
+                self.narrate("fail-stop could not reacquire admission: "
+                             + repr(exc))
         if self.hold is not None and self.hold.owns():
             try:
                 self.units.stop(sorted(self.triggers))
             except Exception as exc:  # the hold is what matters
                 self.narrate("fail-stop could not stop triggers: " + repr(exc))
         record = self.document("recovery_required", reason=str(reason)[:400])
+        if reacquire_refusal is not None:
+            record["admission_reacquire_refusal"] = reacquire_refusal[:400]
         record["written_at"] = now_iso()
         if self.run_dir is not None:
             try:
