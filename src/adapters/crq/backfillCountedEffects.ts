@@ -79,6 +79,8 @@ export function backfillCountedEffects(input: {
   durableRoot: string;
   store: ArtifactStore;
   repo: BackfillCountedHarvestEffects['repo'];
+  /** Runs the async review verification a prepared repo recorded; before any write. */
+  verifyRecorded?: () => Promise<void>;
   publication: { spool(value: JsonValue): Promise<string> };
   inbox: { ingest(value: JsonValue): Promise<unknown> };
   stateEvent: BackfillCountedHarvestEffects['stateEvent'];
@@ -93,6 +95,7 @@ export function backfillCountedEffects(input: {
     repo: input.repo,
     // Retained bytes must exist before anything verifies or names them.
     writeReviewEvent: async (runId, bytes) => {
+      await input.verifyRecorded?.();
       await deferred.flush();
       await readArtifacts(runId);
       await atomicWrite(join(input.stateRoot, 'runs', runId, 'review-event.json'), bytes);
