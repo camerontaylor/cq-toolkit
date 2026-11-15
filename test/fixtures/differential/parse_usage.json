@@ -1,0 +1,947 @@
+[
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"limit\": 2.5, \"fullCapacityInMs\": 3.0}}\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 0, \"rollingWindowMs\": 9007199254740993, \"fullCapacityInMs\": 1}}\u000b{\"includedReviews\": {\"remaining\": {}, \"limit\": 10}}\u001c{\"includedReviews\": {\"remaining\": NaN}}\u000b"
+  },
+  {
+    "stream": "\u001e{\"includedReviews\": {\"rollingWindowMs\": null}}\u0085{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": 3.0, \"state\": \"exhausted\"}}\u001d"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": true, \"state\": false}}\u001e{\"includedReviews\": {\"remaining\": NaN}}\n\"s\"\u001e"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3, \"limit\": 10}}\u001c{\"includedReviews\": {\"remaining\": [], \"limit\": 2.5}}\u2028{\"includedReviews\": {\"state\": 5}}\u0085{\"includedReviews\": NaN}\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": \"3\", \"limit\": true, \"state\": null}}\r\n{\"includedReviews\": {\"remaining\": 3}}\r\n{\"includedReviews\": {\"remaining\": 1e0}}\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": false, \"limit\": -1, \"rollingWindowMs\": 3, \"fullCapacityInMs\": 3}}\u0085{\"includedReviews\": {\"remaining\": 2.5, \"limit\": 0, \"rollingWindowMs\": \"3\", \"fullCapacityInMs\": 10, \"state\": \"exhausted\"}}\u000b"
+  },
+  {
+    "stream": "\u000b{\"includedReviews\": []}\n{\"includedReviews\": {\"remaining\": 3.0, \"state\": false}}\f"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "7\u2028{\"includedReviews\": {\"remaining\": true, \"rollingWindowMs\": [], \"fullCapacityInMs\": {}}}\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": null, \"fullCapacityInMs\": null, \"state\": 5}}\u001c"
+  },
+  {
+    "stream": "\r{\"includedReviews\": {\"fullCapacityInMs\": 3.0, \"state\": false}}\r{\"includedReviews\": {\"remaining\": {}, \"fullCapacityInMs\": true, \"state\": false}}\r"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": true, \"rollingWindowMs\": \"3\", \"fullCapacityInMs\": 10}}\u001e"
+  },
+  {
+    "stream": "\"s\"\u000b{\"includedReviews\": {\"remaining\": [], \"rollingWindowMs\": 3, \"fullCapacityInMs\": false}}\u000b{\"includedReviews\": {\"remaining\": false, \"limit\": -1, \"rollingWindowMs\": -1}}\u2028{\"includedReviews\": {\"remaining\": [], \"limit\": false, \"fullCapacityInMs\": 1}}\u001d"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"rollingWindowMs\": 3.0}}\u0085{\"includedReviews\": {\"remaining\": \"3\", \"limit\": null, \"rollingWindowMs\": 0, \"fullCapacityInMs\": {}, \"state\": 5}}\u001e{\"includedReviews\": {\"remaining\": 1, \"state\": \"available\"}}\u2029"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 10, \"limit\": [], \"rollingWindowMs\": 9007199254740993, \"fullCapacityInMs\": null}}\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 9007199254740993, \"fullCapacityInMs\": \"3\", \"state\": 5}}\n{\"includedReviews\": {\"remaining\": 0, \"rollingWindowMs\": -1, \"state\": null}}\f"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": true, \"fullCapacityInMs\": true}}\u001c{\f"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\u001e{\"includedReviews\": {\"limit\": {}}}\u001d{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"rollingWindowMs\": -1, \"fullCapacityInMs\": 3, \"state\": false}}\u0085{\"includedReviews\": {\"remaining\": 1e0}}\f"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": \"3\", \"limit\": 2.5, \"rollingWindowMs\": null}}\u2029{\"includedReviews\": {\"remaining\": false, \"limit\": -1, \"fullCapacityInMs\": false, \"state\": 5}}\u000b{\"includedReviews\": {\"remaining\": \"3\", \"limit\": null}}\n{\"includedReviews\": {\"remaining\": 10, \"rollingWindowMs\": false}}\r\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": {}, \"limit\": -1, \"state\": false}}\u2028{\"includedReviews\": {\"remaining\": 1, \"state\": \"exhausted\"}}\n"
+  },
+  {
+    "stream": "\"s\"\u2028{\"includedReviews\": {\"remaining\": true, \"rollingWindowMs\": 1}}\u2029{\u2029"
+  },
+  {
+    "stream": "[1,2]\u001d7\r7\u001c"
+  },
+  {
+    "stream": "[1,2]\r\n{\"includedReviews\": {\"remaining\": 3.0, \"fullCapacityInMs\": 3.0}}\u000b{\"includedReviews\": {\"remaining\": 0, \"limit\": false, \"rollingWindowMs\": -1, \"fullCapacityInMs\": -1, \"state\": \"available\"}}\u2028{\"includedReviews\": {\"remaining\": null, \"limit\": []}}\u001d"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 9007199254740993, \"limit\": true, \"state\": null}}\u001e"
+  },
+  {
+    "stream": "{\"includedReviews\": 4}\r\n{\"includedReviews\": NaN}\u001e{\"includedReviews\": {\"remaining\": {}, \"fullCapacityInMs\": 3, \"state\": false}}\u000b{\"includedReviews\": {\"remaining\": 3.0, \"limit\": 3.0, \"rollingWindowMs\": false}}\u2029"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": null, \"limit\": 9007199254740993}}\n{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\u001c"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": NaN}}\f{\"includedReviews\": {\"remaining\": -1, \"limit\": 2.5, \"fullCapacityInMs\": 1}}\u000b{\"includedReviews\": {\"remaining\": 0, \"limit\": 1180591620717411303424, \"state\": false}}\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": [], \"fullCapacityInMs\": true}}\u2028{\"includedReviews\": {\"remaining\": [], \"limit\": \"3\", \"fullCapacityInMs\": true, \"state\": \"\"}}\u001c"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -0}}\f{\"includedReviews\": {\"remaining\": [], \"fullCapacityInMs\": 3.0}}\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\u001e"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": true, \"limit\": 9007199254740993, \"rollingWindowMs\": 1180591620717411303424, \"fullCapacityInMs\": -1}}\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": \"3\", \"limit\": 1, \"fullCapacityInMs\": 9007199254740993}}\r{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": 1180591620717411303424, \"state\": \"exhausted\"}}\r"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3, \"rollingWindowMs\": -1, \"fullCapacityInMs\": false, \"state\": \"\"}}\u001c"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\u2029{\"includedReviews\": {\"remaining\": 3, \"fullCapacityInMs\": {}, \"state\": \"\"}}\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": null, \"fullCapacityInMs\": 0}}\u001d{\"includedReviews\": {\"remaining\": 1, \"limit\": 1}}\u001c{\"includedReviews\": {\"remaining\": 0, \"limit\": 3}}\u2029"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 0, \"limit\": 9007199254740993, \"fullCapacityInMs\": false}}\u0085\"s\"\u001d"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": false, \"state\": null}}\u001d7\u001e\n{\"includedReviews\": {\"limit\": true, \"rollingWindowMs\": \"3\", \"fullCapacityInMs\": true, \"state\": false}}\u0085"
+  },
+  {
+    "stream": "not json\f{\"includedReviews\": {\"limit\": -1, \"rollingWindowMs\": 3, \"fullCapacityInMs\": 3.0}}\r\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": {}, \"limit\": 9007199254740993, \"rollingWindowMs\": {}, \"state\": false}}\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": NaN}}\n{\"includedReviews\": {\"fullCapacityInMs\": 3.0}}\u0085{\"includedReviews\": {\"remaining\": 0, \"limit\": 9007199254740993, \"fullCapacityInMs\": -1, \"state\": \"exhausted\"}}\r\n{\"includedReviews\": {\"remaining\": NaN}}\r"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\u2028{\"includedReviews\": {\"limit\": {}, \"rollingWindowMs\": 1180591620717411303424}}"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": 10, \"state\": false}}\u001d{\"includedReviews\": {\"remaining\": \"3\", \"limit\": 3, \"rollingWindowMs\": -1}}\n{\"includedReviews\": {\"remaining\": 1180591620717411303424}}\u2028{\"includedReviews\": {\"remaining\": false, \"limit\": 1, \"state\": \"available\"}}\u001c"
+  },
+  {
+    "stream": "null\u001d{\"includedReviews\": {\"remaining\": 2.5, \"fullCapacityInMs\": null, \"state\": \"available\"}}\u000bnull\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3.0, \"state\": \"exhausted\"}}\u0085{\"includedReviews\": {\"remaining\": -1}}\u2029\"s\"\u2028"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": []}}\u001c{\"includedReviews\": {\"remaining\": 3, \"limit\": 3, \"rollingWindowMs\": 0}}\u001d"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 9007199254740993, \"limit\": 1180591620717411303424, \"state\": null}}\u001d{\"includedReviews\": {\"remaining\": 3, \"rollingWindowMs\": 3, \"state\": \"\"}}\r\n{\"includedReviews\": []}\r"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -1, \"limit\": 9007199254740993, \"fullCapacityInMs\": 1180591620717411303424, \"state\": null}}\u2028"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": null, \"rollingWindowMs\": true}}\u0085{\"includedReviews\": {\"remaining\": 1e0}}\f{\"includedReviews\": {\"remaining\": 9007199254740993, \"rollingWindowMs\": 10, \"state\": \"\"}}\u001d{\"includedReviews\": {\"remaining\": 2.5, \"rollingWindowMs\": [], \"fullCapacityInMs\": 3, \"state\": false}}\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": {}, \"limit\": 9007199254740993, \"state\": false}}\r{\"includedReviews\": {\"remaining\": -0}}\f{\"includedReviews\": {\"remaining\": 2.5, \"limit\": {}, \"fullCapacityInMs\": -1, \"state\": \"available\"}}\u000b"
+  },
+  {
+    "stream": "\r{\"includedReviews\": {\"remaining\": 3, \"rollingWindowMs\": 2.5, \"state\": \"available\"}}\f{\"includedReviews\": {\"remaining\": 3, \"rollingWindowMs\": {}, \"state\": \"available\"}}\u000b{\"includedReviews\": {\"remaining\": null, \"fullCapacityInMs\": false, \"state\": \"exhausted\"}}\r\n"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -1, \"limit\": 0}}\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3.0, \"limit\": \"3\", \"rollingWindowMs\": 1, \"fullCapacityInMs\": 9007199254740993, \"state\": 5}}\u2029{\"includedReviews\": {\"remaining\": 1, \"limit\": 10, \"rollingWindowMs\": 0, \"fullCapacityInMs\": 1, \"state\": \"\"}}\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": \"3\", \"rollingWindowMs\": {}}}\u001d{\"includedReviews\": {\"limit\": null, \"state\": \"\"}}\f"
+  },
+  {
+    "stream": "{\"includedReviews\": \"x\"}\u2029{\"includedReviews\": {\"remaining\": 1, \"rollingWindowMs\": true, \"fullCapacityInMs\": true}}\u2028"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"rollingWindowMs\": {}, \"state\": \"exhausted\"}}\u2028{\"includedReviews\": {\"remaining\": 9007199254740993, \"limit\": 2.5, \"rollingWindowMs\": false, \"fullCapacityInMs\": -1}}\n"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": {}, \"limit\": 0, \"state\": \"exhausted\"}}\u2028"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -1, \"state\": \"\"}}\u000b{\"includedReviews\": {\"remaining\": 10, \"limit\": \"3\", \"fullCapacityInMs\": 0}}\u2029\"s\"\u2028{\"includedReviews\": {\"remaining\": {}, \"rollingWindowMs\": 3.0, \"fullCapacityInMs\": \"3\", \"state\": \"exhausted\"}}\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": null}}\u2029{\"includedReviews\": \"x\"}\u000b"
+  },
+  {
+    "stream": "\"s\"\n{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"rollingWindowMs\": 3.0}}\u001d{\u001d"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": null}\u001e"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 0, \"limit\": 10}}\u000b"
+  },
+  {
+    "stream": "{\r{\"includedReviews\": {\"remaining\": true, \"limit\": 10}}\u0085{\"includedReviews\": {\"remaining\": true, \"limit\": 3.0, \"fullCapacityInMs\": null, \"state\": null}}\u001c{\"includedReviews\": {\"remaining\": true, \"limit\": 0, \"rollingWindowMs\": [], \"fullCapacityInMs\": -1}}\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": NaN}}\u000b{\"includedReviews\": {\"remaining\": 3.0, \"rollingWindowMs\": -1, \"fullCapacityInMs\": 3, \"state\": \"exhausted\"}}\r\n{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\u2028{\"includedReviews\": 4}\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": true, \"rollingWindowMs\": 1180591620717411303424, \"fullCapacityInMs\": null}}\u0085{\"includedReviews\": {\"remaining\": 3.0, \"limit\": null, \"rollingWindowMs\": false, \"fullCapacityInMs\": true}}\f{\u000b{\"includedReviews\": {\"remaining\": 3.0, \"limit\": [], \"rollingWindowMs\": -1, \"state\": 5}}\u001e"
+  },
+  {
+    "stream": "{\"includedReviews\": null}\u2029{\"includedReviews\": {\"remaining\": false, \"limit\": 10, \"fullCapacityInMs\": {}}}\u001e7\u0085{\"includedReviews\": []}\u2028"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"fullCapacityInMs\": -1, \"state\": false}}\u001c{\"includedReviews\": {\"remaining\": 2.5, \"rollingWindowMs\": 3.0}}\u000bnot json\u000b{\"includedReviews\": {\"remaining\": [], \"limit\": 2.5, \"rollingWindowMs\": 3, \"state\": 5}}\u001c"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"limit\": 1}}\r\n\"s\"\u001d{\"includedReviews\": NaN}\u0085{\"includedReviews\": []}\u2028"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": {}, \"limit\": {}, \"fullCapacityInMs\": -1}}\n{\"includedReviews\": {\"remaining\": [], \"rollingWindowMs\": false}}\u2028{\"includedReviews\": {\"remaining\": 1, \"limit\": 1}}\u2028"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": \"3\", \"limit\": \"3\", \"fullCapacityInMs\": \"3\"}}\u2028{\"includedReviews\": {\"remaining\": 2.5, \"limit\": {}, \"fullCapacityInMs\": 3}}\r\n{\"includedReviews\": {\"remaining\": false, \"limit\": \"3\", \"fullCapacityInMs\": \"3\"}}\r\n{\"includedReviews\": {\"remaining\": 1, \"rollingWindowMs\": 9007199254740993, \"fullCapacityInMs\": 3.0}}\r"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": true, \"rollingWindowMs\": 10, \"fullCapacityInMs\": 1180591620717411303424, \"state\": false}}\u000b{\"includedReviews\": {\"remaining\": 1, \"limit\": 1}}\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": true, \"limit\": 2.5, \"state\": \"exhausted\"}}\u2028{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": null, \"state\": \"available\"}}\r"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 10, \"rollingWindowMs\": 2.5, \"fullCapacityInMs\": false}}\u2029\u2028{\"includedReviews\": {\"remaining\": 3, \"limit\": true, \"rollingWindowMs\": 10, \"state\": \"available\"}}\f{\"includedReviews\": {\"remaining\": -1, \"limit\": true, \"rollingWindowMs\": 3.0, \"state\": 5}}\u2028"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": {}, \"limit\": null}}\f{\"includedReviews\": {\"remaining\": null, \"limit\": 1180591620717411303424, \"fullCapacityInMs\": []}}\u2029{\"includedReviews\": {\"remaining\": 2.5, \"limit\": 1180591620717411303424, \"state\": \"\"}}\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -1, \"limit\": 9007199254740993, \"rollingWindowMs\": 2.5, \"fullCapacityInMs\": \"3\", \"state\": \"\"}}\n{\"includedReviews\": {\"remaining\": null, \"limit\": [], \"rollingWindowMs\": null, \"fullCapacityInMs\": []}}\f{\"includedReviews\": {\"remaining\": -0}}\u001d"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"rollingWindowMs\": 1180591620717411303424, \"fullCapacityInMs\": 1}}\u0085{\"includedReviews\": {\"remaining\": -1, \"fullCapacityInMs\": null}}\u2028"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": true}}\u001c{\"includedReviews\": {\"remaining\": 10, \"rollingWindowMs\": 3.0, \"fullCapacityInMs\": false, \"state\": \"exhausted\"}}\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3, \"limit\": \"3\", \"rollingWindowMs\": \"3\"}}\r\n{\"includedReviews\": {\"remaining\": -1, \"fullCapacityInMs\": [], \"state\": null}}\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -0}}\nnull\u2028{\"includedReviews\": null}\n{\"includedReviews\": {\"remaining\": 3.0, \"fullCapacityInMs\": 0, \"state\": \"exhausted\"}}\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": true, \"limit\": 10, \"rollingWindowMs\": 3.0, \"state\": 5}}\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": true, \"fullCapacityInMs\": 3, \"state\": null}}\f{\"includedReviews\": {\"remaining\": 1, \"rollingWindowMs\": 0}}\f{\"includedReviews\": {\"remaining\": 10, \"rollingWindowMs\": 10, \"fullCapacityInMs\": 1180591620717411303424, \"state\": false}}\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -0}}\f"
+  },
+  {
+    "stream": "{\"includedReviews\": []}\u2028{\u2029"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": NaN}}\r{\"includedReviews\": {\"limit\": [], \"rollingWindowMs\": 2.5, \"fullCapacityInMs\": \"3\", \"state\": \"\"}}\r{\"includedReviews\": {\"remaining\": -1, \"limit\": [], \"state\": false}}\r\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3, \"limit\": 2.5, \"rollingWindowMs\": 3.0, \"fullCapacityInMs\": \"3\"}}\u001c{\"includedReviews\": {\"remaining\": 1e0}}\r\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"rollingWindowMs\": \"3\", \"state\": \"exhausted\"}}\u001c{\"includedReviews\": {\"remaining\": 1e0}}\u2029\"s\"\r"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": false, \"fullCapacityInMs\": []}}\u0085{\"includedReviews\": {\"remaining\": 0, \"limit\": -1, \"fullCapacityInMs\": 1}}\u001d{\"includedReviews\": {\"remaining\": 3, \"limit\": -1}}\u001e"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": 9007199254740993, \"rollingWindowMs\": 10, \"fullCapacityInMs\": 3, \"state\": \"available\"}}\u0085{\"includedReviews\": {\"remaining\": 9007199254740993, \"limit\": false, \"rollingWindowMs\": 1180591620717411303424, \"state\": false}}\n{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"state\": \"exhausted\"}}\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"limit\": null}}\u000b{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\u001c{\"includedReviews\": {\"remaining\": [], \"limit\": 1, \"state\": \"available\"}}\f"
+  },
+  {
+    "stream": "{\"includedReviews\": NaN}\u2028{\"includedReviews\": {\"remaining\": 3, \"rollingWindowMs\": 3.0, \"fullCapacityInMs\": false, \"state\": \"exhausted\"}}\u001e"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3, \"limit\": 3.0, \"rollingWindowMs\": 1180591620717411303424}}\u2028{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": 1180591620717411303424, \"fullCapacityInMs\": 1, \"state\": 5}}\u2028{\"includedReviews\": {\"remaining\": true, \"fullCapacityInMs\": 0, \"state\": false}}\u001c{\n"
+  },
+  {
+    "stream": "{\"includedReviews\": NaN}\r{\"includedReviews\": \"x\"}\u2028"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": true, \"limit\": 3.0, \"fullCapacityInMs\": -1, \"state\": \"available\"}}\u000b{\"includedReviews\": {\"rollingWindowMs\": true, \"state\": 5}}\n{\"includedReviews\": {\"remaining\": -1, \"limit\": 9007199254740993, \"rollingWindowMs\": null, \"fullCapacityInMs\": 0}}\r\n{\"includedReviews\": {\"remaining\": true, \"fullCapacityInMs\": []}}\r"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 2.5, \"limit\": []}}\u0085{\"includedReviews\": {\"remaining\": \"3\", \"rollingWindowMs\": false, \"fullCapacityInMs\": {}}}\u000bnot json\u001e"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3.0, \"limit\": 2.5, \"rollingWindowMs\": 3.0, \"fullCapacityInMs\": true, \"state\": \"\"}}\u001c{\"includedReviews\": {\"rollingWindowMs\": 3, \"fullCapacityInMs\": \"3\"}}\u0085{\"includedReviews\": {\"remaining\": 10, \"fullCapacityInMs\": 1180591620717411303424, \"state\": null}}\u001c"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 2.5, \"limit\": 1180591620717411303424, \"rollingWindowMs\": false, \"fullCapacityInMs\": []}}\r{\"includedReviews\": {\"remaining\": 2.5, \"limit\": 1, \"fullCapacityInMs\": [], \"state\": false}}\u000b{\"includedReviews\": {\"remaining\": \"3\", \"limit\": 9007199254740993, \"rollingWindowMs\": 2.5}}\u0085"
+  },
+  {
+    "stream": "\u001c{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\u001d\"s\"\u001d{\"includedReviews\": {\"remaining\": \"3\", \"limit\": false, \"state\": \"exhausted\"}}\u2029"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": [], \"rollingWindowMs\": [], \"state\": false}}\r{\"includedReviews\": \"x\"}\u001d"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -0}}\u001c{\"includedReviews\": {\"remaining\": 10, \"limit\": 3, \"fullCapacityInMs\": 3, \"state\": 5}}\r\n{\"includedReviews\": {\"remaining\": false, \"fullCapacityInMs\": 3, \"state\": \"available\"}}\u001d{\"includedReviews\": {\"remaining\": 0, \"rollingWindowMs\": true, \"fullCapacityInMs\": 3, \"state\": false}}\u001e"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -0}}\u001d{\"includedReviews\": {\"remaining\": 9007199254740993, \"limit\": 1180591620717411303424, \"rollingWindowMs\": -1, \"state\": null}}\u001cnot json\r\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": null, \"limit\": 3.0, \"rollingWindowMs\": \"3\", \"state\": \"\"}}\n{\"includedReviews\": {\"remaining\": 1, \"limit\": 10, \"rollingWindowMs\": null, \"fullCapacityInMs\": 9007199254740993}}\u001c{\"includedReviews\": {\"remaining\": [], \"limit\": 0, \"rollingWindowMs\": 9007199254740993, \"fullCapacityInMs\": 3}}\r\n{\"includedReviews\": {\"fullCapacityInMs\": 2.5, \"state\": 5}}\u000b"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "\"s\"\r"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": false, \"limit\": 3}}\n{\"includedReviews\": {\"remaining\": {}, \"rollingWindowMs\": [], \"state\": null}}\u2029{\"includedReviews\": {\"remaining\": 1, \"limit\": 1, \"fullCapacityInMs\": 1180591620717411303424}}\u2028{\"includedReviews\": {\"limit\": -1, \"rollingWindowMs\": 0}}"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": {}, \"rollingWindowMs\": 2.5, \"fullCapacityInMs\": 0, \"state\": \"available\"}}\u0085{\"includedReviews\": []}\f{\"includedReviews\": {\"remaining\": -1, \"limit\": 3, \"rollingWindowMs\": []}}\r{\"includedReviews\": {\"remaining\": 1, \"limit\": 1}}\r\n"
+  },
+  {
+    "stream": "\u001e"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": NaN}}\u001e{\"includedReviews\": {\"remaining\": 0, \"limit\": 9007199254740993, \"rollingWindowMs\": 9007199254740993, \"fullCapacityInMs\": 2.5, \"state\": false}}\r\n{\"includedReviews\": {\"remaining\": -0}}\u2028{\"includedReviews\": {\"remaining\": 1}}\u001e"
+  },
+  {
+    "stream": "\u2028{\"includedReviews\": {\"remaining\": 1, \"rollingWindowMs\": true, \"fullCapacityInMs\": 9007199254740993, \"state\": 5}}\fnot json\n{\"includedReviews\": {\"rollingWindowMs\": false, \"fullCapacityInMs\": false}}\n"
+  },
+  {
+    "stream": "7\u001c{\"includedReviews\": []}\u001c"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"limit\": 1}}\u000b"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -1, \"limit\": {}, \"state\": false}}\n{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\u001d{\"includedReviews\": {\"remaining\": 9007199254740993, \"rollingWindowMs\": {}, \"fullCapacityInMs\": 3}}\u001e"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"rollingWindowMs\": true, \"fullCapacityInMs\": 10, \"state\": 5}}\u001d{\"includedReviews\": {\"remaining\": false, \"fullCapacityInMs\": 3.0}}\f{\"includedReviews\": {\"limit\": 0, \"rollingWindowMs\": false, \"fullCapacityInMs\": 1, \"state\": \"exhausted\"}}\u0085"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -1, \"fullCapacityInMs\": null}}\u001c"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3, \"fullCapacityInMs\": 9007199254740993}}\r\n{\"includedReviews\": {\"remaining\": 3.0, \"rollingWindowMs\": 0, \"state\": 5}}\nnot json\u2028"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": \"3\", \"fullCapacityInMs\": null, \"state\": 5}}\f{\"includedReviews\": {\"fullCapacityInMs\": -1}}\u2028"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 10, \"limit\": 10, \"fullCapacityInMs\": 3.0, \"state\": \"available\"}}\r\n{\"includedReviews\": {\"remaining\": 1, \"limit\": 1}}\u001c{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\u001d"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3.0, \"fullCapacityInMs\": 10}}\u2029"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": [], \"limit\": 0, \"fullCapacityInMs\": 3.0}}\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": \"3\", \"rollingWindowMs\": 0, \"fullCapacityInMs\": 0}}\u001d{\"includedReviews\": {\"remaining\": \"3\", \"limit\": -1, \"rollingWindowMs\": null, \"state\": \"available\"}}\n{\"includedReviews\": {\"remaining\": {}, \"rollingWindowMs\": 1180591620717411303424, \"fullCapacityInMs\": 10}}\u0085{\"includedReviews\": {\"limit\": 1, \"rollingWindowMs\": 3, \"fullCapacityInMs\": false, \"state\": 5}}\f"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": true, \"limit\": -1, \"rollingWindowMs\": 9007199254740993, \"fullCapacityInMs\": 3.0, \"state\": 5}}\r{\"includedReviews\": {\"remaining\": \"3\", \"limit\": \"3\", \"rollingWindowMs\": {}, \"fullCapacityInMs\": []}}\u0085not json\u001d\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -1, \"state\": 5}}\r\n{\"includedReviews\": {\"remaining\": {}, \"limit\": 1, \"rollingWindowMs\": 3, \"fullCapacityInMs\": [], \"state\": \"exhausted\"}}\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": [], \"limit\": 2.5}}\u001dnot json\u001c{\"includedReviews\": {\"remaining\": 2.5, \"limit\": \"3\", \"rollingWindowMs\": []}}\u001d"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"rollingWindowMs\": []}}\f{\"includedReviews\": []}\f{\"includedReviews\": {\"remaining\": \"3\", \"rollingWindowMs\": false}}\n{\"includedReviews\": {\"remaining\": -1, \"fullCapacityInMs\": 3.0, \"state\": 5}}\u2028"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": 2.5, \"rollingWindowMs\": null}}\n{\"includedReviews\": {\"remaining\": []}}\n{\"includedReviews\": {\"remaining\": -1, \"limit\": 2.5, \"state\": \"exhausted\"}}\u001e\"s\"\u0085"
+  },
+  {
+    "stream": "[1,2]\r\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": [], \"rollingWindowMs\": [], \"fullCapacityInMs\": []}}\u001e"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -1, \"limit\": false, \"fullCapacityInMs\": []}}\u0085{\u0085{\"includedReviews\": {\"remaining\": NaN}}\u2028"
+  },
+  {
+    "stream": "null\f{\"includedReviews\": {\"remaining\": -0}}\n{\"includedReviews\": {\"remaining\": 3.0, \"limit\": \"3\"}}\u2029"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"rollingWindowMs\": 0, \"fullCapacityInMs\": 2.5, \"state\": \"available\"}}\u001e{\"includedReviews\": {\"remaining\": 2.5, \"limit\": null, \"rollingWindowMs\": 0, \"fullCapacityInMs\": 0}}\u0085{\"includedReviews\": {\"remaining\": 2.5, \"limit\": {}, \"rollingWindowMs\": 3.0, \"state\": null}}\u001c"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -0}}\r{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\r{\"includedReviews\": {\"remaining\": 0, \"limit\": \"3\", \"fullCapacityInMs\": false}}\u2029"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": \"3\"}}\r"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 0, \"limit\": 0, \"rollingWindowMs\": 3, \"fullCapacityInMs\": 3.0, \"state\": 5}}\u2029{\"includedReviews\": {\"remaining\": 2.5, \"rollingWindowMs\": false, \"fullCapacityInMs\": 3}}\f{\"includedReviews\": {\"remaining\": 0, \"limit\": 3, \"rollingWindowMs\": 1180591620717411303424, \"fullCapacityInMs\": 1180591620717411303424}}\u0085"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": \"3\", \"limit\": false, \"rollingWindowMs\": 1180591620717411303424, \"fullCapacityInMs\": 0, \"state\": false}}\u2029{\"includedReviews\": {\"remaining\": -0}}\u001e{\"includedReviews\": {\"remaining\": 0, \"rollingWindowMs\": {}, \"state\": false}}\u2029"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": \"3\", \"limit\": 1180591620717411303424, \"rollingWindowMs\": {}, \"state\": false}}\u2028{\f{\"includedReviews\": NaN}\u2029{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": {}, \"limit\": 3, \"rollingWindowMs\": false}}\u2029{\"includedReviews\": {\"remaining\": null, \"limit\": false, \"fullCapacityInMs\": 3.0, \"state\": null}}\f{\u001d"
+  },
+  {
+    "stream": "not json\r\n{\"includedReviews\": {\"remaining\": 1, \"limit\": 1}}\u001e"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 10, \"limit\": []}}\u2028{\"includedReviews\": {\"remaining\": \"3\", \"limit\": [], \"fullCapacityInMs\": 9007199254740993}}\u2029{\"includedReviews\": {\"remaining\": {}, \"fullCapacityInMs\": false, \"state\": 5}}\r"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 0, \"rollingWindowMs\": -1}}\r\nnull\u001d{\"includedReviews\": \"x\"}\u2029{\"includedReviews\": NaN}\r"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": \"3\", \"rollingWindowMs\": 10, \"state\": false}}\u001c{\"includedReviews\": {\"remaining\": null, \"limit\": {}, \"fullCapacityInMs\": 0}}\u000b"
+  },
+  {
+    "stream": "[1,2]\u001d"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"limit\": [], \"rollingWindowMs\": 10, \"fullCapacityInMs\": 3.0, \"state\": false}}\r\n{\"includedReviews\": {\"limit\": 10, \"rollingWindowMs\": [], \"state\": \"exhausted\"}}\n{\"includedReviews\": {\"remaining\": {}, \"limit\": 9007199254740993, \"fullCapacityInMs\": 0}}\u001d{\"includedReviews\": {\"remaining\": null, \"rollingWindowMs\": 1180591620717411303424, \"fullCapacityInMs\": \"3\"}}\u001c"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": 3.0, \"fullCapacityInMs\": \"3\"}}\u000b7\u0085{\"includedReviews\": {\"remaining\": \"3\", \"fullCapacityInMs\": true}}\u001e"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3.0, \"limit\": false, \"rollingWindowMs\": {}, \"fullCapacityInMs\": {}, \"state\": null}}\u001e{\u000b{\"includedReviews\": {\"remaining\": 1e0}}\u2029"
+  },
+  {
+    "stream": "null\u2029{\"includedReviews\": {\"remaining\": [], \"rollingWindowMs\": 3, \"fullCapacityInMs\": true, \"state\": \"exhausted\"}}\u001e{\"includedReviews\": {\"limit\": -1, \"rollingWindowMs\": -1, \"fullCapacityInMs\": {}, \"state\": \"available\"}}\r{\"includedReviews\": NaN}\u001d"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": 1180591620717411303424, \"rollingWindowMs\": 3.0}}\u2029{\"includedReviews\": {\"limit\": false, \"rollingWindowMs\": 3.0, \"state\": null}}\r{\"includedReviews\": {\"remaining\": 3, \"fullCapacityInMs\": null}}\nnull\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3.0, \"limit\": {}, \"rollingWindowMs\": 10, \"fullCapacityInMs\": false}}\u2029{\"includedReviews\": {\"remaining\": \"3\", \"rollingWindowMs\": null, \"fullCapacityInMs\": 10}}\u001dnot json\u000b7\f"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3, \"state\": \"exhausted\"}}\u001d{\"includedReviews\": {\"remaining\": true, \"limit\": 0}}\u001c"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3}}\u000b"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 9007199254740993, \"rollingWindowMs\": {}}}\n{\"includedReviews\": {\"remaining\": true, \"limit\": [], \"fullCapacityInMs\": true}}\u2028{\"includedReviews\": {\"remaining\": -1, \"state\": 5}}\u000b{\"includedReviews\": {\"remaining\": [], \"limit\": null, \"rollingWindowMs\": 10, \"fullCapacityInMs\": 1180591620717411303424, \"state\": \"available\"}}\u001d"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 9007199254740993, \"limit\": 3, \"state\": \"exhausted\"}}\u001c"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"limit\": 1}}\u2028{\"includedReviews\": NaN}\r"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -1, \"limit\": 2.5, \"rollingWindowMs\": [], \"fullCapacityInMs\": -1, \"state\": null}}\u000b{\"includedReviews\": {\"remaining\": 3.0, \"fullCapacityInMs\": \"3\"}}\u001d"
+  },
+  {
+    "stream": "not json\u001c{\u001c"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": false, \"rollingWindowMs\": 10, \"state\": \"available\"}}\f{\"includedReviews\": {\"remaining\": \"3\", \"limit\": 2.5, \"state\": \"\"}}\u2029{\"includedReviews\": {\"remaining\": null, \"limit\": 3, \"rollingWindowMs\": true, \"fullCapacityInMs\": \"3\", \"state\": \"available\"}}\u2029"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3, \"limit\": 10, \"fullCapacityInMs\": 3.0, \"state\": \"\"}}\r\n{\"includedReviews\": {\"remaining\": 9007199254740993, \"limit\": 10, \"rollingWindowMs\": 3, \"fullCapacityInMs\": 10}}\u001d{\"includedReviews\": {\"remaining\": 1, \"state\": null}}\u001d{\"includedReviews\": {\"remaining\": 2.5, \"limit\": true, \"state\": \"available\"}}\u001c"
+  },
+  {
+    "stream": "\"s\"\u2029{\"includedReviews\": {\"limit\": {}, \"rollingWindowMs\": \"3\", \"state\": false}}\u000b{\"includedReviews\": {\"remaining\": 2.5, \"limit\": 2.5, \"state\": \"available\"}}\u001dnot json\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 10, \"rollingWindowMs\": 1180591620717411303424, \"fullCapacityInMs\": 10, \"state\": \"\"}}\u001c{\"includedReviews\": {\"remaining\": true, \"limit\": 3.0, \"state\": \"\"}}\u0085"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 10, \"limit\": 0, \"fullCapacityInMs\": []}}\u001d\u001e{\u001c{\"includedReviews\": {\"remaining\": 2.5, \"limit\": -1, \"fullCapacityInMs\": 1}}\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 10, \"limit\": 10}}\n{\"includedReviews\": {\"remaining\": 9007199254740993, \"fullCapacityInMs\": {}}}\n{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\u2028"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"limit\": 3, \"fullCapacityInMs\": 1180591620717411303424}}\u2029{\"includedReviews\": {\"remaining\": 2.5, \"rollingWindowMs\": 3.0, \"fullCapacityInMs\": 9007199254740993, \"state\": \"\"}}\u000b{\"includedReviews\": {\"remaining\": \"3\", \"fullCapacityInMs\": 9007199254740993}}\u001cnull\u001c"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": 9007199254740993, \"state\": null}}\u001c{\"includedReviews\": {\"limit\": 9007199254740993, \"rollingWindowMs\": -1}}\r\n{\"includedReviews\": []}\u2028{\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3, \"fullCapacityInMs\": 3, \"state\": false}}\n{\"includedReviews\": []}\u001enull\n{\"includedReviews\": {\"remaining\": 9007199254740993, \"limit\": 2.5, \"rollingWindowMs\": {}, \"fullCapacityInMs\": -1, \"state\": \"available\"}}"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 10, \"limit\": 3.0}}\u001c{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\u0085{\"includedReviews\": {\"remaining\": 3, \"limit\": {}, \"state\": 5}}\u0085"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\r\n{\"includedReviews\": {\"remaining\": [], \"limit\": []}}\r\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": false, \"limit\": true, \"state\": \"\"}}\r\n\"s\"\u001e"
+  },
+  {
+    "stream": "7\u2029"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": false, \"limit\": [], \"fullCapacityInMs\": null, \"state\": false}}\r"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"rollingWindowMs\": 3, \"fullCapacityInMs\": \"3\"}}\u000b{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\n{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": 3.0, \"rollingWindowMs\": false}}\u000b{\"includedReviews\": {\"remaining\": 10, \"limit\": 10, \"rollingWindowMs\": true, \"state\": \"\"}}\u0085"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": true, \"limit\": \"3\", \"rollingWindowMs\": 1180591620717411303424, \"fullCapacityInMs\": -1}}\u000b{\"includedReviews\": {\"remaining\": 0, \"rollingWindowMs\": 1180591620717411303424, \"state\": \"exhausted\"}}\r\n7\u2029{\"includedReviews\": {\"remaining\": -1, \"state\": null}}"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": [], \"limit\": 1180591620717411303424, \"state\": \"\"}}\fnot json\u2028"
+  },
+  {
+    "stream": "7\u2028{\"includedReviews\": {\"remaining\": 1e0}}\u2029"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": -1, \"rollingWindowMs\": {}, \"state\": null}}\u001e{\"includedReviews\": []}\u2029{\"includedReviews\": {\"remaining\": 9007199254740993, \"limit\": true, \"fullCapacityInMs\": 9007199254740993, \"state\": 5}}\f"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": null, \"rollingWindowMs\": 1180591620717411303424, \"fullCapacityInMs\": 10}}\u2029"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1e0}}\u0085{\"includedReviews\": {\"remaining\": [], \"limit\": 1, \"fullCapacityInMs\": null}}\u001c[1,2]\u000b"
+  },
+  {
+    "stream": "[1,2]\u001d{\"includedReviews\": {\"remaining\": 3.0, \"limit\": 3, \"rollingWindowMs\": 3, \"fullCapacityInMs\": 1180591620717411303424, \"state\": \"available\"}}\f"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1180591620717411303424}}\r\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"rollingWindowMs\": \"3\", \"fullCapacityInMs\": -1}}\f"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3, \"fullCapacityInMs\": [], \"state\": false}}\r"
+  },
+  {
+    "stream": "{\"includedReviews\": NaN}\n{\"includedReviews\": {\"remaining\": -1, \"limit\": null, \"fullCapacityInMs\": true}}\u2028"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": 9007199254740993, \"rollingWindowMs\": 2.5, \"state\": null}}\u000b{\"includedReviews\": {\"remaining\": 10, \"rollingWindowMs\": 2.5, \"fullCapacityInMs\": null}}\r\n{\"includedReviews\": {\"remaining\": 1, \"limit\": {}, \"rollingWindowMs\": {}}}\u001e"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"rollingWindowMs\": \"3\", \"fullCapacityInMs\": 3, \"state\": null}}\n{\"includedReviews\": {\"remaining\": NaN}}\r{\"includedReviews\": 4}\f{\r"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": 2.5, \"fullCapacityInMs\": 2.5}}\u2028"
+  },
+  {
+    "stream": "{\"includedReviews\": \"x\"}\u001e{\"includedReviews\": {\"remaining\": 10, \"limit\": 3.0, \"rollingWindowMs\": null, \"fullCapacityInMs\": 1180591620717411303424, \"state\": \"available\"}}\u001c{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\r"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"limit\": [], \"rollingWindowMs\": 1}}\u2028{\"includedReviews\": {\"remaining\": [], \"limit\": null, \"rollingWindowMs\": {}, \"fullCapacityInMs\": []}}\f{\"includedReviews\": {\"remaining\": 2.5, \"fullCapacityInMs\": 0}}\u2029{\"includedReviews\": {\"rollingWindowMs\": [], \"state\": 5}}\f"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 9007199254740993, \"fullCapacityInMs\": 3, \"state\": \"available\"}}\r\n{\"includedReviews\": {\"limit\": 2.5, \"rollingWindowMs\": 1, \"fullCapacityInMs\": {}, \"state\": \"available\"}}\r\n{\"includedReviews\": {\"remaining\": false, \"limit\": 1, \"rollingWindowMs\": [], \"fullCapacityInMs\": \"3\"}}\f"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": [], \"state\": 5}}\u001d{\"includedReviews\": NaN}\u2029"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": 4}\u2029{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": \"3\", \"rollingWindowMs\": 0, \"fullCapacityInMs\": 1}}\u001e{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": 2.5}}\u001c"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"rollingWindowMs\": 9007199254740993}}\u2029{\"includedReviews\": {\"remaining\": -0}}\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": 9007199254740993, \"rollingWindowMs\": {}, \"fullCapacityInMs\": 0}}\u2029{\"includedReviews\": {\"remaining\": 9007199254740993, \"rollingWindowMs\": 0, \"fullCapacityInMs\": 3}}\r\n{\"includedReviews\": NaN}\u000b"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3.0, \"limit\": \"3\", \"fullCapacityInMs\": []}}\u2028"
+  },
+  {
+    "stream": "\"s\"\n\"s\"\r\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": true, \"limit\": 0, \"rollingWindowMs\": []}}\u2028{\"includedReviews\": {\"remaining\": 3, \"limit\": 3.0, \"rollingWindowMs\": \"3\", \"fullCapacityInMs\": 1}}\f"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -1, \"limit\": 3, \"rollingWindowMs\": 3.0, \"fullCapacityInMs\": -1}}\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": NaN}}\f\f{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": 2.5, \"rollingWindowMs\": true, \"fullCapacityInMs\": [], \"state\": \"exhausted\"}}\u001c"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": true, \"rollingWindowMs\": true, \"fullCapacityInMs\": \"3\"}}\u001e7\u0085{\"includedReviews\": \"x\"}\r"
+  },
+  {
+    "stream": "{\u001d"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": \"3\", \"rollingWindowMs\": 2.5, \"fullCapacityInMs\": \"3\"}}\u001e{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": null, \"fullCapacityInMs\": false, \"state\": null}}\u001c"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 2.5, \"rollingWindowMs\": 10, \"fullCapacityInMs\": 1}}\u001d{\f{\"includedReviews\": {\"remaining\": 1e0}}\f"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 2.5, \"rollingWindowMs\": 0, \"fullCapacityInMs\": 2.5}}\u001e{\"includedReviews\": {\"remaining\": 1, \"fullCapacityInMs\": null}}\r{"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 2.5, \"limit\": 3.0, \"rollingWindowMs\": 0, \"state\": \"exhausted\"}}\u2029\"s\"\f\"s\"\r\n"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\r\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": 3.0, \"fullCapacityInMs\": -1, \"state\": \"\"}}\r{\"includedReviews\": {\"remaining\": \"3\", \"state\": \"available\"}}\u000b"
+  },
+  {
+    "stream": "\"s\"\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 2.5, \"fullCapacityInMs\": 2.5, \"state\": \"\"}}\u000b"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": \"3\", \"limit\": 10, \"rollingWindowMs\": -1, \"fullCapacityInMs\": 2.5, \"state\": \"\"}}\u2029{\"includedReviews\": {\"remaining\": true, \"rollingWindowMs\": false, \"state\": \"\"}}\u2028{\"includedReviews\": {\"limit\": 3.0}}\r\n"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": null, \"limit\": null, \"rollingWindowMs\": 3.0}}\u2029{\"includedReviews\": {\"remaining\": {}, \"limit\": false, \"fullCapacityInMs\": false, \"state\": null}}\r"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "\n"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": false, \"rollingWindowMs\": false, \"fullCapacityInMs\": []}}\u0085{\"includedReviews\": {\"limit\": null, \"rollingWindowMs\": \"3\", \"fullCapacityInMs\": false, \"state\": 5}}\r"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": 0, \"fullCapacityInMs\": true}}\r\n{\"includedReviews\": {\"remaining\": 0}}\u0085\u000b\"s\"\u001d"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": -1}}\u000bnot json\r\n7\n{\"includedReviews\": {\"remaining\": null, \"limit\": 2.5, \"rollingWindowMs\": 0}}\u001c"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3, \"limit\": 1180591620717411303424, \"fullCapacityInMs\": -1}}\u001c"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"limit\": [], \"rollingWindowMs\": -1, \"fullCapacityInMs\": 10, \"state\": \"exhausted\"}}\u001c7\u2028{\"includedReviews\": {\"limit\": [], \"rollingWindowMs\": 9007199254740993, \"fullCapacityInMs\": {}}}\u001c"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": false, \"limit\": -1, \"state\": \"exhausted\"}}\r[1,2]\u000b{\"includedReviews\": {\"remaining\": 0, \"limit\": null, \"rollingWindowMs\": 2.5, \"fullCapacityInMs\": true}}\r{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\n"
+  },
+  {
+    "stream": "{\"includedReviews\": null}\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"fullCapacityInMs\": null, \"state\": null}}\u001e{\"includedReviews\": {\"remaining\": 3, \"limit\": 3, \"rollingWindowMs\": 0, \"fullCapacityInMs\": 0}}\u001c{\"includedReviews\": {\"remaining\": 1e0}}\u2028"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 9007199254740993, \"limit\": \"3\", \"rollingWindowMs\": 2.5, \"fullCapacityInMs\": \"3\"}}\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": \"3\", \"limit\": false, \"fullCapacityInMs\": 10}}\u2029"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"fullCapacityInMs\": 3.0, \"state\": \"available\"}}\u2029{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": 2.5, \"fullCapacityInMs\": {}}}\u001d{\"includedReviews\": {\"remaining\": 10, \"limit\": 3, \"fullCapacityInMs\": null, \"state\": 5}}\f"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": NaN}\u2029"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 9007199254740993, \"limit\": [], \"rollingWindowMs\": false, \"fullCapacityInMs\": 1}}\u2029{\"includedReviews\": {\"remaining\": [], \"limit\": 3.0}}\u0085{\"includedReviews\": {\"remaining\": \"3\"}}\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": true, \"fullCapacityInMs\": 9007199254740993}}\f"
+  },
+  {
+    "stream": "7\f{\"includedReviews\": {\"remaining\": 1, \"limit\": 1180591620717411303424, \"rollingWindowMs\": {}, \"fullCapacityInMs\": 1}}\u000b{\"includedReviews\": {\"remaining\": 3.0}}\u001d"
+  },
+  {
+    "stream": "{\"includedReviews\": 4}\u001d"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"limit\": null, \"state\": \"\"}}\u001e{\"includedReviews\": NaN}\u001c{\"includedReviews\": {\"remaining\": \"3\", \"limit\": true, \"fullCapacityInMs\": 9007199254740993, \"state\": \"\"}}\u001e{\"includedReviews\": {\"remaining\": 1180591620717411303424, \"state\": \"available\"}}\u0085"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"limit\": 1}}\u000b"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 2.5, \"limit\": [], \"state\": 5}}\u000b{\"includedReviews\": {\"remaining\": {}, \"limit\": -1, \"fullCapacityInMs\": 0, \"state\": \"exhausted\"}}\u001d"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 3.0, \"fullCapacityInMs\": false, \"state\": null}}\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\u001e{\"includedReviews\": {\"remaining\": NaN}}\r{\"includedReviews\": {\"remaining\": 10, \"rollingWindowMs\": {}, \"fullCapacityInMs\": 3, \"state\": \"\"}}\u001e{\u001d"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1}}\u001e{\"includedReviews\": {\"remaining\": 1e0}}\f{\"includedReviews\": {\"fullCapacityInMs\": \"3\"}}\u001c{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"rollingWindowMs\": 9007199254740993, \"fullCapacityInMs\": null}}\u001e{\"includedReviews\": {\"remaining\": false, \"limit\": 0, \"fullCapacityInMs\": false, \"state\": \"available\"}}\u0085{\"includedReviews\": {\"remaining\": NaN}}\f"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"limit\": true, \"fullCapacityInMs\": null}}\u2028{\"includedReviews\": {\"remaining\": [], \"rollingWindowMs\": 9007199254740993}}\u2028{\"includedReviews\": {\"remaining\": 1e0}}\r"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": \"3\", \"state\": \"available\"}}\u000b{\"includedReviews\": {\"remaining\": 10, \"limit\": true, \"rollingWindowMs\": 3, \"fullCapacityInMs\": null, \"state\": false}}\u001d\"s\"\u2029{\"includedReviews\": {\"remaining\": 0, \"rollingWindowMs\": 3, \"fullCapacityInMs\": 0, \"state\": \"exhausted\"}}\u000b"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 10, \"limit\": 3.0, \"rollingWindowMs\": false}}"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": {}, \"limit\": null, \"rollingWindowMs\": {}}}\fnot json\f{\u001c{\"includedReviews\": {\"remaining\": 1, \"limit\": 1}}\u001e"
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": ""
+  },
+  {
+    "stream": "not json"
+  },
+  {
+    "stream": "{"
+  },
+  {
+    "stream": "[1,2]"
+  },
+  {
+    "stream": "null"
+  },
+  {
+    "stream": "\"s\""
+  },
+  {
+    "stream": "7"
+  },
+  {
+    "stream": "{\"includedReviews\": NaN}"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": NaN}}"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"remaining\": 2}}"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1e0}}"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": -0}}"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 1, \"limit\": 1}}"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 0, \"limit\": 0}}"
+  },
+  {
+    "stream": "{\"includedReviews\": {\"remaining\": 0, \"limit\": 0}}\n{\"includedReviews\": {\"remaining\": 2}}"
+  }
+]
