@@ -101,10 +101,11 @@ export function nextSlot(
   }
   const candidates = known.map((start) => start + window);
   const full = u.fullCapacityInMs;
-  if (truthy(full) && u.remaining === 0) {
+  // Python `remaining == 0`: False and 0.0 equal zero too.
+  if (truthy(full) && (u.remaining === 0 || (u.remaining as unknown) === false)) {
     candidates.push(at.epochMicros + millisToMicros(full, 'fullCapacityInMs'));
   }
-  const used = (u.limit ?? DEFAULT_LIMIT) - (u.remaining ?? 0);
+  const used = pythonOperand(u, 'limit', DEFAULT_LIMIT) - pythonOperand(u, 'remaining', 0);
   if (known.length === 0 || (usage !== null && usage !== undefined && used > known.length)) {
     // Unknown external starts, or local reservations that precede vendor
     // admission: full-capacity recovery cannot date the FIRST slot.
@@ -120,13 +121,37 @@ function pythonInt(value: JsonValue | undefined): bigint | null {
   return value instanceof JsonNumber && value.kind === 'int' ? value.integer : null;
 }
 
+/**
+ * `usage.get(key, fallback)` used as a subtraction operand: a missing key takes
+ * the fallback, an explicit null (or any non-number) raises TypeError, and a
+ * boolean is the integer it equals.
+ */
+function pythonOperand(usage: Partial<VendorUsage>, key: 'limit' | 'remaining', fallback: number) {
+  const value: unknown = usage[key];
+  if (value === undefined) return fallback;
+  if (typeof value === 'boolean') return value ? 1 : 0;
+  if (typeof value !== 'number') {
+    throw new UsageSlotsError(`unsupported operand for ${key}`, 'TypeError');
+  }
+  return value;
+}
+
 function millisToMicros(value: unknown, field: string): bigint {
-  if (typeof value !== 'number' || Number.isNaN(value)) {
+  const number = typeof value === 'boolean' ? Number(value) : value;
+  if (typeof number !== 'number' || Number.isNaN(number)) {
     throw new UsageSlotsError(`${field} is not a number`, 'TypeError');
   }
-  if (Number.isInteger(value)) return BigInt(value) * 1000n;
-  // `timedelta(milliseconds=...)` keeps microsecond resolution.
-  return BigInt(Math.round(value * 1000));
+  if (Number.isInteger(number)) return BigInt(number) * 1000n;
+  // `timedelta(milliseconds=...)` keeps microsecond resolution and rounds half to even.
+  return BigInt(roundHalfEven(number * 1000));
+}
+
+function roundHalfEven(value: number): number {
+  const floor = Math.floor(value);
+  const diff = value - floor;
+  if (diff < 0.5) return floor;
+  if (diff > 0.5) return floor + 1;
+  return floor % 2 === 0 ? floor : floor + 1;
 }
 
 function truthy(value: unknown): boolean {

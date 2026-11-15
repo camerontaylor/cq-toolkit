@@ -293,7 +293,11 @@ export function startsLastHour(queue: CrqRecord, nowMicros: bigint): number {
       if (error instanceof UtcParseError) throw new TickScheduleError(error.message);
       throw error;
     }
-    if (instant !== null && instant.epochMicros > cutoff) count += 1;
+    // Python compares `parse_iso(s) > cutoff` unguarded: a null or empty
+    // entry parses to None and the comparison raises TypeError.
+    if (instant === null)
+      throw new TickScheduleError("'>' not supported between NoneType and datetime");
+    if (instant.epochMicros > cutoff) count += 1;
   }
   return count;
 }

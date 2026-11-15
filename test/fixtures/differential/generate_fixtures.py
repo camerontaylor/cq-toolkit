@@ -92,6 +92,8 @@ def next_slot_cases(rng):
         {'starts': [at], 'at': at, 'usage': {'rollingWindowMs': '5'}},
         {'starts': [at], 'at': at, 'usage': {'rollingWindowMs': True}},
         {'starts': [at], 'at': at, 'usage': {'remaining': True, 'limit': 3}},
+        {'starts': [at], 'at': at, 'usage': {'remaining': True, 'limit': 2}},
+        {'starts': [at], 'at': at, 'usage': {'remaining': False, 'limit': 1, 'fullCapacityInMs': 9}},
         {'starts': [at], 'at': at, 'usage': {'remaining': 0, 'fullCapacityInMs': 2.0000005}},
         {'starts': [at], 'at': at, 'usage': {'rollingWindowMs': 0.0005}},
         {'starts': [at], 'at': at, 'usage': {'rollingWindowMs': 0.0015}},
