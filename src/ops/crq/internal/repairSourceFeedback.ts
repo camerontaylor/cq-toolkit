@@ -233,20 +233,25 @@ export async function publishRepairSourceFeedback(
     publication = latest;
   }
   const completed = [...publication.sourceResolutions];
+  let pending = false;
   for (const entry of input.jobs) {
     if (completed.includes(entry.id) || entry.sourcePr === undefined) continue;
     const marker = `<!-- crq-repair-source:${entry.id} -->`;
     if (!(await effects.hasSourceComment(entry.sourcePr, marker)))
       await effects.postSourceComment(entry.sourcePr, marker, input.merge);
     const thread = await effects.sourceThread(entry.job);
-    if (thread.kind === 'pending') return { kind: 'pending', publication };
+    if (thread.kind === 'pending') {
+      // Python (publish_source_resolution) keeps going: later jobs still resolve while this one retries.
+      pending = true;
+      continue;
+    }
     if (thread.kind === 'found' && !(await effects.resolveSourceThread(thread.id)))
       throw new Error('source thread resolution unconfirmed');
     completed.push(entry.id);
     publication = { ...publication, sourceResolutions: [...completed] };
     await effects.writeJournal(publication);
   }
-  return { kind: 'complete', publication, proof };
+  return pending ? { kind: 'pending', publication } : { kind: 'complete', publication, proof };
 }
 
 /** Persist an explicit revalidation only after two semantic observations of the same PR.
