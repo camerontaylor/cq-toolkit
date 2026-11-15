@@ -3,6 +3,7 @@ import { JsonObject, toPlainJson } from '../../../src/policy/crq/jsonValue.js';
 import { fromPlainJson } from '../../../src/policy/crq/queueDoc.js';
 import {
   reconcileFixRun,
+  SourcePublicationFailed,
   type ReconcileFixRunEffects,
 } from '../../../src/ops/crq/internal/reconcileFixRun.js';
 
@@ -136,5 +137,24 @@ describe('externally merged fix PR reconciliation', () => {
     expect(result.kind).toBe('error');
     expect(run(result.item).source_publication_error).toBe('changed before source feedback');
     expect(run(result.item).fix_merged).toBeUndefined();
+  });
+  test('a feedback failure after the publication latched keeps record.publication', async () => {
+    const { effects } = fixture();
+    effects.publishSource = async () => {
+      throw new SourcePublicationFailed('feedback failed', obj({ head: 'h' }));
+    };
+    const result = await reconcileFixRun(item(), 'r1', effects);
+    expect(result.kind).toBe('error');
+    expect(run(result.item).publication).toEqual({ head: 'h' });
+    expect(run(result.item).source_publication_error).toBe('feedback failed');
+    expect(run(result.item).fix_merged).toBeUndefined();
+  });
+  test('a plain pre-feedback failure keeps no publication', async () => {
+    const { effects } = fixture();
+    effects.publishSource = async () => {
+      throw new Error('canonical fixed finding changed before source feedback');
+    };
+    const result = await reconcileFixRun(item(), 'r1', effects);
+    expect(run(result.item).publication).toBeUndefined();
   });
 });

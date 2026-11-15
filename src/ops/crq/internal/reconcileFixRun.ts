@@ -42,6 +42,18 @@ export interface ReconcileFixRunEffects {
     merge: string,
   ): Promise<{ readonly pending: boolean; readonly publication?: JsonValue }>;
 }
+/** Thrown by `publishSource` when feedback fails after the journalled publication was
+ * latched: Python assigns `record['publication']` before `publish_source_resolution`,
+ * so the failed run keeps it. A failure of the earlier pre-feedback checks is a plain
+ * error and keeps nothing. */
+export class SourcePublicationFailed extends Error {
+  override readonly name = 'SourcePublicationFailed';
+  readonly publication: JsonValue;
+  constructor(message: string, publication: JsonValue) {
+    super(message);
+    this.publication = publication;
+  }
+}
 export type ReconcileFixRunResult =
   | { readonly kind: 'projected' | 'pending' | 'skipped' | 'closed'; readonly item: JsonObject }
   | { readonly kind: 'error'; readonly item: JsonObject; readonly error: unknown };
@@ -167,7 +179,11 @@ export async function reconcileFixRun(
   try {
     outcome = await effects.publishSource(record, info, merged, merge);
   } catch (error) {
-    return failed(error, record, current, true);
+    const kept =
+      error instanceof SourcePublicationFailed
+        ? withObjectKeys(record, [['publication', error.publication]])
+        : record;
+    return failed(error, kept, current, true);
   }
   record = withoutObjectKey(record, 'source_publication_error');
   if (outcome.publication !== undefined)
