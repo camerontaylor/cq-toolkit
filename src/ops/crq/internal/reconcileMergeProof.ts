@@ -70,7 +70,10 @@ function checkJournal(record: JsonObject, saved: JsonObject): void {
     if (!(Array.isArray(have) ? have : []).some((v) => pythonValueEqual(v, id)))
       throw new Error('publication resolutions contradict journal');
 }
-async function savedJournal(record: JsonObject, effects: MergeProofEffects): Promise<JsonObject> {
+export async function savedJournal(
+  record: JsonObject,
+  effects: MergeProofEffects,
+): Promise<JsonObject> {
   const saved = await effects.readSavedJournal(firstJob(record));
   if (saved === null) throw new Error('publication journal missing');
   checkJournal(record, saved);
@@ -78,7 +81,7 @@ async function savedJournal(record: JsonObject, effects: MergeProofEffects): Pro
 }
 
 /** `repair_tick.fixed_publication_evidence` for the merged PR `info`. */
-async function validateFixedEvidence(
+export async function validateFixedEvidence(
   context: MergeProofContext,
   record: JsonObject,
   info: JsonObject,
@@ -122,7 +125,7 @@ async function validateFixedEvidence(
   );
 }
 
-async function canonical(
+export async function canonicalProof(
   record: JsonObject,
   info: JsonObject,
   effects: MergeProofEffects,
@@ -156,9 +159,9 @@ export async function proveMerge(
   info: JsonObject,
   effects: MergeProofEffects,
 ): Promise<MergeProof> {
-  const projected = await canonical(record, info, effects);
+  const projected = await canonicalProof(record, info, effects);
   if (projected !== null) {
-    const again = await canonical(record, info, effects);
+    const again = await canonicalProof(record, info, effects);
     if (again === null || !ledgerValueEqual(projected, again))
       throw new Error('canonical fixed finding changed before source feedback');
     return { proof: projected, projected: true };
