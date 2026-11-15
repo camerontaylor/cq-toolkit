@@ -454,7 +454,7 @@ export function pythonStr(value: JsonValue): string {
     .join(', ')}}`;
 }
 
-function pythonRepr(value: JsonValue): string {
+export function pythonRepr(value: JsonValue): string {
   return typeof value === 'string' ? pythonReprString(value) : pythonStr(value);
 }
 
@@ -1104,7 +1104,7 @@ function result(overrides: Partial<DeliverResult> = {}): DeliverResult {
   };
 }
 
-function callGh(gh: GhPort, argv: readonly string[], inputText: string | null): GhResult {
+export function callGh(gh: GhPort, argv: readonly string[], inputText: string | null): GhResult {
   try {
     return gh(argv, { inputText });
   } catch (error) {
@@ -1136,7 +1136,7 @@ function rawReturncode(callResult: GhResult): number | boolean | null {
   return typeof raw === 'number' || typeof raw === 'boolean' ? raw : null;
 }
 
-function okGh(argv: readonly string[], callResult: GhResult): GhResult {
+export function okGh(argv: readonly string[], callResult: GhResult): GhResult {
   const returncode = rawReturncode(callResult);
   if (returncode === null || (returncode !== 0 && returncode !== false)) {
     const stderr = pythonSlice(pythonStrip(ghString(callResult.stderr)), 0, 300);
@@ -1147,7 +1147,7 @@ function okGh(argv: readonly string[], callResult: GhResult): GhResult {
   return callResult;
 }
 
-function ghString(value: JsonValue | undefined): string {
+export function ghString(value: JsonValue | undefined): string {
   if (value === undefined) return '';
   if (typeof value !== 'string') {
     throw new PrReviewAttributeError(
@@ -1158,7 +1158,7 @@ function ghString(value: JsonValue | undefined): string {
 }
 
 /** Python `json.loads` on stdout; '' or null becomes Python's `None`. */
-function parseGhJson(argv: readonly string[], callResult: GhResult): JsonValue {
+export function parseGhJson(argv: readonly string[], callResult: GhResult): JsonValue {
   const out = okGh(argv, callResult);
   const stdout = ghString(out.stdout);
   try {
@@ -1173,11 +1173,11 @@ function parseGhJson(argv: readonly string[], callResult: GhResult): JsonValue {
   }
 }
 
-interface PrState {
+export interface PrState {
   readonly [key: string]: JsonValue;
 }
 
-function prState(gh: GhPort, repo: string, pr: number): PrState {
+export function prState(gh: GhPort, repo: string, pr: number): PrState {
   const argv = [
     'gh',
     'api',
@@ -1201,7 +1201,7 @@ function prState(gh: GhPort, repo: string, pr: number): PrState {
   };
 }
 
-function authenticatedLogin(gh: GhPort): string {
+export function authenticatedLogin(gh: GhPort): string {
   const argv = ['gh', 'api', 'user', '--jq', '.login'];
   const login = pythonStrip(ghString(okGh(argv, callGh(gh, argv, null)).stdout));
   if (!isLogin(login)) {
