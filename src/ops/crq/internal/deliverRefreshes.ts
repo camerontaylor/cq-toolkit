@@ -12,13 +12,11 @@ import { pyTruthy, withObjectKeys } from '../../../policy/crq/queueDoc.js';
 import {
   PR_REVIEWS_PER_TICK,
   PR_REVIEW_MAX_ATTEMPTS,
+  DeliveryKeyTypeError,
   DeliveryRuntimeError,
   DeliveryValueError,
   ThreadsNotVisibleError,
 } from './deliverPending.js';
-
-/** Python `KeyError` or `TypeError` from a refresh: unlike `ValueError`, not caught. */
-export class DeliveryKeyTypeError extends DeliveryValueError {}
 
 export interface RefreshEffects {
   /** `crq_review_receipt.refresh(pr_review_findings, repo, pr, meta)`. */

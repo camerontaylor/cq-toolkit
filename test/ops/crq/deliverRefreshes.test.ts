@@ -6,12 +6,12 @@ import {
   type JsonValue,
 } from '../../../src/policy/crq/jsonValue.js';
 import {
+  DeliveryKeyTypeError,
   DeliveryRuntimeError,
   DeliveryValueError,
   ThreadsNotVisibleError,
 } from '../../../src/ops/crq/internal/deliverPending.js';
 import {
-  DeliveryKeyTypeError,
   deliverPendingReviewRefreshes,
   type RefreshEffects,
 } from '../../../src/ops/crq/internal/deliverRefreshes.js';
