@@ -1288,7 +1288,7 @@ function diffHunks(gh: GhPort, repo: string, base: string, head: string): HunkMa
   return hunks;
 }
 
-function postReview(
+export function postReview(
   gh: GhPort,
   repo: string,
   pr: number,
