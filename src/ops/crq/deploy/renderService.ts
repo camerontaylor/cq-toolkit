@@ -57,13 +57,13 @@ const decodeUtf8 = (data: Uint8Array): string => {
   }
 };
 /** `subprocess.run(text=True).stdout`: strict UTF-8, universal newlines. */
-const pyText = (data: Uint8Array): string => decodeUtf8(data).replace(/\r\n?/g, '\n');
+export const pyText = (data: Uint8Array): string => decodeUtf8(data).replace(/\r\n?/g, '\n');
 /** `git()`: text stdout without trailing newlines. */
-const gitText = async (fx: RenderServiceEffects, args: readonly string[]): Promise<string> =>
+export const gitText = async (fx: RenderServiceEffects, args: readonly string[]): Promise<string> =>
   pyText(await fx.git(args)).replace(/\n+$/, '');
 
 /** Python `str.splitlines()`. */
-function splitLines(text: string): string[] {
+export function splitLines(text: string): string[] {
   return splitLinesKeepEnds(text).map((line) => {
     if (line.endsWith('\r\n')) return line.slice(0, -2);
     const last = line.at(-1) ?? '';
@@ -137,7 +137,7 @@ export async function renderService(
 }
 
 /** `Path(source).name`: the last non-empty component. */
-const nameOf = (source: string): string =>
+export const nameOf = (source: string): string =>
   source
     .split('/')
     .filter((p) => p !== '' && p !== '.')
