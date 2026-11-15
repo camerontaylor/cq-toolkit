@@ -4,6 +4,7 @@ Regenerate: python3 test/fixtures/differential/generate_fixtures.py
 Deterministic (random.Random(seed)); the committed files are what the tests read.
 Follow with `pnpm fix test/fixtures/differential/*.json` (prettier layout).
 """
+import base64
 import json
 import random
 from pathlib import Path
@@ -203,6 +204,185 @@ def edit_queue_cases(rng):
     return cases
 
 
+HEAD = 'a' * 40
+BLOB = 'b' * 40
+
+
+def b64(raw):
+    return base64.b64encode(raw).decode()
+
+
+def jl(value):
+    return json.dumps(value, ensure_ascii=rng_ascii[0]).encode()
+
+
+rng_ascii = [True]
+
+
+def reviewed_file(rng, i):
+    name = rng.choice(['src/a.ts', 'src/b/c.ts', 'README.md', 'docs/x y.md', 'src/\u00e9.ts']) + str(i)
+    intervals = rng.choice([[[1, 3]], [[1, 3], [5, 9]], [[1, 1]], [], [[2, 400]]])
+    return {'path': name, 'blob': BLOB[:39] + str(i % 10), 'intervals': intervals}
+
+
+def valid_complete(rng):
+    return {'type': 'complete', 'status': 'review_completed', 'head': HEAD, 'outcome': 'completed',
+            'reviewedFiles': [reviewed_file(rng, i) for i in range(rng.randint(1, 4))]}
+
+
+def finding_event(rng, i):
+    event = {'type': 'finding', 'id': rng.choice([i, str(i), None]), 'severity': rng.choice(['info', 'major', 'minor']),
+             'fileName': 'src/a.ts', 'title': 't%d' % i, 'comment': 'c'}
+    for key in rng.sample(['startLine', 'endLine'], rng.randint(0, 2)):
+        event[key] = rng.choice([1, 5, 40, 1_000_000, 0, -3, 1_000_001, 2 ** 70, True, None, '7', 3.0])
+    if rng.random() < 0.3:
+        event['intervals'] = [[1, 2], [4, 4]]
+    return event
+
+
+def vendor_stream(rng):
+    events = [{'type': 'review_context', 'baseCommit': 'c' * 40}]
+    events += [finding_event(rng, i) for i in range(rng.randint(0, 3))]
+    events.append(valid_complete(rng))
+    return events
+
+
+def mutate_stream(rng, events):
+    """Return stream bytes with one structural fault injected."""
+    lines = [jl(e) for e in events]
+    kind = rng.randint(0, 17)
+    pos = rng.randint(0, len(lines))
+    faults = {
+        0: b'{"type":"a","type":"b"}',
+        1: b'{"type":"a","nested":{"k":1,"k":2}}',
+        2: b'{"type":"a","v":NaN}',
+        3: b'{"type":"a","v":Infinity}',
+        4: b'{"type":"a","v":-Infinity}',
+        5: b'{"type":"a","v":1e999}',
+        6: b'{"type":"a","v":1.5,"w":1E2,"x":-0.0,"y":123456789012345678901234567890}',
+        7: rng.choice([b'[1]', b'"x"', b'3', b'null', b'true']),
+        8: rng.choice([b'{"a":', b'{', b'not json', b'{"a":1,}', b'{"a" 1}']),
+        9: b'\xef\xbb\xbf' + jl(events[0]),
+        10: b'{"type":"a","v":"\xff\xfe"}',
+        11: '{"type":"u"}'.encode('utf-16'),
+        12: b'{"type":"a","v":"\\ud800"}',
+        13: b'{"type":"a","v":"\\ud83d\\ude00 \\u00e9"}',
+        14: rng.choice([b'  ', b'\t', b'\r', b'\x0b', b'\x0c', b' \x0b\x0c ', b'\xa0']),
+        15: '{"type":"a","v":"caf\u00e9 \U0001f600"}'.encode('utf-8'),
+        16: b'{"type":"a","v":"\xed\xa0\x80"}',
+        17: '{"type":"u"}'.encode('utf-16-be'),
+    }
+    lines.insert(pos, faults[kind])
+    sep = rng.choice([b'\n', b'\n', b'\r\n', b'\n\n'])
+    raw = sep.join(lines)
+    if rng.random() < 0.5:
+        raw += b'\n'
+    return raw
+
+
+def vendor_events_cases(rng):
+    cases = []
+    for _ in range(420):
+        events = vendor_stream(rng)
+        if rng.random() < 0.5:
+            raw = b'\n'.join(jl(e) for e in events) + rng.choice([b'', b'\n', b'\n  \n'])
+        else:
+            raw = mutate_stream(rng, events)
+        cases.append({'raw_b64': b64(raw)})
+    cases += [{'raw_b64': b64(b'')}, {'raw_b64': b64(b'\n\n')}, {'raw_b64': b64(b'{}')}]
+    return cases
+
+
+def finding_interval_cases(rng):
+    anchors = [1, 2, 7, 1_000_000, 1_000_001, 0, -1, 2 ** 70, True, False, None, '3', 3.0, [], {}]
+    cases = []
+    for _ in range(420):
+        value = {'type': 'finding'}
+        mode = rng.random()
+        if mode < 0.45:
+            for key in rng.sample(['startLine', 'endLine'], rng.randint(0, 2)):
+                value[key] = rng.choice(anchors[:8] if rng.random() < 0.6 else anchors)
+        else:
+            def pair():
+                kind = rng.random()
+                if kind < 0.6:
+                    a = rng.choice([1, 2, 5, 10, 999_999])
+                    return [a, a + rng.choice([0, 0, 1, 5, 100])]
+                return rng.choice([[1], [1, 2, 3], 'ab', [True, 2], [1.0, 2], [[1, 2]], [5, 2], [0, 3],
+                                   [1, 1_000_001], [1, 2 ** 70], None, {'a': 1, 'b': 2}, [], 7, [None, 1]])
+            if rng.random() < 0.8:
+                value['intervals'] = [pair() for _ in range(rng.randint(0, 4))]
+            else:
+                value['intervals'] = rng.choice(['', 'ab', 'abc', {}, {'a': 1, 'b': 2}, 0, 5, True, False,
+                                                 None, 1.5, [[]], [[1, 2], 'xy']])
+            if rng.random() < 0.3:
+                value['startLine'] = rng.choice(anchors)
+        cases.append({'value': value})
+    cases.append({'value': {}})
+    cases.append({'value': {'intervals': [[1, 1_000_000]]}})
+    return cases
+
+
+def terminal_scope_cases(rng):
+    cases = []
+    for _ in range(420):
+        events = [{'type': 'review_context', 'baseCommit': 'c' * 40}]
+        events += [finding_event(rng, i) for i in range(rng.randint(0, 2))]
+        complete = valid_complete(rng)
+        head = HEAD
+        roll = rng.random()
+        if roll >= 0.5:
+            fault = rng.randint(0, 17)
+            files = complete['reviewedFiles']
+            if fault == 0:
+                complete['head'] = rng.choice(['d' * 40, None, 5, ''])
+            elif fault == 1:
+                head = 'e' * 40
+            elif fault == 2:
+                complete['status'] = rng.choice(['skipped', 'review_failed', None, 3])
+            elif fault == 3:
+                complete['type'] = rng.choice(['done', 'finding', None])
+            elif fault == 4:
+                complete['reviewedFiles'] = rng.choice([[], None, {}, 'x', 5, ['a.ts'], [None], [[]]])
+            elif fault == 5:
+                del files[0]['intervals']
+            elif fault == 6:
+                files[0]['extra'] = 1
+            elif fault == 7:
+                files[0]['path'] = rng.choice(['../x', '/abs/x', '', 'a\\b', 'a//b', '.', 'a/./b', 'a\u0000b', 5, None, 'a/..'])
+            elif fault == 8:
+                files.append(dict(files[0]))
+            elif fault == 9:
+                files[0]['intervals'] = rng.choice([[[0, 3]], [[3, 1]], [[1.0, 2]], 'x', None, [[1]], [[1, 2], [2, 3]],
+                                                    [[True, 2]], [[1, 2 ** 70]], [[1, 1_000_001]], {}, [[1, 2], [1, 2]]])
+            elif fault == 10:
+                files[0]['blob'] = rng.choice([None, 5, '', ['x'], {'a': 1}, 1.5])
+            elif fault == 11:
+                events.insert(rng.randint(0, len(events)), {'type': rng.choice(['error', 'action_required'])})
+            elif fault == 12:
+                events.append({'type': 'finding', 'id': 1})
+            elif fault == 13:
+                events = []
+                complete = None
+            elif fault == 14:
+                files[0]['intervals'] = [[1, 3.5]]
+            elif fault == 15:
+                files[0]['blob'] = 'x' * 3
+                files.append({'path': files[0]['path'], 'blob': 'y', 'intervals': []})
+            elif fault == 16:
+                files[0]['path'] = 'src/\u00e9\U0001f600.ts'
+            else:
+                complete['head'] = 5
+        if complete is not None:
+            events.append(complete)
+        sep = rng.choice([b'\n', b'\n', b'\r\n'])
+        raw = sep.join(jl(e) for e in events) + rng.choice([b'', b'\n'])
+        if roll >= 0.93:
+            raw = mutate_stream(rng, events or [{'type': 'x'}])
+        cases.append({'raw_b64': b64(raw), 'head': head})
+    return cases
+
+
 def write(name, cases):
     (HERE / name).write_text(json.dumps(cases, indent=1, ensure_ascii=True) + '\n')
 
@@ -211,3 +391,6 @@ write('parse_usage.json', parse_usage_cases(random.Random(1)))
 write('next_slot.json', next_slot_cases(random.Random(2)))
 write('starts_last_hour.json', starts_cases(random.Random(3)))
 write('edit_queue.json', edit_queue_cases(random.Random(4)))
+write('vendor_events.json', vendor_events_cases(random.Random(5)))
+write('finding_intervals.json', finding_interval_cases(random.Random(6)))
+write('terminal_scope.json', terminal_scope_cases(random.Random(7)))
