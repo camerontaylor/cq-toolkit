@@ -28,6 +28,16 @@ export interface ReviewLaunchEffects {
   event(kind: 'spawn_failed' | 'review_started', data: JsonObject): Promise<void>;
   nowIso(): string;
 }
+/** Python's `text[:n]` counts code points; a UTF-16 `slice` would cut astral characters short. */
+function pythonPrefix(text: string, count: number): string {
+  let end = 0;
+  let seen = 0;
+  while (end < text.length && seen < count) {
+    end += (text.codePointAt(end) as number) > 0xffff ? 2 : 1;
+    seen += 1;
+  }
+  return text.slice(0, end);
+}
 function itemAt(queue: JsonObject, index: number): { items: JsonValue[]; item: JsonObject } {
   const items = queue.get('items');
   if (
@@ -113,7 +123,7 @@ export async function reserveAndSpawnReview(
   } catch (error) {
     if (!(error instanceof ReviewSpawnError) || (kind !== 'author' && kind !== 'local-review'))
       throw error;
-    const message = error.message.slice(0, 200);
+    const message = pythonPrefix(error.message, 200);
     run = new JsonObject([
       ['run_id', input.runId],
       ['pid', null],
@@ -126,7 +136,7 @@ export async function reserveAndSpawnReview(
     current = withObjectKeys(current, [
       ['run', run],
       ['state', kind === 'author' ? 'author_failed' : 'failed'],
-      ['last_error', `${kind} spawn failed (no retry): ${error.message}`.slice(0, 300)],
+      ['last_error', pythonPrefix(`${kind} spawn failed (no retry): ${error.message}`, 300)],
     ]);
     next = replace(next, input.itemIndex, current);
     await effects.event(
