@@ -24,7 +24,7 @@ export const UNIT_COMMANDS: Readonly<Record<string, string>> = Object.freeze({
 const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
 
 /** `PurePosixPath(value)`'s string: '' and '.' components dropped, exactly two leading slashes kept. */
-function posixStr(value: string): string {
+export function posixStr(value: string): string {
   const parts = value.split('/').filter((p) => p !== '' && p !== '.');
   const lead =
     value.startsWith('//') && !value.startsWith('///') ? '//' : value.startsWith('/') ? '/' : '';
@@ -40,7 +40,7 @@ function suffix(name: string): string {
 }
 
 /** `host_path`: no systemd specifiers, whitespace, shell syntax or traversal. Returns `str(Path(value))`. */
-function hostPath(value: string): string {
+export function hostPath(value: string): string {
   if (!/^\/[A-Za-z0-9_./-]+$/s.test(value))
     throw new ValueError('host paths must be absolute, without whitespace or specifiers');
   if (value.split('/').includes('..')) throw new ValueError('parent traversal is not a host path');
@@ -82,7 +82,7 @@ const LINE_BREAKS: ReadonlySet<string> = new Set([
 ]);
 
 /** Python `str.splitlines(keepends=True)`: every Unicode line boundary. */
-function splitLinesKeepEnds(text: string): string[] {
+export function splitLinesKeepEnds(text: string): string[] {
   const out: string[] = [];
   let start = 0;
   for (let i = 0; i < text.length; i++) {
