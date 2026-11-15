@@ -21,6 +21,8 @@ export const PR_REVIEW_MAX_ATTEMPTS = 5;
 export class ThreadsNotVisibleError extends Error {}
 /** Python `ValueError`, `KeyError` or `TypeError` from a delivery: permanent. */
 export class DeliveryValueError extends Error {}
+/** Python `KeyError` or `TypeError` from a delivery. Callers that catch only `ValueError` let it propagate. */
+export class DeliveryKeyTypeError extends DeliveryValueError {}
 /** Python `RuntimeError` or `OSError` from a delivery: retried up to the attempt cap. */
 export class DeliveryRuntimeError extends Error {}
 
@@ -56,7 +58,7 @@ function subscriptError(request: JsonValue | undefined, key: string): string {
   return `'${name}' object is not subscriptable`;
 }
 
-function counter(item: JsonObject, key: string): bigint {
+export function counter(item: JsonObject, key: string): bigint {
   const value = item.get(key);
   if (value === undefined) return 0n;
   if (value instanceof JsonNumber && value.kind === 'int') return value.integer as bigint;
@@ -175,7 +177,7 @@ function pyOr(item: JsonObject, key: string): string {
   return pyTruthy(value) && typeof value === 'string' ? value : '';
 }
 
-function pyStr(value: JsonValue): string {
+export function pyStr(value: JsonValue): string {
   if (value === null) return 'None';
   if (typeof value === 'string') return value;
   if (typeof value === 'boolean') return value ? 'True' : 'False';
