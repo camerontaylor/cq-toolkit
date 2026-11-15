@@ -11,6 +11,7 @@ import { switchCheckout } from '../../../../src/ops/crq/deploy/deployOps.js';
 import { FailStop as UnitFailStop } from '../../../../src/ops/crq/deploy/deployUnitSteps.js';
 import { Refused as GuardRefused } from '../../../../src/ops/crq/deploy/gitGuards.js';
 import {
+  Interrupted,
   FailStop,
   RecoveryRequired,
   Refused,
@@ -281,6 +282,20 @@ describe('binding: failures reach the right terminal state', () => {
     expect(String(result['reason'])).toContain('health check failed: boom');
     expect(w.events.filter((e) => e.startsWith('switch'))).toEqual(['switch:b', 'switch:a']);
     expect(w.head).toBe(PRIOR);
+    expect(w.events.at(-1)).toBe('lock.release');
+  });
+
+  test('an interrupt during the health window rolls back and re-raises the interrupt', async () => {
+    const w = fresh();
+    switchTo(w);
+    const { bound, deps } = build(w);
+    const interrupt = new Interrupted('^C');
+    deps.controller!.twoSlotHealth = async () => {
+      throw interrupt;
+    };
+    await expect(bound.run()).rejects.toBe(interrupt);
+    expect(w.events.filter((e) => e.startsWith('switch'))).toEqual(['switch:b', 'switch:a']);
+    expect(w.writes.some((x) => x.value['reason'] === 'interrupted by the operator')).toBe(true);
     expect(w.events.at(-1)).toBe('lock.release');
   });
 

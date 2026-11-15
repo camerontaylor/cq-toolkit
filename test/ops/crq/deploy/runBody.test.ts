@@ -1,12 +1,9 @@
 import { describe, expect, test } from 'vitest';
 import {
   HealthFailed,
-  Interrupted,
-  RecoveryRequired,
   Refused,
   newRunBodyState,
   runBody,
-  runWithRecovery,
   type Health,
   type RunBodyArgs,
   type RunBodySteps,
@@ -184,14 +181,10 @@ describe('runBody phase order', () => {
     expect(state.finalTriggers).toEqual(f.states);
   });
 
-  test('runBody alone never releases the lock; the wrapper does exactly once', async () => {
+  test('runBody never releases the lock; RunRecovery.run does', async () => {
     const f = fixture();
     await runBody(f.args, f.steps, newRunBodyState());
     expect(f.log).not.toContain('lock.release');
-    const g = fixture();
-    await runWithRecovery(g.args, g.steps, newRunBodyState());
-    expect(g.log.filter((l) => l === 'lock.release')).toEqual(['lock.release']);
-    expect(g.log.at(-1)).toBe('lock.release');
   });
 });
 
@@ -385,37 +378,16 @@ describe('per-phase throws table', () => {
     for (const name of STEP_NAMES) expect(HAPPY).toContain(name);
   });
 
-  test.each(STEP_NAMES)('%s throwing reaches recovery then releases the lock', async (name) => {
+  test.each(STEP_NAMES)('%s throwing stops the body there and leaves the lock', async (name) => {
     const f = fixture();
-    f.fail.set(name, new Error('boom'));
-    const state = newRunBodyState();
-    expect(await runWithRecovery(f.args, f.steps, state)).toEqual({
-      outcome: 'rolled_back',
-      reason: 'boom',
-    });
-    const at = f.log.indexOf(name);
-    // Nothing past the throwing step ran, except recovery and the lock release.
-    expect(f.log.slice(at + 1)).toEqual(['recover:Error:boom', 'lock.release']);
+    const boom = new Error('boom');
+    f.fail.set(name, boom);
+    await expect(runBody(f.args, f.steps, newRunBodyState())).rejects.toBe(boom);
+    // Nothing past the throwing step ran; releasing the lock belongs to RunRecovery.run.
+    expect(f.log.slice(f.log.indexOf(name) + 1)).toEqual([]);
   });
 
-  test.each(STEP_NAMES)(
-    '%s throwing is a Refused when recovery does not roll back',
-    async (name) => {
-      const f = fixture();
-      f.outcome.value = 'fail_stopped';
-      const cause = new TypeError('bad');
-      f.fail.set(name, cause);
-      const error = await runWithRecovery(f.args, f.steps, newRunBodyState()).catch(
-        (e: unknown) => e,
-      );
-      expect(error).toBeInstanceOf(Refused);
-      expect((error as Refused).message).toBe('bad');
-      expect((error as Refused).cause).toBe(cause);
-      expect(f.log.slice(-2)).toEqual(['recover:TypeError:bad', 'lock.release']);
-    },
-  );
-
-  test('state at recovery time reflects how far the run got', async () => {
+  test('state when a step throws reflects how far the run got', async () => {
     for (const [name, expected] of [
       ['hold.acquire', { attempted: false, switched: false, released: false }],
       ['switch', { attempted: true, switched: false, released: false }],
@@ -425,111 +397,13 @@ describe('per-phase throws table', () => {
       const f = fixture();
       f.fail.set(name, new Error('x'));
       const state = newRunBodyState();
-      let seen: unknown;
-      const recover = f.steps.recover;
-      f.steps.recover = async (exc) => {
-        seen = {
-          attempted: state.switchAttempted,
-          switched: state.switched,
-          released: state.released,
-        };
-        return recover(exc);
+      await runBody(f.args, f.steps, state).catch(() => undefined);
+      const seen = {
+        attempted: state.switchAttempted,
+        switched: state.switched,
+        released: state.released,
       };
-      await runWithRecovery(f.args, f.steps, state);
       expect(seen).toEqual(expected);
     }
-  });
-});
-
-describe('exception routing', () => {
-  test('HealthFailed recovers then returns rolled_back regardless of the outcome', async () => {
-    const f = fixture();
-    f.health.value = { healthy: false, reason: 'r' };
-    f.outcome.value = 'fail_stopped';
-    expect(await runWithRecovery(f.args, f.steps, newRunBodyState())).toEqual({
-      outcome: 'rolled_back',
-      reason: 'health check failed: r',
-    });
-    expect(f.log.slice(-2)).toEqual([
-      'recover:HealthFailed:health check failed: r',
-      'lock.release',
-    ]);
-  });
-
-  test('Refused with a non-rolled-back outcome is rethrown as Refused', async () => {
-    const f = fixture();
-    f.outcome.value = 'x';
-    f.fail.set('assertClean', new Refused('dirty'));
-    await expect(runWithRecovery(f.args, f.steps, newRunBodyState())).rejects.toThrow('dirty');
-  });
-
-  test('RecoveryRequired is routed like a Refused', async () => {
-    const f = fixture();
-    f.fail.set('drainQueue', new RecoveryRequired('stuck'));
-    expect(await runWithRecovery(f.args, f.steps, newRunBodyState())).toEqual({
-      outcome: 'rolled_back',
-      reason: 'stuck',
-    });
-  });
-
-  test('Interrupted recovers with a fresh Refused and re-throws the interrupt', async () => {
-    const f = fixture();
-    const interrupt = new Interrupted('^C');
-    f.fail.set('checkHealth', interrupt);
-    const error = await runWithRecovery(f.args, f.steps, newRunBodyState()).catch(
-      (e: unknown) => e,
-    );
-    expect(error).toBe(interrupt);
-    expect(f.log.slice(-2)).toEqual([
-      'recover:Refused:interrupted by the operator',
-      'lock.release',
-    ]);
-  });
-
-  test('Interrupted discards the recovery outcome even when it rolled back', async () => {
-    const f = fixture();
-    f.fail.set('checkHealth', new Interrupted('^C'));
-    f.outcome.value = 'rolled_back';
-    await expect(runWithRecovery(f.args, f.steps, newRunBodyState())).rejects.toBeInstanceOf(
-      Interrupted,
-    );
-  });
-
-  test('the rolled_back reason is clipped to 400 code points', async () => {
-    const f = fixture();
-    f.fail.set('assertClean', new Error('é'.repeat(500) + '😀'));
-    const doc = (await runWithRecovery(f.args, f.steps, newRunBodyState())) as {
-      reason: string;
-    };
-    expect(Array.from(doc.reason)).toHaveLength(400);
-    const g = fixture();
-    g.health.value = { healthy: false, reason: 'r'.repeat(600) };
-    const hd = (await runWithRecovery(g.args, g.steps, newRunBodyState())) as { reason: string };
-    expect(Array.from(hd.reason)).toHaveLength(400);
-  });
-
-  test('a recovery that throws still releases the lock and surfaces its error', async () => {
-    const f = fixture();
-    f.fail.set('assertClean', new Error('first'));
-    f.fail.set('recover', new RecoveryRequired('cannot recover'));
-    await expect(runWithRecovery(f.args, f.steps, newRunBodyState())).rejects.toThrow(
-      'cannot recover',
-    );
-    expect(f.log.at(-1)).toBe('lock.release');
-  });
-
-  test('a lock release failure on success surfaces after the body completes', async () => {
-    const f = fixture();
-    f.fail.set('lock.release', new Error('unlock'));
-    await expect(runWithRecovery(f.args, f.steps, newRunBodyState())).rejects.toThrow('unlock');
-    expect(f.log).toContain('complete');
-  });
-
-  test('success never calls recover', async () => {
-    const f = fixture();
-    expect(await runWithRecovery(f.args, f.steps, newRunBodyState())).toMatchObject({
-      outcome: 'completed',
-    });
-    expect(f.log.some((l) => l.startsWith('recover'))).toBe(false);
   });
 });
