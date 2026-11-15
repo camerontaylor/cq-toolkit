@@ -7,11 +7,13 @@ No network, forge or filesystem access: only pure functions are exposed.
 """
 import base64
 import datetime as dt
+import hashlib
 import json
 import sys
 
 sys.path.insert(0, sys.argv[1])
 import backfill_history  # noqa: E402
+import backfill_runtime  # noqa: E402
 import crq  # noqa: E402
 import usage_slots  # noqa: E402
 
@@ -73,7 +75,54 @@ def terminal_scope(case):
     return ordered(backfill_history.terminal_scope(base64.b64decode(case['raw_b64']), case['head']))
 
 
-OPS = {'vendor_events': vendor_events, 'finding_intervals': finding_intervals, 'terminal_scope': terminal_scope, 'parse_usage': parse_usage, 'next_slot': next_slot, 'starts_last_hour': starts_last_hour}
+class FakeStore:
+    """Content store seam: the reference is the real `{"sha256", "location"}` shape."""
+
+    def put(self, data):
+        ident = hashlib.sha256(data).hexdigest()
+        return {'sha256': ident, 'location': '/store/sha256/' + ident}
+
+
+class FakeRepo:
+    """Repository seam built from a case's `repo` table (no git, no filesystem)."""
+
+    def __init__(self, spec):
+        self.spec = spec
+
+    def entries(self, rev):
+        table = self.spec['head_entries'] if rev == self.spec.get('head') else self.spec['target_entries']
+        return {name: {'blob': blob} for name, blob in table.items()}
+
+    def changed_intervals(self, base, head):
+        return {name: set(lines) for name, lines in self.spec['changed'].items()}
+
+    def git(self, *args):
+        assert args[:2] == ('diff', '--name-only')
+        return b''.join(name.encode('utf-8') + b'\0' for name in self.spec['paths'])
+
+    def retain(self, store, commits):
+        return {**store.put(b'bundle:' + ' '.join(sorted(set(commits))).encode()), 'kind': 'git-bundle'}
+
+    def verify_review(self, value):
+        return {}
+
+
+def submitted_scope(case):
+    return ordered(backfill_history.submitted_scope(FakeRepo(case['repo']), case['base'], case['head']))
+
+
+def adapted_terminal_scope(case):
+    return ordered(backfill_history.adapted_terminal_scope(
+        FakeRepo(case['repo']), base64.b64decode(case['raw_b64']), case['item'], case['meta'], case['proof']))
+
+
+def completion_event(case):
+    return ordered(backfill_runtime.completion_event(
+        FakeRepo(case['repo']), FakeStore(), case['item'], base64.b64decode(case['raw_b64']),
+        case['exit_code'], case['meta'], case['ended_at'], case['submission']))
+
+
+OPS = {'submitted_scope': submitted_scope, 'adapted_terminal_scope': adapted_terminal_scope, 'completion_event': completion_event, 'vendor_events': vendor_events, 'finding_intervals': finding_intervals, 'terminal_scope': terminal_scope, 'parse_usage': parse_usage, 'next_slot': next_slot, 'starts_last_hour': starts_last_hour}
 
 
 def main():
