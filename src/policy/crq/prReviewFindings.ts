@@ -30,6 +30,11 @@ export const MAX_BODY = 60000;
 
 const ZWJ = '‍';
 
+/** `crq_review_receipt.BLOCKING`: severities that make a receipt block. */
+export const BLOCKING: readonly string[] = ['major', 'critical', 'blocker', 'fatal'];
+/** `crq_review_receipt.INLINE_PREFIX`. */
+export const INLINE_PREFIX = '<!-- crq-review-inline-major ';
+
 // ----------------------------------------------------------- error classes
 
 /** Python `ValueError` from the delivery identity checks. */
@@ -61,6 +66,16 @@ export class PrReviewAttributeError extends Error {
 
   constructor(message: string) {
     super(message);
+  }
+}
+
+/** Python `KeyError` from `meta[key]`. */
+export class PrReviewKeyError extends Error {
+  override readonly name: string = 'PrReviewKeyError';
+  readonly pythonError = 'KeyError';
+
+  constructor(key: string) {
+    super(`'${key}'`);
   }
 }
 
@@ -622,6 +637,47 @@ export function rightRanges(patch: JsonValue): Array<HunkRange> {
   return ranges;
 }
 
+/** Python `str.splitlines()` line boundaries. */
+// eslint-disable-next-line no-control-regex
+const PY_LINE_BREAK = /\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/u;
+
+function pythonSplitLines(text: string): string[] {
+  if (text === '') return [];
+  const parts = text.split(PY_LINE_BREAK);
+  // A trailing terminator ends the last line; it does not open another.
+  if (parts[parts.length - 1] === '') parts.pop();
+  return parts;
+}
+
+/**
+ * `added_ranges`: the actually-added right-side lines, one range per `+` row,
+ * excluding context, header and deleted coordinates.
+ */
+export function addedRanges(patch: JsonValue): Array<HunkRange> {
+  if (patch === null) return [];
+  if (typeof patch !== 'string') {
+    throw new PrReviewAttributeError(
+      `'${ledgerPythonTypeName(patch)}' object has no attribute 'splitlines'`,
+    );
+  }
+  const ranges: Array<HunkRange> = [];
+  let lineNumber: number | null = null;
+  for (const line of pythonSplitLines(patch)) {
+    const header = line.startsWith('@@') ? parseHunkHeader(line, 0) : null;
+    if (header !== null) {
+      lineNumber = header[0];
+    } else if (lineNumber !== null) {
+      if (line.startsWith('+')) {
+        ranges.push({ lo: lineNumber, hi: lineNumber });
+        lineNumber += 1;
+      } else if (line.startsWith(' ')) {
+        lineNumber += 1;
+      }
+    }
+  }
+  return ranges;
+}
+
 /**
  * `^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@` at `at` (re.M: anchored to a
  * line start). `\d` is Unicode Nd.
@@ -964,10 +1020,40 @@ export function buildReview(
     readonly heading: string;
     readonly text: string;
   }> = [];
+  const receipt = pythonTruthy(meta.get('crq_receipt'));
+  const bindingLine = meta.get('receipt_binding');
+  const bound = pythonTruthy(bindingLine);
+  const inlineMajor: string[] = [];
+  const blocking = (finding: Finding): boolean =>
+    BLOCKING.includes(pythonStr(finding.severity).toLowerCase());
   for (const [offset, finding] of findings.entries()) {
     const number = offset + 1;
-    const position =
-      hunkMap !== null && comments.length < MAX_INLINE ? anchor(finding, hunkMap) : undefined;
+    let position =
+      hunkMap !== null && (receipt || comments.length < MAX_INLINE)
+        ? anchor(finding, hunkMap)
+        : undefined;
+    let intended = '';
+    if (receipt && hunkMap !== null) {
+      const populated = Object.entries(hunkMap).filter(([, ranges]) => ranges.length > 0);
+      if (populated.length > 0 && position === undefined) {
+        const own =
+          typeof finding.path === 'string' && Object.hasOwn(hunkMap, finding.path)
+            ? hunkMap[finding.path]
+            : undefined;
+        const [path, ranges] =
+          own !== undefined && own.length > 0
+            ? [finding.path as string, own]
+            : (populated[0] as [string, ReadonlyArray<HunkRange>]);
+        position = {
+          path,
+          line: jsonInt((ranges[0] as HunkRange).lo),
+          side: 'RIGHT',
+        };
+        intended = `\n\nThread anchor is a PR changed line, not the finding's intended location: ${codeSpan(
+          pythonTruthy(finding.path) ? finding.path : '(unspecified file)',
+        )} ${linesSuffix(finding)}.`;
+      }
+    }
     let heading = `**crq finding F${number} [${oneLine(finding.severity)}]**`;
     if (pythonTruthy(finding.title)) {
       heading += ` ${oneLine(finding.title)}`;
@@ -975,9 +1061,18 @@ export function buildReview(
     const text = cleanText(finding.text, finding.title);
     if (position) {
       const where = linesSuffix(finding);
-      const note = `
+      let note = `${intended}
 
 <sub>crq run \`${pythonStr(runId)}\`${where ? `, ${where}` : ''}</sub>`;
+      if (bound) {
+        const identity = sha256Hex(
+          new TextEncoder().encode(
+            pythonDumpsDefaultSortKeys(findingToJson(finding) as JsonObject),
+          ),
+        );
+        note += `\n<!-- crq-review-thread run=${pythonStr(runId)} head=${pythonStr(head)} finding=${identity} -->`;
+        if (blocking(finding)) inlineMajor.push(identity);
+      }
       const body =
         clip(
           `${heading}
@@ -1004,12 +1099,35 @@ ${text}`,
     : `crq findings (CodeRabbit CLI, local run ${pythonStr(runId)}, ${pythonPrefix(pythonStr(base))}..${pythonPrefix(pythonStr(head))})`;
   const label = oneLine(labelValue as JsonValue);
   const itemField = meta.has('item_id') ? meta.get('item_id') : '';
-  const lines = [
-    marker(pythonStr(runId)),
+  const lines = [marker(pythonStr(runId))];
+  if (bound) {
+    lines.push(pythonStr(bindingLine as JsonValue));
+    const bodyMajor = unanchored.some((entry) => blocking(entry.finding));
+    const scope = pythonTruthy(meta.get('whole_pr_scan')) ? 'whole-pr-success' : 'narrow-success';
+    lines.push(
+      `<!-- crq-review-scan run=${pythonStr(runId)} ${scope}${bodyMajor ? ' body-major=1' : ''} -->`,
+      `${INLINE_PREFIX}${pythonJsonText(
+        new JsonObject([
+          ['run_id', runId],
+          ['head', head],
+          ['findings', inlineMajor],
+        ]),
+        { asciiOnly: true, sortKeys: true, indent: null },
+      )} -->`,
+    );
+    const header = meta.get('receipt_header');
+    if (header === undefined) throw new PrReviewKeyError('receipt_header');
+    lines.push(pythonStr(header));
+    if (pythonTruthy(meta.get('unattested'))) {
+      lines.push('Unattested: App identity unavailable; posted with the host account.');
+    }
+    lines.push('Legacy body-only findings are not covered or claimed resolved by this receipt.');
+  }
+  lines.push(
     cleanText(meta.has('summary') ? (meta.get('summary') as JsonValue) : ''),
     `### ${label}`,
     '',
-    `${findings.length} finding(s) (${summary}): ${comments.length} as inline threads, ` +
+    `${findings.length === 0 && receipt ? '0 findings' : `${findings.length} finding(s)`} (${summary}): ${comments.length} as inline threads, ` +
       `${unanchored.length} listed below.`,
     '',
     `Queue item \`${pythonStr(itemField as JsonValue)}\`, reviewed range \`${pythonStr(base)}..${pythonStr(head)}\`. ` +
@@ -1017,7 +1135,7 @@ ${text}`,
         ? `${label}. Reply on a thread or resolve it after an explicit disposition.`
         : 'Posted by crq, the local review queue that runs the CodeRabbit CLI on this host. ' +
           'This is not a CodeRabbit PR review. Reply on a thread or resolve it once addressed.'),
-  ];
+  );
   if (unanchored.length > 0) {
     lines.push('', '#### Not anchored to the PR diff', '');
     for (const entry of unanchored) {
@@ -1260,7 +1378,13 @@ function existingReview(
   return undefined;
 }
 
-function diffHunks(gh: GhPort, repo: string, base: string, head: string): HunkMap {
+export function diffHunks(
+  gh: GhPort,
+  repo: string,
+  base: string,
+  head: string,
+  changedOnly = false,
+): HunkMap {
   const argv = [
     'gh',
     'api',
@@ -1280,8 +1404,10 @@ function diffHunks(gh: GhPort, repo: string, base: string, head: string): HunkMa
       const status = row.get('status');
       if (typeof filename !== 'string') continue;
       if (status === 'removed') continue;
-      const patch = row.has('patch') ? row.get('patch') : null;
-      const ranges = rightRanges(patch ?? null);
+      // Python `row.get("patch") or ""`: any falsy patch is an empty one.
+      const rawPatch = row.has('patch') ? (row.get('patch') as JsonValue) : null;
+      const patch = pythonTruthy(rawPatch) ? rawPatch : '';
+      const ranges = changedOnly ? addedRanges(patch) : rightRanges(patch);
       if (ranges.length > 0) hunks[filename] = ranges;
     }
   }
@@ -1543,9 +1669,25 @@ function findingToJson(finding: Finding): JsonValue {
  * text arrives already read with Python's `errors='replace'` semantics; the
  * pure module parses each line the way `json.loads` does.
  */
-export function loadFindings(text: string): Finding[] {
+const SEVERITY_RANK: Readonly<Record<string, number>> = {
+  fatal: 7,
+  blocker: 6,
+  critical: 5,
+  major: 4,
+  minor: 3,
+  trivial: 2,
+  info: 1,
+  none: 0,
+};
+
+const severityRank = (value: JsonValue): number => {
+  const key = pythonStr(value).toLowerCase();
+  return Object.hasOwn(SEVERITY_RANK, key) ? (SEVERITY_RANK[key] as number) : 0;
+};
+
+export function loadFindings(text: string, highestSeverity = false): Finding[] {
   const out: Finding[] = [];
-  const seen = new Set<string>();
+  const seen = new Map<string, number>();
   for (const line of text.split('\n')) {
     let event: JsonValue;
     try {
@@ -1623,8 +1765,19 @@ export function loadFindings(text: string): Finding[] {
       ]),
       { asciiOnly: true, sortKeys: true, indent: null },
     );
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const prior = seen.get(key);
+    if (prior !== undefined) {
+      // Receipts keep the highest severity of an exact duplicate.
+      const earlier = out[prior] as Finding;
+      if (
+        highestSeverity &&
+        severityRank(finding.severity as JsonValue) > severityRank(earlier.severity)
+      ) {
+        out[prior] = { ...earlier, severity: finding.severity as JsonValue };
+      }
+      continue;
+    }
+    seen.set(key, out.length);
     out.push(finding as unknown as Finding);
   }
   return out;
