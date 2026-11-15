@@ -5,11 +5,13 @@ Reads {"op": str, "cases": [...]} on stdin and writes one result per case:
 {"ok": true, "value": ...} or {"ok": false, "error": "<ExceptionType>"}.
 No network, forge or filesystem access: only pure functions are exposed.
 """
+import base64
 import datetime as dt
 import json
 import sys
 
 sys.path.insert(0, sys.argv[1])
+import backfill_history  # noqa: E402
 import crq  # noqa: E402
 import usage_slots  # noqa: E402
 
@@ -50,7 +52,28 @@ def starts_last_hour(case):
     return crq.starts_last_hour({'starts': case['starts']})
 
 
-OPS = {'parse_usage': parse_usage, 'next_slot': next_slot, 'starts_last_hour': starts_last_hour}
+def ordered(value):
+    """Dicts as {"$": [[key, value], ...]} so key order survives JSON object semantics."""
+    if isinstance(value, dict):
+        return {'$': [[k, ordered(v)] for k, v in value.items()]}
+    if isinstance(value, list):
+        return [ordered(v) for v in value]
+    return value
+
+
+def vendor_events(case):
+    return ordered(backfill_history.vendor_events(base64.b64decode(case['raw_b64'])))
+
+
+def finding_intervals(case):
+    return backfill_history.finding_intervals(case['value'])
+
+
+def terminal_scope(case):
+    return ordered(backfill_history.terminal_scope(base64.b64decode(case['raw_b64']), case['head']))
+
+
+OPS = {'vendor_events': vendor_events, 'finding_intervals': finding_intervals, 'terminal_scope': terminal_scope, 'parse_usage': parse_usage, 'next_slot': next_slot, 'starts_last_hour': starts_last_hour}
 
 
 def main():
