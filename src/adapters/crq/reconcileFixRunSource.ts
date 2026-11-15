@@ -32,16 +32,12 @@ import {
   type SourcePublishEffects,
   type SourceThread,
 } from '../../ops/crq/internal/reconcileSourceFeedback.js';
-import {
-  FindingInbox,
-  type FindingPublication,
-} from '../../ops/review/internal/crq/findingInbox.js';
+import { FindingInbox } from '../../ops/review/internal/crq/findingInbox.js';
 import { ghJson, ghNameOk, makeGhRunner, slurpedComments, type GhFn } from '../forge-github/gh.js';
 import { atomicWrite } from './atomic.js';
-import { fileArtifactStore, fileFindingInbox, fileFindingPublication } from './findingStore.js';
 import type { RunGit } from './ledgerGit.js';
 import { runGitIn } from './publishSource.js';
-import { parseBackfillRollout } from './repairPreparation.js';
+import { fileRepairHarvestEffects, findingLedgerRoots } from './repairHarvestSource.js';
 
 export type FixRunSeams = Pick<
   ReconcileFixRunEffects,
@@ -140,8 +136,8 @@ export function fileFixRunSeams(
   const gh = options.gh ?? makeGhRunner();
   const now = options.now ?? (() => new Date());
   const repairDir = join(options.stateRoot, 'repair');
-  const findingsRoot = join(options.stateRoot, 'backfill', 'findings');
-  const files = fileFindingInbox(findingsRoot);
+  const findingsRoot = findingLedgerRoots(options.stateRoot).findings;
+  const { files, publication } = fileRepairHarvestEffects(options.stateRoot);
   const journalDir = (first: string): string => join(repairDir, jobName(first));
 
   const readJob = async (id: string): Promise<JsonObject> => {
@@ -152,31 +148,6 @@ export function fileFixRunSeams(
     if (!(value instanceof JsonObject)) throw new Error('repair job is not an object');
     return value;
   };
-  /** `finding_inbox`: needs the durable artifact root from the rollout file, lazily. */
-  const publication: FindingPublication = {
-    async retained() {
-      return (await store()).retained();
-    },
-    async spool(value) {
-      return (await store()).spool(value);
-    },
-  };
-  async function store(): Promise<FindingPublication> {
-    let raw: string;
-    try {
-      raw = text.decode(await readFile(join(options.stateRoot, 'backfill-rollout.json')));
-    } catch (error) {
-      if (errorCode(error) !== 'ENOENT') throw error;
-      raw = '';
-    }
-    const rollout = parseBackfillRollout(raw);
-    if (!rollout.ok)
-      throw new Error('backfill repair write-back requires existing ledger configuration');
-    return fileFindingPublication({
-      root: join(options.stateRoot, 'backfill', 'publication'),
-      artifacts: fileArtifactStore(rollout.durableArtifactRoot),
-    });
-  }
   const readTriage = async (id: string): Promise<JsonObject | null> => {
     const bytes = await files.readTriage(id);
     if (bytes === null) return null;
