@@ -115,7 +115,8 @@ export interface RepairHarvestInput {
   /** The prepared job's pinned base commit. */
   readonly repairBase?: string;
   /** The merged/salvaged fix PR, when the caller has one. */
-  readonly fixPr?: number | null;
+  /** A PR number, or the PR url string that `reconcile_fix_prs` passes. */
+  readonly fixPr?: number | string | null;
   /**
    * The merged commit. Only a merged outcome may write `fixed`; an unmerged
    * FIXED artifact returns `fixed-requires-merge`.
@@ -275,7 +276,9 @@ export function planRepairHarvest(input: RepairHarvestInput): RepairHarvestPlan 
       'fix_pr',
       input.fixPr === undefined || input.fixPr === null
         ? null
-        : (JsonNumber.int(input.fixPr) as JsonValue),
+        : typeof input.fixPr === 'string'
+          ? input.fixPr
+          : (JsonNumber.int(input.fixPr) as JsonValue),
     ],
   ];
   if (input.repairBase !== undefined) evidenceEntries.push(['repair_base', input.repairBase]);
