@@ -1200,14 +1200,64 @@ export interface DeliverInput {
   readonly findings: readonly Finding[];
   readonly gh: GhPort;
   readonly login?: string | null;
+  /** The caller supplied its own gh (Python `gh is not None`); read by `receipt.selectIdentity`. */
+  readonly injected?: boolean;
+  /** Required exactly when `meta.crq_receipt` is truthy. */
+  readonly receipt?: ReceiptHooks;
 }
 
+/**
+ * The three receipt collaborators of `deliver`. They live in modules that import this one
+ * (`reviewIdentity`, `receiptEvidence`, `receiptPrepare`), so they arrive as hooks.
+ */
+export interface ReceiptHooks {
+  /** `select_receipt_identity` (the caller closes over `injected`, `authenticate` and the checkpoint). */
+  selectIdentity(
+    gh: GhPort,
+    repo: string,
+    meta: JsonObject,
+    login: string | null,
+  ): { readonly gh: GhPort; readonly login: string; readonly meta: JsonObject };
+  /** `crq_review_receipt.prior_receipt`: `{id, url, login, body}` or null. */
+  priorReceipt(
+    gh: GhPort,
+    repo: string,
+    pr: number,
+    meta: JsonObject,
+    login: string,
+  ): JsonObject | null;
+  /** `crq_review_receipt.prepare`: the full prepared meta, or null for no countable verdict. */
+  prepare(
+    gh: GhPort,
+    repo: string,
+    pr: number,
+    meta: JsonObject,
+    findings: readonly Finding[],
+    login: string,
+  ): JsonObject | null;
+}
+
+const RECEIPT_VERDICT =
+  /(?<![^\n])\*\*Independent review \(CodeRabbit CLI via crq\): (PASS|ITERATE) for `([0-9a-f]{40})`\*\*(?=\n|$)/;
+
 export interface DeliverResult {
-  readonly state: 'created' | 'existing' | 'skipped-closed' | 'skipped-empty' | 'skipped-head';
+  readonly state:
+    | 'created'
+    | 'existing'
+    | 'skipped-closed'
+    | 'skipped-empty'
+    | 'skipped-head'
+    | 'skipped-no-verdict';
   readonly review_id: JsonValue;
   readonly review_url: JsonValue;
   readonly inline: number;
   readonly body_only: number;
+  readonly identity?: JsonValue;
+  readonly attested?: boolean;
+  readonly identity_reason?: JsonValue;
+  readonly verdict?: JsonValue;
+  readonly whole_pr_scan?: JsonValue;
+  readonly body_major?: boolean;
 }
 
 function result(overrides: Partial<DeliverResult> = {}): DeliverResult {
@@ -1439,7 +1489,13 @@ export function postReview(
  * the driver; the pure module keeps only the Python ordering semantics).
  */
 export function deliver(input: DeliverInput): DeliverResult {
-  const { repo, pr, meta, findings, gh } = input;
+  const { repo, pr, findings } = input;
+  let { meta, gh } = input;
+  const flag = (key: string): boolean =>
+    pythonTruthy(meta.has(key) ? (meta.get(key) as JsonValue) : null);
+  const receiptMode = flag('crq_receipt');
+  const hooks = input.receipt;
+  if (receiptMode && hooks === undefined) throw new Error('receipt delivery needs receipt hooks');
   const runIdValue = meta.has('run_id') ? meta.get('run_id') : undefined;
   const headValue = meta.has('head') ? meta.get('head') : undefined;
   if (
@@ -1464,9 +1520,34 @@ export function deliver(input: DeliverInput): DeliverResult {
   if (
     findings.length === 0 &&
     !pythonTruthy(meta.has('summary') ? (meta.get('summary') as JsonValue) : null) &&
-    !pythonTruthy(meta.has('local_review') ? (meta.get('local_review') as JsonValue) : null)
+    !pythonTruthy(meta.has('local_review') ? (meta.get('local_review') as JsonValue) : null) &&
+    !receiptMode
   ) {
     return result({ state: 'skipped-empty' });
+  }
+  let login: string | null = loginInput ?? null;
+  if (receiptMode && hooks !== undefined) {
+    const selected = hooks.selectIdentity(gh, repo, meta, login);
+    gh = selected.gh;
+    login = selected.login;
+    meta = selected.meta;
+    const prior = hooks.priorReceipt(gh, repo, pr, meta, login);
+    if (prior !== null) {
+      const body = pythonStr(prior.get('body') ?? '');
+      const verdict = RECEIPT_VERDICT.exec(body);
+      return {
+        review_id: prior.get('id') as JsonValue,
+        review_url: prior.get('url') ?? null,
+        inline: 0,
+        body_only: 0,
+        state: 'existing',
+        identity: prior.get('login') ?? null,
+        attested: prior.get('login') === 'cq-review[bot]',
+        verdict: verdict === null ? null : (verdict[1] as string),
+        whole_pr_scan: body.includes(`<!-- crq-review-scan run=${runId} whole-pr-success`),
+        body_major: body.includes(' body-major=1 -->'),
+      } as DeliverResult;
+    }
   }
   const state = prState(gh, repo, pr);
   if (state.state !== 'open' || pythonTruthy(state.merged)) {
@@ -1480,11 +1561,17 @@ export function deliver(input: DeliverInput): DeliverResult {
   }
   if (
     findings.length === 0 &&
-    !pythonTruthy(meta.has('summary') ? (meta.get('summary') as JsonValue) : null)
+    !pythonTruthy(meta.has('summary') ? (meta.get('summary') as JsonValue) : null) &&
+    !receiptMode
   ) {
     return result({ state: 'skipped-empty' });
   }
-  const login = loginInput ?? authenticatedLogin(gh);
+  const postingLogin: string = login || authenticatedLogin(gh);
+  if (receiptMode && hooks !== undefined) {
+    const prepared = hooks.prepare(gh, repo, pr, meta, findings, postingLogin);
+    if (prepared === null) return result({ state: 'skipped-no-verdict' });
+    meta = prepared;
+  }
   let fingerprint: string | null = null;
   let wanted = '';
   if (!pythonTruthy(meta.has('summary') ? (meta.get('summary') as JsonValue) : null)) {
@@ -1500,7 +1587,7 @@ export function deliver(input: DeliverInput): DeliverResult {
       ),
     );
     wanted = `<!-- crq-local-findings head=${head} set=${fingerprint} -->`;
-    const jq = `.[] | select(.user.login == ${pythonJsonText(login, { asciiOnly: true, sortKeys: false, indent: null })} and ((.body // "") | contains(${pythonJsonText(wanted, { asciiOnly: true, sortKeys: false, indent: null })}))) | {id: .id, url: .html_url}`;
+    const jq = `.[] | select(.user.login == ${pythonJsonText(postingLogin, { asciiOnly: true, sortKeys: false, indent: null })} and ((.body // "") | contains(${pythonJsonText(wanted, { asciiOnly: true, sortKeys: false, indent: null })}))) | {id: .id, url: .html_url}`;
     const argv = [
       'gh',
       'api',
@@ -1522,7 +1609,7 @@ export function deliver(input: DeliverInput): DeliverResult {
         );
       }
       const id = row.get('id');
-      if (isPythonInt(id)) {
+      if (isPythonInt(id) && !receiptMode) {
         return {
           review_id: jsonInt(Number(id.integer)),
           review_url: row.has('url') ? (row.get('url') as JsonValue) : null,
@@ -1533,7 +1620,7 @@ export function deliver(input: DeliverInput): DeliverResult {
       }
     }
   }
-  const found = existingReview(gh, repo, pr, runId, login);
+  const found = receiptMode ? undefined : existingReview(gh, repo, pr, runId, postingLogin);
   if (found) {
     return {
       review_id: jsonInt(found.id),
@@ -1543,7 +1630,7 @@ export function deliver(input: DeliverInput): DeliverResult {
       state: 'existing',
     } as DeliverResult;
   }
-  const hunks = diffHunks(gh, repo, meta.get('base') as string, head);
+  const hunks = diffHunks(gh, repo, meta.get('base') as string, head, receiptMode);
   let review = buildReview(meta, findings, hunks);
   if (fingerprint) {
     const body = `${pythonStr(review.has('body') ? (review.get('body') as JsonValue) : null)}
@@ -1564,6 +1651,9 @@ ${wanted}`;
     stderr.includes('HTTP 422') &&
     ((review.get('comments') as JsonValue[]).length > 0 || review.has('commit_id'))
   ) {
+    if (receiptMode && prState(gh, repo, pr).head !== head) {
+      return result({ state: 'skipped-head' });
+    }
     const fallback = buildReview(meta, findings, null);
     review = fallback;
     if (fingerprint) {
@@ -1590,13 +1680,38 @@ ${wanted}`;
   } catch {
     parsed = new JsonObject([]);
   }
-  const reviewId =
-    parsed instanceof JsonObject && parsed.has('id') ? (parsed.get('id') as JsonValue) : null;
-  const reviewUrl =
-    parsed instanceof JsonObject && parsed.has('html_url')
-      ? (parsed.get('html_url') as JsonValue)
-      : null;
+  // Python calls `posted.get(...)` on whatever parsed, so a non-object body is an AttributeError.
+  if (!(parsed instanceof JsonObject)) {
+    throw new PrReviewAttributeError(
+      `'${ledgerPythonTypeName(parsed)}' object has no attribute 'get'`,
+    );
+  }
+  const reviewId = parsed.has('id') ? (parsed.get('id') as JsonValue) : null;
+  const reviewUrl = parsed.has('html_url') ? (parsed.get('html_url') as JsonValue) : null;
+  if (receiptMode && !isPythonInt(reviewId)) {
+    throw new PrReviewRuntimeError(
+      'receipt POST returned no review identity; reconcile before retry',
+    );
+  }
   const inline = (review.get('comments') as JsonValue[]).length;
+  const base: DeliverResult = {
+    state: 'created',
+    review_id: reviewId,
+    review_url: reviewUrl,
+    inline,
+    body_only: findings.length - inline,
+  };
+  if (receiptMode) {
+    return {
+      ...base,
+      identity: postingLogin,
+      attested: postingLogin === 'cq-review[bot]',
+      identity_reason: meta.get('identity_reason') ?? null,
+      verdict: meta.get('receipt_verdict') ?? null,
+      whole_pr_scan: meta.get('whole_pr_scan') ?? null,
+      body_major: pythonStr(review.get('body') ?? null).includes(' body-major=1 -->'),
+    };
+  }
   // Python builds the created result as a fresh dict: state comes FIRST here
   // (unlike the spread branches, where it lands last).
   return {
