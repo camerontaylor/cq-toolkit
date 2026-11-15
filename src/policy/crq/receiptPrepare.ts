@@ -11,6 +11,7 @@ import { classify } from './classification.js';
 import { JsonNumber, JsonObject, parseJsonValue, type JsonValue } from './jsonValue.js';
 import { ledgerPythonTypeName } from './ledger.js';
 import {
+  BLOCKING,
   PrReviewAttributeError,
   PrReviewRuntimeError,
   PrReviewValueError,
@@ -22,7 +23,6 @@ import {
   type GhPort,
 } from './prReviewFindings.js';
 import {
-  INLINE_PREFIX,
   PREFIX,
   ReceiptKeyError,
   binding,
@@ -36,9 +36,6 @@ import {
 import { pythonEqual } from './receiptIdentity.js';
 import { pythonStrip, pythonTruthy } from './repairBinding.js';
 
-void INLINE_PREFIX;
-
-const BLOCKING = ['major', 'critical', 'blocker', 'fatal'];
 const REFRESH = '<!-- crq-verdict-refresh ';
 const FULL_RANGE = 'full-range-once-v1';
 

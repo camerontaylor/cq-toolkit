@@ -11,6 +11,7 @@
 import { JsonNumber, JsonObject, parseJsonValue, type JsonValue } from './jsonValue.js';
 import { ledgerPythonTypeName } from './ledger.js';
 import {
+  INLINE_PREFIX,
   PrReviewAttributeError,
   PrReviewRuntimeError,
   PrReviewTypeError,
@@ -29,7 +30,6 @@ import { pythonJsonText } from './pythonJson.js';
 import { pythonStrip, pythonTruthy } from './repairBinding.js';
 
 export const PREFIX = '<!-- crq-review-output ';
-export const INLINE_PREFIX = '<!-- crq-review-inline-major ';
 const UNATTESTED = 'Unattested: App identity unavailable; posted with the host account.';
 const ASSOCIATIONS = ['OWNER', 'MEMBER', 'COLLABORATOR'];
 
