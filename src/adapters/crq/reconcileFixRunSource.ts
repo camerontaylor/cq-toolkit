@@ -48,6 +48,9 @@ export type FixRunSeams = Pick<
   'proveMerge' | 'recheckRevalidation' | 'markFixedOutcome' | 'publishSource'
 >;
 
+/** `CONFIG['repair'].get('max_finding_retries', 2)`. */
+export const DEFAULT_MAX_FINDING_RETRIES = 2;
+
 export interface FixRunSeamsOptions {
   readonly stateRoot: string;
   readonly clone: string;
@@ -248,7 +251,7 @@ export function fileFixRunSeams(
     files,
     publication,
     readJob,
-    maxFindingRetries: options.maxFindingRetries ?? (() => 2),
+    maxFindingRetries: options.maxFindingRetries ?? (() => DEFAULT_MAX_FINDING_RETRIES),
     now: () => `${now().toISOString().slice(0, 19)}Z`,
   };
 

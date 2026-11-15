@@ -2,7 +2,10 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { fileFixRunSeams } from '../../../src/adapters/crq/reconcileFixRunSource.js';
+import {
+  DEFAULT_MAX_FINDING_RETRIES,
+  fileFixRunSeams,
+} from '../../../src/adapters/crq/reconcileFixRunSource.js';
 import type { GhResult } from '../../../src/adapters/forge-github/gh.js';
 import { SourcePublicationFailed } from '../../../src/ops/crq/internal/reconcileFixRun.js';
 import { JsonObject, parseJsonValue } from '../../../src/policy/crq/jsonValue.js';
@@ -79,6 +82,10 @@ async function writeJournal(extra: unknown): Promise<void> {
 }
 
 describe('fileFixRunSeams', () => {
+  it('defaults the finding retry budget to the Python config default', () => {
+    expect(DEFAULT_MAX_FINDING_RETRIES).toBe(2);
+  });
+
   it('rejects an unsafe repo or job id', async () => {
     expect(() =>
       fileFixRunSeams({ stateRoot: root, clone: '/c', repo: '../x', prInfo: async () => obj({}) }),
