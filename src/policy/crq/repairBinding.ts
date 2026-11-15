@@ -91,7 +91,7 @@ function hasUnsafePathCharacter(value: string): boolean {
 }
 
 /** Python `str.isspace()` code points, which differ from JavaScript `trim`. */
-function pythonIsSpace(codePoint: number): boolean {
+export function pythonIsSpace(codePoint: number): boolean {
   return (
     (codePoint >= 0x09 && codePoint <= 0x0d) ||
     (codePoint >= 0x1c && codePoint <= 0x1f) ||
