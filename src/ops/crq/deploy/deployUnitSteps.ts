@@ -3,16 +3,8 @@
  * check are injected; nothing here runs systemctl, and nothing imports this module yet.
  */
 import { pythonJsonText, compareCodePoints } from '../../../policy/crq/pythonJson.js';
-
-export class Refused extends Error {
-  override readonly name: string = 'Refused';
-}
-/** A refusal that must keep the hold: recovery is an owner operation. */
-export class FailStop extends Refused {
-  override readonly name = 'FailStop';
-}
-
-export const DEAD_STATES: readonly string[] = ['inactive', 'failed'];
+import { Refused, FailStop, DEAD_STATES } from './errors.js';
+export { Refused, FailStop, DEAD_STATES };
 
 export interface UnitControl {
   stop(units: readonly string[]): Promise<void>;

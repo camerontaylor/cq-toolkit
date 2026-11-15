@@ -1,21 +1,11 @@
+import { Refused, OSError, ValueError } from './errors.js';
+export { Refused, OSError, ValueError };
 /** `read_queue`, `drain_check` and the tick-health functions from
  * `apps/crq-python/ops/deploy-controller.py`. The filesystem, the runner liveness
  * probe, the heartbeat reader and the receipt samplers are injected through
  * `DrainEffects` / `HealthEffects`; nothing here touches the disk, a process or
  * systemd, and nothing imports this module yet.
  */
-
-export class Refused extends Error {
-  override readonly name: string = 'Refused';
-}
-/** Python `ValueError` (includes `json.JSONDecodeError`): readJson failures to be refused. */
-export class ValueError extends Error {
-  override readonly name = 'ValueError';
-}
-/** Python `OSError`: an unreadable file; refused like `ValueError`. */
-export class OSError extends Error {
-  override readonly name = 'OSError';
-}
 
 export type Result = Record<string, unknown>;
 const isRecord = (v: unknown): v is Result =>

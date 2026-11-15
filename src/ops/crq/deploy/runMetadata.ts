@@ -7,11 +7,8 @@
  * here touches the filesystem; the caller supplies every read.
  */
 import { JsonObject, parseJsonValue } from '../../../policy/crq/jsonValue.js';
-
-/** Python `OSError`: what an injected read throws when the filesystem refuses. */
-export class OSError extends Error {
-  override name = 'OSError';
-}
+import { OSError } from './errors.js';
+export { OSError };
 
 /** `RECEIPT_SAMPLE`: how many of the newest entries are sampled. */
 export const RECEIPT_SAMPLE = 10;
