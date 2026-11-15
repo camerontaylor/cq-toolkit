@@ -272,7 +272,11 @@ export interface SwitchEffects extends GitEffects, RootCheckEffects, InactiveEff
     extra: ReadonlyArray<readonly [string, JsonValue]>,
   ): Promise<void>;
 }
-const renderAt = (effects: GitEffects, overlay: JsonObject, sha = 'HEAD'): Promise<Uint8Array> =>
+export const renderAt = (
+  effects: GitEffects,
+  overlay: JsonObject,
+  sha = 'HEAD',
+): Promise<Uint8Array> =>
   render(
     { gitShow: async (s, p) => pyText(await effects.git(['show', `${s}:${p}`])) },
     overlay,
