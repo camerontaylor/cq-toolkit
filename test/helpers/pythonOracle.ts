@@ -22,9 +22,13 @@ export function pythonAvailable(): boolean {
 }
 
 /** Run one pure Python function over every case in a single subprocess. */
-export function runOracle(op: string, cases: readonly unknown[]): OracleOutcome[] {
+export function runOracle(op: string, cases: readonly unknown[] | string): OracleOutcome[] {
   const run = spawnSync('python3', ['-I', DRIVER, CRQ_PYTHON], {
-    input: JSON.stringify({ op, cases }),
+    // A string is the cases' JSON text, passed through so int/float lexemes survive.
+    input:
+      typeof cases === 'string'
+        ? `{"op":${JSON.stringify(op)},"cases":${cases}}`
+        : JSON.stringify({ op, cases }),
     encoding: 'utf8',
     timeout: 60_000,
     maxBuffer: 64 * 1024 * 1024,

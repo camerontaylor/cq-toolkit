@@ -134,6 +134,75 @@ def starts_cases(rng):
     return cases
 
 
+def edit_queue_cases(rng):
+    """In-place queue edits: key order, int/float lexemes, unicode and Python's error types."""
+    keys = ['state', 'run', 'wait_reason', 'notes', 'last_error', 'band', 'pr', '10', 'zz', 'é', '\U0001f600']
+    scalars = [None, True, False, 0, 1, -7, 2 ** 70, 1.0, 2.5, 1e22, -0.0, '', 'a', 'é\u2028', '\U0001f600x']
+
+    def val(depth=0):
+        r = rng.random()
+        if depth > 1 or r < 0.55:
+            return rng.choice(scalars)
+        if r < 0.75:
+            return [val(depth + 1) for _ in range(rng.randint(0, 3))]
+        return {rng.choice(keys): val(depth + 1) for _ in range(rng.randint(0, 3))}
+
+    def item():
+        out = {'id': 'pr%d-open' % rng.randint(1, 99), 'kind': rng.choice(['open', 'delta', 'author'])}
+        for key in rng.sample(keys[:7], rng.randint(0, 5)):
+            out[key] = val()
+        return out
+
+    cases = []
+    for _ in range(450):
+        queue = {'items': [item() for _ in range(rng.randint(1, 3))]}
+        if rng.random() < 0.7:
+            queue['starts'] = rng.choice([[], ['2026-11-06T00:00:00Z'], None, 5])
+        for key in rng.sample(keys, rng.randint(0, 3)):
+            queue[key] = val()
+        if rng.random() < 0.5:
+            queue.setdefault('starts', [])
+        ops = []
+        for _ in range(rng.randint(1, 6)):
+            if rng.random() < 0.65:  # what start_one/launch actually do: edit a live item or starts
+                i = rng.randrange(len(queue['items']))
+                present = list(queue['items'][i])
+                pick = rng.choice(['set', 'setdefault', 'update', 'pop', 'delete', 'starts'])
+                if pick == 'starts':
+                    ops.append({'op': 'append', 'path': ['starts'], 'value': val()})
+                elif pick == 'update':
+                    ops.append({'op': 'update', 'path': ['items', i],
+                                'entries': [[k, val()] for k in rng.sample(keys, rng.randint(0, 3))]})
+                elif pick in ('set', 'setdefault'):
+                    ops.append({'op': pick, 'path': ['items', i], 'key': rng.choice(keys),
+                                'value': val()})
+                else:
+                    ops.append({'op': pick, 'path': ['items', i],
+                                'key': rng.choice(present or keys)})
+                continue
+            index = rng.choice([0, 0, 0, 1, 2, 5, -1, -4])
+            path = rng.choice([[], ['items'], ['items', index], ['items', index],
+                               ['items', index, rng.choice(keys)], ['starts'], [rng.choice(keys)]])
+            kind = rng.choice(['set', 'set', 'setdefault', 'append', 'update', 'delete', 'pop'])
+            op = {'op': kind, 'path': path}
+            if kind in ('set', 'setdefault'):
+                if kind == 'set' and path in (['items'], ['starts']):
+                    op['key'] = rng.choice([0, 1, 2, 5, -1, -9, 'state'])
+                else:  # an int key assigned on a dict is legal Python but never what crq does
+                    op['key'] = rng.choice(keys)
+                op['value'] = val()
+            elif kind == 'append':
+                op['value'] = val()
+            elif kind == 'update':
+                names = rng.sample(keys, rng.randint(0, 3))
+                op['entries'] = [[name, val()] for name in names]
+            else:
+                op['key'] = rng.choice(keys + [0, -1]) if kind == 'delete' else rng.choice(keys)
+            ops.append(op)
+        cases.append({'queue': queue, 'ops': ops})
+    return cases
+
+
 def write(name, cases):
     (HERE / name).write_text(json.dumps(cases, indent=1, ensure_ascii=True) + '\n')
 
@@ -141,3 +210,4 @@ def write(name, cases):
 write('parse_usage.json', parse_usage_cases(random.Random(1)))
 write('next_slot.json', next_slot_cases(random.Random(2)))
 write('starts_last_hour.json', starts_cases(random.Random(3)))
+write('edit_queue.json', edit_queue_cases(random.Random(4)))

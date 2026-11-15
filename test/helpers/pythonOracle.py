@@ -50,7 +50,43 @@ def starts_last_hour(case):
     return crq.starts_last_hour({'starts': case['starts']})
 
 
-OPS = {'parse_usage': parse_usage, 'next_slot': next_slot, 'starts_last_hour': starts_last_hour}
+def edit_queue(case):
+    """Replay in-place queue edits the way crq.launch/start_one make them; return the saved text."""
+    q = case['queue']
+
+    def target(path):
+        t = q
+        for step in path:
+            t = t[step]
+        return t
+
+    for op in case['ops']:
+        name = op['op']
+        t = target(op['path'])
+        if name == 'set':
+            t[op['key']] = op['value']
+        elif name == 'setdefault':
+            t.setdefault(op['key'], op['value'])
+        elif name == 'append':
+            t.append(op['value'])
+        elif name == 'update':
+            t.update(dict(op['entries']))
+        elif name == 'delete':
+            del t[op['key']]
+        elif name == 'pop':
+            t.pop(op['key'], None)
+        else:
+            raise ValueError(name)
+    return json.dumps(q, indent=2, ensure_ascii=True) + '\n'
+
+
+def spawn_failed_text(case):
+    """The two strings launch() builds for a failed author/local-review spawn (crq.py launch)."""
+    kind, exc = case['kind'], case['message']
+    return {'error': str(exc)[:200], 'last_error': f"{kind} spawn failed (no retry): {exc}"[:300]}
+
+
+OPS = {'edit_queue': edit_queue, 'spawn_failed_text': spawn_failed_text, 'parse_usage': parse_usage, 'next_slot': next_slot, 'starts_last_hour': starts_last_hour}
 
 
 def main():
