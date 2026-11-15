@@ -127,7 +127,7 @@ export async function deliverPendingCleanReviews(
       if (ndjson === undefined) throw new DeliveryValueError("'ndjson'");
       if (typeof ndjson !== 'string')
         throw new DeliveryValueError(
-          `expected str, bytes or os.PathLike object, not ${ledgerPythonTypeName(ndjson)}`,
+          `argument should be a str or an os.PathLike object where __fspath__ returns a str, not '${ledgerPythonTypeName(ndjson)}'`,
         );
       const repoValue = item.get('repo');
       const result = await effects.deliver({
