@@ -5,8 +5,8 @@
  * (budgeted `gh pr view`, git ancestry) and their persistence (atomic queue.json,
  * saved after every item update and before any error is counted).
  *
- * Still caller-injected, because no TS body exists yet: merge proof selection,
- * revalidation recheck, finding outcome marking and source publication.
+ * The merge proof, revalidation recheck, outcome marking and source publication seams are
+ * bound per (item, run) by `fileFixRunSeams`; `fixRun` overrides that binding (tests).
  */
 import { join } from 'node:path';
 import { JsonObject } from '../../policy/crq/jsonValue.js';
@@ -26,6 +26,7 @@ import type { RunGit } from './ledgerGit.js';
 import { atomicWrite } from './atomic.js';
 import { queueBytes } from './queueEffects.js';
 import { fileCurrentRepairEffects } from './repairCurrentSource.js';
+import { fileFixRunSeams, type FixRunSeams } from './reconcileFixRunSource.js';
 
 export interface ReconcilePhaseSourceOptions {
   readonly stateRoot: string;
@@ -34,10 +35,9 @@ export interface ReconcilePhaseSourceOptions {
   readonly gh?: GhFn;
   readonly runGit?: RunGit;
   readonly now?: () => Date;
-  readonly fixRun: Pick<
-    ReconcileFixRunEffects,
-    'proveMerge' | 'recheckRevalidation' | 'markFixedOutcome' | 'publishSource'
-  >;
+  readonly fixRun?: (item: JsonObject, run: string) => FixRunSeams;
+  /** `CONFIG['repair'].get('max_finding_retries', 2)`. */
+  readonly maxFindingRetries?: () => number;
   readonly event: ReconcilePhaseEffects['event'];
 }
 
@@ -72,8 +72,19 @@ export function fileReconcilePhaseEffects(
         );
         await atomicWrite(join(options.stateRoot, 'queue.json'), queueBytes(working));
       };
-      const fixEffects: ReconcileFixRunEffects = {
-        ...options.fixRun,
+      const seams =
+        options.fixRun ??
+        fileFixRunSeams({
+          stateRoot: options.stateRoot,
+          clone: options.clone,
+          repo: options.repo,
+          prInfo: (number) => repair.prInfo(number),
+          now,
+          ...(options.gh ? { gh: options.gh } : {}),
+          ...(options.runGit ? { runGit: options.runGit } : {}),
+          ...(options.maxFindingRetries ? { maxFindingRetries: options.maxFindingRetries } : {}),
+        });
+      const baseEffects: Omit<ReconcileFixRunEffects, keyof FixRunSeams> = {
         prInfo: (number) => repair.prInfo(number),
         defaultTip: () => repair.resolveRef(repair.targetRef('promoted-main')),
         isAncestor: (a, d) => repair.isAncestor(a, d),
@@ -97,7 +108,8 @@ export function fileReconcilePhaseEffects(
             persist: install,
           });
         },
-        reconcile: (item, run) => reconcileFixRun(item, run, fixEffects),
+        reconcile: (item, run) =>
+          reconcileFixRun(item, run, { ...baseEffects, ...seams(item, run) }),
         persist: (item) => install(item),
       });
       return runReconcileFixPrs(adapter.effects);
