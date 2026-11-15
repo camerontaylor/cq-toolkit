@@ -156,6 +156,18 @@ describe('deliverPendingCleanReviews', () => {
     });
   });
 
+  it('settles a non-string ndjson with the Python 3.14 Path() TypeError text', async () => {
+    const r = await deliverPendingCleanReviews(
+      doc({ items: [pending('a', { clean_review_request: { ...REQUEST, ndjson: 5 } })] }),
+      effects(ok),
+    );
+    expect((out(r.queue) as Array<Record<string, unknown>>)[0]).toMatchObject({
+      clean_review_error:
+        "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'int'",
+      clean_review_pending: false,
+    });
+  });
+
   it('propagates an unexpected error class', async () => {
     await expect(
       deliverPendingCleanReviews(
