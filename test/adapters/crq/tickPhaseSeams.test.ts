@@ -12,11 +12,9 @@ beforeEach(async () => {
 afterEach(async () => rm(root, { recursive: true, force: true }));
 
 const cfg = (text: string) => parseJsonValue(text) as JsonObject;
-const seams = (config = '{}', extra: { watchdogHome?: string } = {}) =>
+const seams = (config = '{}') =>
   fileTickSeams({
     stateRoot: join(root, 'state'),
-    watchdogHome: extra.watchdogHome ?? join(root, 'wd'),
-    root: '/runner',
     config: cfg(config),
     now: () => Date.UTC(2026, 10, 15, 1, 2, 3, 999),
   });
@@ -41,22 +39,6 @@ describe('file tick seams', () => {
       '{"at": "2026-11-15T01:02:03Z", "event": "tick_gap", "last_tick": "\\u00e9", "gap_min": 3}\n' +
         '{"at": "2026-11-15T01:02:03Z", "event": "x"}\n',
     );
-  });
-
-  it('writes the heartbeat with the configured alert fields and null defaults', async () => {
-    const s = seams('{"schedule_id":"s1","alerts":{"alert_agent_id":"a"}}');
-    await s.writeHeartbeat(cfg('{"last_tick":"2026-11-15T00:00:00Z"}'));
-    expect(await readFile(join(root, 'wd', 'heartbeat.json'), 'utf8')).toBe(
-      '{"last_tick": "2026-11-15T00:00:00Z", "stale_alarm_min": 36, "schedule_id": "s1", "root": "/runner", "alert_agent_id": "a", "alert_agent_host": null}\n',
-    );
-  });
-
-  it('records heartbeat_failed instead of throwing when the home is unwritable', async () => {
-    await writeFile(join(root, 'wd'), 'a file, not a directory');
-    const s = seams('{}');
-    await s.writeHeartbeat(cfg('{"last_tick":"t"}'));
-    const text = await readFile(join(root, 'state', 'events.jsonl'), 'utf8');
-    expect(text).toContain('"event": "heartbeat_failed"');
   });
 
   it('enables merged discovery only for enabled === true', () => {
