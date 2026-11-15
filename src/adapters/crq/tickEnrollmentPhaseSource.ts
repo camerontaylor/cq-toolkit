@@ -5,8 +5,8 @@
  * repositories into the primary pass and the non-primary pass. The tick saves the
  * returned queue; this binding writes nothing. tick.lock stays caller-owned.
  *
- * Still caller-injected: `ownRange` (primary repair proof), `event`, and the
- * local-review `facts`/`retained` reads.
+ * Still caller-injected: `event` and the
+ * local-review `facts`/`retained` reads; `ownRange` may be overridden.
  */
 import type { EnrollmentPhaseEffects } from '../../queue-runner/tickDiscoveryPhase.js';
 import { discoverOpenPrs } from '../../queue-runner/openPrDiscovery.js';
@@ -14,6 +14,8 @@ import {
   associateLocalReview,
   type LocalReviewAssociateEffects,
 } from '../../queue-runner/localReviewAssociate.js';
+import { repairOwnRange } from '../../queue-runner/repairOwnRange.js';
+import { runGitIn } from './publishSource.js';
 import {
   openPrDiscoveryEffects,
   type OpenPrRepository,
@@ -24,7 +26,8 @@ export interface EnrollmentPhaseSourceOptions {
   readonly repos: readonly OpenPrRepository[];
   readonly primaryRepo: string;
   readonly localReview: LocalReviewAssociateEffects;
-  readonly ownRange: OpenPrSourceOptions['ownRange'];
+  /** Defaults to `repair_tick.own_range` over `git rev-list` in the primary clone. */
+  readonly ownRange?: OpenPrSourceOptions['ownRange'];
   readonly event: OpenPrSourceOptions['event'];
   readonly gh?: OpenPrSourceOptions['gh'];
   readonly git?: OpenPrSourceOptions['git'];
@@ -34,11 +37,29 @@ export interface EnrollmentPhaseSourceOptions {
 export function fileEnrollmentPhaseEffects(
   options: EnrollmentPhaseSourceOptions,
 ): EnrollmentPhaseEffects {
+  const primaryClone = options.repos.find((repo) => repo.primary)?.clone;
+  const ownRange: OpenPrSourceOptions['ownRange'] =
+    options.ownRange ??
+    (async (queue, previousHead, head) => {
+      const sha = /^[0-9a-f]{40}$/;
+      if (!primaryClone || !sha.test(previousHead) || !sha.test(head))
+        throw new Error('invalid repair range');
+      const run =
+        options.git?.(options.repos.find((repo) => repo.primary) as OpenPrRepository) ??
+        runGitIn(primaryClone);
+      const result = await run(['rev-list', `${previousHead}..${head}`]);
+      if (result.code !== 0) throw new Error('repair range unavailable');
+      const commits = new TextDecoder()
+        .decode(result.stdout)
+        .split('\n')
+        .filter((line) => line.length > 0);
+      return repairOwnRange(queue, commits);
+    });
   const effects = openPrDiscoveryEffects({
     repos: options.repos,
     associate: (queue, repo, pr, base, dry) =>
       associateLocalReview(queue, repo.repo, pr.number, base, pr.head, dry, options.localReview),
-    ownRange: options.ownRange,
+    ownRange,
     event: options.event,
     ...(options.gh ? { gh: options.gh } : {}),
     ...(options.git ? { git: options.git } : {}),
