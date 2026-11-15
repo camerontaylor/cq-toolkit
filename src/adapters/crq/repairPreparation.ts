@@ -68,7 +68,7 @@ export function checkRepairJobId(value: string): boolean {
 }
 
 /** Python text-mode reads translate CRLF and lone CR to LF. */
-function pythonUniversalNewlines(text: string): string {
+export function pythonUniversalNewlines(text: string): string {
   return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 }
 
