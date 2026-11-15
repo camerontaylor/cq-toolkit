@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { parseJsonValue, JsonObject } from '../../../../src/policy/crq/jsonValue.js';
 import {
   bindRun,
-  canonical,
   type BoundController,
   type RunConfig,
   type RunDeps,
@@ -332,22 +331,14 @@ describe('binding: failures reach the right terminal state', () => {
   });
 });
 
-describe('canonical error classes', () => {
-  test("another module's FailStop becomes recovery's FailStop", () => {
-    const out = canonical(new UnitFailStop('drain expired'));
-    expect(out).toBeInstanceOf(FailStop);
-    expect((out as Error).message).toBe('drain expired');
+describe('shared error classes', () => {
+  test("another module's FailStop and Refused are recovery's own classes", () => {
+    expect(UnitFailStop).toBe(FailStop);
+    expect(GuardRefused).toBe(Refused);
+    expect(new UnitFailStop('drain expired')).toBeInstanceOf(Refused);
   });
-  test('a plain Refused from another module becomes recovery’s Refused', () => {
-    expect(canonical(new GuardRefused('dirty'))).toBeInstanceOf(Refused);
-  });
-  test('RecoveryRequired, recovery’s own classes and foreign errors pass through', () => {
-    const required = new RecoveryRequired('stuck');
-    expect(canonical(required)).toBe(required);
-    const own = new FailStop('x');
-    expect(canonical(own)).toBe(own);
-    const other = new TypeError('crash');
-    expect(canonical(other)).toBe(other);
-    expect(canonical('text')).toBe('text');
+  test('RecoveryRequired keeps its record and defaults it to empty', () => {
+    expect(new RecoveryRequired('stuck').record).toEqual({});
+    expect(new RecoveryRequired('stuck', { a: 1 }).record).toEqual({ a: 1 });
   });
 });

@@ -7,38 +7,18 @@
  */
 import { createHash } from 'node:crypto';
 import { pythonJsonText } from '../../../policy/crq/pythonJson.js';
-
-export class Refused extends Error {
-  override readonly name: string = 'Refused';
-}
-/** A refusal that must keep the hold: recovery is an owner operation. */
-export class FailStop extends Refused {
-  override readonly name = 'FailStop';
-}
-/** A health check failed after the switch: roll back, do not fail-stop. */
-export class HealthFailed extends Refused {
-  override readonly name = 'HealthFailed';
-}
-/** Python `OSError`: the only failure `fail_stop` converts into a persistence error. */
-export class OSError extends Error {
-  override readonly name = 'OSError';
-}
-/** Python `KeyboardInterrupt`: not an `Exception`, so recovery handlers pass it through. */
-export class Interrupted extends Error {
-  override readonly name = 'Interrupted';
-}
-/** The host could not be returned to a verified state; the hold is retained. */
-export class RecoveryRequired extends Error {
-  override readonly name = 'RecoveryRequired';
-  readonly record: Record<string, unknown>;
-  constructor(message: string, record?: Record<string, unknown>) {
-    super(message);
-    this.record = record !== undefined && truthy(record) ? record : {};
-  }
-}
+import {
+  Refused,
+  FailStop,
+  HealthFailed,
+  OSError,
+  Interrupted,
+  RecoveryRequired,
+  DEAD_STATES,
+} from './errors.js';
+export { Refused, FailStop, HealthFailed, OSError, Interrupted, RecoveryRequired, DEAD_STATES };
 
 export type Result = Record<string, unknown>;
-export const DEAD_STATES: readonly string[] = ['inactive', 'failed'];
 
 /** Python truthiness for JSON-shaped values. */
 function truthy(v: unknown): boolean {

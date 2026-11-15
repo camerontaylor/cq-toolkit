@@ -18,20 +18,8 @@ import {
 } from '../../../policy/crq/jsonValue.js';
 import { ledgerValueEqual } from '../../../policy/crq/ledger.js';
 import { receiptJsonBytes, receiptJsonDigest } from '../../../policy/crq/pythonJson.js';
-
-/** Python `OSError`: what an injected read throws when the filesystem refuses. */
-export class OSError extends Error {
-  override name = 'OSError';
-}
-/** A Python exception that the real code would let escape (`KeyError`, `TypeError`, ...). */
-export class PythonError extends Error {
-  constructor(
-    override readonly name: string,
-    message: string,
-  ) {
-    super(message);
-  }
-}
+import { OSError, PythonError } from './errors.js';
+export { OSError, PythonError };
 
 export const RECEIPT_SAMPLE = 10;
 export const RECEIPT_POLICY = 'affected-current-additions-v1';

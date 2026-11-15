@@ -7,15 +7,8 @@
  * here runs git, writes a file or loads code; the caller supplies every effect.
  */
 import { createHash } from 'node:crypto';
-
-/** Python `Refused`: a precondition failed. */
-export class Refused extends Error {
-  override name = 'Refused';
-}
-/** Python `OSError`: what an injected module load throws when unreadable. */
-export class OSError extends Error {
-  override name = 'OSError';
-}
+import { Refused, OSError } from './errors.js';
+export { Refused, OSError };
 
 /** The ops modules the deploy takes from the target revision, in extraction order. */
 export const TARGET_OPS_MODULES = ['prepare-host.py', 'deploy-controller.py'] as const;

@@ -4,14 +4,8 @@
  * imports this module yet.
  */
 import { pythonJsonText } from '../../../policy/crq/pythonJson.js';
-
-export class Refused extends Error {
-  override readonly name: string = 'Refused';
-}
-/** A refusal that must keep the hold: recovery is an owner operation. */
-export class FailStop extends Refused {
-  override readonly name = 'FailStop';
-}
+import { Refused, FailStop } from './errors.js';
+export { Refused, FailStop };
 
 /** A controller result: a plain record (Python dict). */
 export type Result = Record<string, unknown>;

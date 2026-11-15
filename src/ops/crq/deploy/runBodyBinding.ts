@@ -8,11 +8,7 @@
  * and makes the failure classes the modules throw mean the same thing to recovery.
  * Every effect is injected; nothing here is imported by deployed code.
  *
- * Two bridging rules matter:
- * - Each module declares its own `Refused`/`FailStop`/... copy, so `instanceof` across
- *   modules is false. {@link canonical} re-wraps by class name before recovery decides
- *   between fail-stop and rollback; without it a drain `FailStop` would be rolled back.
- * - A few module effects are synchronous (`complete`, `recheckBaseline`'s phase). Their
+ * One bridging rule matters: a few module effects are synchronous (`complete`, `recheckBaseline`'s phase). Their
  *   calls are recorded and replayed in order with awaits, which preserves Python's order
  *   and its "stop at the first failing write" behaviour.
  */
@@ -46,12 +42,6 @@ import {
 } from './deployHealth.js';
 import { switchCheckout, type SwitchEffects } from './deployOps.js';
 import {
-  FailStop,
-  HealthFailed,
-  Interrupted,
-  OSError,
-  RecoveryRequired,
-  Refused,
   RunRecovery,
   type HoldLike,
   type Result,
@@ -128,35 +118,6 @@ export interface RunDeps<E, H, C extends BoundController<E>> {
   clock(): number;
   sleep(seconds: number): Promise<void>;
   narrate(message: string): void;
-}
-
-const CLASSES: Record<string, new (message: string, options?: ErrorOptions) => Error> = {
-  Refused,
-  FailStop,
-  HealthFailed,
-  OSError,
-  Interrupted,
-};
-
-/**
- * Re-wrap a module's copy of a deploy error class as the class recovery and
- * `RunRecovery.run` test with `instanceof`. Unknown errors pass through unchanged.
- */
-export function canonical(exc: unknown): unknown {
-  if (!(exc instanceof Error) || exc instanceof RecoveryRequired) return exc;
-  const err: Error = exc;
-  const Wanted = CLASSES[err.name];
-  const asUnknown: unknown = err;
-  if (Wanted === undefined || asUnknown instanceof Wanted) return err;
-  return new Wanted(err.message, { cause: err });
-}
-
-async function canon<T>(fn: () => Promise<T>): Promise<T> {
-  try {
-    return await fn();
-  } catch (exc) {
-    throw canonical(exc);
-  }
 }
 
 export function newRunState(tag: string | null): RunState {
@@ -294,21 +255,19 @@ export function bindRun<E, H, C extends BoundController<E>>(deps: RunDeps<E, H, 
     },
     units: deps.units,
     newHold: () => deps.newHold(),
-    switchCheckout: (sha) =>
-      canon(async () => {
-        await switchCheckout(deps.switchEffects, cfg.root, need(loaded, 'overlay').overlay, sha);
-      }),
+    switchCheckout: async (sha) => {
+      await switchCheckout(deps.switchEffects, cfg.root, need(loaded, 'overlay').overlay, sha);
+    },
     headSha: () => deps.headSha(),
-    readConfig: () => canon(() => readConfig(deps.live, cfg.root)),
-    runtimePointerCheck: () =>
-      canon(() => runtimePointerCheck(deps.live, cfg.root, need(cqBin, 'cqBin'))),
-    drainServices: () => canon(() => steps.drainServices()),
-    drainQueue: (name) => canon(() => steps.drainQueueAs(name)),
+    readConfig: () => readConfig(deps.live, cfg.root),
+    runtimePointerCheck: () => runtimePointerCheck(deps.live, cfg.root, need(cqBin, 'cqBin')),
+    drainServices: () => steps.drainServices(),
+    drainQueue: (name) => steps.drainQueueAs(name),
     durableWrite: (name, value) => deps.durableWrite(runPath(name), value),
     now: () => deps.nowIso(),
     narrate,
     releaseLock: () => deps.lock.release(),
-    innerRun: () => canon(async () => (await runBody(args, steps, bodyView(state))) as Result),
+    innerRun: async () => (await runBody(args, steps, bodyView(state))) as Result,
   });
 
   const args: RunBodyArgs = {
