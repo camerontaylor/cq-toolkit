@@ -109,6 +109,11 @@ async function resolveExisting(path: string): Promise<string> {
   }
 }
 
+/** Where `fileArtifactStore(durableRoot).put` retains bytes with this digest. */
+export function artifactLocation(durableRoot: string, sha256: string): string {
+  return join(resolveNonStrict(durableRoot), 'sha256', sha256);
+}
+
 /**
  * `review_ledger.ArtifactStore`: content-addressed `sha256/<digest>` blobs.
  *
