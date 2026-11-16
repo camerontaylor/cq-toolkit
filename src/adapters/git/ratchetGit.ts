@@ -18,7 +18,9 @@
 //     GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_CONFIG_PARAMETERS/COUNT, ...),
 //     ignores the system config, never prompts, takes no optional locks, and
 //     disables replace refs (a `refs/replace/*` object would make `<rev>`
-//     silently read a DIFFERENT tree than its oid names).
+//     silently read a DIFFERENT tree than its oid names); GIT_GRAFT_FILE is
+//     pinned at devNull, because grafts substitute parents independently of
+//     replace refs and would otherwise reshape the range a gate walks.
 //   - Every revision is validated BEFORE spawn: a 40-hex oid or a
 //     conservative ref name (effects.ts's SAFE_REF rules). A value starting
 //     with `-` can never reach argv as an option; `--end-of-options` (git
@@ -103,6 +105,14 @@ function gitEnv(): NodeJS.ProcessEnv {
   env['GIT_TERMINAL_PROMPT'] = '0';
   env['GIT_OPTIONAL_LOCKS'] = '0';
   env['GIT_NO_REPLACE_OBJECTS'] = '1';
+  // GRAFTS ARE A SECOND, INDEPENDENT PARENT-SUBSTITUTION VECTOR: git loads the
+  // graft file regardless of GIT_NO_REPLACE_OBJECTS, and a graft naming a
+  // different parent for a commit silently rewrites the graph (A -> B -> C
+  // read as A -> C, so the range A..C omits B). The variable ALSO overrides
+  // git's default path ($GIT_DIR/info/grafts), so pinning it at devNull
+  // (empty, hence no grafts) blocks an ambient value and a repository-local
+  // info/grafts file at once — deleting the variable would restore the default.
+  env['GIT_GRAFT_FILE'] = devNull;
   return env;
 }
 
