@@ -271,7 +271,9 @@ export class MergeConflictContractError extends Error {
   readonly rawPrefix: string;
 
   constructor(rawText: string) {
-    const prefix = bounded(rawText);
+    // Redact first, then bound: worker output can echo an environment secret
+    // and this message reaches the failed OpResult (via the catch in (g)).
+    const prefix = bounded(boundedErrorText(rawText));
     super(
       `merge conflict decision contract violated — expected ${DECISION_CONTRACT}; got: ${prefix}`,
     );
