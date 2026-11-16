@@ -89,6 +89,16 @@ class ExampleTests(HistoryGitMixin, SnapshotGitFixture, unittest.TestCase):
         self.assertIn("server-verified", result["cue"])
         self.assertIn("wait behind first reviews", result["cue"])
 
+    def test_digest_changes_when_the_predecessor_reviewed_flag_changes(self):
+        def digest_for(**overrides):
+            row = item("lr-a", facts(base=self.base, base_tree=self.base_tree,
+                                     head=self.base, head_tree=self.base_tree), task="T")
+            row.update(overrides)
+            return self.project(queue(row), task="T")["digest"]
+
+        # Same requests, invocations and failures; only the cue-driving flag moves.
+        self.assertNotEqual(digest_for(), digest_for(receipt_id=None))
+
     def test_a7_main_ancestor_and_unrelated_sibling_earn_no_repeat(self):
         q = queue(item("lr-main", facts(base=self.base_tree, base_tree=self.base_tree,
                                         head=self.base, head_tree=self.base_tree),

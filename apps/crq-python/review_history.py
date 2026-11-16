@@ -323,6 +323,7 @@ def project(q, *, repo, target, head_commit=None, head_tree=None, task=None,
                          if i.get("id") == headline["item"]), None)
         reviewed = _reviewed(selected) if selected is not None else False
     material = dict(relation=relation, repeat=repeat, summary=summary, delta=delta,
+                    reviewed=reviewed,
                     predecessor=None if headline is None else
                     {k: headline[k] for k in ("item", "head_commit", "ancestry",
                                               "relationship", "commits_ahead")})
