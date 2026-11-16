@@ -238,4 +238,11 @@ def invoke(config, role, job, wt, directory, judge=False):
         parsed = None
     if not isinstance(parsed, dict):
         return _failure(judge, 'error', 'codex output unparseable')
+    if any(key not in parsed for key in schema['required']) or (not judge and not (
+            isinstance(parsed['changed'], bool) and isinstance(parsed['summary'], str)
+            and isinstance(parsed['commits'], list)
+            and all(isinstance(sha, str) for sha in parsed['commits']))):
+        return _failure(judge, 'error', 'codex output misses required fields')
+    if judge and parsed['verdict'] not in ('valid', 'invalid', 'unsure'):
+        return _failure(judge, 'error', 'codex verdict outside schema enum')
     return {**parsed, 'stop': 'ok'}
