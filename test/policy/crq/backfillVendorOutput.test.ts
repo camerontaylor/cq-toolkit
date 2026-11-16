@@ -178,4 +178,27 @@ describe('backfill vendor output', () => {
     const pathOnly = { ...complete, reviewedFiles: [{ path: 'src/a.ts', blob: 'b'.repeat(40) }] };
     expect(() => terminalScope(line(pathOnly), 'a'.repeat(40))).toThrow('path-only receipts');
   });
+
+  it('refuses a raw surrogate on the credit path only', () => {
+    const head = 'a'.repeat(40);
+    const body = (path: string) =>
+      `{"type":"complete","status":"review_completed","head":"${head}","reviewedFiles":[{"path":"${path}","blob":"${'b'.repeat(40)}","intervals":[[1,3]]}]}\n`;
+    // ED A0 BD ED B8 80: two encoded surrogates JS would merge into U+1F600.
+    const rawPair = Buffer.from([0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80]);
+    const credit = Buffer.concat([
+      Buffer.from(body('x').split('"x"')[0] ?? ''),
+      Buffer.from('"'),
+      rawPair,
+      Buffer.from('"' + (body('x').split('"x"')[1] ?? '')),
+    ]);
+    expect(() => terminalScope(credit, head)).toThrow('non-scalar Unicode');
+    // The same bytes on a non-terminal vendor line stay valid.
+    const other = Buffer.concat([
+      Buffer.from('{"type":"note","text":"'),
+      rawPair,
+      Buffer.from('"}\n'),
+    ]);
+    expect(vendorEvents(other)).toHaveLength(1);
+    expect(terminalScope(Buffer.concat([other, Buffer.from(body('x'))]), head)).toHaveLength(1);
+  });
 });
