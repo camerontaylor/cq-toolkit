@@ -62,13 +62,16 @@ export function deferredArtifactStore(input: { durableRoot: string; store: Artif
       ]);
     },
     async flush(): Promise<void> {
-      const rows = pending;
-      pending = [];
+      // Rows leave the queue only after every write completed and the store
+      // agreed with the reference already given out. A rejected put or a
+      // reference mismatch propagates with the queued rows intact.
+      const rows = [...pending];
       for (const row of rows) {
         const stored = await input.store.put(row.bytes);
         if (stored.sha256 !== row.sha256 || stored.location !== row.location)
           throw new LedgerIntegrityError('artifact store reference differs from the event');
       }
+      pending = pending.slice(rows.length);
     },
   };
 }
