@@ -768,6 +768,19 @@
           "by": "self-merge-prs:observe"
         }
       ]
+    },
+    "1973": {
+      "tuple": {
+        "head": "e893c48a3950b31a4bb7a176ad60ec3e535f1f11",
+        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-16T23:04:31.335Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
     }
   }
 }
