@@ -1394,8 +1394,9 @@ def main(argv=None) -> int:
         if not parser.json_mode:
             print("refused: " + message, file=sys.stderr)
         return 2
-    except RuntimeError as exc:
-        # A RuntimeError from QEMU or a guest phase is a thrown error
+    except (RuntimeError, OSError) as exc:
+        # A RuntimeError from QEMU or a guest phase, or an OSError from a
+        # missing report, a download or the filesystem, is a thrown error
         # (exit 1), never an argument error.
         message = str(exc) or type(exc).__name__
         print(json.dumps(_error_artifact("thrown", args.command, message, 1),
