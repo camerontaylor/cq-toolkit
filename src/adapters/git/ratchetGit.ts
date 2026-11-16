@@ -864,8 +864,11 @@ export async function gitLsRemoteRef(
 
 /**
  * Atomically push `updates` to `url` as a compare-and-swap: `push --atomic
- * --porcelain --no-verify` with one explicit `--force-with-lease=refs/heads/
- * <branch>:<expected>` per update, NEVER plain `--force` or a `+` refspec.
+ * --porcelain --no-verify --no-follow-tags` with one explicit `--force-with-
+ * lease=refs/heads/<branch>:<expected>` per update, NEVER plain `--force` or a
+ * `+` refspec. `--no-follow-tags` pins `push.followTags` OFF: an ambient
+ * `push.followTags=true` would otherwise send annotated tags reachable from
+ * the pushed branch — tags with no lease and outside the validated set.
  * Each lease names the exact oid the caller last read, so the remote ref
  * must still hold it — a ref that advanced OR was rewound (even to an
  * ancestor of the new value, which a plain fast-forward push would accept)
@@ -909,6 +912,12 @@ export async function gitPushAtomic(
       '--atomic',
       '--porcelain',
       '--no-verify',
+      // review crq-backfill-510beeb3: push.followTags=true would publish
+      // annotated tags reachable from the pushed branch. Those tags are not in
+      // `updates`, so they carry no lease, are not part of the validated set,
+      // and `--atomic` would send them in the same transaction. The sibling
+      // push in mergeEffects.ts pins the same flag.
+      '--no-follow-tags',
       ...leases,
       '--end-of-options',
       url,
