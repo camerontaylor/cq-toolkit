@@ -6,7 +6,8 @@ The route is deliberately narrow and offline:
 1. require a clean checkout whose HEAD is the requested full commit SHA and
    whose packageManager pin names a full pnpm version;
 2. run `pnpm install --frozen-lockfile --offline` with an isolated project
-   virtual store, then `pnpm rebuild fs-ext` and `pnpm run build`;
+   virtual store, then `pnpm rebuild fs-ext`, remove any stale `dist/` output
+   left by an earlier build in a reused checkout, and `pnpm run build`;
 3. deploy the production tree with `pnpm deploy --prod --offline`;
 4. re-check HEAD, the tracked tree and the lockfile digest;
 5. record provenance from the actual staging tree (source, lockfile, Node
@@ -271,6 +272,7 @@ def build(repo, sha, staging, output, node='node', pnpm='pnpm',
     compile_runner = [pnpm, 'run', 'build']
     run(install, cwd=checkout['repo'], env=env)
     run(rebuild, cwd=checkout['repo'], env=env)
+    shutil.rmtree(checkout['repo'] / 'dist', ignore_errors=True)
     run(compile_runner, cwd=checkout['repo'], env=env)
     deploy_command = deploy(checkout['repo'], staging, pnpm, env, run=run)
     if not staging.is_dir():
