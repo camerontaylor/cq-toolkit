@@ -314,6 +314,9 @@ export class RunRecovery<E> {
       );
       await this.deps.runtimePointerCheck();
       if (truthy(s.original)) {
+        // Ownership can move during the drain: restarting the triggers under a marker this run
+        // no longer holds would resume admission unguarded, so that is an owner recovery.
+        require_(await hold.owns(), 'admission ownership was lost before the pre-switch restart');
         await this.deps.units.start(this.active());
         const observed = await this.observe();
         require_(
