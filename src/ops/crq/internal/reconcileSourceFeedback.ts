@@ -169,8 +169,14 @@ async function publishResolutions(
         pending = true;
         continue; // Keep feedback pending for retry.
       }
+      // Journal the resolution first: a failed write leaves `completed` (and so the
+      // latched publication) unchanged, so it cannot claim an unjournalled resolution.
+      const next = [...completed, id];
+      await effects.writeJournal(
+        first,
+        withObjectKeys(publication, [['source_resolutions', next]]),
+      );
       completed.push(id);
-      await effects.writeJournal(first, current());
     }
   } catch (error) {
     throw new SourcePublicationFailed(
