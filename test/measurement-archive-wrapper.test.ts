@@ -609,6 +609,49 @@ describe('M8b failure evidence', () => {
     expect(absent.archive.state).toBe('unknown');
   });
 
+  test('inherited rclone settings are stripped, connection settings survive', async () => {
+    const base = await workspace();
+    const bundle = await bundleIn(base, 'run-m8b-env');
+    const bin = join(base, 'bin');
+    await mkdir(bin, { recursive: true });
+    const config = join(base, 'rclone.conf');
+    // An ambient RCLONE_MAX_SIZE=1M would drop a 2 MiB payload from the copy
+    // and from the check alike; the manifest-only marker check then still
+    // passes and a bundle missing evidence would report 'archived'. The fake
+    // rclone fails whenever a selection setting reaches it and when the
+    // connection setting does not, so 'archived' here means the child got
+    // exactly the connection environment.
+    vi.stubEnv('RCLONE_CONFIG', config);
+    vi.stubEnv('RCLONE_MAX_SIZE', '1M');
+    vi.stubEnv('RCLONE_EXCLUDE', '/files/**');
+    vi.stubEnv('RCLONE_DRY_RUN', 'true');
+    await writeFile(
+      join(bin, 'rclone'),
+      `#!/bin/sh
+if [ -n "$RCLONE_MAX_SIZE" ] || [ -n "$RCLONE_EXCLUDE" ] || [ -n "$RCLONE_DRY_RUN" ]; then
+  echo "ERROR : inherited rclone selection setting" >&2
+  exit 7
+fi
+if [ "$RCLONE_CONFIG" != "${config}" ]; then
+  echo "ERROR : connection setting lost" >&2
+  exit 8
+fi
+exit 0
+`,
+    );
+    await chmod(join(bin, 'rclone'), 0o755);
+    vi.stubEnv('PATH', bin);
+
+    const result = await runMeasurementArchive({
+      bundleDir: bundle,
+      target: TARGET,
+      host: 'triton',
+    });
+
+    expect(result.state).toBe('archived');
+    expect(result.reason).toBeUndefined();
+  });
+
   test('only the execFile timeout kill is labelled a timeout', () => {
     // killed is execFile reporting the kill it performed itself — in this
     // wrapper the 5-minute timeout, which a test cannot wait out. The exact

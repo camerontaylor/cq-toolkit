@@ -81,11 +81,32 @@ export function mapRcloneFailure(error, args) {
   };
 }
 
+/**
+ * rclone accepts any command-line option from its environment as
+ * `RCLONE_<NAME>`, filters included: an inherited `RCLONE_MAX_SIZE` (or
+ * `RCLONE_EXCLUDE`, `--dry-run`, a weaker `check`) would silently drop a
+ * payload file from the copy and from the verification alike, so the marker
+ * check could pass and a bundle missing evidence would report `archived`.
+ * Pass the child only the variables that select and authenticate the remote —
+ * `RCLONE_CONFIG`, `RCLONE_CONFIG_PASS`, `RCLONE_CONFIG_<REMOTE>_<OPTION>` —
+ * and drop every other inherited rclone setting; every flag this wrapper needs
+ * is passed explicitly on the command line.
+ */
+const RCLONE_CONNECTION_ENV = /^RCLONE_CONFIG(_|$)/i;
+function rcloneEnvironment(env = process.env) {
+  const isolated = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (!/^RCLONE_/i.test(name) || RCLONE_CONNECTION_ENV.test(name)) isolated[name] = value;
+  }
+  return isolated;
+}
+
 async function runRclone(command, args) {
   try {
     const { stdout, stderr } = await execFileAsync(command, args, {
       maxBuffer: 1024 * 1024,
       timeout: RCLONE_TIMEOUT_MS,
+      env: rcloneEnvironment(),
     });
     return { code: 0, stdout, stderr };
   } catch (error) {
