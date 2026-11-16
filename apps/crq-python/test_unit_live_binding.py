@@ -628,6 +628,20 @@ class DiscoveryTests(PortFixture):
         self.assertIn("Service names crq-tick.service",
                       " ".join(evidence["foreign"]))
 
+    def test_dotted_instance_socket_service_target_is_unsupported(self):
+        declared = self.declare()
+        # An instance name may itself contain dots. ``Service=%i`` on
+        # ``ingress@crq-tick.service.socket`` expands to crq-tick.service, so
+        # the instance capture must run to the final unit-type suffix instead
+        # of stopping at the first dot and leaving ``%i`` unexpanded.
+        self.write("ingress@crq-tick.service.socket",
+                   "[Socket]\nListenStream=1\nService=%i\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Service names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
     def test_co_installed_socket_service_target_is_unsupported(self):
         declared = self.declare()
         # ``[Socket] Service=`` selects the unit that incoming traffic
