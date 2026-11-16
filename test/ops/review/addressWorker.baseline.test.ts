@@ -430,4 +430,32 @@ fs.writeFileSync(p,String(Number(fs.existsSync(p)?fs.readFileSync(p,'utf8'):0)+1
       }
     },
   );
+  test.each(['pnpm-lock.yaml', 'package-lock.json', 'yarn.lock'])(
+    'dependency reuse checks workspace member %s when it differs',
+    async (lock) => {
+      // pnpm can disable the shared workspace lockfile, so a member lockfile can
+      // select versions the installed tree does not have even when root metadata,
+      // the member manifest, and the root lockfile are all identical.
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        const workspace = 'packages:\n  - "packages/*"\n';
+        await f.repo.write('pnpm-workspace.yaml', workspace);
+        await writeFile(join(f.dependencyRoot, 'pnpm-workspace.yaml'), workspace);
+        await f.repo.write('packages/lib/package.json', JSON.stringify({ name: 'lib' }));
+        await f.repo.write(`packages/lib/${lock}`, 'member: installed\n');
+        f.repo.commitAll('workspace member metadata');
+        await mkdir(join(f.dependencyRoot, 'packages/lib'), { recursive: true });
+        await writeFile(
+          join(f.dependencyRoot, 'packages/lib/package.json'),
+          JSON.stringify({ name: 'lib' }),
+        );
+        await writeFile(join(f.dependencyRoot, `packages/lib/${lock}`), 'member: different\n');
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.reason).toContain('manifests/locks differ');
+        expect(f.calls()).toBe(0);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
 });
