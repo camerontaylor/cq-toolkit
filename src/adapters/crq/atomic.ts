@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { closeSync, fsyncSync, openSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { lstat, open, readdir, rename, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
@@ -25,6 +26,39 @@ export async function atomicWrite(path: string, data: string | Uint8Array): Prom
     await unlink(temporary).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== 'ENOENT') throw error;
     });
+  }
+}
+
+/** `atomicWrite` for a caller that cannot await (the receipt layer's identity checkpoint). */
+export function atomicWriteSync(path: string, data: string | Uint8Array): void {
+  const dir = dirname(path);
+  const temporary = join(dir, `.${basename(path)}.${randomUUID()}.tmp`);
+  const fd = openSync(temporary, 'wx', 0o600);
+  try {
+    try {
+      writeFileSync(fd, data);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(temporary, path);
+    const directory = openSync(dir, 'r');
+    try {
+      fsyncSync(directory);
+    } finally {
+      closeSync(directory);
+    }
+  } finally {
+    removeQuietly(temporary);
+  }
+}
+
+/** Best-effort removal of a leftover temp; a rename already consumed it on success. */
+function removeQuietly(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch {
+    // ENOENT after a successful rename; any other failure only leaves a UUID-named temp.
   }
 }
 
