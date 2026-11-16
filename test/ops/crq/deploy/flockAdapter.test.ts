@@ -42,7 +42,7 @@ describe('flockLockFs with a fake process', () => {
     expect(f.s.args[0]!.slice(0, 7)).toEqual([
       '-x',
       '-n',
-      '-F',
+      '--no-fork',
       '-E',
       String(BUSY_EXIT),
       '--',

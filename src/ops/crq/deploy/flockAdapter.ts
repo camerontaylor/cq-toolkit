@@ -30,9 +30,8 @@ export function flockArgs(path: string): string[] {
   return [
     '-x',
     '-n',
-    // --no-fork: exec the command instead of forking a child, so the process we
-    // track *is* the `flock(2)` owner and killing it releases the lock.
-    '-F',
+    // exec the holder directly so the pid release() kills is the lock holder
+    '--no-fork',
     '-E',
     String(BUSY_EXIT),
     // End option parsing: a lock path such as `--unlock` must stay a path.

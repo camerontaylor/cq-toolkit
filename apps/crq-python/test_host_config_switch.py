@@ -7,6 +7,7 @@ and test_host_config_legacy.py.
 """
 import fcntl
 import json
+from pathlib import Path
 import subprocess
 import unittest
 from unittest import mock
@@ -47,6 +48,28 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         with mock.patch.object(host, 'run', side_effect=self.stopped):
             host.switch(self.root, self.overlay, self.raw, self.before, rollback_tag)
         self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.before)
+
+    def test_failure_after_config_install_rolls_back_over_the_dirty_config(self):
+        current = self.rendered()
+        real = host.atomic_bytes
+        calls = []
+
+        def failing_after_install(path, data):
+            if Path(path) == self.root / host.CONFIG:
+                calls.append(path)
+            if len(calls) == 1 and Path(path) == self.root / host.CONFIG:
+                # Host overrides make the installed config differ from the
+                # committed target bytes, so it is a local modification.
+                real(path, data + b' ')
+                raise OSError('directory fsync failed after replace')
+            real(path, data)
+
+        with mock.patch.object(host, 'run', side_effect=self.stopped), \
+                mock.patch.object(host, 'atomic_bytes', failing_after_install):
+            with self.assertRaisesRegex(OSError, 'directory fsync'):
+                host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
+        self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.before)
+        self.assertEqual((self.runner / 'config.json').read_bytes(), current)
 
     def test_drift_refuses_before_restoring_or_switching_no_private_values(self):
         self.rendered()

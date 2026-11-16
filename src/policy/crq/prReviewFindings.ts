@@ -30,6 +30,11 @@ export const MAX_BODY = 60000;
 
 const ZWJ = '‍';
 
+/** `crq_review_receipt.BLOCKING`: severities that make a receipt block. */
+export const BLOCKING: readonly string[] = ['major', 'critical', 'blocker', 'fatal'];
+/** `crq_review_receipt.INLINE_PREFIX`. */
+export const INLINE_PREFIX = '<!-- crq-review-inline-major ';
+
 // ----------------------------------------------------------- error classes
 
 /** Python `ValueError` from the delivery identity checks. */
@@ -61,6 +66,16 @@ export class PrReviewAttributeError extends Error {
 
   constructor(message: string) {
     super(message);
+  }
+}
+
+/** Python `KeyError` from `meta[key]`. */
+export class PrReviewKeyError extends Error {
+  override readonly name: string = 'PrReviewKeyError';
+  readonly pythonError = 'KeyError';
+
+  constructor(key: string) {
+    super(`'${key}'`);
   }
 }
 
@@ -454,7 +469,7 @@ export function pythonStr(value: JsonValue): string {
     .join(', ')}}`;
 }
 
-function pythonRepr(value: JsonValue): string {
+export function pythonRepr(value: JsonValue): string {
   return typeof value === 'string' ? pythonReprString(value) : pythonStr(value);
 }
 
@@ -617,6 +632,47 @@ export function rightRanges(patch: JsonValue): Array<HunkRange> {
       index = end;
     } else {
       index = at + 2;
+    }
+  }
+  return ranges;
+}
+
+/** Python `str.splitlines()` line boundaries. */
+// eslint-disable-next-line no-control-regex
+const PY_LINE_BREAK = /\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/u;
+
+function pythonSplitLines(text: string): string[] {
+  if (text === '') return [];
+  const parts = text.split(PY_LINE_BREAK);
+  // A trailing terminator ends the last line; it does not open another.
+  if (parts[parts.length - 1] === '') parts.pop();
+  return parts;
+}
+
+/**
+ * `added_ranges`: the actually-added right-side lines, one range per `+` row,
+ * excluding context, header and deleted coordinates.
+ */
+export function addedRanges(patch: JsonValue): Array<HunkRange> {
+  if (patch === null) return [];
+  if (typeof patch !== 'string') {
+    throw new PrReviewAttributeError(
+      `'${ledgerPythonTypeName(patch)}' object has no attribute 'splitlines'`,
+    );
+  }
+  const ranges: Array<HunkRange> = [];
+  let lineNumber: number | null = null;
+  for (const line of pythonSplitLines(patch)) {
+    const header = line.startsWith('@@') ? parseHunkHeader(line, 0) : null;
+    if (header !== null) {
+      lineNumber = header[0];
+    } else if (lineNumber !== null) {
+      if (line.startsWith('+')) {
+        ranges.push({ lo: lineNumber, hi: lineNumber });
+        lineNumber += 1;
+      } else if (line.startsWith(' ')) {
+        lineNumber += 1;
+      }
     }
   }
   return ranges;
@@ -964,10 +1020,40 @@ export function buildReview(
     readonly heading: string;
     readonly text: string;
   }> = [];
+  const receipt = pythonTruthy(meta.get('crq_receipt'));
+  const bindingLine = meta.get('receipt_binding');
+  const bound = pythonTruthy(bindingLine);
+  const inlineMajor: string[] = [];
+  const blocking = (finding: Finding): boolean =>
+    BLOCKING.includes(pythonStr(finding.severity).toLowerCase());
   for (const [offset, finding] of findings.entries()) {
     const number = offset + 1;
-    const position =
-      hunkMap !== null && comments.length < MAX_INLINE ? anchor(finding, hunkMap) : undefined;
+    let position =
+      hunkMap !== null && (receipt || comments.length < MAX_INLINE)
+        ? anchor(finding, hunkMap)
+        : undefined;
+    let intended = '';
+    if (receipt && hunkMap !== null) {
+      const populated = Object.entries(hunkMap).filter(([, ranges]) => ranges.length > 0);
+      if (populated.length > 0 && position === undefined) {
+        const own =
+          typeof finding.path === 'string' && Object.hasOwn(hunkMap, finding.path)
+            ? hunkMap[finding.path]
+            : undefined;
+        const [path, ranges] =
+          own !== undefined && own.length > 0
+            ? [finding.path as string, own]
+            : (populated[0] as [string, ReadonlyArray<HunkRange>]);
+        position = {
+          path,
+          line: jsonInt((ranges[0] as HunkRange).lo),
+          side: 'RIGHT',
+        };
+        intended = `\n\nThread anchor is a PR changed line, not the finding's intended location: ${codeSpan(
+          pythonTruthy(finding.path) ? finding.path : '(unspecified file)',
+        )} ${linesSuffix(finding)}.`;
+      }
+    }
     let heading = `**crq finding F${number} [${oneLine(finding.severity)}]**`;
     if (pythonTruthy(finding.title)) {
       heading += ` ${oneLine(finding.title)}`;
@@ -975,9 +1061,18 @@ export function buildReview(
     const text = cleanText(finding.text, finding.title);
     if (position) {
       const where = linesSuffix(finding);
-      const note = `
+      let note = `${intended}
 
 <sub>crq run \`${pythonStr(runId)}\`${where ? `, ${where}` : ''}</sub>`;
+      if (bound) {
+        const identity = sha256Hex(
+          new TextEncoder().encode(
+            pythonDumpsDefaultSortKeys(findingToJson(finding) as JsonObject),
+          ),
+        );
+        note += `\n<!-- crq-review-thread run=${pythonStr(runId)} head=${pythonStr(head)} finding=${identity} -->`;
+        if (blocking(finding)) inlineMajor.push(identity);
+      }
       const body =
         clip(
           `${heading}
@@ -1004,12 +1099,35 @@ ${text}`,
     : `crq findings (CodeRabbit CLI, local run ${pythonStr(runId)}, ${pythonPrefix(pythonStr(base))}..${pythonPrefix(pythonStr(head))})`;
   const label = oneLine(labelValue as JsonValue);
   const itemField = meta.has('item_id') ? meta.get('item_id') : '';
-  const lines = [
-    marker(pythonStr(runId)),
+  const lines = [marker(pythonStr(runId))];
+  if (bound) {
+    lines.push(pythonStr(bindingLine as JsonValue));
+    const bodyMajor = unanchored.some((entry) => blocking(entry.finding));
+    const scope = pythonTruthy(meta.get('whole_pr_scan')) ? 'whole-pr-success' : 'narrow-success';
+    lines.push(
+      `<!-- crq-review-scan run=${pythonStr(runId)} ${scope}${bodyMajor ? ' body-major=1' : ''} -->`,
+      `${INLINE_PREFIX}${pythonJsonText(
+        new JsonObject([
+          ['run_id', runId],
+          ['head', head],
+          ['findings', inlineMajor],
+        ]),
+        { asciiOnly: true, sortKeys: true, indent: null },
+      )} -->`,
+    );
+    const header = meta.get('receipt_header');
+    if (header === undefined) throw new PrReviewKeyError('receipt_header');
+    lines.push(pythonStr(header));
+    if (pythonTruthy(meta.get('unattested'))) {
+      lines.push('Unattested: App identity unavailable; posted with the host account.');
+    }
+    lines.push('Legacy body-only findings are not covered or claimed resolved by this receipt.');
+  }
+  lines.push(
     cleanText(meta.has('summary') ? (meta.get('summary') as JsonValue) : ''),
     `### ${label}`,
     '',
-    `${findings.length} finding(s) (${summary}): ${comments.length} as inline threads, ` +
+    `${findings.length === 0 && receipt ? '0 findings' : `${findings.length} finding(s)`} (${summary}): ${comments.length} as inline threads, ` +
       `${unanchored.length} listed below.`,
     '',
     `Queue item \`${pythonStr(itemField as JsonValue)}\`, reviewed range \`${pythonStr(base)}..${pythonStr(head)}\`. ` +
@@ -1017,7 +1135,7 @@ ${text}`,
         ? `${label}. Reply on a thread or resolve it after an explicit disposition.`
         : 'Posted by crq, the local review queue that runs the CodeRabbit CLI on this host. ' +
           'This is not a CodeRabbit PR review. Reply on a thread or resolve it once addressed.'),
-  ];
+  );
   if (unanchored.length > 0) {
     lines.push('', '#### Not anchored to the PR diff', '');
     for (const entry of unanchored) {
@@ -1082,14 +1200,64 @@ export interface DeliverInput {
   readonly findings: readonly Finding[];
   readonly gh: GhPort;
   readonly login?: string | null;
+  /** The caller supplied its own gh (Python `gh is not None`); read by `receipt.selectIdentity`. */
+  readonly injected?: boolean;
+  /** Required exactly when `meta.crq_receipt` is truthy. */
+  readonly receipt?: ReceiptHooks;
 }
 
+/**
+ * The three receipt collaborators of `deliver`. They live in modules that import this one
+ * (`reviewIdentity`, `receiptEvidence`, `receiptPrepare`), so they arrive as hooks.
+ */
+export interface ReceiptHooks {
+  /** `select_receipt_identity` (the caller closes over `injected`, `authenticate` and the checkpoint). */
+  selectIdentity(
+    gh: GhPort,
+    repo: string,
+    meta: JsonObject,
+    login: string | null,
+  ): { readonly gh: GhPort; readonly login: string; readonly meta: JsonObject };
+  /** `crq_review_receipt.prior_receipt`: `{id, url, login, body}` or null. */
+  priorReceipt(
+    gh: GhPort,
+    repo: string,
+    pr: number,
+    meta: JsonObject,
+    login: string,
+  ): JsonObject | null;
+  /** `crq_review_receipt.prepare`: the full prepared meta, or null for no countable verdict. */
+  prepare(
+    gh: GhPort,
+    repo: string,
+    pr: number,
+    meta: JsonObject,
+    findings: readonly Finding[],
+    login: string,
+  ): JsonObject | null;
+}
+
+const RECEIPT_VERDICT =
+  /(?<![^\n])\*\*Independent review \(CodeRabbit CLI via crq\): (PASS|ITERATE) for `([0-9a-f]{40})`\*\*(?=\n|$)/;
+
 export interface DeliverResult {
-  readonly state: 'created' | 'existing' | 'skipped-closed' | 'skipped-empty' | 'skipped-head';
+  readonly state:
+    | 'created'
+    | 'existing'
+    | 'skipped-closed'
+    | 'skipped-empty'
+    | 'skipped-head'
+    | 'skipped-no-verdict';
   readonly review_id: JsonValue;
   readonly review_url: JsonValue;
   readonly inline: number;
   readonly body_only: number;
+  readonly identity?: JsonValue;
+  readonly attested?: boolean;
+  readonly identity_reason?: JsonValue;
+  readonly verdict?: JsonValue;
+  readonly whole_pr_scan?: JsonValue;
+  readonly body_major?: boolean;
 }
 
 function result(overrides: Partial<DeliverResult> = {}): DeliverResult {
@@ -1104,7 +1272,7 @@ function result(overrides: Partial<DeliverResult> = {}): DeliverResult {
   };
 }
 
-function callGh(gh: GhPort, argv: readonly string[], inputText: string | null): GhResult {
+export function callGh(gh: GhPort, argv: readonly string[], inputText: string | null): GhResult {
   try {
     return gh(argv, { inputText });
   } catch (error) {
@@ -1136,7 +1304,7 @@ function rawReturncode(callResult: GhResult): number | boolean | null {
   return typeof raw === 'number' || typeof raw === 'boolean' ? raw : null;
 }
 
-function okGh(argv: readonly string[], callResult: GhResult): GhResult {
+export function okGh(argv: readonly string[], callResult: GhResult): GhResult {
   const returncode = rawReturncode(callResult);
   if (returncode === null || (returncode !== 0 && returncode !== false)) {
     const stderr = pythonSlice(pythonStrip(ghString(callResult.stderr)), 0, 300);
@@ -1147,7 +1315,7 @@ function okGh(argv: readonly string[], callResult: GhResult): GhResult {
   return callResult;
 }
 
-function ghString(value: JsonValue | undefined): string {
+export function ghString(value: JsonValue | undefined): string {
   if (value === undefined) return '';
   if (typeof value !== 'string') {
     throw new PrReviewAttributeError(
@@ -1158,7 +1326,7 @@ function ghString(value: JsonValue | undefined): string {
 }
 
 /** Python `json.loads` on stdout; '' or null becomes Python's `None`. */
-function parseGhJson(argv: readonly string[], callResult: GhResult): JsonValue {
+export function parseGhJson(argv: readonly string[], callResult: GhResult): JsonValue {
   const out = okGh(argv, callResult);
   const stdout = ghString(out.stdout);
   try {
@@ -1173,11 +1341,11 @@ function parseGhJson(argv: readonly string[], callResult: GhResult): JsonValue {
   }
 }
 
-interface PrState {
+export interface PrState {
   readonly [key: string]: JsonValue;
 }
 
-function prState(gh: GhPort, repo: string, pr: number): PrState {
+export function prState(gh: GhPort, repo: string, pr: number): PrState {
   const argv = [
     'gh',
     'api',
@@ -1201,7 +1369,7 @@ function prState(gh: GhPort, repo: string, pr: number): PrState {
   };
 }
 
-function authenticatedLogin(gh: GhPort): string {
+export function authenticatedLogin(gh: GhPort): string {
   const argv = ['gh', 'api', 'user', '--jq', '.login'];
   const login = pythonStrip(ghString(okGh(argv, callGh(gh, argv, null)).stdout));
   if (!isLogin(login)) {
@@ -1260,7 +1428,13 @@ function existingReview(
   return undefined;
 }
 
-function diffHunks(gh: GhPort, repo: string, base: string, head: string): HunkMap {
+export function diffHunks(
+  gh: GhPort,
+  repo: string,
+  base: string,
+  head: string,
+  changedOnly = false,
+): HunkMap {
   const argv = [
     'gh',
     'api',
@@ -1280,15 +1454,17 @@ function diffHunks(gh: GhPort, repo: string, base: string, head: string): HunkMa
       const status = row.get('status');
       if (typeof filename !== 'string') continue;
       if (status === 'removed') continue;
-      const patch = row.has('patch') ? row.get('patch') : null;
-      const ranges = rightRanges(patch ?? null);
+      // Python `row.get("patch") or ""`: any falsy patch is an empty one.
+      const rawPatch = row.has('patch') ? (row.get('patch') as JsonValue) : null;
+      const patch = pythonTruthy(rawPatch) ? rawPatch : '';
+      const ranges = changedOnly ? addedRanges(patch) : rightRanges(patch);
       if (ranges.length > 0) hunks[filename] = ranges;
     }
   }
   return hunks;
 }
 
-function postReview(
+export function postReview(
   gh: GhPort,
   repo: string,
   pr: number,
@@ -1313,7 +1489,13 @@ function postReview(
  * the driver; the pure module keeps only the Python ordering semantics).
  */
 export function deliver(input: DeliverInput): DeliverResult {
-  const { repo, pr, meta, findings, gh } = input;
+  const { repo, pr, findings } = input;
+  let { meta, gh } = input;
+  const flag = (key: string): boolean =>
+    pythonTruthy(meta.has(key) ? (meta.get(key) as JsonValue) : null);
+  const receiptMode = flag('crq_receipt');
+  const hooks = input.receipt;
+  if (receiptMode && hooks === undefined) throw new Error('receipt delivery needs receipt hooks');
   const runIdValue = meta.has('run_id') ? meta.get('run_id') : undefined;
   const headValue = meta.has('head') ? meta.get('head') : undefined;
   if (
@@ -1338,9 +1520,34 @@ export function deliver(input: DeliverInput): DeliverResult {
   if (
     findings.length === 0 &&
     !pythonTruthy(meta.has('summary') ? (meta.get('summary') as JsonValue) : null) &&
-    !pythonTruthy(meta.has('local_review') ? (meta.get('local_review') as JsonValue) : null)
+    !pythonTruthy(meta.has('local_review') ? (meta.get('local_review') as JsonValue) : null) &&
+    !receiptMode
   ) {
     return result({ state: 'skipped-empty' });
+  }
+  let login: string | null = loginInput ?? null;
+  if (receiptMode && hooks !== undefined) {
+    const selected = hooks.selectIdentity(gh, repo, meta, login);
+    gh = selected.gh;
+    login = selected.login;
+    meta = selected.meta;
+    const prior = hooks.priorReceipt(gh, repo, pr, meta, login);
+    if (prior !== null) {
+      const body = pythonStr(prior.get('body') ?? '');
+      const verdict = RECEIPT_VERDICT.exec(body);
+      return {
+        review_id: prior.get('id') as JsonValue,
+        review_url: prior.get('url') ?? null,
+        inline: 0,
+        body_only: 0,
+        state: 'existing',
+        identity: prior.get('login') ?? null,
+        attested: prior.get('login') === 'cq-review[bot]',
+        verdict: verdict === null ? null : (verdict[1] as string),
+        whole_pr_scan: body.includes(`<!-- crq-review-scan run=${runId} whole-pr-success`),
+        body_major: body.includes(' body-major=1 -->'),
+      } as DeliverResult;
+    }
   }
   const state = prState(gh, repo, pr);
   if (state.state !== 'open' || pythonTruthy(state.merged)) {
@@ -1354,11 +1561,17 @@ export function deliver(input: DeliverInput): DeliverResult {
   }
   if (
     findings.length === 0 &&
-    !pythonTruthy(meta.has('summary') ? (meta.get('summary') as JsonValue) : null)
+    !pythonTruthy(meta.has('summary') ? (meta.get('summary') as JsonValue) : null) &&
+    !receiptMode
   ) {
     return result({ state: 'skipped-empty' });
   }
-  const login = loginInput ?? authenticatedLogin(gh);
+  const postingLogin: string = login || authenticatedLogin(gh);
+  if (receiptMode && hooks !== undefined) {
+    const prepared = hooks.prepare(gh, repo, pr, meta, findings, postingLogin);
+    if (prepared === null) return result({ state: 'skipped-no-verdict' });
+    meta = prepared;
+  }
   let fingerprint: string | null = null;
   let wanted = '';
   if (!pythonTruthy(meta.has('summary') ? (meta.get('summary') as JsonValue) : null)) {
@@ -1374,7 +1587,7 @@ export function deliver(input: DeliverInput): DeliverResult {
       ),
     );
     wanted = `<!-- crq-local-findings head=${head} set=${fingerprint} -->`;
-    const jq = `.[] | select(.user.login == ${pythonJsonText(login, { asciiOnly: true, sortKeys: false, indent: null })} and ((.body // "") | contains(${pythonJsonText(wanted, { asciiOnly: true, sortKeys: false, indent: null })}))) | {id: .id, url: .html_url}`;
+    const jq = `.[] | select(.user.login == ${pythonJsonText(postingLogin, { asciiOnly: true, sortKeys: false, indent: null })} and ((.body // "") | contains(${pythonJsonText(wanted, { asciiOnly: true, sortKeys: false, indent: null })}))) | {id: .id, url: .html_url}`;
     const argv = [
       'gh',
       'api',
@@ -1396,7 +1609,7 @@ export function deliver(input: DeliverInput): DeliverResult {
         );
       }
       const id = row.get('id');
-      if (isPythonInt(id)) {
+      if (isPythonInt(id) && !receiptMode) {
         return {
           review_id: jsonInt(Number(id.integer)),
           review_url: row.has('url') ? (row.get('url') as JsonValue) : null,
@@ -1407,7 +1620,7 @@ export function deliver(input: DeliverInput): DeliverResult {
       }
     }
   }
-  const found = existingReview(gh, repo, pr, runId, login);
+  const found = receiptMode ? undefined : existingReview(gh, repo, pr, runId, postingLogin);
   if (found) {
     return {
       review_id: jsonInt(found.id),
@@ -1417,7 +1630,7 @@ export function deliver(input: DeliverInput): DeliverResult {
       state: 'existing',
     } as DeliverResult;
   }
-  const hunks = diffHunks(gh, repo, meta.get('base') as string, head);
+  const hunks = diffHunks(gh, repo, meta.get('base') as string, head, receiptMode);
   let review = buildReview(meta, findings, hunks);
   if (fingerprint) {
     const body = `${pythonStr(review.has('body') ? (review.get('body') as JsonValue) : null)}
@@ -1438,6 +1651,9 @@ ${wanted}`;
     stderr.includes('HTTP 422') &&
     ((review.get('comments') as JsonValue[]).length > 0 || review.has('commit_id'))
   ) {
+    if (receiptMode && prState(gh, repo, pr).head !== head) {
+      return result({ state: 'skipped-head' });
+    }
     const fallback = buildReview(meta, findings, null);
     review = fallback;
     if (fingerprint) {
@@ -1464,13 +1680,38 @@ ${wanted}`;
   } catch {
     parsed = new JsonObject([]);
   }
-  const reviewId =
-    parsed instanceof JsonObject && parsed.has('id') ? (parsed.get('id') as JsonValue) : null;
-  const reviewUrl =
-    parsed instanceof JsonObject && parsed.has('html_url')
-      ? (parsed.get('html_url') as JsonValue)
-      : null;
+  // Python calls `posted.get(...)` on whatever parsed, so a non-object body is an AttributeError.
+  if (!(parsed instanceof JsonObject)) {
+    throw new PrReviewAttributeError(
+      `'${ledgerPythonTypeName(parsed)}' object has no attribute 'get'`,
+    );
+  }
+  const reviewId = parsed.has('id') ? (parsed.get('id') as JsonValue) : null;
+  const reviewUrl = parsed.has('html_url') ? (parsed.get('html_url') as JsonValue) : null;
+  if (receiptMode && !isPythonInt(reviewId)) {
+    throw new PrReviewRuntimeError(
+      'receipt POST returned no review identity; reconcile before retry',
+    );
+  }
   const inline = (review.get('comments') as JsonValue[]).length;
+  const base: DeliverResult = {
+    state: 'created',
+    review_id: reviewId,
+    review_url: reviewUrl,
+    inline,
+    body_only: findings.length - inline,
+  };
+  if (receiptMode) {
+    return {
+      ...base,
+      identity: postingLogin,
+      attested: postingLogin === 'cq-review[bot]',
+      identity_reason: meta.get('identity_reason') ?? null,
+      verdict: meta.get('receipt_verdict') ?? null,
+      whole_pr_scan: meta.get('whole_pr_scan') ?? null,
+      body_major: pythonStr(review.get('body') ?? null).includes(' body-major=1 -->'),
+    };
+  }
   // Python builds the created result as a fresh dict: state comes FIRST here
   // (unlike the spread branches, where it lands last).
   return {
@@ -1543,9 +1784,25 @@ function findingToJson(finding: Finding): JsonValue {
  * text arrives already read with Python's `errors='replace'` semantics; the
  * pure module parses each line the way `json.loads` does.
  */
-export function loadFindings(text: string): Finding[] {
+const SEVERITY_RANK: Readonly<Record<string, number>> = {
+  fatal: 7,
+  blocker: 6,
+  critical: 5,
+  major: 4,
+  minor: 3,
+  trivial: 2,
+  info: 1,
+  none: 0,
+};
+
+const severityRank = (value: JsonValue): number => {
+  const key = pythonStr(value).toLowerCase();
+  return Object.hasOwn(SEVERITY_RANK, key) ? (SEVERITY_RANK[key] as number) : 0;
+};
+
+export function loadFindings(text: string, highestSeverity = false): Finding[] {
   const out: Finding[] = [];
-  const seen = new Set<string>();
+  const seen = new Map<string, number>();
   for (const line of text.split('\n')) {
     let event: JsonValue;
     try {
@@ -1623,8 +1880,19 @@ export function loadFindings(text: string): Finding[] {
       ]),
       { asciiOnly: true, sortKeys: true, indent: null },
     );
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const prior = seen.get(key);
+    if (prior !== undefined) {
+      // Receipts keep the highest severity of an exact duplicate.
+      const earlier = out[prior] as Finding;
+      if (
+        highestSeverity &&
+        severityRank(finding.severity as JsonValue) > severityRank(earlier.severity)
+      ) {
+        out[prior] = { ...earlier, severity: finding.severity as JsonValue };
+      }
+      continue;
+    }
+    seen.set(key, out.length);
     out.push(finding as unknown as Finding);
   }
   return out;

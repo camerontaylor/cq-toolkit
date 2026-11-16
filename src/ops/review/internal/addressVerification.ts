@@ -491,8 +491,10 @@ export function verifyClosureEvidence(
         reason: 'unavailable-evidence',
       };
     let ambiguousSurvivor: string | undefined;
+    const ambiguousSpans: string[] = [];
     for (const span of spans) {
       if (isAmbiguousName(span, packet.before)) {
+        ambiguousSpans.push(span);
         if (packet.after.includes(span) || dependencies.some((entry) => entry.text.includes(span)))
           ambiguousSurvivor ??= span;
         continue;
@@ -553,9 +555,14 @@ export function verifyClosureEvidence(
         reason: 'unavailable-evidence',
       };
     // Removed declarations can supply counter-evidence, but their removal
-    // alone does not link the patch to the finding's actual trigger.
+    // alone does not link the patch to the finding's actual trigger. Ambiguous
+    // identifiers are excluded from positive evidence too: a bare name may
+    // identify the affected function rather than its defect.
     const supportedTrigger = spans.some(
-      (span) => packet.before.includes(span) && removedLines.some((line) => line.includes(span)),
+      (span) =>
+        !ambiguousSpans.includes(span) &&
+        packet.before.includes(span) &&
+        removedLines.some((line) => line.includes(span)),
     );
     if (!supportedTrigger)
       return {
