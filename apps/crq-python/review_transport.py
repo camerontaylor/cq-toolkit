@@ -361,7 +361,8 @@ def handle(raw, runner, *, principal, policy):
         if inputs["target"] not in policy.get("branches", []):
             raise ValueError("target branch denied")
         key = admission.key_digest(inputs, repeat=req.get("repeat", False))
-        result = admission.retry(q, req["request_id"], key)
+        result = admission.retry(q, req["request_id"], key,
+                                 lambda item: retained(runner, item))
         if result is None:
             clone = clone_for(runner, inputs["repo"])
             # Snapshot bundles supply the unpublished head; only the base must be fetched.

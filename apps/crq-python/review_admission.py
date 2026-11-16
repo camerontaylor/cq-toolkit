@@ -21,7 +21,7 @@ def key_digest(inputs, *, repeat=False):
     return digest({"inputs": inputs, "repeat": repeat})
 
 
-def retry(q, request_id, key):
+def retry(q, request_id, key, verify_receipt=None):
     """Must run before resolving objects or today's installed profile."""
     if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", request_id):
         raise ValueError("invalid request id")
@@ -30,7 +30,7 @@ def retry(q, request_id, key):
         return None
     if old["key_digest"] != key:
         raise ValueError("request id has different inputs")
-    return status(q, request_id)
+    return status(q, request_id, verify_receipt=verify_receipt)
 
 
 def adequate(item):
@@ -38,7 +38,7 @@ def adequate(item):
             and bool(item.get("receipt_id")))
 
 
-def status(q, request_id):
+def status(q, request_id, verify_receipt=None):
     request = q.get("review_requests", {}).get(request_id)
     if request is None:
         raise ValueError("unknown review request")
@@ -57,6 +57,10 @@ def status(q, request_id):
         result["next_action"] = "resubmit"
     if item.get("wait_reason") or item.get("last_error"):
         result["reason"] = item.get("wait_reason") or item["last_error"]
+    # A replay must not report a completed status whose receipt is not retained:
+    # the same receipt check admit() applies to a first response decides reuse.
+    if verify_receipt is not None and adequate(item) and not verify_receipt(item):
+        result.update(next_action="resubmit", reason="receipt-unavailable")
     return result
 
 
@@ -64,7 +68,7 @@ def admit(q, *, request_id, inputs, resolved, profile, at, repeat=False,
           supersedes=None, notify=None, ancestry_repeat=False,
           verify_receipt=lambda item: True):
     key = key_digest(inputs, repeat=repeat)
-    old = retry(q, request_id, key)
+    old = retry(q, request_id, key, verify_receipt)
     if old is not None:
         return old
     identity = operation.identity(resolved)
