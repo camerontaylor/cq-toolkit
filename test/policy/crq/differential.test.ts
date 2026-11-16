@@ -60,31 +60,45 @@ type Disagreement = { index: number; python: OracleOutcome; ts: Outcome; case: C
 const KNOWN: Record<string, Record<string, (d: Disagreement) => boolean>> = {
   parse_usage: {
     // Python ints are exact; the TS VendorUsage carries a JS number.
-    'integers beyond 2**53 lose precision': (d) => JSON.stringify(d.python).includes('"int:'),
+    'integers beyond 2**53 lose precision': (d) =>
+      d.python.ok && d.ts.ok && JSON.stringify(d.python).includes('"int:'),
   },
   next_slot: {
     // Python: `10 - None` raises TypeError. TS: `limit ?? 10` / `remaining ?? 0` default it.
+    // The divergence is "Python raised, TS returned a value".
     'explicit null limit or remaining': (d) => {
       const u = d.case.usage as Case | null;
-      return u?.limit === null || u?.remaining === null;
+      return !d.python.ok && d.ts.ok && (u?.limit === null || u?.remaining === null);
     },
     // Python: True is an int (1 ms). TS: typeof boolean is refused.
+    // The divergence is "Python returned a value, TS raised".
     'boolean millisecond field': (d) => {
       const u = d.case.usage as Case | null;
-      return typeof u?.rollingWindowMs === 'boolean' || typeof u?.fullCapacityInMs === 'boolean';
+      return (
+        d.python.ok &&
+        !d.ts.ok &&
+        (typeof u?.rollingWindowMs === 'boolean' || typeof u?.fullCapacityInMs === 'boolean')
+      );
     },
     // Python timedelta rounds half-even to the microsecond; TS Math.round is half-up.
+    // Both return a value; the values differ.
     'sub-microsecond rounding': (d) => {
       const u = d.case.usage as Case | null;
-      return [u?.rollingWindowMs, u?.fullCapacityInMs].some(
-        (v) => typeof v === 'number' && !Number.isInteger(v * 1000),
+      return (
+        d.python.ok &&
+        d.ts.ok &&
+        [u?.rollingWindowMs, u?.fullCapacityInMs].some(
+          (v) => typeof v === 'number' && !Number.isInteger(v * 1000),
+        )
       );
     },
   },
   starts_last_hour: {
     // Python: parse_iso('') / parse_iso(None) is None, then `None > cutoff`
     // raises TypeError. TS skips the entry and counts the rest.
-    'null or empty start': (d) => (d.case.starts as unknown[]).some((v) => v === null || v === ''),
+    // The divergence is "Python raised, TS returned a count".
+    'null or empty start': (d) =>
+      !d.python.ok && d.ts.ok && (d.case.starts as unknown[]).some((v) => v === null || v === ''),
   },
 };
 
