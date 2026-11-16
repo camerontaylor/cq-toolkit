@@ -422,7 +422,16 @@ class Hold:
             # The persisted bytes match this run's token, so ownership is
             # proven: remove the marker as release() would and refuse with
             # the host genuinely unchanged.
-            self.path.unlink()
+            try:
+                self.path.unlink()
+            except OSError as removal:
+                raise RecoveryRequired(
+                    "the admission marker " + str(self.path)
+                    + " could not be persisted (" + repr(exc)[:200]
+                    + ") and could not be removed (" + repr(removal)[:200]
+                    + "); the marker is retained with this run's token "
+                    + self.token.decode().strip() + " and admission stays "
+                    "disabled") from removal
             raise Refused(
                 "the admission marker " + str(self.path)
                 + " could not be persisted (" + repr(exc)[:200]
@@ -633,6 +642,29 @@ class Run:
                     "Nothing has been switched.")
 
     # -- steps ---------------------------------------------------------
+    def refuse_unfinished_controller_transactions(self):
+        """Run the controller's unfinished-transaction guard before a switch.
+
+        deploy_plan runs this guard before its own switch; this runbook
+        bypasses deploy_plan, so it runs the same guard itself, under the
+        controller lock this run holds. Controller journals
+        (``controller-*.json``) live in ``--record-dir`` and, for unit
+        transactions, in the overlay's ``record_dir``; the run's private
+        directory never holds them, so both real directories are scanned.
+        """
+        directories = [Path(self.args.record_dir)]
+        overlay_dir = (self.overlay or {}).get("record_dir")
+        if overlay_dir is not None and Path(overlay_dir) not in directories:
+            directories.append(Path(overlay_dir))
+        for directory in directories:
+            try:
+                self.controller.refuse_unfinished_transactions(
+                    self.controller.Effects(self.root, directory))
+            except self.controller.Refused as exc:
+                raise Refused("unfinished controller transaction in "
+                              + str(directory) + "; recover it before "
+                              "switching: " + str(exc)) from exc
+
     def _run(self):
         require(self.args.root and Path(self.args.root).is_dir(),
                 "--root must name the deployment checkout")
@@ -667,6 +699,12 @@ class Run:
         # rollback; released in run().
         self.controller_guard = contextlib.ExitStack()
         self.controller_guard.enter_context(self.effects.controller_lock())
+        # prior_sha was read before the lock; a controller switch may have
+        # moved HEAD in between. Refuse before any switch so the rollback
+        # target and the measured baseline describe the same checkout.
+        require(self.git("rev-parse", "HEAD") == self.prior_sha,
+                "live HEAD changed before the controller lock was acquired; "
+                "nothing has been switched. Retry the deploy.")
         if self.units is None:
             self.units = RealUnits()
         self.original_config = read_config(self.root)
@@ -714,31 +752,9 @@ class Run:
         self.recheck_baseline()
         self.phase("drained")
 
-        # deploy_plan runs the controller's unfinished-transaction guard on the
-        # controller record directory before its switch; this runbook bypasses
-        # deploy_plan, so run the same guard here on an Effects bound to the
-        # controller record directory (--record-dir, where deploy-controller.py
-        # journals its controller-*.json records). The Effects above binds this
-        # run's private run directory, which never holds controller records, so
-        # it cannot stand in: a pending checkout deploy/rollback, an unfinished
-        # unit switch or an unresolved recovery record there must refuse this
-        # deploy before the checkout moves.
-        try:
-            self.controller.refuse_unfinished_transactions(
-                self.controller.Effects(self.root,
-                                        Path(self.args.record_dir)))
-        except self.controller.Refused as exc:
-            raise Refused("unfinished controller transaction in the "
-                          "controller record directory; recover it before "
-                          "deploying: " + str(exc)) from exc
+        self.refuse_unfinished_controller_transactions()
 
         self.narrate("switching to " + self.target)
-        # self.effects reads this run's private record directory (run_dir is
-        # what Effects was built with), so this is the same unfinished-
-        # transaction guard the controller's own checkout seams run before
-        # any helper switch: a pending or unresolved controller-*.json record
-        # must block the switch here too.
-        self.controller.refuse_unfinished_transactions(self.effects)
         self.switch_attempted = True
         self.helper.switch(self.root, self.overlay, self.overlay_raw,
                            self.target, self.args.tag)
@@ -1040,7 +1056,7 @@ class Run:
         # The rollback switch is fenced by the same unfinished-transaction
         # guard as the forward switch; a refusal keeps the hold and is
         # surfaced as recovery_required.
-        self.controller.refuse_unfinished_transactions(self.effects)
+        self.refuse_unfinished_controller_transactions()
         self.helper.switch(self.root, self.overlay, self.overlay_raw,
                            self.prior_sha, None)
         self.switched = False

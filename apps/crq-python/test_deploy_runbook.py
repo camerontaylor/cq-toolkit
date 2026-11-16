@@ -253,6 +253,45 @@ class DeployTests(DeployFixture, unittest.TestCase):
         probe.acquire()
         probe.release()
 
+    def test_unfinished_record_in_record_dir_refuses_before_switch(self):
+        (self.record_dir / "controller-unfinished.json").write_text("{}\n")
+        run = self.build()
+        with self.assertRaisesRegex(rb.Refused, "unfinished controller"):
+            run.run()
+        self.assertEqual(self.head(), self.prior)
+
+    def test_unfinished_record_in_overlay_record_dir_refuses_before_switch(self):
+        (Path(self.overlay["record_dir"])
+         / "controller-unfinished.json").write_text("{}\n")
+        run = self.build()
+        with self.assertRaisesRegex(rb.Refused, "unfinished controller"):
+            run.run()
+        self.assertEqual(self.head(), self.prior)
+
+    def test_head_moved_before_controller_lock_refuses(self):
+        real_lock = dc.Effects.controller_lock
+        fixture = self
+
+        def moving_lock(effects):
+            fixture.command("commit", "--allow-empty", "-qm", "controller moved")
+            return real_lock(effects)
+
+        run = self.build()
+        with mock.patch.object(dc.Effects, "controller_lock", moving_lock):
+            with self.assertRaisesRegex(rb.Refused, "live HEAD changed"):
+                run.run()
+        self.assertEqual(self.units.stopped, [])
+
+    def test_unremovable_unprovable_marker_is_recovery_required(self):
+        hold = rb.Hold(self.root)
+        full = OSError(28, "No space left on device")
+        with mock.patch.object(rb.os, "fsync", side_effect=full), \
+                mock.patch.object(rb.Path, "unlink",
+                                  side_effect=OSError(13, "permission")):
+            with self.assertRaises(rb.RecoveryRequired):
+                hold.acquire()
+        self.assertTrue(hold.path.exists())
+
     def test_unmerged_target_refuses_before_any_mutation(self):
         self.command("commit", "--allow-empty", "-qm", "unmerged")
         unmerged = self.head()
