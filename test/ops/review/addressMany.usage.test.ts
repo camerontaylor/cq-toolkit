@@ -213,6 +213,65 @@ test('M7-many malformed evidence degrades to unknown without losing settlement',
   });
 });
 
+test('M7-many partially measured evidence degrades to unknown', async () => {
+  // A leg's report usage is an AGGREGATE over its dispatches, so a non-zero
+  // unknownCount in the report's own usage summary means at least one dispatch
+  // was unmeasured and the total is a PARTIAL SUM, never a measurement. It
+  // must settle through the unknown-usage path exactly like a malformed or
+  // absent measurement: the held reservation is retained at its full
+  // allocation marked unresolved, the sticky unknown-usage stop is set, later
+  // legs are not admitted, and the partial total never folds into the ledger
+  // as known spend.
+  const partialUsage = report();
+  partialUsage.usageSummary = { knownCount: 1, unknownCount: 1, unpricedCount: 1 };
+  const address = vi.fn(async () => ({ status: 'ok' as const, value: partialUsage }));
+  const result = await makeReviewAddressMany({
+    coordinationRoot: coordinationRoot(),
+    isolate: async (root) => root,
+    gh,
+    address,
+  })(input);
+  expect(result.report?.usageSummary).toEqual({
+    knownCount: 0,
+    unknownCount: 1,
+    unpricedCount: 1,
+  });
+  expect(result.report?.accounting).toEqual({
+    limitTokens: 100,
+    observedTokens: 0,
+    heldTokens: 50,
+    unresolved: ['1'],
+    stop: 'unknown-usage',
+  });
+});
+
+test('M7-many fully measured evidence keeps the known settlement', async () => {
+  // The guard must not degrade a fully measured leg: a report whose summary
+  // counts no unknown observation settles known at its own total.
+  const measuredUsage = report();
+  measuredUsage.usageSummary = { knownCount: 2, unknownCount: 0, unpricedCount: 0 };
+  const address = vi.fn(async () => ({ status: 'ok' as const, value: measuredUsage }));
+  const result = await makeReviewAddressMany({
+    coordinationRoot: coordinationRoot(),
+    isolate: async (root) => root,
+    gh,
+    address,
+  })(input);
+  expect(result.report?.usageSummary).toEqual({
+    usage: { input: 20, output: 0, cacheRead: 0, cacheWrite: 0 },
+    knownCount: 2,
+    unknownCount: 0,
+    unpricedCount: 2,
+  });
+  expect(result.report?.accounting).toEqual({
+    limitTokens: 100,
+    observedTokens: 20,
+    heldTokens: 0,
+    unresolved: [],
+    stop: null,
+  });
+});
+
 test('M7-many post-dispatch exit retains the envelope through a thrown settlement', async () => {
   // Leg 1 settles with measured usage; leg 2's settlement arithmetic leaves
   // the safe integer range and throws. The guard settles it as unknown with

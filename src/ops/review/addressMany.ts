@@ -647,20 +647,32 @@ function makeReviewAddressManyCore(
                 }
                 const report = result?.status === 'ok' ? result.value : result?.report;
                 const usage = report?.usage;
-                // A measurement only counts as KNOWN when it survives normalization;
-                // a malformed one (negative or non-integer tokens) is unmeasurable
-                // telemetry, so the leg settles through the SAME unknown-usage path
-                // as a dispatched leg without a measurement. The held reservation
-                // settles as unresolved and is retained in outstanding at its full
-                // allocation (never released, never refunded), the sticky
-                // unknown-usage stop is set, and the raw value can never leak into
-                // the ledger as a token total.
-                const observation = usage
-                  ? normalizeUsageObservation({
-                      usage,
-                      ...(report?.costUSD === undefined ? {} : { costUSD: report.costUSD }),
-                    })
-                  : undefined;
+                // The leg's report usage is an AGGREGATE over every dispatch the
+                // leg made, and an unmeasured dispatch contributes nothing (or a
+                // partial placeholder) to it. Such a total is a PARTIAL SUM, not a
+                // measurement, however well formed it looks: the leg's own usage
+                // summary counts those unmeasured observations, so any non-zero
+                // unknownCount makes the leg unmeasurable. A report with no usage
+                // summary (an injected or legacy report) offers no provenance
+                // evidence either way and keeps the total as before.
+                const usageProvenanceIncomplete = (report?.usageSummary?.unknownCount ?? 0) > 0;
+                // A measurement only counts as KNOWN when it survives normalization
+                // AND the leg measured every dispatch it made; a malformed one
+                // (negative or non-integer tokens) is unmeasurable telemetry. Both
+                // settle through the SAME unknown-usage path as a dispatched leg
+                // without a measurement. The held reservation settles as unresolved
+                // and is retained in outstanding at its full allocation (never
+                // released, never refunded), the sticky unknown-usage stop is set,
+                // and the raw value can never leak into the ledger as a token total.
+                // The leg's cost total is dropped with the usage total because it is
+                // summed over that same incomplete dispatch set.
+                const observation =
+                  usage && !usageProvenanceIncomplete
+                    ? normalizeUsageObservation({
+                        usage,
+                        ...(report?.costUSD === undefined ? {} : { costUSD: report.costUSD }),
+                      })
+                    : undefined;
                 const known = observation?.usage !== undefined && usage !== undefined;
                 // Exit spend is recorded EXACTLY ONCE per admitted leg, at its
                 // settlement point: the normalized observation when the settled
