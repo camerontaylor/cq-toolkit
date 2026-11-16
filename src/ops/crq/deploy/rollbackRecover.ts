@@ -266,6 +266,26 @@ export class RunRecovery<E> {
     });
   }
 
+  /** Admission was released before a terminal record could be persisted: take it back so
+   * the fail-stop that follows stops the triggers under a hold this run owns. A refusal to
+   * reacquire leaves the fail-stop to report the unheld state. */
+  private async reclaimAdmission(): Promise<void> {
+    const s = this.state;
+    if (s.hold !== null && (await s.hold.owns())) return;
+    const hold = this.deps.newHold();
+    try {
+      await hold.acquire();
+    } catch (exc) {
+      if (exc instanceof Interrupted) throw exc;
+      this.deps.narrate(
+        `could not reacquire admission after a persistence failure: ${excRepr(exc)}`,
+      );
+      return;
+    }
+    s.hold = hold;
+    s.released = false;
+  }
+
   /** Keep the hold and leave the host inert; owner recovery. */
   async failStop(reason: unknown): Promise<never> {
     const s = this.state;
@@ -338,6 +358,7 @@ export class RunRecovery<E> {
         await this.phase('refused', { reason: clip(reason, 400) });
       } catch (exc) {
         if (!(exc instanceof OSError)) throw exc;
+        await this.reclaimAdmission();
         await this.failStop(
           `the refused record could not be persisted (${clip(excRepr(exc), 200)}) after: ${clip(reason, 200)}`,
         );
@@ -432,8 +453,13 @@ export class RunRecovery<E> {
       await s.hold.release();
       s.released = true;
     }
-    await this.writeRecord('rolled_back', { released: true, reason: clip(reason, 400) });
-    await this.phase('rolled_back', { triggers: s.finalTriggers });
+    try {
+      await this.writeRecord('rolled_back', { released: true, reason: clip(reason, 400) });
+      await this.phase('rolled_back', { triggers: s.finalTriggers });
+    } catch (exc) {
+      if (exc instanceof OSError) await this.reclaimAdmission();
+      throw exc;
+    }
     d.narrate(`rolled back to ${prior.slice(0, 12)}; triggers restored`);
   }
 

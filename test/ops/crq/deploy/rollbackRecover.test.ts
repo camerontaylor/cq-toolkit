@@ -423,6 +423,24 @@ describe('restoreBeforeSwitch', () => {
     );
     expect(f.log).toContain('hold.release');
   });
+  test('a refusal record failure after release reacquires admission before the fail-stop', async () => {
+    const f = fixture();
+    const release = f.hold.release.bind(f.hold);
+    f.hold.release = () => {
+      f.hold.owned = false;
+      return release();
+    };
+    f.deps.newHold = () => {
+      const next = new FakeHold(false, f.log);
+      return next;
+    };
+    f.fail.write = new OSError('ro');
+    const err = await caught(rec(f).restoreBeforeSwitch('why'));
+    expect(err).toBeInstanceOf(RecoveryRequired);
+    const log = f.log;
+    expect(log.indexOf('hold.acquire')).toBeGreaterThan(log.indexOf('hold.release'));
+    expect(log.filter((l) => l.startsWith('stop:'))).toEqual(['stop:a.timer,b.timer']);
+  });
   test('a non-OSError record failure propagates', async () => {
     const f = fixture();
     f.fail.write = new TypeError('bug');
