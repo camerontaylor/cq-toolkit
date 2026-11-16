@@ -143,6 +143,17 @@ const installLifecycleScripts = new Set([
   'pnpm:devPreinstall',
 ]);
 
+/** npm-run-all script patterns: `*` spans any characters and `?` exactly one. */
+const matchesScriptPattern = (name: string, pattern: string): boolean => {
+  let source = '';
+  for (const character of pattern) {
+    if (character === '*') source += '.*';
+    else if (character === '?') source += '.';
+    else source += /[.*+?^${}()|[\]\\]/.test(character) ? `\\${character}` : character;
+  }
+  return new RegExp(`^${source}$`, 's').test(name);
+};
+
 /** Compare installed-tree inputs without exposing package-manager credential bytes. */
 export async function assertAddressDependencyMetadata(
   root: string,
@@ -178,6 +189,11 @@ export async function assertAddressDependencyMetadata(
         token.replace(/^(['"])(.*)\1$/, '$2'),
       );
       const literal = new Set<string>();
+      // npm-run-all (run-s/run-p/npm-run-all) selects scripts by name pattern, so a
+      // token like `build:*` runs `build:deps` even though the command never spells
+      // that name. Record the patterns it names; unsupported/negative matching stays
+      // ambiguous below so no actual install input is omitted.
+      const patterns = new Set<string>();
       // Dynamic shell expressions and unsupported runner syntax stay conservative:
       // narrowing those to literal names could omit an actual install input.
       let ambiguous =
@@ -195,7 +211,19 @@ export async function assertAddressDependencyMetadata(
         // Normalize path-qualified .bin invocations (e.g. ./node_modules/.bin/run-s)
         // to the runner name so the npm-run-all family stays ambiguous, keeping
         // the scripts it names reachable.
-        if (['npm-run-all', 'run-s', 'run-p'].includes(runner)) ambiguous = true;
+        if (['npm-run-all', 'run-s', 'run-p'].includes(runner)) {
+          ambiguous = true;
+          for (const argument of tokens.slice(index + 1)) {
+            if (argument.startsWith('-')) continue;
+            // Unsupported matcher syntax (negation, brackets, braces) stays
+            // ambiguous; supported `*`/`?` patterns resolve to the scripts they
+            // name so a pattern-selected script is still compared.
+            if (/[!\[\]{}()+,|\\]/.test(argument)) ambiguous = true;
+            else if (/[*?]/.test(argument)) patterns.add(argument);
+            else if (argument in scripts) literal.add(argument);
+            else ambiguous = true;
+          }
+        }
         if (!['npm', 'pnpm', 'yarn', 'bun'].includes(runner)) continue;
         let name = tokens[index + 1];
         if (name === 'run' || name === 'run-script') name = tokens[index + 2];
@@ -207,11 +235,16 @@ export async function assertAddressDependencyMetadata(
           ambiguous = true;
         else literal.add(name);
       }
+      const resolved = [...patterns];
       for (const target of Object.keys(scripts)) {
         if (
           target === key ||
           selected.has(target) ||
-          !(literal.has(target) || (ambiguous && command.includes(target)))
+          !(
+            literal.has(target) ||
+            (ambiguous && command.includes(target)) ||
+            resolved.some((pattern) => matchesScriptPattern(target, pattern))
+          )
         )
           continue;
         worklist.push(target);
