@@ -156,7 +156,9 @@ export class QueueCell {
 
   /** `target.update(...)`: assignment for each pair, in order. */
   update(path: readonly PathStep[], entries: ReadonlyArray<readonly [string, JsonValue]>): void {
-    this.#edit(path, (target) => withObjectKeys(dictTarget(target, 'update'), entries));
+    // `Map` keeps each key's first position and last value, as Python `dict.update` does.
+    const pairs = [...new Map(entries)];
+    this.#edit(path, (target) => withObjectKeys(dictTarget(target, 'update'), pairs));
   }
 
   /** `del target[key]`; a missing dict key is a KeyError. */

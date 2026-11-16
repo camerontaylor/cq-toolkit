@@ -118,6 +118,15 @@ describe('ItemRef reads through the cell like a Python item reference', () => {
     expect(item.get('a')).toEqual(JsonNumber.int(1));
   });
 
+  it('update collapses duplicate keys: one member, first position, last value', () => {
+    const cell = new QueueCell(obj('{"items":[{"id":"a","tail":2}]}'));
+    cell.update(['items', 0], [['pid', JsonNumber.int(1)], ['pid', JsonNumber.int(2)]]);
+    const item = cell.item(0);
+    expect(item.value.entries.filter(([key]) => key === 'pid')).toHaveLength(1);
+    expect(item.get('pid')).toEqual(JsonNumber.int(2));
+    expect(item.value.entries.map(([key]) => key)).toEqual(['id', 'tail', 'pid']);
+  });
+
   it('setdefault(key, []).append is one idiom: present null is not replaced (AttributeError)', () => {
     const cell = new QueueCell(obj('{"items":[{"id":"a","notes":null}]}'));
     expect(() => cell.item(0).appendTo('notes', 'n')).toThrow(QueueEditError);
