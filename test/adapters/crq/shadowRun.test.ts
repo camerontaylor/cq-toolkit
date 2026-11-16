@@ -84,6 +84,12 @@ describe('compareArtefacts', () => {
     expect(compareArtefacts(art(a), art(b), PIN).events.verdict).toBe('differs');
   });
 
+  it('keeps sub-millisecond clock drift visible', () => {
+    const a = root({ 'events.jsonl': `{"at":"${PIN}"}\n` });
+    const b = root({ 'events.jsonl': '{"at":"2027-01-15T08:00:00.000001Z"}\n' });
+    expect(compareArtefacts(art(a), art(b), PIN).events.verdict).toBe('differs');
+  });
+
   it('compares the heartbeat by bytes, so key order matters', () => {
     const a = root({ 'heartbeat.json': '{"a":1,"b":2}' });
     const b = root({ 'heartbeat.json': '{"b":2,"a":1}' });

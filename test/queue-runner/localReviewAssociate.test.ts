@@ -134,12 +134,16 @@ describe('associateLocalReview', () => {
   });
 
   it('treats an integral float profile value as equal to the int (Python 1 == 1.0)', async () => {
-    const stored = {
-      ...item('a', 'pending'),
-      identity_inputs: { ...inputs(H1), profile: { a: 1.0 } },
-    };
-    expect((await run({ items: [stored] })).associated).toBe(true);
-    const other = { ...stored, identity_inputs: { ...inputs(H1), profile: { a: 2 } } };
-    expect((await run({ items: [other] })).associated).toBe(false);
+    // `JSON.stringify` writes 1.0 as `1`, so splice the float token into the JSON text.
+    const floatQueue = (profile: unknown): JsonObject =>
+      parseJsonValue(
+        JSON.stringify({
+          items: [{ ...item('a', 'pending'), identity_inputs: { ...inputs(H1), profile } }],
+        }).replace('"__float_one__"', '1.0'),
+      ) as JsonObject;
+    const call = (queue: JsonObject) =>
+      associateLocalReview(queue, 'o/r', 7, B, H1, false, effects());
+    expect((await call(floatQueue({ a: '__float_one__' }))).associated).toBe(true);
+    expect((await call(floatQueue({ a: 2 }))).associated).toBe(false);
   });
 });

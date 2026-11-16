@@ -4,11 +4,11 @@
  * freezes a state root into two scratch copies, proves the live root was not touched, and
  * compares the artefacts the Python and TypeScript sides left behind.
  *
- * Safety: the live root is opened for reading only (`copyFileSync` source, `readFileSync`),
+ * Safety: the live root is opened for reading only (`readFileSync`),
  * never locked and never written. The pre/post `queue.json` digest is the abort signal.
  */
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { JsonValue } from '../../policy/crq/jsonValue.js';
 import { JsonObject, parseJsonValue } from '../../policy/crq/jsonValue.js';
@@ -47,11 +47,15 @@ export function freezeStateRoot(liveRoot: string, scratch: string): FrozenInput 
   const liveDigest = liveQueueDigest(liveRoot);
   const a = join(scratch, 'a');
   const b = join(scratch, 'b');
+  // Capture each live file once, so both copies come from one consistent snapshot.
+  const captured = SHADOW_FILES.map((name) => {
+    const source = join(liveRoot, name);
+    return { name, bytes: existsSync(source) ? readFileSync(source) : null };
+  });
   for (const dir of [a, b]) {
     mkdirSync(dir, { recursive: true });
-    for (const name of SHADOW_FILES) {
-      const source = join(liveRoot, name);
-      if (existsSync(source)) copyFileSync(source, join(dir, name));
+    for (const { name, bytes } of captured) {
+      if (bytes !== null) writeFileSync(join(dir, name), bytes);
     }
   }
   return { a, b, liveDigest };
@@ -104,14 +108,22 @@ function compareQueue(a: Uint8Array | null, b: Uint8Array | null): FileVerdict {
     : 'differs';
 }
 
+/** An instant as text that keeps fractional digits beyond the milliseconds `Date.parse` drops. */
+function instantKey(value: string): string {
+  const match = /^(.*?)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)$/i.exec(value);
+  const base = match ? Date.parse(`${match[1]}${match[3]}`) : Date.parse(value);
+  const fraction = match?.[2] ? match[2].replace(/0+$/, '') : '';
+  return `${base}.${fraction}`;
+}
+
 /** Replace an `at` that denotes the pinned instant, so only real clock drift shows. */
 function normaliseEvent(line: string, pinnedAt: string): JsonValue {
   const value = parseJsonValue(line);
   if (!(value instanceof JsonObject)) return value;
-  const pinned = Date.parse(pinnedAt);
+  const pinned = instantKey(pinnedAt);
   return new JsonObject(
     value.entries.map(([key, entry]) =>
-      key === 'at' && typeof entry === 'string' && Date.parse(entry) === pinned
+      key === 'at' && typeof entry === 'string' && instantKey(entry) === pinned
         ? [key, PINNED_AT]
         : [key, entry],
     ),

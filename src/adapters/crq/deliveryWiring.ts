@@ -42,7 +42,10 @@ import {
   ThreadsNotVisibleError,
   deliverPendingCleanReviews,
 } from '../../ops/crq/internal/deliverPending.js';
-import { deliverPendingPrReviews } from '../../ops/crq/internal/deliverPrReviews.js';
+import {
+  deliverPendingPrReviews,
+  upgradeLegacyIssueDebt,
+} from '../../ops/crq/internal/deliverPrReviews.js';
 import { deliverPendingReviewRefreshes } from '../../ops/crq/internal/deliverRefreshes.js';
 import {
   deliverPendingPushFindings,
@@ -318,8 +321,11 @@ export function bindDeliveryPhases(env: DeliveryEnv): DeliveryPhases {
       });
     },
     async deliverPrReviews(queue) {
-      const log = new CheckpointLog(queue, ['pr_review_request'], env.saveQueue);
-      const out = await deliverPendingPrReviews(queue, {
+      // The pass upgrades undelivered legacy issue debt into a `pr_review_request` before it
+      // delivers; the checkpoint must see that migrated request, so log against the same queue.
+      const upgraded = upgradeLegacyIssueDebt(queue);
+      const log = new CheckpointLog(upgraded, ['pr_review_request'], env.saveQueue);
+      const out = await deliverPendingPrReviews(upgraded, {
         deliver: (input) => guarded(() => deliverReview(env, log, input, false)),
         now: env.now,
         primaryRepo: env.primaryRepo,

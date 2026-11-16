@@ -224,6 +224,7 @@ async function coverageFallbackInner(
       log.push('DRY-RUN would cut coverage ' + (item.id as string));
       return { started: null, available: true };
     }
+    let launched = false;
     try {
       if (!('coverage_sha' in item)) item.coverage_sha = mq;
       const sha = item.coverage_sha as string;
@@ -244,11 +245,14 @@ async function coverageFallbackInner(
       };
       if (!(await fx.rank4Gate(q, item, dry))) continue;
       const runId = await fx.launch(q, item, plan);
+      launched = true;
       if (item.state === 'reviewing') fx.bindRun(q, item, runId);
       else if (!truthy(item.run)) fx.cancelBeforeVendor(q, item);
       log.push('coverage ' + (item.id as string) + ': ' + String(item.state));
       return { started: item.state === 'reviewing' ? runId : null, available: true };
     } catch (error) {
+      // After a successful launch a binding failure must not fall through to a second launch.
+      if (launched) throw error;
       item.wait_reason = 'coverage planning failed: ' + pyPrefix(message(error), 200);
     }
   }
