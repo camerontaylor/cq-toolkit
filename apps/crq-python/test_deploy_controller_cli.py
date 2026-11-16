@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from unittest import mock
 import unittest
 
 from test_deploy_controller_fixtures import OPS, ROOT, ControllerFixture, dc, host
@@ -312,6 +313,21 @@ class RecordDirResolutionTests(unittest.TestCase):
             nested = pathlib.Path(tmp).resolve() / "nested"
             nested.mkdir()
             self.assertEqual(dc.absolute_record_dir(nested / ".."), nested.parent)
+
+    def test_a_trailing_dot_on_a_symlink_resolves_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp).resolve() / "records"
+            target.mkdir()
+            link = pathlib.Path(tmp) / "alias"
+            link.symlink_to(target, target_is_directory=True)
+            self.assertEqual(dc.absolute_record_dir(str(link) + "/."), target)
+
+    def test_a_symlink_loop_is_a_refusal_not_a_traceback(self):
+        # Python 3.10-3.12 raise RuntimeError from non-strict resolve(); 3.13+
+        # do not, so simulate the older behaviour on any runtime.
+        with mock.patch.object(pathlib.Path, "resolve", side_effect=RuntimeError("loop")):
+            with self.assertRaises(dc.Refused):
+                dc.absolute_record_dir("/tmp/loop/records")
 
     def test_a_final_symlink_is_still_visible_to_preflight(self):
         with tempfile.TemporaryDirectory() as tmp:
