@@ -6,6 +6,7 @@ import {
   acquireFileLock,
   acquireSlot,
   attachSlotMetadata,
+  readSlotMetadata,
 } from '../../../src/adapters/lock/slotLock.js';
 // @ts-expect-error The recovery executable is plain JavaScript.
 import { recoverReviewCheckout as untypedRecover } from '../../../scripts/recover-review-checkout.mjs';
@@ -175,6 +176,31 @@ test('failed recovery shell reports non-clearing result', async () => {
   await expect(recoverReviewCheckout(f.env, { ...f.io, shell: async () => false })).rejects.toThrow(
     'Recovery shell exited unsuccessfully',
   );
+  for (const path of f.paths) expect((await f.read(path))?.incomplete).toBe(true);
+});
+
+test('complete slots are marked incomplete before the shell starts', async () => {
+  const f = await recoveryFixture();
+  const slot = attachSlotMetadata(await acquireFileLock(f.paths[0]!));
+  await slot.writeMetadata({ version: 1, state: 'unbound', incomplete: false });
+  await slot.close();
+  const readFlags = async () => {
+    const values = await Promise.all(
+      f.paths.map((path) => readSlotMetadata(path.replace(/\.lock$/, '.json'))),
+    );
+    return values.map((value) => value?.incomplete);
+  };
+  let observed: (boolean | undefined)[] = [];
+  await expect(
+    recoverReviewCheckout(f.env, {
+      ...f.io,
+      shell: async () => {
+        observed = await readFlags();
+        return false;
+      },
+    }),
+  ).rejects.toThrow('Recovery shell exited unsuccessfully');
+  expect(observed).toEqual([true, true]);
   for (const path of f.paths) expect((await f.read(path))?.incomplete).toBe(true);
 });
 
