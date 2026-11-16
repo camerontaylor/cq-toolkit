@@ -264,6 +264,44 @@ test('M7-many clamp saturation at the safe integer bound', async () => {
   expect(result.report?.usageSummary.usage?.input).toBe(Number.MAX_SAFE_INTEGER);
 });
 
+test('M7-many unknown observation in the address report settles the leg as unknown', async () => {
+  // `report.usage` is an ADDITIVE total, so an unmeasured dispatch folds zero
+  // into it while `report.usageSummary` records that dispatch as unknown. The
+  // total alone would normalize as a KNOWN zero and release the reservation,
+  // admitting a later PR beyond the requested budget. An unknown observation in
+  // the summary forces the leg through the unknown-usage settlement path: its
+  // reservation is retained unresolved at full allocation, the sticky stop is
+  // set, and the sibling is never admitted.
+  const unmeasuredSibling = {
+    ...report(),
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    usageSummary: {
+      knownCount: 1,
+      unknownCount: 1,
+      unpricedCount: 1,
+    },
+  };
+  const address = vi.fn(async () => ({ status: 'ok' as const, value: unmeasuredSibling }));
+  const result = await makeReviewAddressMany({
+    coordinationRoot: coordinationRoot(),
+    isolate: async (root) => root,
+    gh,
+    address,
+  })({ ...input, pulls: [1, 2], maxTokens: 100, tokensPerPr: 100, concurrency: 1 });
+  expect(result.report?.accounting).toEqual({
+    limitTokens: 100,
+    observedTokens: 0,
+    heldTokens: 100,
+    unresolved: ['1'],
+    stop: 'unknown-usage',
+  });
+  // The stopped ledger admits nothing further: the second candidate is refused
+  // rather than admitted on a budget the unknown leg could still consume.
+  expect(result.status).toBe('budget-exhausted');
+  expect(address).toHaveBeenCalledTimes(1);
+  expect(result.report?.totals.notAdmitted).toBe(1);
+});
+
 test('M7-many report-less refusal carries a top-level usage summary', async () => {
   // A report-less exit (here: remote mismatch before dispatch) still carries
   // its I1 top-level usageSummary envelope, never silently dropping spend.
