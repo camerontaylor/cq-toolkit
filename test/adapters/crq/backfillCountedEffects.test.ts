@@ -21,6 +21,7 @@ import {
   parseJsonValue,
   type JsonValue,
 } from '../../../src/policy/crq/jsonValue.js';
+import { classify } from '../../../src/policy/crq/classification.js';
 import { withObjectKeys } from '../../../src/policy/crq/queueDoc.js';
 
 const cases = parseJsonValue(
@@ -129,6 +130,7 @@ const good = cases.find((c) => outcomeOf(c) === 'ok') as JsonObject;
 const bad = cases.find(
   (c) =>
     outcomeOf(c) === 'IntegrityError' &&
+    classify(rawOf(c), 0).get('counted') === true &&
     /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(String(c.get('ended_at'))),
 ) as JsonObject;
 
