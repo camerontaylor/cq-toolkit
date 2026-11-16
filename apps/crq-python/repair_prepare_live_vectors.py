@@ -163,6 +163,7 @@ def _live_case(
         else None
     )
     def run_git(argv, **kwargs):
+        kwargs.setdefault("env", _git_env())
         done = subprocess.run(argv, capture_output=True, text=True, check=False, **kwargs)
         if done.returncode != 0:
             raise RuntimeError(f"git failed: {' '.join(argv)}: {done.stderr.strip()}")
