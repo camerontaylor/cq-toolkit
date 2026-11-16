@@ -108,14 +108,22 @@ function compareQueue(a: Uint8Array | null, b: Uint8Array | null): FileVerdict {
     : 'differs';
 }
 
+/** An instant as text that keeps fractional digits beyond the milliseconds `Date.parse` drops. */
+function instantKey(value: string): string {
+  const match = /^(.*?)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)$/i.exec(value);
+  const base = match ? Date.parse(`${match[1]}${match[3]}`) : Date.parse(value);
+  const fraction = match?.[2] ? match[2].replace(/0+$/, '') : '';
+  return `${base}.${fraction}`;
+}
+
 /** Replace an `at` that denotes the pinned instant, so only real clock drift shows. */
 function normaliseEvent(line: string, pinnedAt: string): JsonValue {
   const value = parseJsonValue(line);
   if (!(value instanceof JsonObject)) return value;
-  const pinned = Date.parse(pinnedAt);
+  const pinned = instantKey(pinnedAt);
   return new JsonObject(
     value.entries.map(([key, entry]) =>
-      key === 'at' && typeof entry === 'string' && Date.parse(entry) === pinned
+      key === 'at' && typeof entry === 'string' && instantKey(entry) === pinned
         ? [key, PINNED_AT]
         : [key, entry],
     ),

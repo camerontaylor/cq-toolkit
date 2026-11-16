@@ -309,8 +309,8 @@ export function refresh(
     return left < right ? -1 : left > right ? 1 : 0;
   });
   const last = own[own.length - 1] as Own;
-  const prior = own[own.length - 2];
-  if (prior !== undefined && times.get(last) === times.get(prior) && last.verdict !== prior.verdict)
+  const tied = own.filter((entry) => times.get(entry) === times.get(last));
+  if (tied.some((entry) => entry.verdict !== last.verdict))
     throw new PrReviewRuntimeError('ambiguous CRQ review chronology; cannot refresh');
   const latest = last.row;
   if (last.verdict === 'PASS')

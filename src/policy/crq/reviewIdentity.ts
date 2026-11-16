@@ -15,6 +15,7 @@ import {
   type GhPort,
   type GhResult,
 } from './prReviewFindings.js';
+import { GhTimeoutError } from './prReviewFindings.js';
 import { pythonIsSpace, pythonStrip, pythonTruthy } from './repairBinding.js';
 
 /** Safe reason code only: never carry helper output or exception detail. */
@@ -147,7 +148,15 @@ export function authenticatedGh(deps: IdentityDeps, repo: string): GhPort {
   return (argv, options) => {
     if (deps.now() + SKEW >= expiry)
       throw new PrReviewRuntimeError('App credentials expired; retry with the same identity');
-    const out = deps.run(argv, { inputText: options.inputText, timeoutSec: HELPER_TIMEOUT, env });
+    let out: GhResult;
+    try {
+      out = deps.run(argv, { inputText: options.inputText, timeoutSec: HELPER_TIMEOUT, env });
+    } catch (error) {
+      // A timed-out App-bound call is the recoverable `GhTimeoutError` that `callGh` maps.
+      if (error instanceof ProcessLaunchError && error.message === 'ETIMEDOUT')
+        throw new GhTimeoutError(`timed out after ${HELPER_TIMEOUT} seconds`);
+      throw error;
+    }
     const redact = (value: JsonValue | undefined): string =>
       (typeof value === 'string' ? value : '').split(token).join('[redacted]');
     return {
