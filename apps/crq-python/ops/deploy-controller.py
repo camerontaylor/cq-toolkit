@@ -218,7 +218,7 @@ class RecoveryRequired(Exception):
         self.recovery = recovery
 
 
-def absolute_record_dir(path: Path) -> Path:
+def absolute_record_dir(path: "str | os.PathLike[str]") -> Path:
     """Absolute, ancestors resolved, FINAL component left as spelled.
 
     ``Path.resolve()`` follows a symlinked final component, hiding it from
@@ -227,13 +227,23 @@ def absolute_record_dir(path: Path) -> Path:
     a different directory than the one the kernel would open. Resolving only
     the parent keeps both properties: a final symlink stays visible, and
     ``link/../records`` means what the filesystem says it means.
+
+    The raw spelling is inspected first: ``Path`` silently drops a trailing
+    ``.`` (``alias/.`` becomes ``alias``), which would leave a symlink
+    unresolved, so callers pass the string and a final ``.``/``..`` is
+    resolved fully. A symlink loop is a refusal, not a traceback (Python
+    3.10-3.12 raise RuntimeError from non-strict resolve).
     """
-    name = path.name
-    if not name:
-        # '.'/'..' and the root have no final component to preserve, so there
-        # is no final symlink to hide: resolve fully.
-        return Path(os.path.realpath(path))
-    return path.parent.resolve() / name
+    raw = os.fspath(path)
+    try:
+        if raw.rstrip("/").rsplit("/", 1)[-1] in (".", "..", ""):
+            # '.'/'..' and the root have no final component to preserve, so
+            # there is no final symlink to hide: resolve fully.
+            return Path(os.path.realpath(raw))
+        p = Path(raw)
+        return p.parent.resolve() / p.name
+    except RuntimeError as exc:
+        raise Refused("invalid controller record path") from exc
 
 
 class Effects:
@@ -1462,7 +1472,7 @@ def recover_unit(effects, adapter, path, *, adapter_factory=None):
     """
     if adapter is None and adapter_factory is None:
         raise Refused("no unit recovery adapter")
-    path = Path(path)
+    path = absolute_record_dir(path)
     with effects.controller_lock():
         effects.record_preflight()
         if path.parent != effects.record_dir or path.is_symlink():
@@ -2102,7 +2112,7 @@ def main(argv=None) -> int:
                         help="deployment checkout root (full monorepo)")
     parser.add_argument("--overlay", required=True, type=Path,
                         help="private overlay path (outside Git)")
-    parser.add_argument("--record-dir", required=True, type=Path,
+    parser.add_argument("--record-dir", required=True, type=str,
                         help="private controller record directory (outside Git)")
     parser.add_argument("--helper", type=Path,
                         help="path to prepare-host.py (default: <root>/apps/crq-python/ops)")
@@ -2124,7 +2134,7 @@ def main(argv=None) -> int:
                           help="a controller journal entry naming the prior target")
     recover = sub.add_parser(
         "recover", help="restore one retained pre-activation unit intent")
-    recover.add_argument("--record", required=True, type=Path,
+    recover.add_argument("--record", required=True, type=str,
                          help="retained controller unit record to recover")
     health = sub.add_parser("health",
                             help="two advancing completed-tick observations")
