@@ -42,6 +42,7 @@ describe('open PR discovery source', () => {
         base: 'parent',
         headRef: 'child',
         head,
+        crossRepository: false,
       }),
     ).toBe(base);
     expect(calls[0]).toEqual(['fetch', '--prune', '--quiet', 'origin']);
@@ -64,6 +65,7 @@ describe('open PR discovery source', () => {
             {
               number: 7,
               isDraft: false,
+              isCrossRepository: false,
               baseRefName: 'main',
               headRefName: 'feature',
               headRefOid: head,
@@ -83,6 +85,7 @@ describe('open PR discovery source', () => {
       },
     });
     const prs = await effects.list(repo);
+    expect(prs[0]!.crossRepository).toBe(false);
     await effects.fetchDefault(repo);
     expect(await effects.rangeBase(repo, prs[0]!)).toBe(base);
     expect(calls[0]).toContain('200');

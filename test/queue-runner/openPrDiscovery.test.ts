@@ -26,7 +26,14 @@ const foreign: PrDiscoveryRepo = {
   defaultBranch: 'trunk',
   branches: ['trunk'],
 };
-const pr: OpenPr = { number: 7, draft: false, base: 'main', headRef: 'feature', head };
+const pr: OpenPr = {
+  number: 7,
+  draft: false,
+  base: 'main',
+  headRef: 'feature',
+  head,
+  crossRepository: false,
+};
 function obj(value: unknown): JsonObject {
   return parseJsonValue(JSON.stringify(value)) as JsonObject;
 }
@@ -118,6 +125,20 @@ describe('open PR discovery', () => {
     expect(items(result.queue).map((item) => item.get('id'))).toContain('pr8');
     expect(items(result.queue).map((item) => item.get('id'))).not.toContain('pr9');
     expect(result.log.some((line) => line.includes('PR #9 target chain unavailable'))).toBe(true);
+  });
+  it('never lets a fork PR become a parent candidate for a stacked PR', async () => {
+    const parent = { ...pr, number: 1, headRef: 'parent' };
+    const fork = { ...parent, number: 2, base: 'elsewhere', crossRepository: true };
+    const child = { ...pr, number: 3, base: 'parent', headRef: 'child' };
+    const result = await discoverOpenPrs(
+      queue(),
+      [primary],
+      false,
+      'o/r',
+      effects({ list: async () => [parent, fork, child] }),
+    );
+    expect(items(result.queue).map((item) => item.get('id'))).toEqual(['pr1', 'pr3']);
+    expect(result.log.some((line) => line.includes('PR #3 target chain unavailable'))).toBe(false);
   });
   it('emits one enrollment event and none for associated or equivalent work', async () => {
     const events: string[][] = [];
