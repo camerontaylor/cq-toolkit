@@ -518,6 +518,18 @@ describe('exception routing', () => {
     expect(f.log.at(-1)).toBe('lock.release');
   });
 
+  test('a lock release failure does not hide the recovery failure', async () => {
+    const f = fixture();
+    const release = new Error('unlock');
+    f.fail.set('assertClean', new Error('first'));
+    f.fail.set('recover', new RecoveryRequired('cannot recover'));
+    f.fail.set('lock.release', release);
+    const error = await runWithRecovery(f.args, f.steps, newRunBodyState()).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(RecoveryRequired);
+    expect((error as Error).message).toBe('cannot recover');
+    expect((error as { releaseFailure?: unknown }).releaseFailure).toBe(release);
+  });
+
   test('a lock release failure on success surfaces after the body completes', async () => {
     const f = fixture();
     f.fail.set('lock.release', new Error('unlock'));

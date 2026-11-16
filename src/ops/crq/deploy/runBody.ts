@@ -238,6 +238,38 @@ export async function runWithRecovery(
   steps: RunBodySteps,
   state: RunBodyState,
 ): Promise<unknown> {
+  let outcome: { ok: true; value: unknown } | { ok: false; error: unknown };
+  try {
+    outcome = { ok: true, value: await recoverFromFailure(args, steps, state) };
+  } catch (error) {
+    outcome = { ok: false, error };
+  }
+  try {
+    await steps.lock.release();
+  } catch (releaseError) {
+    // Keep the failure that was already propagating: it says why the run
+    // failed, and the release failure rides along on it.
+    if (!outcome.ok && outcome.error instanceof Error) {
+      Object.defineProperty(outcome.error, 'releaseFailure', {
+        value: releaseError,
+        configurable: true,
+        writable: true,
+      });
+      if (outcome.error.cause === undefined) outcome.error.cause = releaseError;
+      throw outcome.error;
+    }
+    if (!outcome.ok) throw outcome.error;
+    throw releaseError;
+  }
+  if (!outcome.ok) throw outcome.error;
+  return outcome.value;
+}
+
+async function recoverFromFailure(
+  args: RunBodyArgs,
+  steps: RunBodySteps,
+  state: RunBodyState,
+): Promise<unknown> {
   try {
     return await runBody(args, steps, state);
   } catch (exc) {
@@ -252,8 +284,6 @@ export async function runWithRecovery(
     const outcome = await steps.recover(exc);
     if (outcome === 'rolled_back') return steps.document('rolled_back', clip(strOf(exc), 400));
     throw new Refused(strOf(exc), { cause: exc });
-  } finally {
-    await steps.lock.release();
   }
 }
 
