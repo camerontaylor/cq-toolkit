@@ -51,7 +51,10 @@ systemctl --user --no-pager stop|reset-failed|daemon-reload|start <unit>
 It returns `{rc, stdout, stderr, timeout}`. The default runner reuses
 `unit-completion._read_bounded` and `_stop_process`: both streams are drained
 concurrently, each is capped at 256 KiB, the whole read is bounded by the
-timeout, only the owned child is terminated, and non-UTF-8 output refuses.
+timeout, only the owned child is terminated, and non-UTF-8 output refuses. The
+completion provider's own `SystemdJournalSource` reads `journalctl` under the
+same bound and asks `--output-fields` for only the witness fields it consults,
+so a full 256-record tail stays inside the cap without dropping evidence.
 
 `show(unit, props)` emits `systemctl --user --no-pager show <unit>
 --property <p>...` and parses with the existing `parse_show_output`. `jobs()`
@@ -89,18 +92,36 @@ shapes:
   foreign timer naming that service is still foreign. An undeclared unit of
   another CRQ group naming only its own units is not foreign.
 
-The recursive dependency scan is bounded by visited entry count, does not
-follow symlinked directories, and reads a symlink file only when its resolved
-target stays inside the unit directory; a `/dev/null` mask is skipped. An
-unreadable directory, including an unreadable descendant, or a symlink
-escaping or unresolvable inside the unit directory makes `complete` false
-rather than silently skipping evidence.
+The recursive dependency scan is bounded by visited entry count and does not
+follow symlinked directories. A symlink file is read when its resolved target
+is a regular file, whether it stays inside the unit directory or points into a
+cotenant repository or config tree; cotenant units are routinely installed
+that way. The target text is scanned like any other source, so a cotenant unit
+naming an expected unit is still foreign, and systemd continuations are joined
+with `config_parse` semantics (only an odd trailing backslash continues, a
+comment line is ignored, a blank line flushes the accumulated line) so a
+wrapped directive cannot hide a dependency. A `/dev/null` mask is skipped, and
+a symlinked directory or special file is not followed. A stale co-tenant
+`*.wants`/`*.requires` enablement link whose target no longer exists is
+skipped when it is undeclared and neither its link name nor its target name is
+a CRQ unit: the link name is the dependency edge systemd installs, and a dead
+link beside a still-present unit is not evidence about the selected topology.
+A dangling link that names a CRQ unit in either position is foreign, and a
+declared, non-enablement, looping, unreadable or oversized target, or an
+unreadable directory including a descendant, makes `complete` false rather
+than silently skipping evidence. A read opens non-blocking and re-checks the
+descriptor as a regular file, so a target replaced by a FIFO or other special
+file between the type observation and the read refuses instead of blocking.
+No ownership or mode gate is added for a cotenant target: its text is
+read-only evidence, not the file the switch mutates.
 
 The examined scope is the user unit directory and the user manager's installed
 and loaded lists. The following are outside this scope and are not claimed by
 `supported`: a non-CRQ unit whose in-memory dependency names a CRQ unit but is
 not on disk, transient or generated state outside the manager lists, another
-namespace or user, and an activator created between the scan and the fence.
+namespace or user, an activator created between the scan and the fence, and a
+dependency introduced through a symlinked drop-in directory because symlinked
+directories are not followed.
 This is the residual that still needs parent-owned actual-topology evidence
 before production enablement.
 
@@ -137,9 +158,11 @@ unsupported discovery topology refuses before any journal or unit mutation.
 The binding is reached through the controller CLI's switch and recover paths.
 The recovery wiring tests drive `recover --record` with the real production
 adapter and injected systemd and journal ports over a real temporary unit
-directory and record directory; an `activation_pending` record still stops and
-drains owned work, then refuses with rc 3 and unchanged record bytes. `watchdog`
-is the only Node command the verified artifact currently declares; `tick`,
-`slot`, `publisher`, `backfill` and `repair` still refuse for a Node target. The
+directory and record directory; an `activation_pending` record stops and drains
+owned work, then restores the snapshot and reports rc 0 with a `rolled_back`
+record only when the fence demonstrated absence. A fence that cannot be
+demonstrated still refuses with rc 3 and unchanged record bytes. `watchdog` and
+`publish` are the Node commands the verified artifact currently declares;
+`tick`, `slot`, `backfill` and `repair` still refuse for a Node target. The
 binding does not call `switch_unit` or `recover_unit` itself; the controller
 owns that seam.

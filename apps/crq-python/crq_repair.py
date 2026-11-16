@@ -36,6 +36,38 @@ def narrate(message):
     machine-readable channel."""
     print(message, file=sys.stderr, flush=True)
 
+# Host handover marker: one phrase for every entry point, so an operator greps
+# one string. The repair pass consults it only at admission points.
+RUNNER_DISABLED = 'runner disabled for host handover (state/runner-disabled)'
+# Admission outcome distinct from a rate-limit stop, so a refusal inside a
+# forked child ends the pass instead of reading as normal completion.
+RUNNER_DISABLED_OUTCOME = 'runner-disabled'
+
+
+# Set only inside a forked child: the gate publishes a refusal here the instant
+# it decides, so the coordinator learns it without waiting for the exit status.
+_REFUSAL_CHANNEL = None
+
+
+def publish_refusal():
+    fd = _REFUSAL_CHANNEL
+    if fd is None:
+        return
+    try:
+        os.write(fd, b'x')
+    except OSError:
+        pass
+
+
+def runner_disabled():
+    """True while a host handover holds the runner inert.
+
+    Read only at admission points: CLI dispatch, the start of a pass, before
+    each item, and before each serial job of an item. A check inside a running
+    job would abandon paid work, so nothing deeper in the pass calls this.
+    """
+    return (ROOT / 'state/runner-disabled').exists()
+
 
 def write_result(result):
     """The one CLI result writer: exactly one JSON artifact on stdout, never
@@ -731,6 +763,14 @@ def triage_phase(config, dry_run=False):
         bounded_config = copy.deepcopy(config)
         bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
         selected = options.get('escalation_role', config['repair']['roles']['judge_critical']) if row.get('_escalate') else role
+        if runner_disabled():
+            # A handover can start while the phase runs; phase() keeps deferred
+            # rows pending, so this judgment is deferred and no later candidate
+            # starts paid work.
+            narrate(RUNNER_DISABLED + ': triage judgment deferred')
+            publish_refusal()
+            return {'stop': 'deferred', 'errorClass': 'runner-disabled',
+                    'reason': 'runner disabled for host handover; triage judge deferred'}
         if blocked(config['repair']):
             # The blackout can start during drain()'s tick-lock wait or this pass;
             # phase() keeps deferred rows pending for the next pass.
@@ -758,6 +798,11 @@ def triage_phase(config, dry_run=False):
 def drain(config):
     """Automatic inbox drain, minor-only items after critical/major items. Items use isolated worker
     processes up to the configured cap, with serial findings within each item."""
+    # Admission before any fetch, triage or write: a handed-over host must cost
+    # nothing and leave the queue and inbox exactly as they are.
+    if runner_disabled():
+        narrate(RUNNER_DISABLED + ': pass not started')
+        return
     repair = config['repair']
     worker_limit(config)  # validate before triage or any provider spend
     until = dispatch_paused(config)
@@ -769,6 +814,11 @@ def drain(config):
     error = fetch_clone(config)
     if error is not None:
         narrate('repair drain skipped: ' + error[:200])
+        return
+    # A marker written while the fetch ran must stop the pass before triage
+    # spends: the guard at the top was sampled before the network work.
+    if runner_disabled():
+        narrate(RUNNER_DISABLED + ': pass stopped before triage')
         return
     try:
         triage_phase(config)
@@ -800,6 +850,14 @@ def drain(config):
 
 
 def drain_item(config, item, job_ids):
+    # A marker that appeared during the pass stops the next admission; the
+    # item already running is never interrupted. The refusal is published the
+    # moment it is decided: a forked child's exit status alone reaches the
+    # coordinator too late to stop the next admission.
+    if runner_disabled():
+        narrate(RUNNER_DISABLED + ': item ' + str(item) + ' not admitted')
+        publish_refusal()
+        return RUNNER_DISABLED_OUTCOME
     if blocked(config['repair']) or dispatch_paused(config):
         return 'rate-limit'
     # Re-read the queue per item: the tick may harvest or the tip may move
@@ -851,16 +909,42 @@ def drain_items(config, groups, order):
             while len(active) >= limit:
                 stopped = reap_item(active) or stopped
             stopped = reap_completed(active)[0] or stopped
+            stopped = refusal_published(active) or stopped
+            # One coordinator admission check, after any capacity wait and before
+            # the next item: it covers a marker that was already present when the
+            # item's turn arrived and one written while this pass waited at the
+            # cap (a first check before the wait proved redundant in a
+            # counterfactual). The serial path's and the child's own gates are the
+            # other two lines of defence.
+            if runner_disabled():
+                narrate(RUNNER_DISABLED + ': pass stopped before ' + str(item))
+                break
             if stopped or blocked(config['repair']) or dispatch_paused(config):
                 break
             if limit == 1:
-                if drain_item(config, item, groups[item]) == 'rate-limit':
+                if drain_item(config, item, groups[item]) in ('rate-limit', RUNNER_DISABLED_OUTCOME):
                     break
                 continue
+            # A child publishes a refusal on a private pipe at the moment it
+            # decides, so the coordinator stops admitting without waiting for
+            # the exit status. The pipe is IPC, not persisted state.
+            refused_r, refused_w = os.pipe()
             # Linearize admission against provider pause writes under the same
             # existing lock. Neither parent nor child retains it during work.
             with cooldown_write():
                 if dispatch_paused(config):
+                    os.close(refused_r)
+                    os.close(refused_w)
+                    break
+                # The lock wait can outlast an admitted child's refusal and a
+                # marker write: re-sample both while admission is still ours,
+                # before this fork, or the wait itself becomes an admission.
+                stopped = refusal_published(active) or stopped
+                if stopped or runner_disabled():
+                    if runner_disabled():
+                        narrate(RUNNER_DISABLED + ': pass stopped before ' + str(item))
+                    os.close(refused_r)
+                    os.close(refused_w)
                     break
                 # Fork duplicates this parent's stdout/stderr buffers; the child
                 # flushes its copy, so flush here or buffered parent lines (such
@@ -870,8 +954,31 @@ def drain_items(config, groups, order):
                 pid = os.fork()
             if pid == 0:
                 try:
-                    outcome = drain_item(config, item, groups[item])
-                    code = 2 if outcome == 'rate-limit' else 0
+                    global _REFUSAL_CHANNEL
+                    os.close(refused_r)
+                    for _pid, (_item, _rfd) in list(active.items()):
+                        os.close(_rfd)  # never hold another child's pipe
+
+                    def publish(byte):
+                        try:
+                            os.write(refused_w, byte)
+                        except OSError:
+                            pass
+
+                    # The child decides at the same gate its parent sampled, and
+                    # publishes the result before doing anything else: the
+                    # coordinator blocks on this byte, so a refusal cannot be
+                    # overtaken by the next admission.
+                    if runner_disabled():
+                        narrate(RUNNER_DISABLED + ': item ' + str(item) + ' not admitted')
+                        publish(b'x')
+                        code = 3
+                    else:
+                        publish(b'a')
+                        _REFUSAL_CHANNEL = refused_w
+                        outcome = drain_item(config, item, groups[item])
+                        code = (2 if outcome == 'rate-limit'
+                                else 3 if outcome == RUNNER_DISABLED_OUTCOME else 0)
                 except BaseException:
                     code = 1
                 # Do not run the coordinator's finally/atexit handlers in a child.
@@ -880,7 +987,21 @@ def drain_items(config, groups, order):
                     sys.stderr.flush()
                 finally:
                     os._exit(code)
-            active[pid] = item
+            os.close(refused_w)
+            # Register the child BEFORE the blocking read: an interrupt that
+            # lands in the barrier must still find this admitted child in
+            # active, or the cleanup releases service.lock beneath it.
+            active[pid] = (item, refused_r)
+            # Barrier: the child publishes its item-gate result before any work.
+            # Accepted means the child passed the gate; refused or a dead child
+            # (EOF) latches the coordinator stop.
+            try:
+                admitted = os.read(refused_r, 1) == b'a'
+            except OSError:
+                admitted = False
+            os.set_blocking(refused_r, False)
+            if not admitted:
+                stopped = True
     finally:
         while active:
             try:
@@ -889,17 +1010,40 @@ def drain_items(config, groups, order):
                 continue  # keep ownership until every admitted child has exited
 
 
+def refusal_published(active):
+    """True once an admitted child has published a refusal.
+
+    A child writes one byte on its private pipe at the instant it refuses,
+    before it exits, so the coordinator's stop does not depend on process
+    scheduling: an exit status alone can arrive after the next admission."""
+    for _pid, (_item, rfd) in list(active.items()):
+        try:
+            data = os.read(rfd, 1)
+        except (BlockingIOError, InterruptedError):
+            continue
+        except OSError:
+            continue
+        if data:
+            return True
+    return False
+
+
 def reap_completed(active):
     """Collect every currently completed owned child before new admission."""
     failed, reaped = False, False
-    for pid, item in list(active.items()):
+    for pid, (item, rfd) in list(active.items()):
         found, status = os.waitpid(pid, os.WNOHANG)
         if found:
             del active[pid]
+            try:
+                os.close(rfd)
+            except OSError:
+                pass
             reaped = True
             if status:
                 code = os.waitstatus_to_exitcode(status)
                 message = ('provider pause; stopping new admission' if code == 2 else
+                           'runner disabled; stopping new admission' if code == 3 else
                            'worker exited with code ' + str(code) if code >= 0 else
                            'worker terminated by signal ' + str(-code))
                 narrate('repair item ' + item + ': ' + message)
@@ -922,6 +1066,13 @@ def process_item(config, jobs):
     jobs.sort(key=finding_order)
     bases = {}  # run -> tip of that run's successful chain
     for job in jobs:
+        # Per-job admission: the plan's slice 5 acceptance is that the
+        # in-flight job finishes and the next does not start, so a marker seen
+        # between serial jobs of one item stops the rest of that item too.
+        if runner_disabled():
+            narrate(RUNNER_DISABLED + ': job ' + str(job['job']) + ' not admitted')
+            publish_refusal()
+            return RUNNER_DISABLED_OUTCOME
         if blocked(config['repair']):
             break  # never start a new finding inside the GLM peak window
         if dispatch_paused(config):
@@ -1003,6 +1154,13 @@ def recover_job(config, job_id):
     if not c.ran_locked(check_owner):
         raise RuntimeError('tick busy; recovery deferred')
     def judge(old, context, directory):
+        if runner_disabled():
+            # A handover can start during the tick-lock wait above; the attempt
+            # stays deferred, spends no budget and starts no model call.
+            narrate(RUNNER_DISABLED + ': recovery judge deferred')
+            publish_refusal()
+            return {'stop': 'configuration', 'errorClass': 'runner-disabled',
+                    'reason': 'runner disabled for host handover; recovery judge deferred'}
         if blocked(config['repair']):
             # The blackout can start during the tick-lock wait above; recover()
             # holds the attempt budget and defers the judgment, never a model call.
@@ -1048,6 +1206,11 @@ def main(argv=None):
     parser.add_argument('--finding-sha256')
     parser.add_argument('--recover-job')
     args = parser.parse_args(argv)
+    # CLI admission before the lock, the state directory and every alternate
+    # path (--recover-job, --job): a handed-over host must not write or spend.
+    if runner_disabled():
+        narrate(RUNNER_DISABLED + ': dispatch refused')
+        return 0
     config = json.loads((ROOT / 'config.json').read_text())
     repair = config.get('repair', {})
     authorization = repair.get('spend_authorization')
@@ -1100,6 +1263,11 @@ def main(argv=None):
             error = fetch_clone(config)
             if error:
                 narrate('repair recovery deferred: ' + error[:200])
+                return
+            # The marker can be written during the fetch's tick-lock wait or
+            # network call: recheck before the recovery judgment spends.
+            if runner_disabled():
+                narrate(RUNNER_DISABLED + ': recovery deferred for ' + args.recover_job)
                 return
             result = recover_job(config, args.recover_job)
             if result.get('report', {}).get('stop') == 'rate-limit':

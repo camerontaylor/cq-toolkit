@@ -45,7 +45,12 @@ const liveCommands = new Set<string>(LIVE_UNIT_COMMANDS);
  * returns the single JSON artifact plus its own exit code (3 for a busy tick
  * lock, Python parity).
  */
-export const LIVE_OPERATOR_COMMANDS = ['repair-prepare'] as const;
+export const LIVE_OPERATOR_COMMANDS = [
+  'repair-prepare',
+  'status',
+  'backfill',
+  'reconcile-merged',
+] as const;
 const operatorLiveCommands = new Set<string>(LIVE_OPERATOR_COMMANDS);
 const backfillCommands = new Set([
   'inventory',
@@ -70,8 +75,25 @@ export interface Plan {
   value: unknown;
 }
 export type Planner = (command: string, args: string[]) => Promise<Plan>;
-export type LiveDispatch = (command: string, args: string[]) => Promise<OpResult<unknown>>;
+/**
+ * A live unit's result, optionally carrying an explicit exit code. Python's
+ * publisher exits 1 when only the coverage refresh failed: publication
+ * succeeded and is still reported, but the unit must be visibly unhealthy.
+ * The runner strips `exitCode` from the artifact it prints.
+ */
+export type LiveDispatchResult = OpResult<unknown> & { readonly exitCode?: number };
+
+export type LiveDispatch = (command: string, args: string[]) => Promise<LiveDispatchResult>;
 export type OperatorLiveDispatch = (command: string, args: string[]) => Promise<RunnerResult>;
+
+/**
+ * A planner's argv refusal. The runner reports it as the usage artifact
+ * (exit 2) instead of the generic thrown-error artifact (exit 1), so doctrine
+ * I1's arg-error code survives the planner boundary.
+ */
+export class PlannerUsageError extends Error {
+  override name = 'PlannerUsageError';
+}
 
 /**
  * A structured operator artifact. It is the runner's one JSON document, not a
@@ -149,7 +171,11 @@ export async function run(
       };
     try {
       const result = await options.live(command, []);
-      return { artifact: result, exitCode: result.status === 'ok' ? 0 : 1 };
+      const { exitCode, ...artifact } = result;
+      return {
+        artifact,
+        exitCode: exitCode ?? (result.status === 'ok' ? 0 : 1),
+      };
     } catch (error) {
       return {
         artifact: {
@@ -196,6 +222,7 @@ export async function run(
     }
     return { artifact: { status: 'ok', value: plan.value }, exitCode: 0 };
   } catch (error) {
+    if (error instanceof PlannerUsageError) return usage(error.message);
     return {
       artifact: { status: 'failed', error: error instanceof Error ? error.message : String(error) },
       exitCode: 1,

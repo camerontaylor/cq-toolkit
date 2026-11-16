@@ -4,7 +4,7 @@ import {
 } from './internal/addressCheckoutOwnership.js';
 import { checkoutWriterContext } from '../../shared/checkoutWriterContext.js';
 import { checkoutWriterCommand } from '../../shared/checkoutWriterCommand.js';
-import { processEnv } from '../../config/process-env.js';
+import { currentEntryEnv, type EntryEnv } from '../../config/run-env.js';
 import { z } from 'zod';
 import { mkdtemp, symlink, access, readFile, mkdir, rm, realpath, lstat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
@@ -84,12 +84,15 @@ class IsolationRefusal extends Error {}
  * enabled, worktree scopes) or none: setting GIT_SSH_COMMAND would otherwise
  * override it and silently discard its options when batch mode is enforced.
  */
-const resolveCoreSshCommand = async (repoRoot: string): Promise<string | undefined> => {
+const resolveCoreSshCommand = async (
+  repoRoot: string,
+  env: EntryEnv = currentEntryEnv(),
+): Promise<string | undefined> => {
   const run = promisify(execFile);
   try {
     const configured = await run('git', ['-C', repoRoot, 'config', '--get', 'core.sshCommand'], {
       timeout: 300_000,
-      env: { ...processEnv(), GIT_TERMINAL_PROMPT: '0' },
+      env: { ...env, GIT_TERMINAL_PROMPT: '0' },
     });
     const command = configured.stdout.trim();
     return command ? command : undefined;
@@ -108,8 +111,9 @@ const resolveCoreSshCommand = async (repoRoot: string): Promise<string | undefin
  */
 export const gitSubprocess = (
   configuredSshCommand?: string,
+  baseEnv: EntryEnv = currentEntryEnv(),
 ): { timeout: number; env: NodeJS.ProcessEnv } => {
-  const env: NodeJS.ProcessEnv = { ...processEnv(), GIT_TERMINAL_PROMPT: '0' };
+  const env: NodeJS.ProcessEnv = { ...baseEnv, GIT_TERMINAL_PROMPT: '0' };
   // GIT_TERMINAL_PROMPT=0 covers git's own credential prompts, but OpenSSH
   // reads /dev/tty directly for passphrase/host-key prompts and ignores it.
   // BatchMode makes ssh non-interactive (it refuses instead of prompting)
@@ -154,13 +158,22 @@ export const gitSubprocess = (
 export async function isolateAddressMany(
   repoRoot: string,
   number: number,
-  options: { cloneRoot: string; target?: string; onPartial?: (path: string) => void },
+  options: {
+    cloneRoot: string;
+    target?: string;
+    env?: EntryEnv;
+    onPartial?: (path: string) => void;
+  },
 ): Promise<string> {
   const run = promisify(execFile);
-  const sshCommand = await resolveCoreSshCommand(repoRoot);
+  // Pin the record for the whole isolation: a caller-supplied env is copied so
+  // a mid-run mutation cannot move this op's git child env.
+  const env = Object.freeze({ ...(options.env ?? currentEntryEnv()) });
+  const sshCommand = await resolveCoreSshCommand(repoRoot, env);
   const git = checkoutWriterContext()
-    ? (file: string, args: string[]) => checkoutWriterCommand(file, args, gitSubprocess(sshCommand))
-    : (file: string, args: string[]) => run(file, args, gitSubprocess(sshCommand));
+    ? (file: string, args: string[]) =>
+        checkoutWriterCommand(file, args, gitSubprocess(sshCommand, env))
+    : (file: string, args: string[]) => run(file, args, gitSubprocess(sshCommand, env));
   // Inspect key names only: helpers, HTTP headers and signing values may contain credentials.
   const scopes = ['--local'];
   try {
@@ -273,6 +286,8 @@ export function makeReviewAddressMany(
     /** Driver factory for the default address; carries the alias sink wiring. */
     drivers?: DriverFactory;
     managedSubmit?: import('../dev/managedReview.js').ManagedReviewSubmit;
+    /** The host's environment record; absent, the enclosing run's applies. */
+    env?: EntryEnv;
   } = {},
 ) {
   return async (input: ReviewAddressManyInput): Promise<ReviewAddressManyResult> => {
@@ -314,12 +329,18 @@ function makeReviewAddressManyCore(
     /** Driver factory for the default address; carries the alias sink wiring. */
     drivers?: DriverFactory;
     managedSubmit?: import('../dev/managedReview.js').ManagedReviewSubmit;
+    /** The host's environment record; absent, the enclosing run's applies. */
+    env?: EntryEnv;
   } = {},
   record: (id: string, observation: UsageObservation) => void = () => {},
 ) {
   return async (input: ReviewAddressManyInput): Promise<ReviewAddressManyCoreResult> => {
     const valid = ReviewAddressManyInputSchema.safeParse(input);
     if (!valid.success) return { status: 'failed', error: valid.error.message };
+    // The composition's entry record: one pinned snapshot per invocation,
+    // before any await, so a mid-run ambient change cannot move a git child
+    // env or PATH. An explicit deps.env is copied for the same reason.
+    const env = Object.freeze({ ...(deps.env ?? currentEntryEnv()) });
     const gh =
       deps.gh ?? makeGhRunner({ cwd: input.repoRoot, unsetEnv: ['GH_REPO'], timeoutMs: 30_000 });
     const facts = async (number: number): Promise<AddressManyPrFacts & { baseRefName: string }> => {
@@ -426,8 +447,8 @@ function makeReviewAddressManyCore(
       if (!selection.candidates.length)
         return { status: 'needs-human', reason: 'No eligible PRs in selection' };
       const run = promisify(execFile);
-      const sshCommand = await resolveCoreSshCommand(input.repoRoot);
-      const git = (file: string, args: string[]) => run(file, args, gitSubprocess(sshCommand));
+      const sshCommand = await resolveCoreSshCommand(input.repoRoot, env);
+      const git = (file: string, args: string[]) => run(file, args, gitSubprocess(sshCommand, env));
       const coordinationRoot =
         deps.coordinationRoot ??
         (await realpath(
@@ -512,10 +533,12 @@ function makeReviewAddressManyCore(
                     ? await deps.isolate(input.repoRoot, candidate.number, {
                         cloneRoot,
                         target: baseRefName,
+                        env,
                       })
                     : await isolateAddressMany(input.repoRoot, candidate.number, {
                         cloneRoot,
                         target: baseRefName,
+                        env,
                         onPartial: (path) => {
                           isolatedRoot = path;
                           preservedClones.push({ number: candidate.number, path });

@@ -150,18 +150,19 @@ jobs:
     # the aggregation must happen here and nowhere else.
     needs: [changes, unit]
     # Fail-closed. A skipped job counts as a SUCCESS for GitHub's required
-    # checks, so `static` must never be skipped on a pull request: when a
-    # shard is cancelled here, static runs and the first step below fails it.
-    # the exception is a cancellation of a default-branch push's shards,
-    # whether by supersession (slice 3) or by an operator cancelling the run:
-    # this condition cannot tell the two apart. That commit then carries a
-    # SKIPPED static, which GitHub counts as satisfying the required check,
-    # and no completed static validation - not an absent result, not evidence
-    # of a pass. Supersession is the accepted trade, where the newest arrival
-    # is the one tested and recovery is a shard re-run; a skipped static on a
-    # main head is therefore always worth checking how the run ended. Every
-    # other event runs static so the guard step below can fail it.
-    if: ${{ always() && !cancelled() && (needs.unit.result != 'cancelled' || github.event_name != 'push') && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
+    # checks, so `static` must never be skipped on a pull request. The event
+    # guard is therefore split: a pull request takes `always()` ALONE, because
+    # cancelling the run is the one action the author controls and
+    # `!cancelled()` would skip the job, handing them a required check
+    # reported as success on a gate that never ran. A cancelled
+    # default-branch push keeps `!cancelled()`: supersession (slice 3) and an
+    # operator cancelling the run are indistinguishable there, and that
+    # commit then carries a SKIPPED static, which GitHub counts as satisfying
+    # the required check with no completed validation - the accepted trade,
+    # not a pass, so a skipped static on a main head is worth checking how the
+    # run ended. Every other event runs static so the guard step below can
+    # fail it.
+    if: ${{ always() && (github.event_name == 'pull_request' || !cancelled()) && (needs.unit.result != 'cancelled' || github.event_name != 'push') && (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
     steps:
       - name: Unit shards passed
         if: ${{ needs.unit.result == 'failure' || (github.event_name != 'push' && needs.unit.result == 'cancelled') || needs.changes.result == 'cancelled' }}

@@ -8,9 +8,12 @@ actual ``deploy_controller.switch_unit`` seam and asserts a discovery refusal
 before any journal or unit mutation.
 """
 import importlib.util
+import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -18,6 +21,11 @@ from unittest import mock
 
 from test_deploy_controller_fixtures import ControllerFixture, dc
 from test_unit_adapter import LiveIdentity, _write
+from test_unit_completion import (
+    FakeJournalPopen,
+    journal_text,
+    realistic_journal_record,
+)
 from test_unit_switch_factory import FactoryFixture, UNIT
 
 ROOT = Path(__file__).resolve().parent
@@ -345,32 +353,183 @@ class DiscoveryTests(PortFixture):
         self.assertIn("crq-slot.service", " ".join(evidence["foreign"]))
         self.assertIn("crq-tick.path", evidence["error"])
 
-    def test_dropin_directory_is_unsupported(self):
+    def test_declared_dropin_topology_is_supported(self):
+        declared = self.declare()
+        target = self.base / ".local/infra/systemd/crq-messaging.conf"
+        target.parent.mkdir(parents=True)
+        # A declared environment drop-in may resolve to an absolute target
+        # outside the unit directory; its text is still dependency-scanned.
+        target.write_text(
+            "[Service]\nEnvironmentFile=%h/.local/state/paseo/env\n")
+        dropin = self.unit_dir / "crq-tick.service.d"
+        dropin.mkdir()
+        (dropin / "20-paseo-env.conf").symlink_to(target)
+        (dropin / "coderabbit-managed.conf").write_text(
+            "[Service]\nEnvironment=CODERABBIT_CLI_DISABLE_AUTO_UPDATE=true\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+        self.assertIsNone(evidence["error"])
+
+    def test_co_installed_declared_dropins_are_supported(self):
+        target = self.base / ".local/infra/systemd/crq-messaging.conf"
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            "[Service]\nEnvironmentFile=%h/.local/state/paseo/env\n")
+
+        tick = self.declare()
+        tick_dropin = self.unit_dir / "crq-tick.service.d"
+        tick_dropin.mkdir()
+        (tick_dropin / "20-paseo-env.conf").symlink_to(target)
+        (tick_dropin / "coderabbit-managed.conf").write_text(
+            "[Service]\nEnvironment=CODERABBIT_CLI_DISABLE_AUTO_UPDATE=true\n")
+
+        watchdog_service = self.write(
+            "crq-watchdog.service", "[Service]\nExecStart=/bin/true\n")
+        watchdog_timer = self.write(
+            "crq-watchdog.timer", "[Timer]\nOnCalendar=*:0/12\n")
+        watchdog_wants = self.link(
+            "timers.target.wants/crq-watchdog.timer",
+            self.unit_dir / "crq-watchdog.timer")
+        watchdog_dropin = self.unit_dir / "crq-watchdog.service.d"
+        watchdog_dropin.mkdir()
+        (watchdog_dropin / "20-paseo-env.conf").symlink_to(target)
+
+        cases = (
+            ("crq-tick.service", tick),
+            ("crq-watchdog.service",
+             [watchdog_service, watchdog_timer, watchdog_wants]),
+        )
+        for unit, declared in cases:
+            with self.subTest(unit=unit):
+                evidence = self.port().discover(
+                    unit, [str(path) for path in declared])
+                self.assertEqual(evidence["complete"], True)
+                self.assertEqual(evidence["supported"], True)
+                self.assertEqual(evidence["foreign"], [])
+                self.assertIsNone(evidence["error"])
+
+    def test_co_installed_dropin_dependency_on_selected_unit_is_unsupported(
+            self):
+        good = self.base / ".local/infra/systemd/crq-messaging.conf"
+        good.parent.mkdir(parents=True)
+        good.write_text(
+            "[Service]\nEnvironmentFile=%h/.local/state/paseo/env\n")
+        bad = self.base / ".local/infra/systemd/evil.conf"
+        bad.write_text("[Unit]\nWants=crq-tick.service\n")
+
+        tick = self.declare()
+        tick_dropin = self.unit_dir / "crq-tick.service.d"
+        tick_dropin.mkdir()
+        (tick_dropin / "20-paseo-env.conf").symlink_to(good)
+        (tick_dropin / "coderabbit-managed.conf").write_text(
+            "[Service]\nEnvironment=CODERABBIT_CLI_DISABLE_AUTO_UPDATE=true\n")
+
+        self.write("crq-watchdog.service", "[Service]\nExecStart=/bin/true\n")
+        self.write("crq-watchdog.timer", "[Timer]\nOnCalendar=*:0/12\n")
+        watchdog_dropin = self.unit_dir / "crq-watchdog.service.d"
+        watchdog_dropin.mkdir()
+        (watchdog_dropin / "20-paseo-env.conf").symlink_to(bad)
+
+        evidence = self.port().discover(
+            "crq-tick.service", [str(path) for path in tick])
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("crq-tick.service", " ".join(evidence["foreign"]))
+
+    def test_co_installed_dropin_continuation_is_unsupported(self):
+        good = self.base / ".local/infra/systemd/crq-messaging.conf"
+        good.parent.mkdir(parents=True)
+        good.write_text(
+            "[Service]\nEnvironmentFile=%h/.local/state/paseo/env\n")
+        bad = self.base / ".local/infra/systemd/evil.conf"
+        bad.write_text("[Unit]\nWants=\\\n crq-tick.service\n")
+
+        tick = self.declare()
+        tick_dropin = self.unit_dir / "crq-tick.service.d"
+        tick_dropin.mkdir()
+        (tick_dropin / "20-paseo-env.conf").symlink_to(good)
+        (tick_dropin / "coderabbit-managed.conf").write_text(
+            "[Service]\nEnvironment=CODERABBIT_CLI_DISABLE_AUTO_UPDATE=true\n")
+
+        self.write("crq-watchdog.service", "[Service]\nExecStart=/bin/true\n")
+        self.write("crq-watchdog.timer", "[Timer]\nOnCalendar=*:0/12\n")
+        watchdog_dropin = self.unit_dir / "crq-watchdog.service.d"
+        watchdog_dropin.mkdir()
+        (watchdog_dropin / "20-paseo-env.conf").symlink_to(bad)
+
+        evidence = self.port().discover(
+            "crq-tick.service", [str(path) for path in tick])
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("continuation", evidence["error"] or "")
+
+    def test_undeclared_dropin_entry_is_unsupported(self):
         declared = self.declare()
         dropin = self.unit_dir / "crq-tick.service.d"
         dropin.mkdir()
         (dropin / "override.conf").write_text("[Service]\nNice=5\n")
         evidence = self.discover(declared)
         self.assertEqual(evidence["supported"], False)
-        self.assertIn("drop-in", " ".join(evidence["foreign"]))
+        self.assertIn("declared entries", " ".join(evidence["foreign"]))
 
-    def test_symlinked_dropin_directory_is_not_scanned_as_a_dropin(self):
+    def test_type_wide_inherited_dropin_directory_is_unsupported(self):
+        declared = self.declare()
+        override = self.unit_dir / "service.d"
+        override.mkdir()
+        # systemd merges the type-wide directory into every service unit, so
+        # an ExecStart override there would execute outside the verified
+        # bytes even though FragmentPath still names the main unit file.
+        (override / "override.conf").write_text(
+            "[Service]\nExecStart=/bin/false\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("undeclared drop-in directory: " + str(override),
+                      " ".join(evidence["foreign"]))
+
+    def test_dash_prefix_inherited_dropin_directory_is_unsupported(self):
+        declared = self.declare()
+        override = self.unit_dir / "crq-.service.d"
+        override.mkdir()
+        # The dash-prefix directory applies to crq-tick.service even though
+        # it is not named after the unit, so discovery must reject it too.
+        (override / "override.conf").write_text(
+            "[Service]\nExecStart=/bin/false\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("undeclared drop-in directory: " + str(override),
+                      " ".join(evidence["foreign"]))
+
+    def test_symlinked_type_wide_dropin_directory_is_unsupported(self):
+        declared = self.declare()
+        held = self.base / "repos/held.service.d"
+        held.mkdir(parents=True)
+        (held / "override.conf").write_text(
+            "[Service]\nExecStart=/bin/false\n")
+        (self.unit_dir / "service.d").symlink_to(held)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("undeclared drop-in directory: " + str(
+            self.unit_dir / "service.d"), " ".join(evidence["foreign"]))
+
+    def test_symlinked_dropin_directory_is_unsupported(self):
         declared = self.declare()
         held = self.unit_dir / "held-dropin"
         held.mkdir()
         (held / "override.conf").write_text("[Service]\nNice=5\n")
         (self.unit_dir / "crq-tick.service.d").symlink_to(held)
         evidence = self.discover(declared)
-        self.assertEqual(evidence["complete"], True)
-        self.assertNotIn("drop-in", " ".join(evidence["foreign"]))
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("not a real directory", " ".join(evidence["foreign"]))
 
-    def test_dangling_symlink_entry_is_not_a_dropin_directory(self):
+    def test_dangling_dropin_directory_is_unsupported(self):
         declared = self.declare()
         (self.unit_dir / "crq-tick.service.d").symlink_to("gone")
         evidence = self.discover(declared)
-        self.assertNotIn("drop-in", " ".join(evidence["foreign"]))
-        self.assertEqual(evidence["complete"], False)
-        self.assertIn("cannot resolve a symlink", evidence["error"])
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("not a real directory", " ".join(evidence["foreign"]))
 
     def test_unreadable_enablement_entry_is_incomplete(self):
         declared = self.declare()
@@ -489,15 +648,237 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("dependency scan bound", evidence["error"])
 
-    def test_symlink_outside_the_unit_directory_is_incomplete(self):
+    def test_cotenant_symlink_outside_the_unit_directory_is_supported(self):
         declared = self.declare()
-        outside = self.base / "outside.service"
-        outside.write_text("[Unit]\nWants=crq-slot.service\n")
-        (self.unit_dir / "foreign.service").symlink_to(outside)
+        outside = (self.base / "repos/telemetry/infra/systemd/user"
+                   / "telemetry-ingest@.service")
+        outside.parent.mkdir(parents=True)
+        # A real cotenant unit is an absolute symlink into its repository
+        # tree. Its text is read under the same bound as a unit-directory
+        # entry, and a legitimate execution-line continuation must not make
+        # the topology incomplete.
+        outside.write_text(
+            "[Service]\nExecStart=/bin/true \\\n  --flag\n")
+        (self.unit_dir / "telemetry-ingest@.service").symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+        self.assertIsNone(evidence["error"])
+
+    def test_cotenant_symlink_naming_the_expected_unit_is_unsupported(self):
+        declared = self.declare()
+        for directive in ("Wants", "Requires", "PartOf"):
+            with self.subTest(directive=directive):
+                outside = self.base / ("repos/%s.service"
+                                       % directive.lower())
+                outside.parent.mkdir(parents=True, exist_ok=True)
+                outside.write_text("[Unit]\n%s=crq-tick.service\n" % directive)
+                link = self.unit_dir / ("cotenant-%s.service"
+                                        % directive.lower())
+                link.symlink_to(outside)
+                evidence = self.discover(declared)
+                self.assertEqual(evidence["complete"], True)
+                self.assertEqual(evidence["supported"], False)
+                self.assertIn("%s names crq-tick.service" % directive,
+                              " ".join(evidence["foreign"]))
+                link.unlink()
+
+    def test_cotenant_symlink_continuation_hiding_a_dependency_is_unsupported(
+            self):
+        declared = self.declare()
+        outside = self.base / "repos/wrapped.service"
+        outside.parent.mkdir(parents=True)
+        # systemd joins the continued directive and ignores a comment block
+        # inside the continuation, so the scanner must join it too.
+        outside.write_text(
+            "[Unit]\nWants=\\\n# ignored comment\n crq-tick.service\n")
+        (self.unit_dir / "wrapped.service").symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Wants names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_cotenant_symlink_blank_line_ends_a_continuation(self):
+        declared = self.declare()
+        outside = self.base / "repos/blank.service"
+        outside.parent.mkdir(parents=True)
+        # A blank line flushes the accumulated line, so Wants is parsed on its
+        # own and the dependency is visible (systemd-analyze verify confirms).
+        outside.write_text(
+            "[Unit]\nDescription=wrapped \\\n\nWants=crq-tick.service\n")
+        (self.unit_dir / "blank.service").symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Wants names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_cotenant_symlink_escaped_backslash_is_not_a_continuation(self):
+        declared = self.declare()
+        outside = self.base / "repos/escaped.service"
+        outside.parent.mkdir(parents=True)
+        # An even trailing run of backslashes does not continue the line, so
+        # Wants must be scanned independently rather than swallowed into
+        # Description (systemd-analyze verify confirms).
+        outside.write_text(
+            "[Unit]\nDescription=escaped \\\\\nWants=crq-tick.service\n")
+        (self.unit_dir / "escaped.service").symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Wants names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_cotenant_directory_symlink_is_not_followed(self):
+        declared = self.declare()
+        held = self.base / "repos/held.service.d"
+        held.mkdir(parents=True)
+        (held / "override.conf").write_text(
+            "[Unit]\nWants=crq-tick.service\n")
+        (self.unit_dir / "telemetry.service.d").symlink_to(held)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+
+    def test_dangling_cotenant_symlink_is_incomplete(self):
+        declared = self.declare()
+        (self.unit_dir / "dangling.service").symlink_to(
+            self.base / "repos/missing.service")
         evidence = self.discover(declared)
         self.assertEqual(evidence["complete"], False)
         self.assertEqual(evidence["supported"], False)
-        self.assertIn("symlink outside", evidence["error"])
+        self.assertIn("cannot resolve a symlink", evidence["error"])
+
+    def test_dangling_cotenant_enablement_links_are_skipped(self):
+        declared = self.declare()
+        stale = self.base / "old-home/systemd/user"
+        stale.mkdir(parents=True)
+        # Enabling a unit creates a link under the target's wants (or
+        # requires) directory. A co-tenant's link can outlive the target it
+        # named while the still-present unit is installed beside it. Ceres
+        # carries exactly this shape for codexbar-quota-cues.timer,
+        # portkey-gateway.service and ntfy-server.service.
+        (self.unit_dir / "timers.target.wants/codexbar-quota-cues.timer"
+         ).symlink_to(stale / "codexbar-quota-cues.timer")
+        self.link("default.target.wants/portkey-gateway.service",
+                  stale / "portkey-gateway.service")
+        self.link("default.target.requires/ntfy-server.service",
+                  stale / "ntfy-server.service")
+        self.write("codexbar-quota-cues.timer",
+                   "[Timer]\nUnit=codexbar-quota-cues.service\n")
+        self.write("portkey-gateway.service",
+                   "[Service]\nExecStart=/bin/true\n")
+        self.write("ntfy-server.service",
+                   "[Service]\nExecStart=/bin/true\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+        self.assertIsNone(evidence["error"])
+
+    def test_dangling_enablement_skip_continues_with_sibling_content(self):
+        declared = self.declare()
+        stale = self.base / "old-home/systemd/user"
+        stale.mkdir(parents=True)
+        # The scan must keep reading the remaining entries after a skipped
+        # stale link, so a cotenant dependency on the selected unit is still
+        # foreign.
+        (self.unit_dir / "timers.target.wants/stale-cotenant.timer"
+         ).symlink_to(stale / "stale-cotenant.timer")
+        self.write("telemetry.service",
+                   "[Unit]\nWants=crq-tick.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Wants names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_dangling_enablement_link_naming_the_selected_unit_is_foreign(
+            self):
+        declared = self.declare()
+        # The link name is the dependency edge systemd records, so it is
+        # foreign even though the target is gone. This must not be skipped
+        # with the benign co-tenant links.
+        self.link("default.target.wants/crq-tick.service",
+                  self.base / "repos/missing/crq-tick.service")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("dangling enablement link names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_dangling_enablement_link_target_naming_a_crq_unit_is_not_skipped(
+            self):
+        declared = self.declare()
+        self.link("default.target.wants/telemetry.service",
+                  self.base / "repos/missing/crq-tick.service")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("dangling enablement link names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_declared_dangling_enablement_link_is_incomplete(self):
+        declared = self.declare()
+        wants = declared[2]
+        wants.unlink()
+        wants.symlink_to(self.base / "repos/missing/crq-tick.timer")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("cannot resolve a symlink", evidence["error"])
+
+    def test_unreadable_enablement_target_is_incomplete(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can read a mode-000 file")
+        declared = self.declare()
+        outside = self.base / "repos/locked-cotenant.timer"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("[Timer]\n")
+        outside.chmod(0o000)
+        self.addCleanup(outside.chmod, 0o600)
+        (self.unit_dir / "timers.target.wants/locked-cotenant.timer"
+         ).symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("cannot read", evidence["error"])
+
+    def test_enablement_symlink_loop_is_incomplete(self):
+        declared = self.declare()
+        self.link("default.target.wants/loop.timer", "loop.timer")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("cannot resolve a symlink", evidence["error"])
+
+    def test_unreadable_cotenant_symlink_target_is_incomplete(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can read a mode-000 file")
+        declared = self.declare()
+        outside = self.base / "repos/locked.service"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("[Service]\n")
+        outside.chmod(0o000)
+        self.addCleanup(outside.chmod, 0o600)
+        (self.unit_dir / "locked.service").symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("cannot read", evidence["error"])
+
+    def test_oversized_cotenant_symlink_target_is_incomplete(self):
+        declared = self.declare()
+        outside = self.base / "repos/large.service"
+        outside.parent.mkdir(parents=True)
+        outside.write_bytes(b"#\n" * ((1 << 20) // 2 + 1))
+        (self.unit_dir / "large.service").symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("byte bound", evidence["error"])
 
     def test_symlink_loop_is_incomplete(self):
         declared = self.declare()
@@ -548,6 +929,46 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["paths"][str(timer)]["type"], "other")
         self.assertEqual(evidence["supported"], False)
         self.assertIn("not a file or symlink", evidence["error"])
+
+
+class ReadFileTests(unittest.TestCase):
+    def test_refuses_a_directory_descriptor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(live.LiveBindingRefused):
+                live._read_file(Path(temporary), max_bytes=1024)
+
+    def test_refuses_a_fifo_without_blocking(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fifo = Path(temporary) / "fifo"
+            os.mkfifo(fifo)
+            opened = threading.Event()
+
+            def holder():
+                # O_RDWR never blocks on a FIFO and keeps both ends present,
+                # so even a regression to a blocking open lets this test
+                # finish instead of hanging the suite.
+                try:
+                    descriptor = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+                except OSError:
+                    return
+                try:
+                    opened.set()
+                    time.sleep(0.2)
+                    os.write(descriptor, b"x")
+                except OSError:
+                    pass
+                finally:
+                    os.close(descriptor)
+
+            thread = threading.Thread(target=holder, daemon=True)
+            thread.start()
+            self.assertTrue(opened.wait(2))
+            try:
+                with self.assertRaises(live.LiveBindingRefused):
+                    live._read_file(fifo, max_bytes=1024)
+            finally:
+                thread.join(2)
+            self.assertFalse(thread.is_alive())
 
 
 class IdentityTests(unittest.TestCase):
@@ -634,7 +1055,9 @@ class LayoutTests(ControllerFixture):
         other_root = self.base / "other-root"
         state = other_root / "apps/crq-python/state"
         state.mkdir(parents=True)
-        (state / dc.LOCK_NAME).write_text("")
+        lock = state / dc.LOCK_NAME
+        lock.write_text("")
+        lock.chmod(0o600)
         other = live.HostLayout(
             root=other_root, unit_dir=self.units_home,
             record_dir=self.overlay_records, overlay=self.overlay)
@@ -734,6 +1157,87 @@ class ProductionAdapterTests(FactoryFixture):
 
     def write(self, name, text, mode=0o644):
         _write(self.unit_dir / name, text.encode(), mode)
+
+
+class BoundedJournalSeamTests(FactoryFixture):
+    """The production composition over the real bounded journal source.
+
+    The host boundary is still injected, but ``SystemdJournalSource`` is the
+    production class and ``_read_bounded`` is the production reader. The fake
+    child emits the same record volume as a real 256-record user-journal tail,
+    projected only when the source asks for ``--output-fields``.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.overlay_records = Path(self.overlay["record_dir"])
+        self.overlay_records.mkdir(mode=0o700)
+        self.overlay_records.chmod(0o700)
+        self.effects = dc.Effects(self.root, self.overlay_records)
+
+    def journal_records(self, unit):
+        padding = [realistic_journal_record("%032x" % (index + 1),
+                                            1000 + index,
+                                            boot=self.systemd.boot,
+                                            unit=unit)
+                   for index in range(256)]
+        return padding + list(self.systemd.journal.get(unit, []))
+
+    def responder(self, *, honor_projection):
+        def respond(command):
+            if command[0].endswith("journalctl"):
+                unit = command[command.index("--user-unit") + 1]
+                return journal_text(command, self.journal_records(unit),
+                                    honor_projection=honor_projection)
+            unit = command[command.index("show") + 1]
+            props = [command[index + 1] for index, argument
+                     in enumerate(command) if argument == "--property"]
+            values = self.systemd.show(unit, props)
+            return "".join("%s=%s\n" % (prop, values.get(prop, ""))
+                           for prop in props)
+        return respond
+
+    def compose_live(self, *, honor_projection=True):
+        popen = FakeJournalPopen(
+            self.responder(honor_projection=honor_projection))
+        self.addCleanup(popen.cleanup)
+        source = live.completion.SystemdJournalSource(popen=popen)
+        patch = mock.patch.object(live.completion, "read_boot_id",
+                                  return_value=self.systemd.boot)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return live.production_adapter(
+            self.effects, self.overlay, unit=UNIT, runtime="python",
+            systemd=self.systemd, journal_source=source,
+            identity=LiveIdentity(), queue_drain=self.queue)
+
+    def test_large_realistic_journal_completes_through_the_live_source(self):
+        full = "".join(json.dumps(record) + "\n"
+                       for record in self.journal_records(UNIT))
+        self.assertGreater(len(full.encode()), 256 * 1024)
+        adapter, _selection = self.compose_live()
+        record = dc.switch_unit(self.effects, adapter, UNIT, "python")
+        self.assertEqual(record["outcome"], "completed")
+        self.assertEqual(len(record["completions"]), 2)
+        for evidence in record["completions"]:
+            self.assertEqual(evidence["witness"], "manager")
+            self.assertEqual(evidence["boot_id"], self.systemd.boot)
+
+    def test_unprojected_large_journal_rolls_back_after_the_byte_bound(self):
+        adapter, _selection = self.compose_live(honor_projection=False)
+        with self.assertRaises(dc.RecoveryRequired) as failure:
+            dc.switch_unit(self.effects, adapter, UNIT, "python")
+        recovery = failure.exception.recovery
+        self.assertEqual(recovery["outcome"], "rolled_back")
+        self.assertEqual(recovery["failed_phase"], "activation_pending")
+        self.assertIn("byte bound", recovery["reason"])
+        records = [json.loads(path.read_text()) for path in
+                   sorted(self.effects.record_dir.glob("controller-*.json"))]
+        self.assertEqual(records[-1]["outcome"], "rolled_back")
+        service = self.unit_dir / UNIT
+        self.assertEqual(service.read_bytes(),
+                         self.node_service(UNIT)["bytes"])
+        self.assertEqual(self.systemd.active["crq-tick.timer"], "active")
 
 
 if __name__ == "__main__":

@@ -363,10 +363,13 @@ commit=$(git rev-parse HEAD)
 python3 apps/crq-python/ops/vm-feasibility.py --state-dir ~/crq-vm-feasibility/state plan
 python3 apps/crq-python/ops/vm-feasibility.py --state-dir ~/crq-vm-feasibility/state \
   --tools ~/crq-vm-feasibility/tools --source-commit "$commit" run
+# Set run to the run ID printed by the previous command (the "run" field of its
+# final JSON line); the quotes keep the placeholder literal for the shell.
+run="<run-id>"
 python3 apps/crq-python/ops/vm-feasibility.py --state-dir ~/crq-vm-feasibility/state \
-  verify ~/crq-vm-feasibility/state/runs/<run>/report.json
+  verify ~/crq-vm-feasibility/state/runs/"$run"/report.json
 python3 apps/crq-python/ops/vm-feasibility.py --state-dir ~/crq-vm-feasibility/state \
-  destroy --run-id <run>
+  destroy --run-id "$run"
 ```
 
 `CRQ_VM_SOURCE_COMMIT` may supply the commit instead of the flag; an unbound

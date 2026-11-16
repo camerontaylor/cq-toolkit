@@ -1,9 +1,8 @@
 // Observation-only entry: independent of the disabled automated merger.
-import { enterWithCqEnv } from '../config/entry.js';
+import { enterWithEntryEnv } from '../config/entry.js';
 import { pathToFileURL } from 'node:url';
 import { ghJson, ghNameOk, makeGhRunner, type GhFn } from '../adapters/forge-github/gh.js';
 import { observeOpenPrs, type ObserveOpenPrsResult } from './merge-recheck.js';
-import { processEnv } from '../config/process-env.js';
 
 /** An argv/config fault: the I1 usage class (exit 2), not a runtime throw (exit 1). */
 class UsageError extends Error {
@@ -47,14 +46,15 @@ export async function observeRepository(
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    // The CQ_* environment is read once; an invalid value exits 2 first.
-    const cqEnv = enterWithCqEnv();
-    if (cqEnv === undefined) {
+    // The environment is read once; an invalid value exits 2 first. Foreign
+    // names (GITHUB_REPOSITORY) come from that same entry record.
+    const entry = enterWithEntryEnv();
+    if (entry === undefined) {
       process.exitCode = 2;
     } else {
       const result = await observeRepository(
-        makeGhRunner({ cqEnv }),
-        processEnv()['GITHUB_REPOSITORY'] ?? '',
+        makeGhRunner({ cqEnv: entry.cqEnv }),
+        entry.env['GITHUB_REPOSITORY'] ?? '',
       );
       console.log(JSON.stringify(result));
       // An observation failure must be visible even though no merge was attempted.

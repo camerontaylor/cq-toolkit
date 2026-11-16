@@ -1,0 +1,662 @@
+{
+  "schema": "cq.crq-group-p-vector/v1",
+  "family": "liveness",
+  "cases": [
+    {
+      "name": "managed-detached-session",
+      "source": "author_quota.identity_kind",
+      "input": {
+        "pidfile": {
+          "pid": 42,
+          "pgid": 42,
+          "sid": 42,
+          "run_id": "run-1",
+          "group_owner": "foreground-v1"
+        },
+        "run_id": "run-1",
+        "queue_pid": 42
+      },
+      "expect": {
+        "ok": true,
+        "value": "managed"
+      }
+    },
+    {
+      "name": "managed-queue-pid-unknown",
+      "source": "author_quota.identity_kind",
+      "input": {
+        "pidfile": {
+          "pid": 42,
+          "pgid": 42,
+          "sid": 42,
+          "run_id": "run-1",
+          "group_owner": "foreground-v1"
+        },
+        "run_id": "run-1"
+      },
+      "expect": {
+        "ok": true,
+        "value": "managed"
+      }
+    },
+    {
+      "name": "managed-foreign-run-binding",
+      "source": "author_quota.identity_kind",
+      "input": {
+        "pidfile": {
+          "pid": 42,
+          "pgid": 42,
+          "sid": 42,
+          "run_id": "run-2",
+          "group_owner": "foreground-v1"
+        },
+        "run_id": "run-1"
+      },
+      "expect": {
+        "ok": true,
+        "value": "invalid"
+      }
+    },
+    {
+      "name": "managed-without-session-shape",
+      "source": "author_quota.identity_kind",
+      "input": {
+        "pidfile": {
+          "pid": 42,
+          "pgid": 42,
+          "sid": 43,
+          "run_id": "run-1",
+          "group_owner": "foreground-v1"
+        },
+        "run_id": "run-1"
+      },
+      "expect": {
+        "ok": true,
+        "value": "invalid"
+      }
+    },
+    {
+      "name": "managed-disagrees-with-queue-pid",
+      "source": "author_quota.identity_kind",
+      "input": {
+        "pidfile": {
+          "pid": 42,
+          "pgid": 42,
+          "sid": 42,
+          "run_id": "run-1",
+          "group_owner": "foreground-v1"
+        },
+        "run_id": "run-1",
+        "queue_pid": 41
+      },
+      "expect": {
+        "ok": true,
+        "value": "invalid"
+      }
+    },
+    {
+      "name": "unknown-marker-is-invalid",
+      "source": "author_quota.identity_kind",
+      "input": {
+        "pidfile": {
+          "pid": 42,
+          "pgid": 42,
+          "sid": 42,
+          "run_id": "run-1",
+          "group_owner": "other"
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": "invalid"
+      }
+    },
+    {
+      "name": "legacy-valid",
+      "source": "author_quota.identity_kind",
+      "input": {
+        "pidfile": {
+          "pid": 42,
+          "pgid": 42
+        },
+        "queue_pid": 42
+      },
+      "expect": {
+        "ok": true,
+        "value": "legacy"
+      }
+    },
+    {
+      "name": "legacy-disagrees-with-queue-pid",
+      "source": "author_quota.identity_kind",
+      "input": {
+        "pidfile": {
+          "pid": 42,
+          "pgid": 42
+        },
+        "queue_pid": 41
+      },
+      "expect": {
+        "ok": true,
+        "value": "invalid"
+      }
+    },
+    {
+      "name": "legacy-without-queue-pid",
+      "source": "author_quota.identity_kind",
+      "input": {
+        "pidfile": {
+          "pid": 42,
+          "pgid": 42
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": "legacy"
+      }
+    },
+    {
+      "name": "missing-pgid-is-invalid",
+      "source": "author_quota.identity_kind",
+      "input": {
+        "pidfile": {
+          "pid": 42
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": "invalid"
+      }
+    },
+    {
+      "name": "boolean-pid-is-invalid",
+      "source": "author_quota.identity_kind",
+      "input": {
+        "pidfile": {
+          "pid": true,
+          "pgid": 42
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": "invalid"
+      }
+    },
+    {
+      "name": "string-pid-is-invalid",
+      "source": "author_quota.identity_kind",
+      "input": {
+        "pidfile": {
+          "pid": "42",
+          "pgid": 42
+        }
+      },
+      "expect": {
+        "ok": true,
+        "value": "invalid"
+      }
+    },
+    {
+      "name": "absent-pidfile-is-invalid",
+      "source": "author_quota.identity_kind",
+      "input": {
+        "pidfile": null
+      },
+      "expect": {
+        "ok": true,
+        "value": "invalid"
+      }
+    },
+    {
+      "name": "bare-pid-is-invalid",
+      "source": "author_quota.identity_kind",
+      "input": {
+        "pidfile": 42
+      },
+      "expect": {
+        "ok": true,
+        "value": "invalid"
+      }
+    },
+    {
+      "name": "empty-object-is-invalid",
+      "source": "author_quota.identity_kind",
+      "input": {
+        "pidfile": {}
+      },
+      "expect": {
+        "ok": true,
+        "value": "invalid"
+      }
+    },
+    {
+      "name": "managed-exit-false-wrapper-None",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": false,
+        "identity": "managed",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": null
+      },
+      "expect": {
+        "ok": true,
+        "value": "ambiguous"
+      }
+    },
+    {
+      "name": "managed-exit-false-wrapper-False",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": false,
+        "identity": "managed",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": false
+      },
+      "expect": {
+        "ok": true,
+        "value": "ambiguous"
+      }
+    },
+    {
+      "name": "managed-exit-false-wrapper-True",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": false,
+        "identity": "managed",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": true
+      },
+      "expect": {
+        "ok": true,
+        "value": "alive"
+      }
+    },
+    {
+      "name": "managed-exit-true-wrapper-None",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": true,
+        "identity": "managed",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": null
+      },
+      "expect": {
+        "ok": true,
+        "value": "harvest"
+      }
+    },
+    {
+      "name": "managed-exit-true-wrapper-False",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": true,
+        "identity": "managed",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": false
+      },
+      "expect": {
+        "ok": true,
+        "value": "harvest"
+      }
+    },
+    {
+      "name": "managed-exit-true-wrapper-True",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": true,
+        "identity": "managed",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": true
+      },
+      "expect": {
+        "ok": true,
+        "value": "alive"
+      }
+    },
+    {
+      "name": "legacy-exit-false-wrapper-None",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": false,
+        "identity": "legacy",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": null
+      },
+      "expect": {
+        "ok": true,
+        "value": "ambiguous"
+      }
+    },
+    {
+      "name": "legacy-exit-false-wrapper-False",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": false,
+        "identity": "legacy",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": false
+      },
+      "expect": {
+        "ok": true,
+        "value": "ambiguous"
+      }
+    },
+    {
+      "name": "legacy-exit-false-wrapper-True",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": false,
+        "identity": "legacy",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": true
+      },
+      "expect": {
+        "ok": true,
+        "value": "alive"
+      }
+    },
+    {
+      "name": "legacy-exit-true-wrapper-None",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": true,
+        "identity": "legacy",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": null
+      },
+      "expect": {
+        "ok": true,
+        "value": "ambiguous"
+      }
+    },
+    {
+      "name": "legacy-exit-true-wrapper-False",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": true,
+        "identity": "legacy",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": false
+      },
+      "expect": {
+        "ok": true,
+        "value": "harvest"
+      }
+    },
+    {
+      "name": "legacy-exit-true-wrapper-True",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": true,
+        "identity": "legacy",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": true
+      },
+      "expect": {
+        "ok": true,
+        "value": "alive"
+      }
+    },
+    {
+      "name": "invalid-exit-false-wrapper-None",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": false,
+        "identity": "invalid",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": null
+      },
+      "expect": {
+        "ok": true,
+        "value": "ambiguous"
+      }
+    },
+    {
+      "name": "invalid-exit-false-wrapper-False",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": false,
+        "identity": "invalid",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": false
+      },
+      "expect": {
+        "ok": true,
+        "value": "ambiguous"
+      }
+    },
+    {
+      "name": "invalid-exit-false-wrapper-True",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": false,
+        "identity": "invalid",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": true
+      },
+      "expect": {
+        "ok": true,
+        "value": "alive"
+      }
+    },
+    {
+      "name": "invalid-exit-true-wrapper-None",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": true,
+        "identity": "invalid",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": null
+      },
+      "expect": {
+        "ok": true,
+        "value": "ambiguous"
+      }
+    },
+    {
+      "name": "invalid-exit-true-wrapper-False",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": true,
+        "identity": "invalid",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": false
+      },
+      "expect": {
+        "ok": true,
+        "value": "ambiguous"
+      }
+    },
+    {
+      "name": "invalid-exit-true-wrapper-True",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": true,
+        "identity": "invalid",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": true
+      },
+      "expect": {
+        "ok": true,
+        "value": "alive"
+      }
+    },
+    {
+      "name": "alive-runner-outranks-exit",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": true,
+        "identity": "managed",
+        "runner_alive": true,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": null
+      },
+      "expect": {
+        "ok": true,
+        "value": "alive"
+      }
+    },
+    {
+      "name": "alive-cli-outranks-exit",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": true,
+        "identity": "managed",
+        "runner_alive": false,
+        "cli_alive": true,
+        "runner_group_alive": false,
+        "wrapper_group_alive": null
+      },
+      "expect": {
+        "ok": true,
+        "value": "alive"
+      }
+    },
+    {
+      "name": "alive-runner-group-outranks-exit",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": true,
+        "identity": "managed",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": true,
+        "wrapper_group_alive": null
+      },
+      "expect": {
+        "ok": true,
+        "value": "alive"
+      }
+    },
+    {
+      "name": "alive-legacy-wrapper-group",
+      "source": "author_quota.run_state",
+      "input": {
+        "has_exit": true,
+        "identity": "legacy",
+        "runner_alive": false,
+        "cli_alive": false,
+        "runner_group_alive": false,
+        "wrapper_group_alive": true
+      },
+      "expect": {
+        "ok": true,
+        "value": "alive"
+      }
+    },
+    {
+      "name": "positive",
+      "source": "crq.ident_pid",
+      "input": {
+        "value": 42
+      },
+      "expect": {
+        "ok": true,
+        "value": 42
+      }
+    },
+    {
+      "name": "boolean",
+      "source": "crq.ident_pid",
+      "input": {
+        "value": true
+      },
+      "expect": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "name": "string",
+      "source": "crq.ident_pid",
+      "input": {
+        "value": "42"
+      },
+      "expect": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "name": "zero",
+      "source": "crq.ident_pid",
+      "input": {
+        "value": 0
+      },
+      "expect": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "name": "negative",
+      "source": "crq.ident_pid",
+      "input": {
+        "value": -1
+      },
+      "expect": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "name": "float",
+      "source": "crq.ident_pid",
+      "input": {
+        "value": 42.0
+      },
+      "expect": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "name": "absent",
+      "source": "crq.ident_pid",
+      "input": {
+        "value": null
+      },
+      "expect": {
+        "ok": true,
+        "value": null
+      }
+    }
+  ]
+}
