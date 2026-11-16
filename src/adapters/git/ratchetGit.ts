@@ -864,8 +864,11 @@ export async function gitLsRemoteRef(
 
 /**
  * Atomically push `updates` to `url` as a compare-and-swap: `push --atomic
- * --porcelain --no-verify` with one explicit `--force-with-lease=refs/heads/
- * <branch>:<expected>` per update, NEVER plain `--force` or a `+` refspec.
+ * --porcelain --no-verify --no-follow-tags` with one explicit
+ * `--force-with-lease=refs/heads/<branch>:<expected>` per update, NEVER plain
+ * `--force` or a `+` refspec. `--no-follow-tags` keeps a config
+ * `push.followTags=true` from publishing annotated tags that bypass the
+ * supplied updates: only the listed refspecs are pushed.
  * Each lease names the exact oid the caller last read, so the remote ref
  * must still hold it — a ref that advanced OR was rewound (even to an
  * ancestor of the new value, which a plain fast-forward push would accept)
@@ -909,6 +912,7 @@ export async function gitPushAtomic(
       '--atomic',
       '--porcelain',
       '--no-verify',
+      '--no-follow-tags',
       ...leases,
       '--end-of-options',
       url,
