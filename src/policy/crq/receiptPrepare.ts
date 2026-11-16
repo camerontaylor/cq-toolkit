@@ -33,6 +33,7 @@ import {
   openMajor,
   reviews,
 } from './receiptEvidence.js';
+import { withObjectKeys } from './queueDoc.js';
 import { pythonEqual } from './receiptIdentity.js';
 import { pythonStrip, pythonTruthy } from './repairBinding.js';
 
@@ -202,8 +203,8 @@ export function prepare(
   const threadsBlock = openMajor(gh, repo, pr, login, expectedInlineMajor(rows, pr, login));
   blocked = bodyMajorAtHead(rows, pr, head, login) || threadsBlock || blocked;
   const verdict = whole && !blocked ? 'PASS' : 'ITERATE';
-  return new JsonObject([
-    ...meta.entries,
+  // `{**meta, ...}`: an existing key keeps its position and takes the new value.
+  return withObjectKeys(meta, [
     [
       'receipt_header',
       `**Independent review (CodeRabbit CLI via crq): ${verdict} for \`${pythonStr(head)}\`**`,
