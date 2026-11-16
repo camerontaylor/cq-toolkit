@@ -89,15 +89,33 @@ class ExampleTests(HistoryGitMixin, SnapshotGitFixture, unittest.TestCase):
         self.assertIn("server-verified", result["cue"])
         self.assertIn("wait behind first reviews", result["cue"])
 
-    def test_digest_changes_when_the_predecessor_reviewed_flag_changes(self):
-        def digest_for(**overrides):
-            row = item("lr-a", facts(base=self.base, base_tree=self.base_tree,
-                                     head=self.base, head_tree=self.base_tree), task="T")
-            row.update(overrides)
-            return self.project(queue(row), task="T")["digest"]
+    def _two_linked(self, *, older_reviewed, newer_reviewed):
+        def row(name, created, reviewed):
+            return item(name, facts(base=self.base, base_tree=self.base_tree,
+                                    head=self.base, head_tree=self.base_tree),
+                        task="T", created=created, receipt=reviewed)
+        return self.project(queue(row("lr-old", "2026-11-01T00:00:00Z", older_reviewed),
+                                  row("lr-new", "2026-11-02T00:00:00Z", newer_reviewed)),
+                            task="T")
 
-        # Same requests, invocations and failures; only the cue-driving flag moves.
-        self.assertNotEqual(digest_for(), digest_for(receipt_id=None))
+    def test_digest_changes_with_the_predecessor_reviewed_flag_alone(self):
+        # Exactly one linked item is reviewed in both, so summary.completed (and
+        # requests, invocations, failures) are identical; only WHICH item is
+        # the selected predecessor's evidence moves.
+        a = self._two_linked(older_reviewed=True, newer_reviewed=False)
+        b = self._two_linked(older_reviewed=False, newer_reviewed=True)
+        self.assertEqual(a["summary"], b["summary"])
+        self.assertEqual(a["predecessor"]["item"], b["predecessor"]["item"])
+        self.assertNotEqual(a["digest"], b["digest"])
+
+    def test_cue_claims_a_review_only_for_a_reviewed_predecessor(self):
+        # Ties among ancestral candidates go to the older item, so lr-old is
+        # the selected predecessor in both.
+        reviewed = self._two_linked(older_reviewed=True, newer_reviewed=False)
+        unreviewed = self._two_linked(older_reviewed=False, newer_reviewed=True)
+        self.assertEqual(reviewed["predecessor"]["item"], "lr-old")
+        self.assertTrue(reviewed["cue"].startswith("Previously reviewed at "))
+        self.assertTrue(unreviewed["cue"].startswith("Earlier review request at "))
 
     def test_a7_main_ancestor_and_unrelated_sibling_earn_no_repeat(self):
         q = queue(item("lr-main", facts(base=self.base_tree, base_tree=self.base_tree,
