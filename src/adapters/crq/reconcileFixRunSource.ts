@@ -198,7 +198,12 @@ export function fileFixRunSeams(
       },
       currentFixedEvent: (job, merge) =>
         new FindingInbox(files).currentFixedEvent(publication, job, merge ?? ''),
-      isAncestor,
+      async isAncestor(ancestor, descendant, fixPrNumber) {
+        // A merged head may be gone from branch refs: fetch the PR ref before ancestry, or a
+        // missing object reads as a lineage mismatch on every pass.
+        if (fixPrNumber !== undefined) await ensureCommit(fixPrNumber, descendant);
+        return isAncestor(ancestor, descendant);
+      },
     },
     evidence: {
       git,
