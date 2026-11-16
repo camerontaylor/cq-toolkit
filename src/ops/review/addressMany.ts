@@ -219,7 +219,10 @@ export async function isolateAddressMany(
   options.onPartial?.(root);
   try {
     const origin = await git('git', ['-C', repoRoot, 'remote', 'get-url', 'origin']);
-    await git('git', ['clone', '--no-hardlinks', '--', repoRoot, root]);
+    // `--dissociate` copies any objects reachable only through a borrowed
+    // alternate store: without it, pruning that store or removing its reference
+    // repository would corrupt a clone holding unpushed fixes.
+    await git('git', ['clone', '--no-hardlinks', '--dissociate', '--', repoRoot, root]);
     await git('git', ['-C', root, 'remote', 'set-url', 'origin', origin.stdout.trim()]);
     // Clone-setup calls carry the caller's sshCommand only through this flow's
     // environment; later Git calls in the clone (fetch, addressing, push) run
