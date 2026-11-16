@@ -6,7 +6,15 @@ const CRQ_PYTHON = fileURLToPath(new URL('../../apps/crq-python', import.meta.ur
 
 export type OracleOutcome = { ok: true; value: unknown } | { ok: false; error: string };
 
-/** True when a `python3` that can import the crq modules is on PATH. */
+/**
+ * True when a `python3` that can import the crq modules is on PATH.
+ *
+ * The ONLY skip is the structural absence the probe can confirm: no `python3`
+ * on PATH (spawn ENOENT). Every other probe failure is a real one — a bundled
+ * `crq`/`usage_slots` import that raises (a syntax error included) means the
+ * repository is broken, not the host — so it throws with the probe's stderr
+ * diagnostics instead of reporting the oracle as unavailable.
+ */
 export function pythonAvailable(): boolean {
   const probe = spawnSync(
     'python3',
@@ -18,13 +26,27 @@ export function pythonAvailable(): boolean {
     ],
     { encoding: 'utf8', timeout: 30_000 },
   );
-  return probe.status === 0;
+  if (probe.error !== undefined) {
+    // The one structural absence this probe can confirm: no `python3` on PATH.
+    if ((probe.error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw new Error(`python oracle probe could not run python3: ${probe.error.message}`);
+  }
+  if (probe.status !== 0) {
+    // A timeout kills the probe by signal; either way, its stderr is the datum.
+    const how = probe.signal ? `signal ${probe.signal}` : `exit ${String(probe.status)}`;
+    throw new Error(`python oracle probe failed (${how}): ${probe.stderr.slice(0, 500)}`);
+  }
+  return true;
 }
 
 /** Run one pure Python function over every case in a single subprocess. */
-export function runOracle(op: string, cases: readonly unknown[]): OracleOutcome[] {
+/** A string `cases` is raw JSON text, spliced in verbatim so int lexemes survive. */
+export function runOracle(op: string, cases: readonly unknown[] | string): OracleOutcome[] {
   const run = spawnSync('python3', ['-I', DRIVER, CRQ_PYTHON], {
-    input: JSON.stringify({ op, cases }),
+    input:
+      typeof cases === 'string'
+        ? `{"op":${JSON.stringify(op)},"cases":${cases}}`
+        : JSON.stringify({ op, cases }),
     encoding: 'utf8',
     timeout: 60_000,
     maxBuffer: 64 * 1024 * 1024,

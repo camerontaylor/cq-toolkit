@@ -692,6 +692,12 @@ def prepare(root, overlay, raw, output, tag):
         # Validate against the SHA read under the lock so a concurrent switch
         # cannot make prepare render from a commit the tag does not name.
         verify_target(root, sha, tag)
+        # The units execute this working tree, not the tagged commit, so apply
+        # the same status guard as switch; only the rendered config that this
+        # operation itself writes may differ.
+        changes = git(root, 'status', '--porcelain', '--untracked-files=all').splitlines()
+        if any(line != ' M ' + CONFIG for line in changes):
+            raise ValueError('checkout has changes other than rendered config')
         data = render(root, overlay, sha)
         with tempfile.TemporaryDirectory(prefix='crq-units-') as temporary:
             paths = render_units(root, Path(temporary), sha)
@@ -767,14 +773,29 @@ def switch(root, overlay, raw, target, tag=None):
             if git(root, 'status', '--porcelain', '--untracked-files=all'):
                 raise ValueError('checkout not clean after config restore')
             git(root, 'checkout', '--detach', target)
+            # Same tick lock spans drift check, checkout, render and audit.
+            record(root, overlay, raw, destination, 'switch-render', previous_sha=previous, tag=tag)
+            atomic_bytes(root / CONFIG, destination)
+            if git(root, 'status', '--porcelain', '--untracked-files=all') not in ('', ' M ' + CONFIG):
+                raise ValueError('post-switch status must contain only rendered config')
         except BaseException:
-            atomic_bytes(root / CONFIG, current)
+            # Recovery spans the whole post-checkout window: the audit and
+            # config writes above run after HEAD moved, so a failure there
+            # (e.g. a full audit volume) must roll the checkout back too, or
+            # the host is left on the target with its committed config and no
+            # host overrides and a retry fails drift_check. Best effort per
+            # step; the original error still propagates.
+            try:
+                # The rendered destination config may already be installed
+                # (e.g. a failing directory fsync after the replace). When the
+                # two commits differ in CONFIG, git refuses to check out over
+                # that local modification, so restore the committed bytes
+                # first; the previous rendering is reinstalled below.
+                git(root, 'restore', '--', CONFIG)
+                git(root, 'checkout', '--detach', previous)
+            finally:
+                atomic_bytes(root / CONFIG, current)
             raise
-        # Same tick lock spans drift check, checkout, render and audit.
-        record(root, overlay, raw, destination, 'switch-render', previous_sha=previous, tag=tag)
-        atomic_bytes(root / CONFIG, destination)
-        if git(root, 'status', '--porcelain', '--untracked-files=all') not in ('', ' M ' + CONFIG):
-            raise ValueError('post-switch status must contain only rendered config')
     return target
 
 

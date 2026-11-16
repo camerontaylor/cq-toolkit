@@ -60,7 +60,8 @@ type Disagreement = { index: number; python: OracleOutcome; ts: Outcome; case: C
 const KNOWN: Record<string, Record<string, (d: Disagreement) => boolean>> = {
   parse_usage: {
     // Python ints are exact; the TS VendorUsage carries a JS number.
-    'integers beyond 2**53 lose precision': (d) => JSON.stringify(d.python).includes('"int:'),
+    'integers beyond 2**53 lose precision': (d) =>
+      d.python.ok && d.ts.ok && JSON.stringify(d.python).includes('"int:'),
   },
 };
 
