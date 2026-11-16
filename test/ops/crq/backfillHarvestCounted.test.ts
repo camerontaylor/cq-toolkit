@@ -12,7 +12,7 @@ import {
   parseJsonValue,
   type JsonValue,
 } from '../../../src/policy/crq/jsonValue.js';
-import { ledgerDigestOf } from '../../../src/policy/crq/ledger.js';
+import { ledgerDigestOf, LedgerIntegrityError } from '../../../src/policy/crq/ledger.js';
 import { withObjectKeys } from '../../../src/policy/crq/queueDoc.js';
 
 const cases = parseJsonValue(
@@ -118,11 +118,6 @@ const outcomeOf = (c: JsonObject): string => {
   }
 };
 const good = cases.find((c) => outcomeOf(c) === 'ok') as JsonObject;
-const bad = cases.find(
-  (c) =>
-    outcomeOf(c) === 'IntegrityError' &&
-    /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(String(c.get('ended_at'))),
-) as JsonObject;
 
 function fixture(c: JsonObject, submission: Uint8Array | null = null) {
   const log: string[] = [];
@@ -213,9 +208,21 @@ describe('counted backfill harvest', () => {
   });
 
   it('quarantines unverifiable scope as unsupported, publishing nothing', async () => {
-    const { effects, log, out } = fixture(bad);
+    // The review stream classifies as counted, but scope verification fails
+    // (the repo refuses the bundle), so the run is quarantined.
+    const base = fixture(good);
+    const { log, out } = base;
+    const effects: BackfillCountedHarvestEffects = {
+      ...base.effects,
+      repo: {
+        ...base.effects.repo,
+        retain: () => {
+          throw new LedgerIntegrityError('scope unverifiable');
+        },
+      },
+    };
     const result = await harvestBackfillCounted(
-      queueOf(harvestable(bad)),
+      queueOf(harvestable(good)),
       0,
       proof,
       effects,
@@ -259,5 +266,58 @@ describe('counted backfill harvest', () => {
     await expect(
       harvestBackfillCounted(q, 0, proof, effects, withObjectKeys(counted, [['counted', false]])),
     ).rejects.toThrow('needs a counted');
+  });
+
+  it('refuses review bytes that do not classify as counted', async () => {
+    const { effects } = fixture(good);
+    const q = queueOf(harvestable(good));
+    const awaiting = enc.encode('{"type":"complete","status":"awaiting_confirmation"}\n');
+    const swapped: BackfillCountedHarvestEffects = {
+      ...effects,
+      readArtifacts: async (run) => ({ ...(await effects.readArtifacts(run)), review: awaiting }),
+    };
+    await expect(harvestBackfillCounted(q, 0, proof, swapped, counted)).rejects.toThrow(
+      'needs a counted review',
+    );
+  });
+
+  it('reuses the retained event on retry instead of minting a new id', async () => {
+    const first = fixture(good);
+    await harvestBackfillCounted(queueOf(harvestable(good)), 0, proof, first.effects, counted);
+    const retained = first.out.event as JsonObject;
+    const retry = fixture(good);
+    const rebuilt: BackfillCountedHarvestEffects = {
+      ...retry.effects,
+      // A retry whose repo would retain a different bundle must not be consulted.
+      repo: {
+        ...retry.effects.repo,
+        retain: () => {
+          throw new Error('retained event must be reused');
+        },
+      },
+      readRetainedEvent: async () => retained,
+    };
+    const result = await harvestBackfillCounted(
+      queueOf(harvestable(good)),
+      0,
+      proof,
+      rebuilt,
+      counted,
+    );
+    expect(result.status).toBe('completed');
+    expect((retry.out.event as JsonObject).get('id')).toBe(retained.get('id'));
+    const forged = withObjectKeys(retained, [['id', 'f'.repeat(64)]]);
+    await expect(
+      harvestBackfillCounted(
+        queueOf(harvestable(good)),
+        0,
+        proof,
+        {
+          ...rebuilt,
+          readRetainedEvent: async () => forged,
+        },
+        counted,
+      ),
+    ).rejects.toThrow('retained review event id mismatch');
   });
 });

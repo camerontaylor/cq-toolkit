@@ -3,6 +3,7 @@
  * store, git and the publication outbox/inbox are injected seams.
  */
 import { completionEvent, type BackfillRepo } from '../../../policy/crq/backfillCompletion.js';
+import { classify } from '../../../policy/crq/classification.js';
 import { terminalBackfill } from '../../../policy/crq/backfillTerminal.js';
 import { JsonNumber, JsonObject, type JsonValue } from '../../../policy/crq/jsonValue.js';
 import {
@@ -30,6 +31,12 @@ export interface BackfillCountedHarvestEffects {
   repo: BackfillRepo;
   /** `ledger.atomic(rdir/review-event.json, canonical(event))`. */
   writeReviewEvent(runId: string, bytes: Uint8Array): Promise<void>;
+  /**
+   * The validated `review-event.json` an earlier attempt retained for this run,
+   * or null. A retry reuses it so a different bundle reference cannot mint a
+   * second event id for the same run. Omitted: every attempt rebuilds.
+   */
+  readRetainedEvent?(runId: string): Promise<JsonObject | null>;
   /** `outbox.spool(event)`. */
   spool(event: JsonObject): Promise<void>;
   /** `finding_delivery.Inbox.ingest(event)`. */
@@ -105,54 +112,67 @@ export async function harvestBackfillCounted(
     (exit.get('exit') as JsonNumber).integer !== BigInt(proof.exitCode)
   )
     throw new LedgerIntegrityError('backfill terminal artifact identity mismatch');
+  // The supplied classification must describe the bytes read here.
+  if (classify(artifacts.review, proof.exitCode).get('counted') !== true)
+    throw new LedgerIntegrityError('counted harvest needs a counted review');
   const endedAt = text(exit.get('ended_at'), 'ended_at');
   ledgerTimestamp(endedAt);
   effects.put(artifacts.review);
   const exitRef = effects.put(artifacts.exit);
-  let event: JsonObject;
-  try {
-    const submission =
-      artifacts.submission === null ? null : obj(ledgerLoads(artifacts.submission), 'submission');
-    event = completionEvent(
-      effects.repo,
-      { put: (bytes) => effects.put(bytes) },
-      item,
-      artifacts.review,
-      exit.get('exit') as JsonValue,
-      meta,
-      endedAt,
-      submission,
-    );
-  } catch (error) {
-    if (!caughtByPython(error)) throw error;
-    const result = terminalBackfill(
-      initial,
-      index,
-      endedAt,
-      'unsupported',
-      true,
-      0,
-      'unverified scope: ' + (error as Error).message,
-    );
-    const queue = await effects.stateEvent(
-      result.queue,
-      result.item,
-      endedAt,
-      'terminal scope unverified',
-    );
-    await effects.saveQueue(queue);
-    await effects.cleanup(meta);
-    return { queue, status: 'unsupported' };
+  let value: JsonObject;
+  const retained = (await effects.readRetainedEvent?.(proof.runId)) ?? null;
+  if (retained !== null) {
+    const id = retained.get('id');
+    const rest = new JsonObject(retained.entries.filter(([key]) => key !== 'id'));
+    if (typeof id !== 'string' || id !== ledgerDigestOf(rest))
+      throw new LedgerIntegrityError('retained review event id mismatch');
+    value = retained;
+  } else {
+    let event: JsonObject;
+    try {
+      const submission =
+        artifacts.submission === null ? null : obj(ledgerLoads(artifacts.submission), 'submission');
+      event = completionEvent(
+        effects.repo,
+        { put: (bytes) => effects.put(bytes) },
+        item,
+        artifacts.review,
+        exit.get('exit') as JsonValue,
+        meta,
+        endedAt,
+        submission,
+      );
+    } catch (error) {
+      if (!caughtByPython(error)) throw error;
+      const result = terminalBackfill(
+        initial,
+        index,
+        endedAt,
+        'unsupported',
+        true,
+        0,
+        'unverified scope: ' + (error as Error).message,
+      );
+      const queue = await effects.stateEvent(
+        result.queue,
+        result.item,
+        endedAt,
+        'terminal scope unverified',
+      );
+      await effects.saveQueue(queue);
+      await effects.cleanup(meta);
+      return { queue, status: 'unsupported' };
+    }
+    const payload = obj(event.get('payload'), 'payload');
+    const artifactRefs = payload.get('artifacts');
+    if (!Array.isArray(artifactRefs)) throw new LedgerTypeError('artifacts must be an array');
+    const withExit = withObjectKeys(event, [
+      ['payload', withObjectKeys(payload, [['artifacts', [...artifactRefs, exitRef]]])],
+    ]);
+    value = withObjectKeys(withExit, [
+      ['id', ledgerDigestOf(new JsonObject(withExit.entries.filter(([key]) => key !== 'id')))],
+    ]);
   }
-  const payload = obj(event.get('payload'), 'payload');
-  const artifactRefs = payload.get('artifacts');
-  if (!Array.isArray(artifactRefs)) throw new LedgerTypeError('artifacts must be an array');
-  const withExit = withObjectKeys(event, [
-    ['payload', withObjectKeys(payload, [['artifacts', [...artifactRefs, exitRef]]])],
-  ]);
-  const value = withObjectKeys(withExit, [
-    ['id', ledgerDigestOf(new JsonObject(withExit.entries.filter(([key]) => key !== 'id')))],
-  ]);
   await effects.writeReviewEvent(proof.runId, ledgerCanonicalBytes(value));
   await effects.spool(value);
   const stamped = withObjectKeys(item, [['publication_event_id', value.get('id') as string]]);
