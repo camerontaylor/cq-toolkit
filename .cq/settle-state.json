@@ -67,45 +67,6 @@
         }
       ]
     },
-    "1838": {
-      "tuple": {
-        "head": "6f1d3489bd5cbead881f0b8ff687a5dd64dbcc2a",
-        "base": "04e5772a9eda44799bc53c5d03f5a944c502c40c",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T04:42:39.599Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1853": {
-      "tuple": {
-        "head": "164bd40280b0a81a60a48a027cdc504f7636dcad",
-        "base": "4461ea27d884ddc341ab5579a682ffed7f0ec774",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T02:41:00.872Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1855": {
-      "tuple": {
-        "head": "661b053b45b983868963fb7c3c2630b071f47ac9",
-        "base": "4461ea27d884ddc341ab5579a682ffed7f0ec774",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T02:43:06.470Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1883": {
       "tuple": {
         "head": "283681ffad3ebb2290274c495e68ef41c407089d",
@@ -119,15 +80,15 @@
         }
       ]
     },
-    "1887": {
+    "1891": {
       "tuple": {
-        "head": "7897d7e8978583b4f18c7243cb84bde9b76a0ec6",
-        "base": "04e5772a9eda44799bc53c5d03f5a944c502c40c",
+        "head": "606394ccc4d12708d4e240bc0e1ffa0ed479ca05",
+        "base": "77b6f22bdfcdaab40a4d198d89f987fba36a469b",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-16T04:45:15.777Z",
+          "observedAt": "2026-11-16T04:56:09.790Z",
           "by": "self-merge-prs:observe"
         }
       ]
