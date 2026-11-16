@@ -282,10 +282,11 @@ describe('parseArgs', () => {
       unitsOutput: 'u',
       tag: 't',
     });
-    expect(parseArgs(['--overlay', 'o', 'switch', '--sha', 's'])).toMatchObject({
+    expect(parseArgs(['--overlay', 'o', 'switch', '--sha', 's', '--tag', 't'])).toMatchObject({
       sha: 's',
-      tag: null,
+      tag: 't',
     });
+    expect(parseArgs(['--overlay', 'o', '--', 'live-config']).operation).toBe('live-config');
     expect(parseArgs(['--overlay', 'o', 'preview', '--output', 'p']).output).toBe('p');
     expect(parseArgs(['--overlay', 'o', 'legacy-check', '--legacy-root', 'l']).legacyRoot).toBe(
       'l',
@@ -297,6 +298,8 @@ describe('parseArgs', () => {
     [['live-config'], 'the following arguments are required: --overlay'],
     [['--overlay', 'o', 'nope'], "invalid choice: 'nope'"],
     [['--overlay', 'o', 'prepare', '--tag', 't'], 'required: --units-output'],
+    [['--overlay', 'o', 'switch', '--sha', 's'], 'required: --tag'],
+    [['--overlay', 'o', '--=x', 'live-config'], 'ambiguous option: --=x could match --help'],
     [['--overlay', 'o', 'prepare', '--units-output'], 'expected one argument'],
     [['--overlay', 'o', 'prepare', '--units-output', '--tag'], 'expected one argument'],
     [['--overlay', 'o', 'live-config', 'extra'], 'unrecognized arguments: extra'],
@@ -467,7 +470,9 @@ describe('main', () => {
   });
   test('switch and prepare dispatch into their operations', async () => {
     const h = host();
-    const sw = await main(['--overlay', h.overlayPath, 'switch', '--sha', 'abc'], { env: h.env });
+    const sw = await main(['--overlay', h.overlayPath, 'switch', '--sha', 'abc', '--tag', 't'], {
+      env: h.env,
+    });
     expect(sw).toEqual({ exitCode: 1, stdout: '', stderr: 'target must be a full commit SHA\n' });
     const pr = await main(
       ['--overlay', h.overlayPath, 'prepare', '--units-output', join(h.base, 'u'), '--tag', 'nope'],
