@@ -213,6 +213,36 @@ test('M7-many malformed evidence degrades to unknown without losing settlement',
   });
 });
 
+test('M7-many unmeasured dispatch settles as unknown, never a partial known total', async () => {
+  // The producer adds every dispatch's usage to `report.usage` even when the
+  // provider supplied no measurement, and records the unmeasured dispatch only
+  // in the report's own `usageSummary`. A numeric total from such a report is
+  // PARTIAL, not complete: treating it as known would refund the reservation
+  // and admit a later candidate while the real spend stays unrecorded. The leg
+  // therefore settles through the unknown-usage path — the reservation is
+  // retained unresolved at its full allocation, the sticky stop is set, and no
+  // sibling is admitted on the unrecorded spend.
+  const partial = {
+    ...report(),
+    usageSummary: { knownCount: 1, unknownCount: 1, unpricedCount: 0 },
+  };
+  const address = vi.fn(async () => ({ status: 'ok' as const, value: partial }));
+  const result = await makeReviewAddressMany({
+    coordinationRoot: coordinationRoot(),
+    isolate: async (root) => root,
+    gh,
+    address,
+  })(input);
+  expect(address).toHaveBeenCalledTimes(1);
+  expect(result.report?.accounting).toEqual({
+    limitTokens: 100,
+    observedTokens: 0,
+    heldTokens: 50,
+    unresolved: ['1'],
+    stop: 'unknown-usage',
+  });
+});
+
 test('M7-many post-dispatch exit retains the envelope through a thrown settlement', async () => {
   // Leg 1 settles with measured usage; leg 2's settlement arithmetic leaves
   // the safe integer range and throws. The guard settles it as unknown with
