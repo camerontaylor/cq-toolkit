@@ -780,6 +780,12 @@ def switch(root, overlay, raw, target, tag=None):
             # host overrides and a retry fails drift_check. Best effort per
             # step; the original error still propagates.
             try:
+                # The rendered destination config may already be installed
+                # (e.g. a failing directory fsync after the replace). When the
+                # two commits differ in CONFIG, git refuses to check out over
+                # that local modification, so restore the committed bytes
+                # first; the previous rendering is reinstalled below.
+                git(root, 'restore', '--', CONFIG)
                 git(root, 'checkout', '--detach', previous)
             finally:
                 atomic_bytes(root / CONFIG, current)
