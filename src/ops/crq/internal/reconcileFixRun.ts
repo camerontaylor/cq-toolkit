@@ -23,7 +23,7 @@ export interface ReconcileFixRunEffects {
   defaultTip(): Promise<string>;
   isAncestor(ancestor: string, descendant: string): Promise<boolean>;
   now(): string;
-  /** Select canonical, revalidated or merge-head proof; throws when none is valid. */
+  /** Select canonical, revalidated or merge-head proof; throws when one is invalid; `proof: null` when the run has no published head (repair_tick parity). */
   proveMerge(record: JsonObject, info: JsonObject, merge: string): Promise<MergeProof>;
   /** Re-check the journalled revalidation against a freshly read PR. */
   recheckRevalidation(record: JsonObject, info: JsonObject, evidence: JsonValue): Promise<void>;

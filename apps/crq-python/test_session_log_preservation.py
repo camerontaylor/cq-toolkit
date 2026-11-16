@@ -232,6 +232,28 @@ class CodexStreamTest(unittest.TestCase):
                                              preexisting='{"verdict": tru')
         self.assertEqual((result['stop'], result['verdict']), ('error', 'unsure'))
 
+    def test_repair_output_with_wrong_field_types_is_an_error_stop(self):
+        config = {'repair': {'codex_budget_launcher': 'launcher',
+                             'codex_budget_launcher_verified': True,
+                             'budget': {'max_tokens': 100, 'wall_clock_min': 1}}}
+        bad = ({'changed': True, 'summary': None, 'commits': None},
+               {'changed': 'yes', 'summary': 's', 'commits': []},
+               {'changed': True, 'summary': 's', 'commits': [1]})
+        good = {'changed': True, 'summary': 's', 'commits': ['abc']}
+        for payload, stop in [(p, 'error') for p in bad] + [(good, 'ok')]:
+            with self.subTest(payload=payload):
+                with tempfile.TemporaryDirectory() as tmp:
+                    directory = Path(tmp)
+
+                    def fake_stream(argv, cwd, env, timeout, log_path):
+                        (directory / 'last.json').write_text(json.dumps(payload))
+                        return 0, [], '', False
+
+                    with mock.patch.object(codex, '_stream_codex', fake_stream):
+                        result = codex.invoke(config, {'model': 'm', 'budget': {}},
+                                              {'job': 'j'}, directory, directory)
+                    self.assertEqual(result['stop'], stop)
+
     def test_judge_failures_report_unsure(self):
         for stream_result in ((0, [], '', True), (1, [], '', False)):
             with self.subTest(stream_result=stream_result):

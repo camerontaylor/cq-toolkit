@@ -360,7 +360,11 @@ def durable_directory(directory):
         probe = probe.parent
     if created:
         directory.mkdir(parents=True, exist_ok=True)
-        for entry in created:
+    # Sync every created entry, and the target's own entry even when it
+    # already exists: an earlier call (or another process) may have created it
+    # and stopped before its parent was synced.
+    for entry in created or [directory]:
+        if entry.parent != entry:
             fsync_dir(entry.parent)
 
 
@@ -422,11 +426,22 @@ class ArtifactStore:
         destination = self.root / "sha256" / ident
         durable_directory(destination.parent)
         if not destination.exists():
-            with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
-                with Path(filename).open("rb") as source:
-                    shutil.copyfileobj(source, stream)
-                stream.flush(); os.fsync(stream.fileno()); temporary = stream.name
-            os.replace(temporary, destination); fsync_dir(destination.parent)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
+                    temporary = stream.name
+                    with Path(filename).open("rb") as source:
+                        shutil.copyfileobj(source, stream)
+                    stream.flush(); os.fsync(stream.fileno())
+                os.replace(temporary, destination)
+                temporary = None
+            finally:
+                if temporary is not None:
+                    Path(temporary).unlink(missing_ok=True)
+        # Always persist the destination's directory entry, also when the
+        # artifact already exists: a previous call may have replaced it and
+        # failed before this sync, and a retry must not skip it.
+        fsync_dir(destination.parent)
         reference = {"sha256": ident, "location": str(destination)}
         self.verify(reference)
         return reference

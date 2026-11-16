@@ -9,15 +9,8 @@
  * here touches the disk, a process or a unit; the caller supplies every effect.
  */
 import { pythonJsonText } from '../../../policy/crq/pythonJson.js';
-
-/** Python `Refused`: a precondition failed. */
-export class Refused extends Error {
-  override name = 'Refused';
-}
-/** Python `OSError`: what an injected fs read throws. */
-export class OSError extends Error {
-  override name = 'OSError';
-}
+import { Refused, OSError } from './errors.js';
+export { Refused, OSError };
 
 export const CONFIG_RELPATH = 'apps/crq-python/config.json';
 export const PLACEHOLDER = '@HOST_CQ_BIN@';
