@@ -275,6 +275,29 @@ class LedgerTest(unittest.TestCase):
             self.assertEqual(list((root / "store" / "sha256").iterdir()), [])
             self.assertEqual(store.put_file(source)["sha256"], hashlib.sha256(b"payload").hexdigest())
 
+    def test_put_file_retry_syncs_directory_after_failed_sync(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source.bin"
+            source.write_bytes(b"payload")
+            store = ledger.ArtifactStore(root / "store")
+            real = ledger.fsync_dir
+            state = {"fail": True}
+
+            def flaky(directory):
+                if state["fail"] and Path(directory).name == "sha256":
+                    state["fail"] = False
+                    raise OSError("sync failed")
+                return real(directory)
+
+            with mock.patch.object(ledger, "fsync_dir", side_effect=flaky):
+                with self.assertRaises(OSError):
+                    store.put_file(source)
+            synced = []
+            with mock.patch.object(ledger, "fsync_dir", side_effect=synced.append):
+                store.put_file(source)
+            self.assertIn(root / "store" / "sha256", [Path(d) for d in synced])
+
 
 if __name__ == "__main__":
     unittest.main()

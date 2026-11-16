@@ -433,11 +433,15 @@ class ArtifactStore:
                     with Path(filename).open("rb") as source:
                         shutil.copyfileobj(source, stream)
                     stream.flush(); os.fsync(stream.fileno())
-                os.replace(temporary, destination); fsync_dir(destination.parent)
+                os.replace(temporary, destination)
                 temporary = None
             finally:
                 if temporary is not None:
                     Path(temporary).unlink(missing_ok=True)
+        # Always persist the destination's directory entry, also when the
+        # artifact already exists: a previous call may have replaced it and
+        # failed before this sync, and a retry must not skip it.
+        fsync_dir(destination.parent)
         reference = {"sha256": ident, "location": str(destination)}
         self.verify(reference)
         return reference
