@@ -7,6 +7,7 @@ import {
   BUSY_EXIT,
   flockArgs,
   flockLockFs,
+  spawnFlock,
   type FlockProc,
 } from '../../../../src/ops/crq/deploy/flockAdapter.js';
 
@@ -38,12 +39,13 @@ describe('flockLockFs with a fake process', () => {
     const p = f.fs().tryLock('/x/deploy.lock');
     f.s.exitCb(BUSY_EXIT);
     await p;
-    expect(f.s.args[0]!.slice(0, 6)).toEqual([
+    expect(f.s.args[0]!.slice(0, 7)).toEqual([
       '-x',
       '-n',
       '--no-fork',
       '-E',
       String(BUSY_EXIT),
+      '--',
       '/x/deploy.lock',
     ]);
     expect(f.s.args[0]).toEqual(flockArgs('/x/deploy.lock'));
@@ -130,6 +132,38 @@ describe.skipIf(!flockOk)('flockLockFs with real flock(1)', () => {
     const again = await flockLockFs().tryLock(path);
     expect(again).not.toBeNull();
     await again!.release();
+  });
+  test('a lock path with a leading dash is a path, not an option', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'flock-dash-'));
+    const prior = process.cwd();
+    process.chdir(base);
+    try {
+      const first = await flockLockFs().tryLock('--unlock');
+      expect(first).not.toBeNull();
+      expect(await flockLockFs().tryLock('--unlock')).toBeNull();
+      await first!.release();
+    } finally {
+      process.chdir(prior);
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+  test('release kills the tracked holder and a later attempt acquires the lock', async () => {
+    const path = join(dir, 'c.lock');
+    // Suppress the stdin close so only kill() can end the holder. That path frees
+    // the lock only when the process we track is the flock(2) owner, which is why
+    // flockArgs passes --no-fork instead of letting flock(1) fork a child.
+    const start = (args: readonly string[]): FlockProc => ({
+      ...spawnFlock(args),
+      closeStdin: () => undefined,
+    });
+    const fs = flockLockFs({ spawn: start, releaseGraceMs: 0 });
+    const holder = (await fs.tryLock(path))!;
+    expect(holder).not.toBeNull();
+    expect(await flockLockFs().tryLock(path)).toBeNull();
+    await holder.release();
+    const next = await flockLockFs().tryLock(path);
+    expect(next).not.toBeNull();
+    await next!.release();
   });
   test('the lock dies with the holder: closing stdin of a killed parent frees it', async () => {
     const path = join(dir, 'b.lock');

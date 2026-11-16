@@ -34,6 +34,8 @@ export function flockArgs(path: string): string[] {
     '--no-fork',
     '-E',
     String(BUSY_EXIT),
+    // End option parsing: a lock path such as `--unlock` must stay a path.
+    '--',
     path,
     'sh',
     '-c',
