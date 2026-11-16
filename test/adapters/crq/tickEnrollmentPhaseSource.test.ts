@@ -32,7 +32,6 @@ function build(extra: Partial<Parameters<typeof fileEnrollmentPhaseEffects>[0]> 
     repos: [primary, other],
     primaryRepo: 'o/main',
     localReview: { facts: async () => null, retained: async () => false },
-    ownRange: async () => false,
     event: async (id) => {
       events.push(id);
     },
@@ -138,5 +137,60 @@ describe('tick enrollment phase source', () => {
     const result = await effects.primary(queue, true);
     expect(seen).toEqual([['o/main', BASE, HEAD]]);
     expect(result.queue.has('review_pr_links')).toBe(false);
+  });
+
+  it('defaults ownRange to rev-list over the primary clone and skips an owned update', async () => {
+    const old = 'c'.repeat(40);
+    const ranges: string[] = [];
+    const { effects, events } = build({
+      git: () => async (args) => {
+        if (args[0] === 'rev-list') ranges.push(String(args[1]));
+        return {
+          args,
+          code: 0,
+          stdout: text(args[0] === 'merge-base' ? BASE : args[0] === 'rev-list' ? `${HEAD}\n` : ''),
+          stderr: '',
+        };
+      },
+    });
+    const items = [
+      {
+        id: 'pr7',
+        kind: 'open',
+        pr: 7,
+        state: 'done',
+        cycles: [{ completed_at: '2026-01-01T00:00:00Z', head: old, run_id: 'r', base: old }],
+      },
+    ];
+    const owned = await effects.primary(q({ repair_own_commits: [HEAD], items }), false);
+    expect(ranges).toEqual([`${old}..${HEAD}`]);
+    expect(names(owned.queue)).toEqual(['pr7']);
+    expect(events).toEqual([]);
+    const unowned = await effects.primary(q({ items }), false);
+    expect(names(unowned.queue)).toHaveLength(2);
+    expect(events).toHaveLength(1);
+  });
+
+  it('treats a failed rev-list as no proof, so the review stays owed', async () => {
+    const old = 'c'.repeat(40);
+    const { effects } = build({
+      git: () => async (args) => ({
+        args,
+        code: args[0] === 'rev-list' ? 128 : 0,
+        stdout: text(args[0] === 'merge-base' ? BASE : args[0] === 'rev-list' ? `${HEAD}\n` : ''),
+        stderr: '',
+      }),
+    });
+    const items = [
+      {
+        id: 'pr7',
+        kind: 'open',
+        pr: 7,
+        state: 'done',
+        cycles: [{ completed_at: '2026-01-01T00:00:00Z', head: old, run_id: 'r', base: old }],
+      },
+    ];
+    const result = await effects.primary(q({ repair_own_commits: [HEAD], items }), false);
+    expect(names(result.queue)).toHaveLength(2);
   });
 });
