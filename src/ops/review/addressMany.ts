@@ -661,7 +661,21 @@ function makeReviewAddressManyCore(
                       ...(report?.costUSD === undefined ? {} : { costUSD: report.costUSD }),
                     })
                   : undefined;
-                const known = observation?.usage !== undefined && usage !== undefined;
+                // A leg whose report records an UNMEASURED dispatch is only
+                // PARTIAL spend: `address.ts` folds every dispatch's usage into
+                // `report.usage` (including dispatches whose provider supplied
+                // no measurement) and records the unmeasured ones as unknown in
+                // `report.usageSummary`. The usage total alone therefore cannot
+                // prove the leg was fully measured. Settling a partial total as
+                // known would release the held reservation while spend from the
+                // unmeasured dispatches is still unaccounted for, and later
+                // admissions could then exceed the aggregate budget. So a leg
+                // settles known only when its summary reports no unmeasured
+                // dispatch; a report carrying no summary at all (no evidence of
+                // partial spend) keeps the known path.
+                const fullyMeasured = (report?.usageSummary?.unknownCount ?? 0) === 0;
+                const known =
+                  fullyMeasured && observation?.usage !== undefined && usage !== undefined;
                 // Exit spend is recorded EXACTLY ONCE per admitted leg, at its
                 // settlement point: the normalized observation when the settled
                 // report carried a valid measurement, an explicit unknown observation
