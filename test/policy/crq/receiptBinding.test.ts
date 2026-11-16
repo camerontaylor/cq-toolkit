@@ -167,4 +167,19 @@ describe('nodeIdentityDeps', () => {
       expect((error as ProcessLaunchError).kind).toBe('other');
     }
   });
+  test('a helper that ignores SIGTERM is killed and the timeout is still `other`', () => {
+    const started = Date.now();
+    try {
+      deps.run(['sh', '-c', 'trap "" TERM; while :; do :; done'], {
+        inputText: null,
+        timeoutSec: 0.2,
+        env: null,
+      });
+      throw new Error('expected a launch error');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ProcessLaunchError);
+      expect((error as ProcessLaunchError).kind).toBe('other');
+    }
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
 });
