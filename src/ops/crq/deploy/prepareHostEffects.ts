@@ -174,6 +174,12 @@ export async function requireOutsideGit(path: string, env: OverlayEnv): Promise<
   const result = await env.run(['git', '-C', parent, 'rev-parse', '--show-toplevel']);
   if (result.code === 0)
     throw new ValueError('private host artifacts must be outside every Git checkout');
+  // Only git's "not a git repository" answer proves the path is outside a checkout: a
+  // malformed config or any other probe failure says nothing about exclusion.
+  if (result.code !== 128 || !/not a git repository/i.test(text(result.stderr)))
+    throw new ValueError(
+      `cannot establish that the path is outside every Git checkout: git exited ${result.code}`,
+    );
 }
 
 export interface LoadedOverlay {
@@ -228,7 +234,11 @@ export async function withTickLock<T>(
   const handle = await lockFs.tryLock(`${state}/tick.lock`);
   if (handle === null) throw new BlockingIOError();
   try {
-    return await fn();
+    if (handle.lost === undefined) return await fn();
+    const lostSignal = handle.lost.then(() => {
+      throw new Error(`tick lock lost while held: ${state}/tick.lock`);
+    });
+    return await Promise.race([fn(), lostSignal]);
   } finally {
     await handle.release();
   }

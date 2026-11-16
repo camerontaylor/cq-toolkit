@@ -195,11 +195,36 @@ describe('requireOutsideGit', () => {
     const seen: string[][] = [];
     const run: RunProcess = async (argv) => {
       seen.push([...argv]);
-      return ok('', 128);
+      return ok('', 128, 'fatal: not a git repository (or any of the parent directories): .git');
     };
     const dir = pyResolve(fresh());
     await requireOutsideGit(join(dir, 'x/y'), { run });
     expect(seen).toEqual([['git', '-C', dir, 'rev-parse', '--show-toplevel']]);
+  });
+});
+
+describe('requireOutsideGit probe failures', () => {
+  test('refuses a failed git probe that is not a not-a-repository answer', async () => {
+    for (const result of [
+      ok('', 128, 'fatal: bad config line 1 in file x'),
+      ok('', 1),
+      ok('', 129),
+    ]) {
+      const run: RunProcess = async () => result;
+      await expect(requireOutsideGit(pyResolve(fresh()), { run })).rejects.toThrow(
+        'cannot establish that the path is outside every Git checkout',
+      );
+    }
+  });
+});
+
+describe('pyResolve symlink then dot-dot', () => {
+  test('applies .. to the link target, not to the link name', () => {
+    const dir = pyResolve(fresh());
+    mkdirSync(join(dir, 'repo/sub'), { recursive: true });
+    mkdirSync(join(dir, 'safe'));
+    symlinkSync(join(dir, 'repo/sub'), join(dir, 'safe/link'));
+    expect(pyResolve(`${dir}/safe/link/../private`)).toBe(join(dir, 'repo/private'));
   });
 });
 
@@ -501,5 +526,20 @@ describe('main', () => {
     await expect(main(['--overlay', h.overlayPath, 'live-config'], { env: boom })).rejects.toThrow(
       TypeError,
     );
+  });
+});
+
+describe('withTickLock lock loss', () => {
+  test('rejects when the holder is lost while the protected work is running', async () => {
+    const dir = fresh();
+    mkdirSync(join(dir, 'apps/crq-python'), { recursive: true });
+    let lose: () => void = () => undefined;
+    const lost = new Promise<void>((r) => (lose = r));
+    const lockFs = {
+      mkdirp: async () => undefined,
+      tryLock: async () => ({ release: async () => undefined, lost }),
+    };
+    const work = withTickLock(lockFs, dir, () => new Promise<string>(() => lose()));
+    await expect(work).rejects.toThrow('tick lock lost while held');
   });
 });
