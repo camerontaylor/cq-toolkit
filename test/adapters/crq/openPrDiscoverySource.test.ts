@@ -100,6 +100,27 @@ describe('open PR discovery source', () => {
     ]);
     expect(calls).toContainEqual(['merge-base', 'origin/main', head]);
   });
+  it('refuses an inventory page that reaches the listing limit', async () => {
+    const row = {
+      number: 7,
+      isDraft: false,
+      baseRefName: 'main',
+      headRefName: 'feature',
+      headRefOid: head,
+    };
+    const effects = openPrDiscoveryEffects({
+      repos: [repo],
+      associate: async (queue) => ({ queue, associated: false }),
+      ownRange: async () => false,
+      event: async () => {},
+      gh: async () => ({
+        code: 0,
+        stdout: JSON.stringify(Array.from({ length: 200 }, () => row)),
+        stderr: '',
+      }),
+    });
+    await expect(effects.list(repo)).rejects.toThrow('200-row limit');
+  });
   it('refuses malformed inventory and unconfigured repository objects', async () => {
     const effects = openPrDiscoveryEffects({
       repos: [repo],
