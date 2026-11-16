@@ -155,6 +155,8 @@ async function publishResolutions(
       const id = result.get('job') ?? null;
       if (completed.some((v) => pythonValueEqual(v, id))) continue;
       if (typeof id !== 'string') throw new Error('FIXED verdict has no job id');
+      if (!(Array.isArray(jobs) ? jobs : []).includes(id))
+        throw new Error('FIXED verdict job is not in the repair record');
       const job = await effects.readJob(id);
       const pr = job.get('pr') ?? null;
       if (!pyTruthy(pr)) continue; // Threadless source truth is the finding ledger.
@@ -169,8 +171,13 @@ async function publishResolutions(
         pending = true;
         continue; // Keep feedback pending for retry.
       }
+      // Journal the next completion list before appending it here, so a failed write
+      // leaves `current()` without `id` and the feedback retries.
+      await effects.writeJournal(
+        first,
+        withObjectKeys(publication, [['source_resolutions', [...completed, id]]]),
+      );
       completed.push(id);
-      await effects.writeJournal(first, current());
     }
   } catch (error) {
     throw new SourcePublicationFailed(
