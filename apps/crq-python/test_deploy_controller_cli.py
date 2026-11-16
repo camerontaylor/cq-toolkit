@@ -307,6 +307,12 @@ class RecordDirResolutionTests(unittest.TestCase):
             self.assertEqual(dc.absolute_record_dir(spelled), records)
             self.assertNotEqual(pathlib.Path(os.path.abspath(spelled)), records)
 
+    def test_a_final_dotdot_is_resolved_to_the_real_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            nested = pathlib.Path(tmp).resolve() / "nested"
+            nested.mkdir()
+            self.assertEqual(dc.absolute_record_dir(nested / ".."), nested.parent)
+
     def test_a_final_symlink_is_still_visible_to_preflight(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = pathlib.Path(tmp) / "records"

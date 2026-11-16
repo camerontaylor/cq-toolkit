@@ -202,7 +202,7 @@ def absolute_record_dir(path: Path) -> Path:
     ``link/../records`` means what the filesystem says it means.
     """
     name = path.name
-    if not name:
+    if not name or name in (".", ".."):
         # '.'/'..' and the root have no final component to preserve, so there
         # is no final symlink to hide: resolve fully.
         return Path(os.path.realpath(path))
