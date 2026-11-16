@@ -524,14 +524,19 @@ def _first_difference(expected, actual):
 def _resolve_node(node):
     """Make an explicit node path absolute without following symlinks.
 
-    Bare names stay unchanged for PATH lookup. An explicit path is made absolute
-    lexically (``os.path.abspath``), never ``Path.resolve()``: a version-manager
-    shim (mise, Volta) selects the real node from its own invocation name, so
-    dereferencing the symlink would launch the manager instead of node.
+    Bare names stay unchanged for PATH lookup. A relative path is prefixed with
+    the current directory and nothing else: ``os.path.abspath`` would collapse
+    ``..`` lexically before the kernel follows symlinks (``/opt/active/../bin``
+    with ``/opt/active`` -> ``/srv/releases/24`` opens ``/srv/releases/bin``,
+    not ``/opt/bin``), and ``Path.resolve()`` would dereference a
+    version-manager shim (mise, Volta), which selects the real node from its
+    own invocation name.
     """
     if node is None or os.path.basename(node) == node:
         return node
-    return os.path.abspath(node)
+    if os.path.isabs(node):
+        return node
+    return os.path.join(os.getcwd(), node)
 
 
 def smoke_fs_ext(root, node=None):
