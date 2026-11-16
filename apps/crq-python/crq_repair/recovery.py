@@ -21,6 +21,16 @@ def blackout_deferral(report):
             and report.get('errorClass') == 'blackout')
 
 
+def handover_deferral(report):
+    """Typed handover stop: the host may be handed over, so no model call.
+
+    Unlike a peak-hour pause there is no clock window to bound: the marker is
+    removed once the handover completes (or the owner runs recovery again), so
+    an expired wait would abandon a recovery that is merely waiting for a host."""
+    return (isinstance(report, dict) and report.get('stop') == 'configuration'
+            and report.get('errorClass') == 'runner-disabled')
+
+
 def recover(root, config, job_id, scan, judge, prepare):
     """Revalidate one immutable finding; never mutate its old worktree or result.
 
@@ -124,7 +134,9 @@ def recover(root, config, job_id, scan, judge, prepare):
         # default-branch tip that moved during the pause resumes by rebuilding
         # current-source evidence in the deferred path below; every other
         # retained state must still match its recorded binding exactly.
-        paused = saved.get('state') == 'deferred' and blackout_deferral(saved.get('report'))
+        paused = saved.get('state') == 'deferred' and (
+            blackout_deferral(saved.get('report'))
+            or handover_deferral(saved.get('report')))
         if replay and isinstance(old_binding, dict):
             old_tip = check_sha(old_binding.get('source_sha'))
             try:
@@ -160,13 +172,20 @@ def recover(root, config, job_id, scan, judge, prepare):
         report = judge(job, context, directory)
         if not isinstance(report, dict):
             report = {'stop': 'error', 'reason': 'invalid recovery judge output'}
-        if not blackout_deferral(report):
+        if not (blackout_deferral(report) or handover_deferral(report)):
             attempts += 1
         saved = {'binding': binding, 'state': 'judged', 'report': report, 'attempts': attempts}
         if blackout_deferral(report):
             saved['blackout_since'] = blackout_since or dt.datetime.now(dt.timezone.utc).isoformat()
         atomic(artifact, saved)
         blackout_since = saved.get('blackout_since')
+    if handover_deferral(report):
+        # No model call happened and no attempt was spent: hold the recovery
+        # until the host is no longer handed over. No clock window bounds it.
+        saved.update(state='deferred',
+                     reason=report.get('reason') or 'runner disabled for host handover')
+        atomic(artifact, saved)
+        return saved
     if blackout_deferral(report):
         # No model call happened, so the attempt budget is untouched; only the
         # wait itself is bounded, so a paused window cannot end recovery.

@@ -325,20 +325,18 @@ class ControllerUnitSwitchWiringTests(FactoryFixture):
         self.assertEqual(artifact["subcommand"], "recover")
         loader.assert_not_called()
 
-    def test_cli_recover_refuses_activation_pending_with_rc3(self):
+    def test_cli_recover_rolls_back_a_demonstrably_fenced_activation(self):
         path, _snapshot = self.pending_record(phase="activation_pending",
                                               drain=True)
-        before = path.read_bytes()
         code, stdout, stderr = self.run_cli(
             args=("recover", "--record", str(path)), systemd=self.systemd)
-        self.assertEqual(code, 3)
+        self.assertEqual(code, 0, stderr)
         recorded = json.loads(stdout)
-        self.assertEqual(recorded["outcome"], "pending")
-        self.assertEqual(recorded["phase"], "activation_pending")
-        self.assertEqual(recorded["record_path"], str(path))
-        self.assertIn("activation may have occurred", recorded["reason"])
-        self.assertIn("recovery required:", stderr)
-        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(recorded["outcome"], "rolled_back")
+        self.assertEqual(recorded["failed_phase"], "activation_pending")
+        final = json.loads(path.read_text())
+        self.assertEqual(final["outcome"], "rolled_back")
+        self.assertEqual(final["phase"], "restore_activation_pending")
 
     def test_cli_recover_loads_the_live_binding_once(self):
         path, _snapshot = self.pending_record(drain=True)

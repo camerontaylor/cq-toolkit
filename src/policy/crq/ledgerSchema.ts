@@ -83,7 +83,14 @@ export const REVIEW_LEDGER_SCHEMA: JsonSchema = {
                   minLength: 1,
                 },
                 type: {
-                  enum: ['crq-run', 'github-review', 'author-cli', 'author-queue'],
+                  enum: [
+                    'crq-run',
+                    'github-review',
+                    'author-cli',
+                    'author-queue',
+                    'manual',
+                    'agent',
+                  ],
                 },
                 id: {
                   type: 'string',
@@ -94,6 +101,45 @@ export const REVIEW_LEDGER_SCHEMA: JsonSchema = {
                 },
               },
               additionalProperties: false,
+            },
+            provenance: {
+              type: 'object',
+              required: [
+                'authenticated_submitter',
+                'claimed_reviewer',
+                'forge_evidence',
+                'completion_evidence',
+                'scope_confidence',
+                'independence',
+              ],
+              properties: {
+                authenticated_submitter: {
+                  type: 'string',
+                  minLength: 1,
+                },
+                claimed_reviewer: {
+                  type: 'string',
+                  minLength: 1,
+                },
+                forge_evidence: {
+                  type: 'string',
+                  minLength: 1,
+                },
+                completion_evidence: {
+                  type: ['string', 'null'],
+                },
+                scope_confidence: {
+                  enum: ['verified', 'claimed', 'unknown'],
+                },
+                independence: {
+                  type: ['string', 'null'],
+                },
+              },
+              additionalProperties: false,
+            },
+            supersedes: {
+              type: 'string',
+              pattern: '^[0-9a-f]{64}$',
             },
             base: {
               type: 'string',
@@ -289,7 +335,7 @@ export const REVIEW_LEDGER_SCHEMA: JsonSchema = {
                     minLength: 1,
                   },
                   kind: {
-                    enum: ['git-bundle', 'local-review-full-diff'],
+                    enum: ['git-bundle', 'local-review-full-diff', 'report'],
                   },
                 },
                 additionalProperties: false,
@@ -411,7 +457,14 @@ export const REVIEW_LEDGER_SCHEMA: JsonSchema = {
                   minLength: 1,
                 },
                 type: {
-                  enum: ['crq-run', 'github-review', 'author-cli', 'author-queue'],
+                  enum: [
+                    'crq-run',
+                    'github-review',
+                    'author-cli',
+                    'author-queue',
+                    'manual',
+                    'agent',
+                  ],
                 },
                 id: {
                   type: 'string',
@@ -422,6 +475,45 @@ export const REVIEW_LEDGER_SCHEMA: JsonSchema = {
                 },
               },
               additionalProperties: false,
+            },
+            provenance: {
+              type: 'object',
+              required: [
+                'authenticated_submitter',
+                'claimed_reviewer',
+                'forge_evidence',
+                'completion_evidence',
+                'scope_confidence',
+                'independence',
+              ],
+              properties: {
+                authenticated_submitter: {
+                  type: 'string',
+                  minLength: 1,
+                },
+                claimed_reviewer: {
+                  type: 'string',
+                  minLength: 1,
+                },
+                forge_evidence: {
+                  type: 'string',
+                  minLength: 1,
+                },
+                completion_evidence: {
+                  type: ['string', 'null'],
+                },
+                scope_confidence: {
+                  enum: ['verified', 'claimed', 'unknown'],
+                },
+                independence: {
+                  type: ['string', 'null'],
+                },
+              },
+              additionalProperties: false,
+            },
+            supersedes: {
+              type: 'string',
+              pattern: '^[0-9a-f]{64}$',
             },
             source_digest: {
               type: 'string',
@@ -456,7 +548,7 @@ export const REVIEW_LEDGER_SCHEMA: JsonSchema = {
                     minLength: 1,
                   },
                   kind: {
-                    enum: ['git-bundle', 'local-review-full-diff'],
+                    enum: ['git-bundle', 'local-review-full-diff', 'report'],
                   },
                 },
                 additionalProperties: false,

@@ -17,6 +17,7 @@ import backfill_accounting
 import backfill_inventory
 import backfill_jobs
 import backfill_report
+import author_quota
 import coverage
 import crq
 import crq_repair
@@ -210,7 +211,80 @@ def invoke(source, inputs):
         return status_summary.summarize(inputs["status"], inputs["queue"],
                                         inputs["heartbeat"], inputs["config"],
                                         inputs["events"], inputs["now"])
+    if source in SCHEDULE_REPLAYS:
+        return _schedule_replay(source, inputs)
+    if source == "author_quota.identity_kind":
+        return author_quota.identity_kind(
+            inputs["pidfile"], run_id=inputs.get("run_id"),
+            queue_pid=inputs.get("queue_pid"))
+    if source == "author_quota.run_state":
+        return author_quota.run_state(
+            has_exit=inputs["has_exit"], identity=inputs["identity"],
+            runner_alive=inputs["runner_alive"], cli_alive=inputs["cli_alive"],
+            runner_group_alive=inputs["runner_group_alive"],
+            wrapper_group_alive=inputs["wrapper_group_alive"])
+    if source == "crq.ident_pid":
+        return crq.ident_pid(inputs["value"])
+    if source == "crq.admit_available":
+        return _admission_replay(inputs)
     raise AssertionError(f"no replay for {source}")
+
+
+SCHEDULE_REPLAYS = {
+    "crq.rank": lambda inputs: crq.rank(inputs["item"]),
+    "crq.sort_key": lambda inputs: list(crq.sort_key(inputs["item"])),
+    "crq.launch_band": lambda inputs: crq.launch_band(inputs["item"]),
+    "crq.deps_met": lambda inputs: crq.deps_met(inputs["queue"], inputs["item"]),
+    "crq.optional_wait": lambda inputs: crq.optional_wait(inputs["queue"], inputs["item"]),
+    "crq.parked_merged_linked_receipt": lambda inputs: crq.parked_merged_linked_receipt(
+        inputs["queue"], inputs["item"]),
+    "crq.inflight": lambda inputs: [item["id"] for item in crq.inflight(inputs["queue"])],
+    "crq.has_collectable_runs": lambda inputs: crq.has_collectable_runs(inputs["queue"]),
+    "crq.background_turn": lambda inputs: crq.background_turn(inputs["queue"]),
+    "crq.starts_last_hour": lambda inputs: crq.starts_last_hour(inputs["queue"]),
+    "crq.item_repo": lambda inputs: crq.item_repo(inputs["item"]),
+}
+
+
+def _schedule_replay(source, inputs):
+    """Replay one scheduling row with the vector's recorded module bindings."""
+    config = {**crq.CONFIG, "local_review_aging_minutes": inputs["local_review_aging_minutes"]}
+    with patch.multiple(
+            crq, REPO=inputs["primary_repo"], REPOS=inputs["repos"],
+            CONFIG=config, now=lambda: queue_time.parse_utc(inputs["now"])):
+        return SCHEDULE_REPLAYS[source](inputs)
+
+
+def _admission_replay(inputs):
+    """Replay `crq.admit_available` with launch and backfill context stubbed."""
+    queue = copy.deepcopy(inputs["queue"])
+    queue["starts"] = list(queue.get("starts", []))
+    calls = []
+
+    def stub_start_one(q, log, dry, only, ignore_quiet, capture_current=True):
+        calls.append(len(q["starts"]))
+        q["starts"].append("2026-11-14T00:00:00Z")
+        return "stub-run", False
+
+    log = []
+    config = {"max_starts_per_hour": inputs["max_starts_per_hour"],
+              "max_starts_per_tick": inputs["max_starts_per_tick"],
+              "max_inflight": inputs["max_inflight"]}
+    with patch.object(crq, "start_one", stub_start_one), \
+            patch.object(crq.backfill_runtime, "usage_context", lambda *a, **k: None), \
+            patch.multiple(crq, CONFIG=config,
+                           now=lambda: queue_time.parse_utc(inputs["now"])):
+        _, gate, remaining = crq.admit_available(
+            queue, inputs["usage"], log, reserved=tuple(inputs["reserved"]))
+    return {
+        "gate": gate,
+        "remaining": remaining,
+        "start_attempts": len(calls),
+        "log": log,
+        "starts": len(queue["starts"]),
+        "usage": queue.get("usage"),
+        "backfill_starts_at_observation": queue.get("backfill_starts_at_observation"),
+    }
 
 
 class VectorFileTest(unittest.TestCase):
@@ -227,6 +301,19 @@ class VectorFileTest(unittest.TestCase):
     def test_build_is_reproducible_in_process(self):
         self.assertEqual(vector_emit.encode(vector_emit.build()),
                          vector_emit.encode(vector_emit.build()))
+
+    def test_emission_binds_the_recorded_aging_limit(self):
+        # `crq.rank` reads CONFIG at call time. Emission must bind the value the
+        # vector records, not the host's config.json, or an ambient override
+        # changes emitted ranks while replay keeps using the recorded value.
+        saved = crq.CONFIG["local_review_aging_minutes"]
+        try:
+            crq.CONFIG["local_review_aging_minutes"] = 30
+            emitted = vector_emit.build()["tick-schedule"]
+        finally:
+            crq.CONFIG["local_review_aging_minutes"] = saved
+        checked_in = json.loads((FIXTURE_ROOT / "tick-schedule.json").read_text())
+        self.assertEqual(emitted, checked_in)
 
     def test_subprocess_emission_is_independent_of_hash_seed(self):
         command = [sys.executable, str(HERE / "vector_emit.py"), "--stdout"]
@@ -298,6 +385,21 @@ class VectorFileTest(unittest.TestCase):
                         "review_ledger.validate_sequence",
                         "review_ledger.creditable",
                         "status_summary.summarize",
+                        "crq.rank",
+                        "crq.sort_key",
+                        "crq.launch_band",
+                        "crq.deps_met",
+                        "crq.optional_wait",
+                        "crq.parked_merged_linked_receipt",
+                        "crq.inflight",
+                        "crq.has_collectable_runs",
+                        "crq.background_turn",
+                        "crq.starts_last_hour",
+                        "crq.item_repo",
+                        "author_quota.identity_kind",
+                        "author_quota.run_state",
+                        "crq.ident_pid",
+                        "crq.admit_available",
                     })
                     key = (family, case["name"])
                     self.assertNotIn(key, seen, "duplicate case name in family")

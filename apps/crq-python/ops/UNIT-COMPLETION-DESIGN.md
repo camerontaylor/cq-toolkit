@@ -121,8 +121,17 @@ def boot_id() -> str
 `systemctl --user show` and `journalctl --user --user-unit` with bounded output.
 Both stdout and stderr are drained concurrently and each is bounded by
 `max_bytes` while it is read, so an oversize stream refuses without buffering
-the full output. It is not constructed by tests. A parent-owned factory is the
-only place that may bind it later.
+the full output. Journal records are requested with `--output-fields` set to
+exactly the fields the witness consults (`_BOOT_ID`,
+`__MONOTONIC_TIMESTAMP`, the `_SYSTEMD_*` and manager unit/invocation pairs).
+The omitted payload fields (`MESSAGE`, `_CMDLINE`, process metadata) are never
+read as completion evidence, so projection is not truncation. A real user-unit
+record is 1.1-1.8 KiB as `--output=json`; the 2026-11-14 cutover failure read
+346,013 stdout bytes from 2,735 records, with the 256-record tail over the
+262,144-byte bound. Projection keeps the same record bound inside it, and a
+projected stream that still exceeds the bound refuses exactly as before. It is
+not constructed by tests. A parent-owned factory is the only place that may
+bind it later.
 
 The provider is pure over the injected source. Tests use a fake source and real
 temporary unit files. The source command tests use an injected process factory

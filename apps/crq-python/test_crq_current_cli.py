@@ -116,12 +116,137 @@ class CurrentTest(CurrentFixture, unittest.TestCase):
                 crq.main()
         self.assertEqual(crq.QUEUE.read_text(), "{not json")
 
+    def test_reconcile_gets_its_own_forge_budget_when_the_shard_budget_is_spent(self):
+        """Reconciliation must not inherit an exhausted tick budget and fail silently.
+
+        Regression for 2026-11-13: reconcile_fix_prs ran last inside the tick's shared
+        24-request, 30-second window and swallowed RefreshExhausted per run, so a
+        starving tick projected nothing for six hours while eleven merged repairs sat
+        stuck at the delivered canonical row, with no log line to say so.
+        """
+        seen = {}
+        shard = crq.ForgeBudget(requests=0)
+        own = crq.ForgeBudget(requests=80, seconds=60)
+        made = []
+
+        def factory(*args, **kwargs):
+            budget = shard if not made else own
+            made.append(budget)
+            return budget
+
+        def capture(*args, **kwargs):
+            seen['budget'] = crq._FORGE_BUDGET
+
+        with mock.patch.object(crq, 'ForgeBudget', side_effect=factory), \
+             mock.patch.object(crq, 'fetch'), mock.patch.object(crq, 'write_status'), \
+             mock.patch.object(crq, 'write_heartbeat'), mock.patch.object(crq, 'notify_owner'), \
+             mock.patch.object(crq, 'enroll', return_value=[]), \
+             mock.patch.object(crq, 'discover_merged', return_value=[]), \
+             mock.patch.object(crq.repair_tick, 'reconcile_fix_prs', side_effect=capture):
+            crq.tick()
+        self.assertIs(seen['budget'], own)
+        self.assertTrue(seen['budget'].available())
+
+    def test_reconcile_reports_starved_runs_instead_of_silence(self):
+        """A pass that read nothing must not look like a pass that found nothing.
+
+        The six-hour silence of 2026-11-13 was a starved reconcile that reported
+        nothing because RefreshExhausted was swallowed with the rest. The counts
+        are the difference between 'nothing to do' and 'nothing attempted'.
+        """
+        record = {'fix_pr': {'number': 7}, 'jobs': [], 'verdicts': []}
+        item = {'id': 'item-starved', 'kind': 'repair-run', 'repair_runs': {'run-1': record}}
+
+        class Starved:
+            def pr_info(self, number):
+                raise crq.deferred_refresh.RefreshExhausted('aggregate forge budget exhausted')
+
+        stats = crq.repair_tick.reconcile_fix_prs(Starved(), {'items': [item]})
+        self.assertEqual(1, stats['examined'])
+        self.assertEqual(0, stats['projected'])
+        self.assertEqual(1, stats['starved'])
+        self.assertEqual(0, stats['deferred'])
+        self.assertEqual(1, len(stats['errors']))
+        self.assertIn('RefreshExhausted', stats['errors'][0]['error'])
+        self.assertNotIn('fix_merged', record)
+
+    def test_reconcile_counts_a_projected_run(self):
+        record = {'fix_pr': {'number': 7, 'url': 'u'}, 'jobs': [], 'verdicts': [],
+                  'publication': {'head': 'published'}}
+        item = {'id': 'item-projected', 'kind': 'repair-run', 'repair_runs': {'run-1': record}}
+
+        class Merged:
+            def pr_info(self, number):
+                return {'state': 'MERGED', 'mergeCommit': {'oid': 'merge'}, 'headRefOid': 'actual'}
+
+            def is_ancestor(self, ancestor, descendant):
+                return True
+
+            def git(self, *args):
+                return 'tip'
+
+            def iso(self):
+                return 'now'
+
+        with mock.patch.object(crq.repair_tick, 'canonical_fixed_events', return_value={'check': 1}), \
+             mock.patch.object(crq.repair_tick, 'publish_source_resolution', return_value=None):
+            stats = crq.repair_tick.reconcile_fix_prs(Merged(), {'items': [item]})
+        self.assertEqual(1, stats['examined'])
+        self.assertEqual(1, stats['projected'])
+        self.assertEqual(0, stats['starved'])
+        self.assertEqual('now', record['fix_merged'])
+
+    def test_receipt_lane_starvation_is_counted_not_swallowed(self):
+        """A starved receipt is not the receipt's fault, and not silence either."""
+        item = {'id': 'receipt-item', 'kind': crq.review_receipt.KIND, 'remediation_state': 'fixed'}
+        with mock.patch.object(crq.repair_tick, 'reconcile_current_fix',
+                               side_effect=crq.deferred_refresh.RefreshExhausted('exhausted')):
+            stats = crq.repair_tick.reconcile_fix_prs(object(), {'items': [item]})
+        self.assertEqual(1, stats['examined'])
+        self.assertEqual(1, stats['starved'])
+        self.assertEqual('fixed', item['remediation_state'])
+        self.assertNotIn('repair_error', item)
+
+    def test_receipt_lane_counts_skips_it_reports(self):
+        item = {'id': 'receipt-item', 'kind': crq.review_receipt.KIND, 'run': 'r1'}
+        lane = {'starved': 1, 'deferred': 2, 'errors': ['RefreshExhausted: exhausted']}
+        with mock.patch.object(crq.repair_tick, 'reconcile_current_fix', return_value=lane):
+            stats = crq.repair_tick.reconcile_fix_prs(object(), {'items': [item]})
+        self.assertEqual(1, stats['examined'])
+        self.assertEqual(1, stats['starved'])
+        self.assertEqual(2, stats['deferred'])
+        self.assertEqual(1, len(stats['errors']))
+
+    def test_receipt_lane_failure_is_counted_not_only_recorded(self):
+        item = {'id': 'receipt-item', 'kind': crq.review_receipt.KIND, 'remediation': {'kept': 1},
+                'remediation_state': 'fixed'}
+        with mock.patch.object(crq.repair_tick, 'reconcile_current_fix',
+                               side_effect=RuntimeError('forge read failed')):
+            stats = crq.repair_tick.reconcile_fix_prs(object(), {'items': [item]})
+        self.assertEqual(1, stats['deferred'])
+        self.assertIn('repair_error', item)
+        self.assertNotIn('remediation', item)
+
+    def test_tick_reports_a_starved_reconcile_pass(self):
+        """The digest line is what makes a starved pass visible without a probe."""
+        stats = {'examined': 3, 'projected': 0, 'starved': 3, 'deferred': 0, 'errors': []}
+        with mock.patch.object(crq, 'fetch'), mock.patch.object(crq, 'write_status'), \
+             mock.patch.object(crq, 'write_heartbeat'), mock.patch.object(crq, 'notify_owner'), \
+             mock.patch.object(crq, 'event') as recorded, \
+             mock.patch.object(crq, 'enroll', return_value=[]), \
+             mock.patch.object(crq, 'discover_merged', return_value=[]), \
+             mock.patch.object(crq.repair_tick, 'reconcile_fix_prs', return_value=stats):
+            log = crq.tick()
+        self.assertTrue(any('reconcile: 3 examined, 0 projected, 3 starved' in line for line in log))
+        self.assertTrue(any(call.args and call.args[0] == 'reconcile_incomplete'
+                            for call in recorded.call_args_list))
+
     def test_selective_start_refuses_and_caps_prevent_capture(self):
         item = self.enroll()
         with mock.patch.object(crq, "fetch"), mock.patch.object(crq, "enroll", return_value=[]), \
              mock.patch.object(crq, "discover_merged", return_value=[]), \
              mock.patch.object(crq, "write_status"), mock.patch.object(crq, "write_heartbeat"), \
-             mock.patch.object(crq.repair_tick, "reconcile_fix_prs"), \
+             mock.patch.object(crq.repair_tick, "reconcile_fix_prs", return_value={}), \
              mock.patch.object(crq, "prepare_current") as planner:
             log = crq.with_lock(crq.tick, False, item["id"])
             self.assertTrue(any("selective start refused" in line for line in log))

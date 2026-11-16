@@ -60,7 +60,7 @@ import { z } from 'zod';
 import { GovernanceOptInRefusedError, PlanLockRefusedError } from '../kernel/errors.js';
 import { createGovernor, governorConfig, type Governance } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
-import type { CqEnv } from '../registry/entry-env.js';
+import type { CqEnv, EntryEnv } from '../registry/entry-env.js';
 import { PlanSchema } from '../kernel/schema.js';
 import type {
   GovernanceOptIn,
@@ -347,7 +347,7 @@ export async function runPlanThroughKernel(
   input: RunPlanOptions,
   io: CliIo,
   mode: NarrationMode,
-  opts?: { opsRoot?: string; failOnVerdict?: boolean; cqEnv?: CqEnv },
+  opts?: { opsRoot?: string; failOnVerdict?: boolean; cqEnv?: CqEnv; env?: EntryEnv },
 ): Promise<number> {
   // Registry view over the resolved ops root: the explicit --ops-root flag
   // (input.opsRoot) wins over the runCli-level DI override (opts.opsRoot).
@@ -396,6 +396,7 @@ export async function runPlanThroughKernel(
     ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
     ...(input.resume ? { resume: true } : {}),
     ...(opts?.cqEnv !== undefined ? { cqEnv: opts.cqEnv } : {}),
+    ...(opts?.env !== undefined ? { env: opts.env } : {}),
   };
   const governance: Governance | undefined =
     input.maxUsd !== undefined ||
@@ -507,7 +508,7 @@ export async function runPlanCommand(
   flags: Record<string, unknown>,
   io: CliIo,
   mode: NarrationMode,
-  opts?: { opsRoot?: string; failOnVerdict?: boolean; cqEnv?: CqEnv },
+  opts?: { opsRoot?: string; failOnVerdict?: boolean; cqEnv?: CqEnv; env?: EntryEnv },
 ): Promise<number> {
   const parsed = parseRunPlanInput('run-plan', flags, io, mode, RunPlanInputSchema);
   if (!parsed.ok) return parsed.code;

@@ -66,6 +66,7 @@ export const registry: OpRegistryEntry[] = [
           // the wiring IS the run snapshot. Absent, the composition resolves
           // the enclosing run snapshot at entry.
           ...(wiring?.cqEnv !== undefined ? { cqEnv: wiring.cqEnv } : {}),
+          ...(wiring?.env !== undefined ? { env: wiring.env } : {}),
         })(raw as FixRunInput);
     },
   },

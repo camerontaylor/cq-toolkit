@@ -145,6 +145,33 @@ PRESERVED = {
     "heartbeat.json": "completed-tick heartbeat",
 }
 
+# Units whose execution can create or advance queue work. Every unit is
+# treated as issuing unless it is named here, so a future unit is fail-closed
+# until someone can show it shares no state with the queue. The watchdog is
+# the one declared non-issuing unit: it reads the completed-tick heartbeat and
+# sends an alert, and never launches a run, advances queue.json or writes the
+# heartbeat.
+QUEUE_NON_ISSUING_UNITS = frozenset({"crq-watchdog.service"})
+
+
+def unit_issues_queue_work(unit: str) -> bool:
+    """Whether this unit's transaction must be serialized with queue work."""
+    return unit not in QUEUE_NON_ISSUING_UNITS
+
+
+def preserved_surfaces(unit: str) -> tuple:
+    """Queue surfaces this unit's transaction must observe byte-identical.
+
+    Only an issuing unit's execution can advance ``queue.json`` or the
+    completed-tick heartbeat. A non-issuing unit shares no state with the
+    queue, and a live run owned by another unit may legitimately advance both
+    while the watchdog switch runs; asserting byte equality there would refuse
+    or roll back a legitimate watchdog transaction. The watchdog keeps its own
+    systemd, cgroup and completion health fences, which do not depend on the
+    queue. No surface is ever restored from this evidence.
+    """
+    return tuple(sorted(PRESERVED)) if unit_issues_queue_work(unit) else ()
+
 
 def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -358,15 +385,20 @@ class Effects:
 # ---------------------------------------------------------------- preflight
 
 
-def captured_state(effects: Effects) -> dict:
+def captured_state(effects: Effects, unit: str | None = None) -> dict:
     """Retained prior identity + preservation digests, read before any helper
-    invocation. The digests are what the post-checks compare byte-for-byte."""
+    invocation. The digests are what the post-checks compare byte-for-byte.
+
+    ``unit`` scopes the digests to the surfaces that unit's transaction can
+    advance; omitting it (checkout deploy/rollback) preserves every surface.
+    """
     state = {"prior_head": effects.git("rev-parse", "HEAD")}
     try:
         state["prior_config_sha256"] = _sha256(effects.config_path)
     except OSError:
         state["prior_config_sha256"] = None
-    state.update(preserved_digests(effects))
+    state.update(preserved_digests(
+        effects, preserved_surfaces(unit) if unit is not None else None))
     state["checkout_status"] = effects.git("status", "--porcelain",
                                            "--untracked-files=all")
     state["units"] = effects.unit_digests()
@@ -425,16 +457,19 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def preserved_digests(effects: Effects) -> dict:
+def preserved_digests(effects: Effects, surfaces=None) -> dict:
     """sha256 of every PRESERVED surface, keyed "preserved/<name>", None when
     that surface does not exist yet. queue.json is read state-relative; the
     completion heartbeat is read from effects.completion_heartbeat_path() —
     the exact file read_completion_heartbeat reads and crq.py replaces — so
     the digests cover what the runner actually writes. A surface that exists
     but cannot be read raises, never quietly digests as None.
+
+    ``surfaces`` narrows the observation to one unit's preservation scope;
+    None observes every PRESERVED surface (checkout deploy/rollback).
     """
     digests: dict = {}
-    for rel in PRESERVED:
+    for rel in (tuple(PRESERVED) if surfaces is None else tuple(surfaces)):
         path = (effects.completion_heartbeat_path()
                 if rel == "heartbeat.json" else effects.state_dir() / rel)
         try:
@@ -583,16 +618,25 @@ def runner_queue_drain(effects: Effects) -> dict:
     return drain_check(effects, _runner_liveness(effects))
 
 
-def queue_drain_gate(effects: Effects) -> dict:
+def queue_drain_gate(effects: Effects, unit: str) -> dict:
     """Refuse a unit transaction while recorded queue work is live/ambiguous.
 
-    Callers invoke this before any unit mutation or journal write, so a
-    refusal leaves installed units, activation, preserved queue bytes and
+    ``unit`` decides whether the gate applies at all: only a unit whose
+    execution can create or advance queue work is serialized with recorded
+    queue ownership. The watchdog is non-issuing and is deliberately admitted
+    while an unrelated run is alive; every other unit is refused exactly as
+    before. Callers invoke this before any unit mutation or journal write, so
+    a refusal leaves installed units, activation, preserved queue bytes and
     retained records unchanged. Both the switch and recovery entry points call
-    it independently; the guest adapter observes the same queue again after its
-    systemd fence. That second point-in-time observation narrows the dispatch
-    window but does not close it.
+    it independently; an issuing unit's adapter observes the same queue again
+    after its systemd fence. That second point-in-time observation narrows the
+    dispatch window but does not close it.
+
+    A non-issuing unit is not observed at all: the queue is not its state, and
+    a read of it would make an unrelated live run look like a conflict.
     """
+    if not unit_issues_queue_work(unit):
+        return {"drained": None, "blocked": [], "applicable": False}
     drain = runner_queue_drain(effects)
     if not drain["drained"]:
         raise QueueDrainRefused(
@@ -605,20 +649,23 @@ def queue_drain_gate(effects: Effects) -> dict:
 # ------------------------------------------------------------- preservation
 
 
-def preservation_check(effects: Effects, before: dict) -> dict:
+def preservation_check(effects: Effects, before: dict, surfaces=None) -> dict:
     """Byte-identical verification of queue/quota history and heartbeat across
     the helper invocation. Any difference is a refused deployment (fail
-    stopped, reason recorded)."""
+    stopped, reason recorded). ``surfaces`` narrows the check to one unit's
+    preservation scope; a non-issuing unit has an empty scope, so unrelated
+    queue progress is neither compared nor rewritten."""
+    surfaces = tuple(PRESERVED) if surfaces is None else tuple(surfaces)
     diffs = []
-    after = preserved_digests(effects)
-    for rel in PRESERVED:
+    after = preserved_digests(effects, surfaces)
+    for rel in surfaces:
         if after["preserved/" + rel] != before.get("preserved/" + rel):
             diffs.append(rel)
     if diffs:
         raise Refused("preserved surfaces changed during deployment: "
                       + ", ".join(diffs)
                       + "; fail stopped, owner recovery required")
-    return {"preserved": True, "checked": sorted(PRESERVED)}
+    return {"preserved": True, "checked": sorted(surfaces)}
 
 
 # ------------------------------------------------------------------- health
@@ -1446,25 +1493,35 @@ def recover_unit(effects, adapter, path, *, adapter_factory=None):
                 or (isinstance(record.get("state"), dict) and any("preserved/" + rel not in record["state"]
                        or (record["state"]["preserved/" + rel] is not None
                            and not _hex(_HEX64, record["state"]["preserved/" + rel]))
-                       for rel in PRESERVED))):
+                       for rel in preserved_surfaces(record["unit"])))):
             raise Refused("invalid unit recovery record")
         # Recovery re-observes ownership itself; it never assumes the switch's
         # drain or a prior crash left the queue empty. Refusal happens before
-        # re-fencing, restore or any journal rewrite.
-        queue_drain_gate(effects)
+        # re-fencing, restore or any journal rewrite. The record's own unit
+        # decides whether that observation applies at all.
+        queue_drain_gate(effects, record["unit"])
         if adapter_factory is not None:
             adapter = adapter_factory(record["unit"], record["prior_runtime"])
         if adapter is None:
             raise Refused("no unit recovery adapter")
         adapter.validate_snapshot(record["unit"], record["snapshot"])
         try:
-            adapter.stop_and_drain(record["unit"])
-            if record["phase"] in ("activation_pending", "restore_activation_pending"):
-                raise ValueError("activation may have occurred; inspect runtime evidence before recovery")
+            failed_phase = record.get("failed_phase", record["phase"])
+            # Recovery does not infer a fence from the journal. It re-establishes
+            # and observes one: stop_and_drain must show no matching job, no
+            # owned process, an inactive service and inactive activators, and
+            # (for an issuing unit) a drained queue. A successful fence makes
+            # restoring the authenticated snapshot safe even after activation;
+            # a fence that cannot establish absence raises and the record stays
+            # recovery_required. The record retains the failed phase, the
+            # original reason and the fence evidence.
+            fence = adapter.stop_and_drain(record["unit"])
             adapter.restore(record["unit"], record["snapshot"])
             if record["state"] is not None:
-                preservation_check(effects, record["state"])
-            record["phase"] = "restore_activation_pending"
+                preservation_check(effects, record["state"],
+                                   preserved_surfaces(record["unit"]))
+            record = {**record, "phase": "restore_activation_pending",
+                      "failed_phase": failed_phase, "fence": fence}
             effects.journal_replace(path, record)
             adapter.restore_activation(record["unit"], record["snapshot"])
             completed = {**record, "outcome": "rolled_back"}
@@ -1765,8 +1822,10 @@ def switch_unit(effects, adapter, unit, runtime):
         effects.record_preflight()
         refuse_unfinished_transactions(effects)
         # No journal entry, snapshot or unit mutation precedes this gate: an
-        # alive/ambiguous recorded run refuses the transaction as-is.
-        queue_drain_gate(effects)
+        # alive/ambiguous recorded run refuses an issuing unit's transaction
+        # as-is. A non-issuing unit (the watchdog) shares no queue state, so
+        # the gate does not apply and an unrelated live run cannot block it.
+        queue_drain_gate(effects, unit)
         prior = adapter.preflight(unit, runtime)
         if not isinstance(prior, dict) or not _unit_runtime(prior.get("runtime")):
             raise Refused("invalid prior runtime")
@@ -1781,13 +1840,15 @@ def switch_unit(effects, adapter, unit, runtime):
         path = effects.journal_append(identity)
         try:
             adapter.stop_and_drain(unit)
-            identity = {**identity, "state": captured_state(effects), "phase": "drained"}
+            identity = {**identity, "state": captured_state(effects, unit),
+                        "phase": "drained"}
             effects.journal_replace(path, identity)
             baseline = adapter.sequence(unit)
             if type(baseline) is not int or baseline < 0:
                 raise ValueError("invalid completion baseline")
             adapter.install(unit, runtime)
-            preservation_check(effects, identity["state"])
+            preservation_check(effects, identity["state"],
+                               preserved_surfaces(unit))
             identity = {**identity, "phase": "activation_pending"}
             effects.journal_replace(path, identity)
             adapter.start(unit)
@@ -1798,16 +1859,26 @@ def switch_unit(effects, adapter, unit, runtime):
             return record
         except (Exception, KeyboardInterrupt) as exc:
             try:
-                adapter.stop_and_drain(unit)
-                if identity["phase"] == "activation_pending":
-                    raise ValueError("activation may have occurred; inspect runtime evidence before recovery")
+                failed_phase = identity["phase"]
+                # The fence is the discriminator, not the phase alone: a
+                # successful stop_and_drain has observed no matching job, no
+                # owned process, an inactive service and inactive activators,
+                # and (for an issuing unit) a drained queue. In that state a
+                # switch that failed after start may restore the authenticated
+                # snapshot. The target still ran; the record keeps the failed
+                # phase, the reason and the fence evidence. A fence that cannot
+                # establish absence raises and stays recovery_required.
+                fence = adapter.stop_and_drain(unit)
                 adapter.restore(unit, snapshot)
                 if identity["state"] is not None:
-                    preservation_check(effects, identity["state"])
-                identity = {**identity, "phase": "restore_activation_pending"}
+                    preservation_check(effects, identity["state"],
+                                       preserved_surfaces(unit))
+                identity = {**identity, "phase": "restore_activation_pending",
+                            "failed_phase": failed_phase, "fence": fence,
+                            "reason": str(exc)[:400]}
                 effects.journal_replace(path, identity)
                 adapter.restore_activation(unit, snapshot)
-                record = {**identity, "outcome": "rolled_back", "reason": str(exc)[:400]}
+                record = {**identity, "outcome": "rolled_back"}
                 effects.journal_replace(path, record)
             except (Exception, KeyboardInterrupt) as rollback_exc:
                 recovery = {**identity, "outcome": "recovery_required", "record_path": str(path),
@@ -2165,7 +2236,15 @@ def main(argv=None) -> int:
         return 2
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         if args.operation == "health":
-            raise  # keep the health observation exit-1 contract
+            # The observation itself failed (e.g. state/runs not listable), so
+            # no health result exists: emit the I1 error artifact and keep the
+            # health exit-1 contract (a failed observation is never a refusal).
+            message = str(exc)[:400] or type(exc).__name__
+            print(json.dumps(_error_artifact("thrown", args.operation, message, 1),
+                             indent=2, sort_keys=True))
+            if not parser.json_mode:
+                print("health observation failed: " + message, file=sys.stderr)
+            return 1
         # Escaped outside mutation_record: the helper was never entered, so the
         # deployment surfaces are unchanged and this is a refusal (exit 2).
         message = str(exc)[:400] or type(exc).__name__

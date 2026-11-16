@@ -66,7 +66,7 @@ job is green because it recorded the failures as data; it is not a restart pass.
 Socket startup helpers blocked while setting the manager environment; the cause
 was not established and the initial environment comparison was not fully
 hermetic. [Restart diagnosis](https://github.com/camerontaylor/cq-toolkit/actions/runs/42720216729/job/129511976423).
-No VM reboot or power-loss test has been performed.
+A guest reboot ran in the disposable VM fixture (see VM-FEASIBILITY.md). No power-loss test has been performed.
 
 ## Offline rendering separation and identity binding
 
@@ -104,7 +104,7 @@ snapshot payload's schema-version-1 top-level keys and state shapes. It is
 composed by `unit-switch-factory.py` and reached through the controller CLI's
 `switch` verb. It has no live systemd binding in these offline tests. Node
 refuses unless the verified artifact's declaration lists the selected command;
-`watchdog` is currently the only such command.
+`watchdog` and `publish` are the declared commands.
 
 The slice remains fail-closed: discovery must enumerate the exact declared
 paths and units and report no foreign activators; unknown entries, missing
@@ -118,16 +118,48 @@ production completion coverage. `test_unit_adapter.py` exercises both
 runtimes, forward and recovery, real temporary files and injected host ports
 only.
 
+Installed environment drop-ins are part of the declared topology, not an
+external exception. The production host carries `20-paseo-env.conf` (the shared
+messaging environment) under the watchdog, tick and slot service units, and
+`coderabbit-managed.conf` under tick and slot. The adapter accepts exactly those
+names as a real, identity-owned directory with no group or world write bits;
+each entry must be an identity-owned regular file, or an absolute symlink to an
+identity-owned regular file outside the unit directory. It never writes,
+removes or renames them, so the alert environment survives switch and rollback
+unchanged. It reads only the declared drop-in text and allows only
+`Environment=` and `EnvironmentFile=` under `[Service]`; any `Type=`,
+`TimeoutStartSec=`, execution-shape or activation-shape key refuses before
+mutation, so a drop-in cannot invalidate the completion bound derived from the
+main unit template. It never follows an `EnvironmentFile=` target. A drop-in
+directory for another unit, another entry name, a symlinked directory, or an
+unsafe entry target also refuses. Because these paths are host-installed rather
+than owned snapshot paths, the adapter revalidates the declared shape at every
+phase and the regression test asserts the directory, entries and shared target
+are unchanged across a full switch and rollback. The live discovery binding
+shares the same declaration, accepts the declared entry names in a real
+directory, and still scans their text for dependency directives, so an
+absolute environment symlink outside the unit directory is not mistaken for a
+dependency escape and a drop-in cannot introduce an unaccounted incoming
+activator.
+
 The completion budget is derived from the declared topology rather than a
 fixed default. Preflight requires the prior timer to be active, parses the
 committed timer schedule and service start timeout, and refuses when the
 declared bound exceeds the supported maximum or the caller's deadline is below
 it. An inactive timer has no bounded second invocation and refuses before
-snapshot or mutation; the 6-hour backfill and 45-minute publisher shapes exceed
-the default supported maximum, and an oneshot without a declared start timeout
-has no bounded completion and refuses. The watchdog template now declares
-`TimeoutStartSec=5min`, so its 300 s start bound and 720 s timer period fit the
-1,800 s supported maximum. A
+snapshot or mutation; an oneshot without a declared start timeout has no
+bounded completion and refuses. The supported maximum is derived from the
+timer's own declared form. A calendar-scheduled timer keeps the fixed 1,800 s
+maximum because its next fire is a scheduled point that can be hours away, so
+the 6-hour backfill shape still refuses. A timer that re-fires
+`OnUnitActiveSec` or `OnUnitInactiveSec` after the unit's own state change
+bounds the next invocation by its declared interval; its complete declared
+bound is therefore its own finite maximum. The publisher's 45-minute
+`TimeoutStartSec` plus its 65 s repeat cadence (one minute plus the 5 s
+`AccuracySec`) plus the 60 s completion margin is a 2,825 s bound, and
+preflight admits it. The watchdog template declares `TimeoutStartSec=5min`, so
+its 300 s start bound and 780 s timer bound remain a 1,140 s completion
+window. A
 `Type=simple` service has no declared invocation execution bound either, so
 preflight refuses that topology rather than treating its startup timeout as a
 completion bound; restore still rejects a failed simple service if a recovery
@@ -142,9 +174,13 @@ snapshot. `restore_activation` rejects a failed service and requires a simple
 service to be active. Drain diagnostics distinguish queued jobs, owned
 processes, active services and active activators, and malformed `list-jobs`
 observations refuse. A pre-release refusal at `start` leaves the mask in place,
-but the controller's `activation_pending` gate still refuses automatic restore
-after any `start` attempt; it records `recovery_required` rather than claiming
-a rollback. The adapter does not change that controller contract.
+and a failure after `start` is restored automatically only when the fence
+demonstrates absence: no matching systemd job, no owned process, an inactive
+service, inactive activators and, for an issuing unit, a drained queue. The
+rolled-back record keeps the failed phase, the original reason and the fence
+observation, so the target's execution is not erased. A fence that cannot
+establish absence, or an installed file that matches neither the snapshot nor
+the verified released render, stays `recovery_required`.
 
 The installed timer file must hash-match the pinned template before its
 schedule is used, so preflight cannot certify a bound for a timer the
@@ -160,6 +196,31 @@ service is a normal new activation and is not stopped by the recovery. This
 avoids killing a path-triggered publisher run after the path is restarted.
 Injected capability and completion-sequence failures are converted to refusals
 in preflight, so a port exception cannot bypass the adapter's error type.
+
+## Non-issuing watchdog transactions
+
+The controller's queue-drain gate and the adapter's post-fence queue
+observation serialize a transaction that stops a unit which can create or
+advance queue work. `crq-watchdog.service` is not such a unit: it reads the
+completed-tick heartbeat and sends an alert, and writes only its own
+`watchdog-state.json`; it never launches a run, advances `queue.json` or
+rewrites the heartbeat. `deploy-controller.py` and `unit-adapter.py` therefore
+share one explicit classification (`QUEUE_NON_ISSUING_UNITS`, currently only
+the watchdog). Every other declared unit is treated as issuing, so a future
+unit stays fail-closed until this declaration is extended deliberately. Both
+the switch and recovery gates, and the adapter's own post-systemd
+observation, are skipped for a non-issuing unit. Its systemd job, cgroup and
+activator drain, snapshot/restore, completion evidence and activation fences
+are unchanged.
+
+The preservation digest scope follows the same classification. A queue-issuing
+transaction captures and compares `queue.json` and the completed heartbeat
+byte-for-byte; a non-issuing watchdog transaction captures no queue surface.
+That is what makes concurrency safe rather than merely permitted: a live run
+owned by another unit may legitimately harvest progress, and the watchdog
+switch neither reads that progress as a conflict nor restores a stale
+snapshot over it. No queue or heartbeat bytes are ever written or restored
+from this evidence; the journal retains the unit snapshot only.
 
 ## Offline factory composition
 
@@ -200,8 +261,11 @@ and the real renderer through the actual `switch_unit`/`recover_unit` seams over
 real temporary unit files, with a structured systemd port and a journal source
 that returns systemd invocation and record fields. It covers a completed
 Node-to-Python switch with two advancing invocations, a pre-activation rollback
-followed by `recover_unit`, a reboot refusal, changed installed bytes, a
-Python-to-Node watchdog switch whose artifact declares `watchdog`, and
+followed by `recover_unit`, a reboot during completion that rolls back through
+a demonstrated fence, a completion-observation failure that restores the prior
+unit and timer without manual recovery, changed installed bytes that stay
+`recovery_required`, a Python-to-Node watchdog switch whose artifact declares
+`watchdog`, and
 fail-closed refusal of a Node target whose declaration is empty or names
 another command, plus the simple, long-schedule and unbounded oneshot
 topologies. It is not live-host evidence.
@@ -243,16 +307,21 @@ journal schema, store, lock or new capability mechanism is introduced.
 5. Before activation, recovery may re-establish the fence, verify drain and
    restore the snapshot. It persists `restore_activation_pending` before
    releasing prior activation, and records rollback only afterwards. A crash
-   in either activation-pending phase is ambiguous: stop/drain, retain the
-   intent and investigate rather than blindly replay or restore. That drain
-   can interrupt live work launched after activation; the adapter must identify
-   owned work without stopping unrelated sessions. The fake adapter test does
-   not establish real process ownership or systemd behavior. Queue data is
-   never restored from the snapshot. Actual controller retries and interruption
+   in either activation-pending phase is retried by re-establishing and
+   observing the fence: a recovery or switch failure after activation restores
+   only when stop/drain demonstrates absence, and otherwise retains the intent
+   and reports `recovery_required`. The record keeps the failed phase, reason
+   and fence evidence so a completed target is not presented as never having
+   run. That drain can interrupt live work launched after activation; the
+   adapter must identify owned work without stopping unrelated sessions. The
+   fake adapter test does not establish real process ownership or systemd
+   behavior. Queue data is never restored from the snapshot. Actual controller
+   retries and interruption
    at each phase require VM proof; synthetic recovery is not that proof.
    The production entry point does not change this contract: it composes an
-   adapter for the record's prior runtime, so an ambiguous activation is still
-   stopped and drained before the rc-3 refusal, with the record bytes unchanged.
+   adapter for the record's prior runtime and re-establishes the fence under
+   the controller lock before restoring. A fence it cannot demonstrate leaves
+   the record bytes unchanged and reports `recovery_required`.
 
 The installed templates provide tick, slot, backfill and watchdog timers;
 repair and publisher each have both timer and path activators. The host adapter

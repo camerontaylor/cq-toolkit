@@ -367,9 +367,11 @@ minor/trivial/info findings, including mixed receipts, are not automatically rep
 and cannot earn partial fixed credit. Review state stays `done` when repair fails;
 repair outcomes and errors are recorded separately.
 
-Forge lookups share the tick's existing aggregate ForgeBudget and its 30-second
-allowance with recovery/discovery. Busy ticks can defer fix-PR polling until a
-later tick; this fails safe without granting fresh fixed credit. Closed-unmerged PRs
+Fix-PR polling runs under its own aggregate ForgeBudget (80 requests, 60-second
+window), not the tick's shared one, because it runs last and the shared allowance is
+already spent by deferred refresh and merged discovery. A pass that is starved or blocked reports its counts and raises a
+`reconcile_incomplete` event rather than appearing quiet; this fails safe without
+granting fresh fixed credit. Closed-unmerged PRs
 and merged PRs whose head differs from the prepared publication are terminal
 not-fixed observations, not polled again. This also applies if crq itself pushes
 another repair onto the fix branch: the changed head receives no credit for the

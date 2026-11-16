@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { describe, expect, test, vi } from 'vitest';
 import { resolveGhBin } from '../../src/adapters/forge-github/ghBin.js';
 import { readCqEnv } from '../../src/config/env.js';
-import { currentCqEnv, runWithCqEnv } from '../../src/config/run-env.js';
+import { currentCqEnv, currentEntryEnv, runWithCqEnv } from '../../src/config/run-env.js';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -98,5 +98,56 @@ describe('runWithCqEnv / currentCqEnv', () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+});
+
+describe('currentEntryEnv (the run environment record)', () => {
+  test('outside a run it is the live process environment', () => {
+    vi.stubEnv('CQ_ENV_PROBE', 'outside');
+    try {
+      expect(currentEntryEnv()['CQ_ENV_PROBE']).toBe('outside');
+      vi.stubEnv('CQ_ENV_PROBE', 'outside-2');
+      expect(currentEntryEnv()['CQ_ENV_PROBE']).toBe('outside-2');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  test('inside a run it is the frozen entry record, never a live re-read', () => {
+    vi.stubEnv('CQ_ENV_PROBE', 'entry');
+    const owner = { CQ_ENV_PROBE: 'entry' };
+    runWithCqEnv(
+      readCqEnv({}),
+      () => {
+        vi.stubEnv('CQ_ENV_PROBE', 'drifted');
+        expect(currentEntryEnv()['CQ_ENV_PROBE']).toBe('entry');
+        // The record is a frozen copy, so even an in-place write cannot move it.
+        expect(Object.isFrozen(currentEntryEnv())).toBe(true);
+      },
+      owner,
+    );
+    vi.unstubAllEnvs();
+    // Back outside a run: the live (unfrozen) process environment applies.
+    expect(Object.isFrozen(currentEntryEnv())).toBe(false);
+    expect(currentEntryEnv()).toBe(process.env);
+  });
+
+  test('a nested run inherits the enclosing entry record when it supplies none', () => {
+    const outer = { PATH: '/outer/bin' };
+    const inner = { PATH: '/inner/bin' };
+    runWithCqEnv(
+      readCqEnv({}),
+      () => {
+        expect(currentEntryEnv()['PATH']).toBe('/outer/bin');
+        runWithCqEnv(readCqEnv({}), () => expect(currentEntryEnv()['PATH']).toBe('/outer/bin'));
+        runWithCqEnv(
+          readCqEnv({}),
+          () => expect(currentEntryEnv()['PATH']).toBe('/inner/bin'),
+          inner,
+        );
+        expect(currentEntryEnv()['PATH']).toBe('/outer/bin');
+      },
+      outer,
+    );
   });
 });

@@ -66,6 +66,7 @@ const ENTRY_NAMES = [
   'review.planReviewBatch',
   'review.replyAndResolve',
   'review.verifyReviewOutcome',
+  'review.record',
 ];
 
 /** Look up one entry by name, failing the test when absent. */
@@ -124,6 +125,11 @@ const queuedRef = {
 };
 
 const minimalInputs: Record<string, () => Record<string, unknown>> = {
+  'review.record': () => ({
+    producer: 'agent',
+    sourceId: 'helper-run-1',
+    report: 'agent report body',
+  }),
   'review.addressMany': () => ({
     repoRoot: '/repo',
     repo: 'owner/repo',

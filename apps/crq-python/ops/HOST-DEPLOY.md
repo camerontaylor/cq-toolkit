@@ -63,7 +63,7 @@ Example only; replace every host value privately:
 {
   "schema_version": 1,
   "deploy_root": "/srv/crq-deploy",
-  "record_dir": "/srv/private/crq-deploy-records",
+  "record_dir": "/private/crq-deploy-records",
   "fleet_reader": {
     "ssh_host": "queue.example.invalid",
     "source": "/srv/operator-state/crq/summary.json"
@@ -109,9 +109,10 @@ The reader host has its own private overlay and checkout paths.
 
 Use a dedicated full cq-toolkit clone, fetched anonymously from
 `https://github.com/camerontaylor/cq-toolkit.git`, never the review runtime clone.
-Never `git pull` the deployment clone. Fetch, verify the full SHA is reachable
-from `origin/main`, and verify its owner-approved annotated
-`crq-runner/YYYYMMDD-N` tag peels to that SHA. This tool does not create tags.
+Never `git pull` the deployment clone. Fetch and verify the full SHA is contained
+in `origin/main`: any merged main SHA is deployable (code is reviewed once at PR
+merge). An annotated `crq-runner/YYYYMMDD-N` tag is optional; when one is supplied
+it must peel to that SHA. This tool does not create tags.
 Targets must descend from import C (`f748fd43`); earlier rollback needs the
 separate, recorded old-runner rollback below. Targets must also provide relocated
 unit templates: every service/path template must contain `@CRQ_ROOT@`. Import-era
@@ -331,6 +332,16 @@ per-unit entry points. Both compose the same production adapter through
 the systemd, journal and identity ports. Neither path has run against a live
 host, and neither enables production use.
 
+Every unit is queue-issuing except `crq-watchdog.service`, which is declared
+non-issuing: it reads the completed-tick heartbeat and sends an alert, and
+never launches or advances queue work. An issuing unit's switch and recovery
+refuse while recorded queue ownership is live or ambiguous, and its preserved
+state asserts byte-identical `queue.json` and heartbeat across the
+transaction. A watchdog transaction is admitted while an unrelated run is
+live, observes no queue surface and never restores one; its own systemd,
+cgroup, activation, snapshot/restore and completion fences are unchanged. A
+future unit is issuing until the declaration is deliberately extended.
+
 `recover --record` consumes one retained `controller-<32hex>.json` unit record
 whose `operation` is `unit_switch`, whose outcome is `pending` or
 `recovery_required`, and whose `snapshot.runtime` equals its recorded
@@ -347,16 +358,21 @@ Exit codes for `recover`:
 
 * 0 — recovery completed. The record is now `outcome: rolled_back` at the
   `restore_activation_pending` phase, and stdout is exactly that persisted
-  record.
+  record. It keeps `failed_phase`, the original `reason` and the observed
+  `fence`, so a target that ran before the failure is not presented as never
+  having run.
 * 2 — refused with no unit or record change: unreadable, malformed,
   unsupported-schema or incoherent record, a record outside `--record-dir`, an
   unfinished checkout or other unit transaction, live/ambiguous queue-owned
-  work, or adapter composition failure. stdout is the usual `error` artifact.
-* 3 — activation ambiguity. A record at `activation_pending` or
-  `restore_activation_pending` is not recovered automatically: the controller
-  still stops and drains the unit's owned work, prints the retained record with
-  `record_path` and `reason` on stdout, and leaves the record bytes unchanged.
-  Inspect runtime evidence before deciding what happened.
+  work for an issuing unit, or adapter composition failure. stdout is the
+  usual `error` artifact.
+* 3 — the fence could not be demonstrated. Recovery re-establishes and
+  observes the fence under the controller lock rather than inferring it from
+  the record's phase: no matching systemd job, no owned process, an inactive
+  service, inactive activators and, for an issuing unit, a drained queue. If
+  any of those cannot be established, the controller prints the retained
+  record with `record_path` and `reason` on stdout and leaves the record bytes
+  unchanged. Inspect runtime evidence before deciding what happened.
 
 `recover` adds no automatic recovery path, boot hook, retry, flag, store or
 lock. Unit records are retained: only the pending intent is replaced by its
@@ -421,22 +437,121 @@ write succeed. Pending/recovery/unknown outcomes are not rollback inputs;
 verified legacy schema-1 completed deploy journals remain accepted. A journal
 entry (mode 0600, private record directory) records every completed deploy or
 rollback. Rollback reuses the same helper fence with the
-recorded prior target and prior tag; a fresh-target switch to a different
-commit is a new deployment, not a rollback.
+recorded prior target (and its tag when one was recorded); a fresh-target switch
+to a different commit is a new deployment, not a rollback.
 
-## Subsequent deploy and rollback
+## Deploy: merged main in, health-checked, automatic rollback
 
-Stop timers/records and wait for tick inactivity before invoking `switch`.
+`ops/deploy-runbook.py` is the deploy path. A merged main SHA is deployable:
+code is reviewed once at PR merge under the fleet merge bar, so the deploy
+needs no freeze, nomination, GO, per-deploy manifest or digest pin. One
+command runs the sequence and writes one JSON result document to stdout:
+
+```sh
+python3 -B apps/crq-python/ops/deploy-runbook.py deploy \
+  --root /srv/crq-deploy --overlay /private/host.json \
+  --record-dir /private/crq-deploy-records \
+  [--target-sha FULL40SHA]      # default: origin/main after fetch
+  [--tag crq-runner/YYYYMMDD-N] # optional; must peel to the SHA
+```
+
+The sequence:
+
+1. **Resolve the target.** Fetch `origin/main` and require a full SHA
+   contained in `refs/remotes/origin/main`. A tag is optional. The target's
+   own `prepare-host.py` must accept a tagless switch; a historical target
+   whose helper still requires a tag is refused before the hold, because its
+   automatic rollback could never pass `None`.
+2. **Measure before touching anything.** Record the live `repair.cq_bin`
+   pointer, its entry bytes and mode, and hash `state/queue.json` plus the
+   completion heartbeat. Require the controller's rollback-compatibility
+   record to be clean (no queue schema marker, no `author_*` keys), so an
+   automatic rollback is possible.
+3. **Hold and drain.** Claim `state/runner-disabled` with `O_EXCL` and
+   run-unique bytes, stop every `crq-*.timer`/`.path`, wait for services,
+   then poll the controller's read-only `drain_check` (default 15 s interval,
+   900 s deadline). An expired drain is a fail-stop: hold retained, nothing
+   killed. Once quiescent it re-measures the config, pointer and queue
+   digests and re-proves rollback compatibility, so a tick that ran during
+   the hold cannot leave the switch with no fallback. A separate advisory
+   lock (`state/deploy.lock`, held from before the first measurement) serializes
+   whole deploys, including the released health window.
+   Before the hold, a target that changes any rendered `crq-*` unit template
+   is refused with the host untouched: this flow installs and verifies no
+   unit files, and a rollback could not restore the prior definitions. The
+   owner installs and verifies the changed unit definitions first.
+4. **Switch** through the audited helper fence (`prepare-host.switch`:
+   root/overlay binding, merged-main ancestry, clean checkout, tick lock,
+   atomic config render).
+5. **Verify the switch changed nothing it must not.** Shared queue bytes and
+   the measured `cq_bin` pointer and entry bytes must be identical.
+6. **Release, restart, check health.** Release admission (the runner cannot
+   advance a tick while the marker exists), restart exactly the triggers
+   observed active, verify the map twice, then run the controller's two-slot
+   health check: one completed tick within 1500 s, then a second after 900 s
+   (one runner cadence plus slack). A restarted trigger that is not active
+   also fails health.
+7. **Roll back automatically on failure after the switch.** Hold, stop,
+   drain, switch back to the measured prior SHA, require the live config
+   bytes to equal the pre-deploy bytes (the `cq_bin` pointer included) and
+   the queue bytes to be unchanged, re-verify the measured runtime entry (a
+   checkout switch cannot restore an external file), restart the original
+   triggers, and exit 1. A failure inside the released health window may
+   follow a completed tick, so rollback re-measures the queue and heartbeat
+   after its own drain and requires the rollback switch to preserve those
+   bytes. If the queue no longer grants rollback or the rollback itself
+   fails, keep the hold and exit 3 (recovery required).
+
+A failure before the switch restarts what this run stopped and releases only
+its own marker (exit 2). A foreign marker is never removed.
+
+Exit codes: 0 completed, 1 failed but rolled back cleanly, 2 refused with the
+host unchanged, 3 recovery required. The run directory under `--record-dir`
+holds `deploy.json` (the result), `phase.json` (the last phase), `drain.json`,
+`health.json`, `rollback-drain.json` after a rollback,
+`recovery-receipt.json` (the immutable pre-admission measurements), and the
+target helper/controller it executed. `deploy.json` carries
+`original_triggers` as well as `final_triggers`, so a recovery record still
+names the measured pre-deploy map; an interrupted run is routed through
+recovery (rollback or restore) before the deployment lock is released.
+
+`--json` is machine mode: narration is suppressed, stderr stays empty, and a
+usage error is one `{"error": {"kind": "usage", "subcommand": "<name>",
+"message": "<text>", "exitCode": 2}}` artifact on stdout.
+
+`status` answers whether the host still matches a run's record:
+
+```sh
+python3 -B apps/crq-python/ops/deploy-runbook.py status \
+  --run-dir /private/crq-deploy-records/run-... --root /srv/crq-deploy
+```
+
+Exit 0 means the recorded outcome still matches (HEAD, marker absent, trigger
+map); exit 1 means do not rely on that record.
+
+This path switches the Python units only. A TypeScript build at the merged
+SHA is a separate artifact pipeline, and the deploy never moves
+`repair.cq_bin`; per-unit cutovers stay with
+`deploy-controller.py switch --unit <u> --runtime node:<sha>`.
+
+Tests: `pnpm test:narrow apps/crq-python/test_deploy_runbook.py` (host-free:
+temporary git clone, fake unit provider, fake health and drain).
+
+## Manual helper path and rollback
+
+The driver above is the normal path. This is the same fence invoked by hand;
+stop timers/records and wait for tick inactivity first.
 The stopped-unit check includes installed and loaded `crq-*` units, including
 obsolete units absent from the selected checkout. Keep a reviewed copy of the
 P2 helper outside the checkout; pre-P2 targets with legacy unit paths require
 the separate owner-operated old-runner rollback, rather than this switch.
 
 ```sh
-python3 /retained/prepare-host.py --overlay /private/host.json switch --sha FULL40SHA --tag crq-runner/YYYYMMDD-N
+python3 /retained/prepare-host.py --overlay /private/host.json switch --sha FULL40SHA [--tag crq-runner/YYYYMMDD-N]
 ```
 
-The helper verifies tag and `origin/main` ancestry without fetching. Under one
+The helper verifies the target is contained in `origin/main` without fetching;
+an optional tag must peel to it. Under one
 nonblocking tick lock it rechecks stopped units, renders CURRENT SHA + overlay
 into a temporary file, and compares every byte with live config. Drift reports
 field names only and refuses before restore/checkout. Resolve drift by an approved

@@ -3,6 +3,7 @@ from runtime_target import DEFAULT_BRANCH, DEFAULT_REF
 import repo_registry
 import review_receipt
 import copy
+import deferred_refresh
 import hashlib
 import json
 from pathlib import Path
@@ -737,6 +738,21 @@ def archive_legacy(c, q):
 
 
 def reconcile_current_fix(c, item):
+    """Revalidate one receipt's repair records, reporting what it could not read.
+
+    Returns {'starved', 'deferred', 'errors'} so the caller can count a pass that
+    read nothing. A swallowed forge failure here is a skipped record, and a
+    skipped record that nobody counts is the silence this whole change exists to
+    remove.
+    """
+    counts = {'starved': 0, 'deferred': 0, 'errors': []}
+
+    def skipped(exc):
+        key = 'starved' if isinstance(exc, deferred_refresh.RefreshExhausted) else 'deferred'
+        counts[key] += 1
+        if len(counts['errors']) < 2:
+            counts['errors'].append('%s: %s' % (type(exc).__name__, exc))
+
     # Revalidate on every tick; a rewritten target must revoke old evidence.
     item.pop('remediation', None)
     if item.get('remediation_state') == 'fixed':
@@ -746,15 +762,15 @@ def reconcile_current_fix(c, item):
                if r.get('receipt_id') == rid and r.get('state') == 'published'
                and not r.get('not_fixed')]
     if not rid or not records:
-        return
+        return counts
     import hashlib
     try:
         data = (c.STATE / 'receipts' / (rid + '.json')).read_bytes()
         if hashlib.sha256(data).hexdigest() != rid:
-            return
+            return counts
         doc = json.loads(data)
     except (OSError, ValueError):
-        return
+        return counts
     for record in records:
         pr = record.get('fix_pr')
         publication = record.get('publication', {})
@@ -772,7 +788,10 @@ def reconcile_current_fix(c, item):
         if not info:
             try:
                 info = c.pr_info(pr['number'])
-            except Exception:
+            except Exception as exc:
+                # Starvation and a real forge failure both skip this record, and
+                # both must reach the counters rather than passing as quiet.
+                skipped(exc)
                 continue
         if (info.get('state') == 'CLOSED' or
                 info.get('state') == 'MERGED' and info.get('headRefOid') != publication.get('head')):
@@ -798,8 +817,9 @@ def reconcile_current_fix(c, item):
         if review_receipt.remediation_fixed(item, doc, rid):
             item['remediation_state'] = 'fixed'
             record['merged_fix'] = copy.deepcopy(info)
-            return
+            return counts
         item.pop('remediation', None)
+    return counts
 
 
 def source_thread(c, job):
@@ -1222,24 +1242,69 @@ def canonical_fixed_events(c, record, info):
 
 
 def reconcile_fix_prs(c, q):
+    """Advance merged repairs and report what the pass actually managed.
+
+    Every forge read here can raise RefreshExhausted, and each of those sites
+    used to swallow it in a bare `except Exception`, so a pass that read nothing
+    and a pass that found nothing were indistinguishable - which is how six
+    hours of non-projection passed as healthy ticks on 2026-11-13. The returned
+    counts make that difference visible instead of inferable.
+
+    `examined` counts every entry the pass tried, receipt items included, so a
+    pass that only had receipt work to do still reports itself.
+    """
+    stats = {'examined': 0, 'projected': 0, 'starved': 0, 'deferred': 0, 'errors': []}
+
+    def swallowed(exc, item, run):
+        # Starvation is the shard budget running out, not a defect in the run:
+        # naming it separately matters because it recovers by itself next tick
+        # while a real error does not.
+        if isinstance(exc, deferred_refresh.RefreshExhausted):
+            stats['starved'] += 1
+        else:
+            stats['deferred'] += 1
+        if len(stats['errors']) < 5:
+            stats['errors'].append({'item': item.get('id'), 'run': run,
+                                    'error': '%s: %s' % (type(exc).__name__, exc)})
+
     for item in q['items']:
         if item['kind'] == review_receipt.KIND:
+            stats['examined'] += 1
             try:
-                reconcile_current_fix(c, item)
+                skips = reconcile_current_fix(c, item)
+            except deferred_refresh.RefreshExhausted as exc:
+                # Starvation is not the item's fault: count it and leave the
+                # remediation state alone, unlike a genuine reconcile error.
+                swallowed(exc, item, item.get('run') or '')
             except Exception as exc:
+                # A reconcile that failed outright is an error like any other,
+                # and a pass of nothing but errors must not read as a quiet one.
+                swallowed(exc, item, item.get('run') or '')
                 item.pop('remediation', None)
                 if item.get('remediation_state') == 'fixed':
                     item['remediation_state'] = 'pending-merged-evidence'
                 item['repair_error'] = str(exc)[:300]
+            else:
+                # Skips inside the lane are counted by the lane itself.
+                skips = skips if isinstance(skips, dict) else {}
+                stats['starved'] += int(skips.get('starved') or 0)
+                stats['deferred'] += int(skips.get('deferred') or 0)
+                for message in (skips.get('errors') or [])[:2]:
+                    if len(stats['errors']) < 5:
+                        stats['errors'].append({'item': item.get('id'),
+                                                'run': item.get('run') or '',
+                                                'error': message})
             continue
         for run, record in item.get('repair_runs', {}).items():
             pr = record.get('fix_pr')
             if not pr or record.get('fix_merged') or record.get('fix_closed'):
                 continue
+            stats['examined'] += 1
             try:
                 info = c.pr_info(pr['number'])
-            except Exception:
+            except Exception as exc:
                 # Shared forge exhaustion must not abort queue persistence.
+                swallowed(exc, item, run)
                 continue
             pr['state'] = info['state']
             if info['state'] == 'CLOSED':
@@ -1269,6 +1334,7 @@ def reconcile_fix_prs(c, q):
                         raise ValueError('canonical fixed finding changed before source feedback')
                 except Exception as exc:
                     record['source_publication_error'] = str(exc)[:300]
+                    swallowed(exc, item, run)
                     continue
                 if proof and 'fixed_revalidation' in proof:
                     try:
@@ -1278,6 +1344,7 @@ def reconcile_fix_prs(c, q):
                         fixed_publication_evidence(c, item, run, record, c.pr_info(pr['number']), proof['fixed_revalidation'])
                     except Exception as exc:
                         record['source_publication_error'] = str(exc)[:300]
+                        swallowed(exc, item, run)
                         continue
                 if proof is not None:
                     record['validated_merge_head'] = {**proof, 'merge_commit': merge}
@@ -1312,11 +1379,14 @@ def reconcile_fix_prs(c, q):
                     pending = publish_source_resolution(c, record, merge)
                 except Exception as exc:
                     record['source_publication_error'] = str(exc)[:300]
+                    swallowed(exc, item, run)
                     continue  # Optional feedback must not abort the scheduler tick.
                 record.pop('source_publication_error', None)
                 if pending:
                     continue  # REST-visible source thread still lagging in GraphQL; retry next tick.
                 record['fix_merged'] = c.iso()
+                stats['projected'] += 1
+    return stats
 
 
 def digest(root, queue):

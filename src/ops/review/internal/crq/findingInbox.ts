@@ -195,6 +195,79 @@ export class FindingInbox {
     });
   }
 
+  /** Read only the current retained fixed event, after recovery and under the finding lock. */
+  async currentFixedEvent(
+    publication: FindingPublication,
+    job: JsonObject,
+    fixingCommit: string,
+  ): Promise<string | null> {
+    const fid = job.get('canonical_finding_id');
+    if (typeof fid !== 'string' || !/^[0-9a-f]{64}$/.test(fid)) return null;
+    await recoverRetained(this, publication);
+    return this.files.withLock(async () => {
+      const bytes = await this.files.readTriage(fid);
+      if (bytes === null) return null;
+      const row = ledgerLoads(bytes);
+      if (!(row instanceof JsonObject))
+        throw new LedgerIntegrityError('current fixed finding row malformed');
+      if (row.get('status') !== 'fixed') return null;
+      const finding = row.get('finding');
+      const receipt = row.get('receipt');
+      if (
+        row.get('canonical_id') !== fid ||
+        !(finding instanceof JsonObject) ||
+        finding.get('id') !== fid ||
+        row.get('review_id') !== job.get('review_id') ||
+        !(receipt instanceof JsonObject) ||
+        receipt.get('repair_task') !== job.get('job')
+      )
+        throw new LedgerIntegrityError('current fixed finding identity does not match repair');
+      const previous = row.get('previous_event_id');
+      const retained = await publication.retained();
+      for (const event of retained) {
+        if (!(event instanceof JsonObject) || event.get('event_type') !== 'finding-event') continue;
+        const payload = event.get('payload');
+        if (
+          payload instanceof JsonObject &&
+          payload.get('finding_id') === fid &&
+          payload.get('previous_event_id') === previous
+        )
+          throw new LedgerIntegrityError('current fixed finding has a retained successor');
+      }
+      const events = retained.filter(
+        (event) => event instanceof JsonObject && event.get('id') === previous,
+      );
+      if (events.length !== 1)
+        throw new LedgerIntegrityError('current fixed finding event is unavailable');
+      const event = events[0]!;
+      ledgerValidate(event);
+      if (!(event instanceof JsonObject))
+        throw new LedgerIntegrityError('current fixed finding event malformed');
+      const payload = event.get('payload');
+      const evidence = payload instanceof JsonObject ? payload.get('evidence') : undefined;
+      const verification =
+        evidence instanceof JsonObject ? evidence.get('verification') : undefined;
+      if (
+        event.get('event_type') !== 'finding-event' ||
+        !(payload instanceof JsonObject) ||
+        payload.get('action') !== 'fixed' ||
+        payload.get('finding_id') !== fid ||
+        payload.get('review_id') !== job.get('review_id') ||
+        !(evidence instanceof JsonObject) ||
+        evidence.get('fixing_commit') !== fixingCommit ||
+        typeof verification !== 'string' ||
+        !verification.trim()
+      )
+        throw new LedgerIntegrityError(
+          'current fixed finding evidence does not match merged repair',
+        );
+      const id = event.get('id');
+      if (typeof id !== 'string')
+        throw new LedgerIntegrityError('current fixed finding event malformed');
+      return id;
+    });
+  }
+
   /**
    * `Inbox.handoff`: recover retained events, revalidate the locked row
    * through the single shared gate, then spool before the atomic row write.

@@ -32,7 +32,7 @@ import { access, constants } from 'node:fs/promises';
 import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { DispatchError } from '../errors.js';
-import { processEnv } from '../../config/process-env.js';
+import { currentEntryEnv } from '../../config/run-env.js';
 
 // ---------------------------------------------------------------------------
 // The endpoint table — plain data, schema-validated (invalid tables throw loudly)
@@ -137,15 +137,15 @@ async function probeExecutable(candidate: string): Promise<boolean> {
  * entry's PATHEXT-suffixed candidates as well (review-debt #40; the
  * candidate list comes from pathCandidates, keyed on the HOST platform).
  *
- * `env` is the environment the PATH lookup reads (defaults to
- * `process.env`; tests inject a literal record). A set-but-EMPTY PATH
- * counts as no PATH.
+ * `env` is the environment the PATH lookup reads (defaults to the enclosing
+ * run's entry snapshot, or the process environment outside a run; tests
+ * inject a literal record). A set-but-EMPTY PATH counts as no PATH.
  */
 export async function resolveAcpCommand(
   explicitCommand: readonly string[] | undefined,
   endpointName: string,
   table: AcpEndpointTable = defaultAcpEndpointTable(),
-  env: Readonly<Record<string, string | undefined>> = processEnv(),
+  env: Readonly<Record<string, string | undefined>> = currentEntryEnv(),
   probe: ExecutableProbe = probeExecutable,
 ): Promise<ResolvedAcpCommand> {
   const parsed: AcpEndpointTable = AcpEndpointTableSchema.parse(table);

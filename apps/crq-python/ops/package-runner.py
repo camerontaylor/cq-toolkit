@@ -166,6 +166,8 @@ def dependency_inventory(root):
                 document = json.loads(package.read_text())
             except (OSError, ValueError) as exc:
                 raise ArtifactError('unreadable dependency metadata: ' + str(package)) from exc
+            if not isinstance(document, dict):
+                raise ArtifactError('dependency metadata must be an object: ' + str(package))
             name = document.get('name')
             version = document.get('version')
             if not isinstance(name, str) or not isinstance(version, str):
@@ -520,14 +522,16 @@ def _first_difference(expected, actual):
 
 
 def _resolve_node(node):
-    """Resolve an explicit node path against the invocation directory.
+    """Make an explicit node path absolute without following symlinks.
 
-    Bare names stay unchanged for PATH lookup; explicit paths are made
-    absolute before any subprocess changes its working directory.
+    Bare names stay unchanged for PATH lookup. An explicit path is made absolute
+    lexically (``os.path.abspath``), never ``Path.resolve()``: a version-manager
+    shim (mise, Volta) selects the real node from its own invocation name, so
+    dereferencing the symlink would launch the manager instead of node.
     """
     if node is None or os.path.basename(node) == node:
         return node
-    return str(Path(node).resolve())
+    return os.path.abspath(node)
 
 
 def smoke_fs_ext(root, node=None):
@@ -585,34 +589,102 @@ process.stdout.write(JSON.stringify({
     return observed
 
 
-def smoke_runner(root, node=None):
-    node = _resolve_node(node or shutil.which('node'))
-    if not node:
-        raise ArtifactError('node executable not found for runner smoke')
-    runner = Path(root) / 'dist/queue-runner/crq.js'
-    with tempfile.TemporaryDirectory(prefix='crq-runner-') as temp:
-        (Path(temp) / 'runner-disabled').write_text('')
-        result = subprocess.run([node, str(runner), 'tick', '--dry-run'],
-                                cwd=temp, check=False, capture_output=True,
-                                text=True, timeout=60)
+SMOKE_RUNNER_ITEM = 'runner-smoke-item'
+
+
+def _run_smoke_tick(node, runner, fixture):
+    """Run one `tick --dry-run` in a fixture root; read the shadow in-place."""
+    result = subprocess.run([node, str(runner), 'tick', '--dry-run'],
+                            cwd=str(fixture), check=False, capture_output=True,
+                            text=True, timeout=60)
+    try:
+        artifact = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError) as exc:
+        raise ArtifactError('runner smoke emitted no usable JSON artifact '
+                            '(exit ' + str(result.returncode) + '): '
+                            + (result.stderr or result.stdout).strip()[:300]
+                            ) from exc
+    if not isinstance(artifact, dict):
+        raise ArtifactError('runner smoke emitted an invalid artifact')
     if result.returncode != 1:
         raise ArtifactError('runner smoke expected exit 1, got '
                             + str(result.returncode) + ': '
                             + (result.stderr or result.stdout).strip())
-    try:
-        artifact = json.loads(result.stdout.strip().splitlines()[-1])
-    except (IndexError, ValueError) as exc:
-        raise ArtifactError('runner smoke emitted no JSON artifact') from exc
-    if not isinstance(artifact, dict):
-        raise ArtifactError('runner smoke emitted an invalid artifact')
     if artifact.get('status') != 'indeterminate':
         raise ArtifactError('runner smoke expected indeterminate refusal, got '
-                            + repr(artifact.get('status')))
+                            + repr(artifact.get('status'))
+                            + ': ' + json.dumps(artifact, sort_keys=True)[:300])
     detail = artifact.get('detail')
     if not isinstance(detail, str) or not detail:
         raise ArtifactError('runner smoke expected a non-empty detail')
-    return {'exit_code': result.returncode, 'status': artifact['status'],
-            'detail': detail}
+    shadows = [json.loads(path.read_text())
+               for path in sorted((fixture / 'shadow').glob('*.json'))]
+    if len(shadows) != 1:
+        raise ArtifactError('runner smoke expected one shadow plan, got '
+                            + str(len(shadows)))
+    return detail, shadows[0]
+
+
+def smoke_runner(root, node=None):
+    """Prove the packaged runner entry reaches its real planning boundary.
+
+    Two fixture roots exercise the two contracts the entry owns. The first
+    carries only ``state/runner-disabled`` and no config or queue: the disarm
+    short-circuit must report itself before reading either document, plan no
+    mutations and refuse with the runtime's structured ``indeterminate``
+    result. The second is a complete runner root: a ``config.json`` with the
+    bindings tick needs and a schema-valid ``state/queue.json`` holding one
+    pending item. ``tick --dry-run`` therefore loads the real policy code,
+    parses both documents, plans the item and writes its shadow artifact
+    before refusing with the runtime's own incomplete-plan result.
+
+    A broken entry that cannot read the fixture emits a typed ``failed``
+    artifact (for example ENOENT for ``config.json`` when the marker is not
+    where the runtime reads it) and is rejected: an arbitrary non-zero exit is
+    never accepted as capability.
+    """
+    node = _resolve_node(node or shutil.which('node'))
+    if not node:
+        raise ArtifactError('node executable not found for runner smoke')
+    runner = (Path(root) / 'dist/queue-runner/crq.js').resolve()
+    with tempfile.TemporaryDirectory(prefix='crq-runner-') as temp:
+        base = Path(temp)
+        disarmed = base / 'disarmed'
+        (disarmed / 'state').mkdir(parents=True)
+        (disarmed / 'state/runner-disabled').write_text('')
+        disarm_detail, disarm_shadow = _run_smoke_tick(node, runner, disarmed)
+        fixture = base / 'planned'
+        state = fixture / 'state'
+        state.mkdir(parents=True)
+        (fixture / 'config.json').write_text(json.dumps(
+            {'repo': 'acme/widgets', 'clone': 'clone-not-created'}))
+        (state / 'queue.json').write_text(json.dumps({
+            'items': [{'id': SMOKE_RUNNER_ITEM, 'kind': 'delta',
+                       'state': 'pending', 'order': 1}]}))
+        detail, shadow = _run_smoke_tick(node, runner, fixture)
+    disarm_value = (disarm_shadow.get('value')
+                    if isinstance(disarm_shadow, dict) else None)
+    if not isinstance(disarm_value, dict) \
+            or disarm_value.get('disabled') is not True:
+        raise ArtifactError('runner smoke did not observe the disarm '
+                            'short-circuit')
+    if not isinstance(disarm_shadow, dict) \
+            or disarm_shadow.get('mutations') != []:
+        raise ArtifactError('runner smoke disarm planned effects')
+    value = shadow.get('value') if isinstance(shadow, dict) else None
+    if not isinstance(value, dict) or value.get('complete') is not False:
+        raise ArtifactError('runner smoke did not reach the incomplete-plan '
+                            'boundary')
+    candidates = value.get('candidates')
+    planned = ([candidate.get('id') for candidate in candidates
+                if isinstance(candidate, dict)]
+               if isinstance(candidates, list) else [])
+    if SMOKE_RUNNER_ITEM not in planned:
+        raise ArtifactError('runner smoke did not plan the fixture item')
+    return {'exit_code': 1, 'status': 'indeterminate', 'detail': detail,
+            'planned': planned,
+            'disarmed': {'detail': disarm_detail,
+                         'mutations': len(disarm_shadow['mutations'])}}
 
 
 def verify_archive(archive, expected_sha256=None, lockfile=None, smoke=True,
@@ -628,9 +700,19 @@ def verify_archive(archive, expected_sha256=None, lockfile=None, smoke=True,
         if expected_sha256 is not None and expected_sha256 != recorded:
             raise ArtifactError('archive sidecar does not match the expected digest')
         expected_sha256 = recorded
-    digest = sha256_file(archive)
-    if expected_sha256 is not None and digest != expected_sha256:
-        raise ArtifactError('archive digest does not match the recorded digest')
+    # Hashing and extraction must observe the same bytes: stage a private
+    # copy first so a replacement at the original pathname cannot make a
+    # self-consistent replacement verify against the original digest.
+    private = tempfile.TemporaryDirectory(prefix='crq-verify-archive-')
+    try:
+        staged = Path(private.name) / archive.name
+        shutil.copyfile(archive, staged)
+        digest = sha256_file(staged)
+        if expected_sha256 is not None and digest != expected_sha256:
+            raise ArtifactError('archive digest does not match the recorded digest')
+    except BaseException:
+        private.cleanup()
+        raise
     manager = None
     if keep:
         temp = Path(tempfile.mkdtemp(prefix='crq-verify-'))
@@ -638,7 +720,7 @@ def verify_archive(archive, expected_sha256=None, lockfile=None, smoke=True,
         manager = tempfile.TemporaryDirectory(prefix='crq-verify-')
         temp = Path(manager.name)
     try:
-        root = _safe_extract(archive, temp)
+        root = _safe_extract(staged, temp)
         try:
             manifest = json.loads((root / MANIFEST_NAME).read_text())
         except (OSError, ValueError) as exc:
@@ -683,6 +765,7 @@ def verify_archive(archive, expected_sha256=None, lockfile=None, smoke=True,
     finally:
         if manager is not None:
             manager.cleanup()
+        private.cleanup()
 
 
 def _machine_error(kind, subcommand, message, exit_code):

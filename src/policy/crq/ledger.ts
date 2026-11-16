@@ -45,8 +45,8 @@ export class LedgerIntegrityError extends Error {
   /** The Python exception class the vector differential compares. */
   readonly pythonError: string = 'IntegrityError';
 
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
   }
 }
 
@@ -189,7 +189,7 @@ function arrayField(object: JsonObject, key: string): JsonValue[] {
 }
 
 /** Python truthiness for the JSON domain; `NaN` is truthy, `-0.0` is not. */
-function pythonTruthy(value: JsonValue | undefined): boolean {
+export function pythonTruthy(value: JsonValue | undefined): boolean {
   if (value === null || value === undefined) return false;
   if (typeof value === 'boolean') return value;
   if (typeof value === 'string') return value.length > 0;
@@ -629,6 +629,37 @@ function validateReview(record: JsonObject, payload: JsonObject): void {
   const expected = `${repo}:${stringField(source, 'producer')}:${stringField(source, 'id')}`;
   if (stringField(record, 'source_key') !== expected || stringField(source, 'repo') !== repo) {
     fail('review source identity mismatch');
+  }
+  // Mirror review_ledger.validate_provenance: provenance and supersedes are
+  // manual/agent record fields. A claimed completion must carry completion
+  // evidence and a verified scope; a record cannot supersede itself.
+  const type = stringField(source, 'type');
+  const isReportProducer = type === 'manual' || type === 'agent';
+  const provenance = payload.get('provenance');
+  const supersedes = payload.get('supersedes');
+  if (!isReportProducer) {
+    if (provenance !== undefined) fail('provenance is a manual/agent record field');
+    if (supersedes !== undefined) fail('superseding is a manual/agent record field');
+  } else {
+    if (!(provenance instanceof JsonObject)) fail('manual/agent record requires provenance');
+    const submitter = provenance.get('authenticated_submitter');
+    if (typeof submitter !== 'string' || submitter.length === 0) {
+      fail('record requires the authenticated submitter');
+    }
+    const forgeEvidence = provenance.get('forge_evidence');
+    if (forgeEvidence !== 'off-forge-import' && forgeEvidence !== 'github-review-comment') {
+      fail('record forge evidence must name the observed source');
+    }
+    if (payload.get('outcome') === 'completed') {
+      if (typeof provenance.get('completion_evidence') !== 'string') {
+        fail('completed record requires completion evidence or unknown outcome');
+      }
+      const completion = payload.get('completion');
+      if (!(completion instanceof JsonObject) || completion.get('scope_verified') !== true) {
+        fail('completed record requires verified scope or an unknown outcome');
+      }
+    }
+    if (supersedes === stringField(record, 'id')) fail('record cannot supersede itself');
   }
 
   const requestedRows = arrayField(payload, 'requested_scope');

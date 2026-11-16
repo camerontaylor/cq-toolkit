@@ -23,8 +23,11 @@ permissions:
 jobs:
   denylist:
     runs-on: ubuntu-latest
-    # Scan every PR and every default-branch push.
-    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    # Scan every PR and every default-branch push, and report even when the
+    # run is cancelled: denylist is a required check, and a skipped required
+    # check reports nothing, so the verdict would be missing rather than
+    # negative. Same reason the static job carries always().
+    if: ${{ always() && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
     env:
       # The scanner policy is the DEFAULT BRANCH's copy (see the header),
       # never the scanned revision's.

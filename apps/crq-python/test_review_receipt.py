@@ -119,8 +119,13 @@ class ReceiptTest(unittest.TestCase):
             self.assertIn('repair_error', good)
             c.pr_info.side_effect = RuntimeError('forge budget exhausted')
             promotion = {'kind': 'promotion', 'repair_runs': {'r': {'fix_pr': {'number': 9}}}}
-            repair_tick.reconcile_fix_prs(c, {'items': [promotion, copy.deepcopy(original)]})
+            stats = repair_tick.reconcile_fix_prs(c, {'items': [promotion, copy.deepcopy(original)]})
             self.assertNotIn('fix_merged', promotion['repair_runs']['r'])
+            # The receipt lane reports its own skips: one receipt item and one
+            # promotion run examined, both deferred, neither starved.
+            self.assertEqual(2, stats['examined'])
+            self.assertEqual(0, stats['starved'])
+            self.assertEqual(2, stats['deferred'])
             no_repairs = {**original, 'repair_runs': {}}
             with mock.patch.object(Path, 'read_bytes', side_effect=AssertionError('unnecessary receipt read')):
                 repair_tick.reconcile_fix_prs(c, {'items': [no_repairs]})
