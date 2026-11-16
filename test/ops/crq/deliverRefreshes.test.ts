@@ -274,9 +274,11 @@ describe('deliverPendingReviewRefreshes', () => {
       doc({ items: [item('a', { pr_review_request: { ...REQUEST, posting_identity: 'me' } })] }),
       {
         ...base,
-        checkpoint: async (id, l, r) => void cp.push(`${String(toPlainJson(id))}:${l}:${r}`),
+        checkpoint: async (id, prefix, l, r) => {
+          cp.push(`${String(toPlainJson(id))}:${prefix}:${l}:${r}`);
+        },
       },
     );
-    expect(cp).toEqual(['a:login:why']);
+    expect(cp).toEqual(['a:pr_review:login:why']);
   });
 });
