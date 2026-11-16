@@ -938,16 +938,16 @@ def main(argv: List[str]) -> int:
     parser.add_argument("--check", action="store_true", help="fail when the checked-in vectors are stale")
     parser.add_argument("--stdout", action="store_true", help="print the whole document")
     args = parser.parse_args(argv)
-    text = render()
+    payload = render().encode("utf-8")
     if args.stdout:
-        sys.stdout.write(text)
+        sys.stdout.buffer.write(payload)
         return 0
     if args.write:
         FIXTURE.parent.mkdir(parents=True, exist_ok=True)
-        FIXTURE.write_text(text, encoding="utf-8")
+        FIXTURE.write_bytes(payload)
         return 0
     if args.check:
-        if not FIXTURE.exists() or FIXTURE.read_text(encoding="utf-8") != text:
+        if not FIXTURE.exists() or FIXTURE.read_bytes() != payload:
             print(f"{FIXTURE} is stale; run python3 pr_review_findings_vector_emit_b1.py --write",
                   file=sys.stderr)
             return 1
