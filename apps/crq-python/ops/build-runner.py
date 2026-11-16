@@ -31,6 +31,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 
 EXPECTED_NODE_MAJOR = 24
 EXPECTED_PLATFORM = 'linux'
@@ -341,6 +342,17 @@ def main():
     parser.add_argument('--report', type=Path)
     args = parser.parse_args()
     try:
+        if args.report is not None:
+            report_path = args.report.resolve()
+            output_path = args.output.resolve()
+            artifact_paths = {
+                output_path,
+                output_path.with_name(output_path.name + '.provenance.json'),
+                output_path.with_name(output_path.name + '.sha256'),
+            }
+            if report_path in artifact_paths:
+                raise BuildError('report path collides with an artifact: '
+                                 + str(report_path))
         report = build(args.repo, args.sha, args.staging, args.output,
                        node=args.node, pnpm=args.pnpm,
                        keep_staging=args.keep_staging)
@@ -348,7 +360,8 @@ def main():
         if args.report is not None:
             args.report.parent.mkdir(parents=True, exist_ok=True)
             args.report.write_text(data)
-    except (BuildError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+    except (BuildError, OSError, ValueError, subprocess.TimeoutExpired,
+            tarfile.TarError) as exc:
         if machine:
             _machine_error('thrown', 'build-runner', str(exc), 1)
         parser.exit(1, 'build-runner: ' + str(exc) + '\n')

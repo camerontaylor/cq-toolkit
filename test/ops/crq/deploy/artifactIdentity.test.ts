@@ -161,6 +161,16 @@ describe('artifactIdentity', () => {
     await chmod(join(c.root, 'package.json'), 0o600);
     await rejects(artifactIdentity(c.root, RUNTIME, UNITS), 'does not match the manifest');
   });
+  test('refuses a directory that cannot be inventoried', async () => {
+    const a = await build();
+    await put(a.root, 'hidden/file.txt', 'x');
+    await chmod(join(a.root, 'hidden'), 0o000);
+    try {
+      await rejects(artifactIdentity(a.root, RUNTIME, UNITS), 'inventory is invalid');
+    } finally {
+      await chmod(join(a.root, 'hidden'), 0o755);
+    }
+  });
   test('refuses an absolute or escaping symlink', async () => {
     const a = await build();
     await symlink('/etc/passwd', join(a.root, 'abs'));
@@ -299,7 +309,7 @@ describe('inventory and staging facts', () => {
       await put(root, 'locked/inner.txt', 'x');
       await chmod(join(root, 'locked'), 0o111);
       try {
-        await rejects(inventory(root), 'unreadable staging directory: locked');
+        await rejects(inventory(root), 'cannot inventory directory: .*locked');
         await rejects(artifactIdentity(root, RUNTIME, UNITS), 'inventory is invalid');
       } finally {
         await chmod(join(root, 'locked'), 0o755);

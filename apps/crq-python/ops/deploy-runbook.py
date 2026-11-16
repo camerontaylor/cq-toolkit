@@ -25,7 +25,13 @@ are kept:
   rollback; any difference is a failed deploy, never a migration.
 * **Whole deploys are serialized.** An advisory ``state/deploy.lock`` is held
   from before the first measurement through the released health window and
-  recovery, so two runs cannot switch the checkout under each other.
+  recovery, so two runs cannot switch the checkout under each other. The
+  controller's own ``controller.lock`` is held for the same window through
+  ``Effects.controller_lock`` (every controller mutation — checkout deploy
+  or rollback, a ``--unit`` switch, recovery — serializes on it), so a
+  controller transaction cannot overlap the switches or the health window:
+  controller transactions read neither ``deploy.lock`` nor the admission
+  marker.
 * **Admission is held and work is drained.** The ``state/runner-disabled``
   marker is claimed with ``O_EXCL`` and run-unique bytes before any unit is
   stopped. Triggers stop, services settle, and the controller's own
@@ -72,6 +78,7 @@ Python stdlib only.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import importlib.util
@@ -306,11 +313,26 @@ def measure_cq_bin(config_bytes):
     return record
 
 
+def command_failure(args, exc):
+    """One operator-facing reason for a failed child command.
+
+    stderr is captured, never inherited: in machine mode (--json) stderr
+    must stay empty, so the diagnostic travels inside the refusal artifact.
+    """
+    detail = (exc.stderr or "").strip().splitlines()
+    return (" ".join(args) + " failed: "
+            + (detail[-1] if detail else "exit " + str(exc.returncode)))
+
+
 class RealUnits:
     """The live systemd user-unit provider; the only host-mutating seam."""
 
     def _run(self, *args):
-        return subprocess.check_output(args, text=True).strip()
+        try:
+            return subprocess.check_output(args, text=True,
+                                           stderr=subprocess.PIPE).strip()
+        except subprocess.CalledProcessError as exc:
+            raise Refused(command_failure(args, exc)) from exc
 
     def state(self, unit):
         return self._run("systemctl", "--user", "show", unit,
@@ -323,14 +345,16 @@ class RealUnits:
             args.append("--all")
         args.append("crq-*")
         try:
-            output = subprocess.check_output(args, text=True)
+            output = subprocess.check_output(args, text=True,
+                                             stderr=subprocess.PIPE)
         except subprocess.CalledProcessError as exc:
             # A unit-file pattern that matches nothing exits 1 with no
-            # diagnostic; an unavailable bus or any other failure raises.
+            # diagnostic; an unavailable bus or any other failure raises
+            # with the captured diagnostic, not on inherited stderr.
             if (command == "list-unit-files" and exc.returncode == 1
                     and not (exc.stderr or "").strip()):
                 return set()
-            raise
+            raise Refused(command_failure(args, exc)) from exc
         names = set()
         for line in output.splitlines():
             fields = line.split()
@@ -360,6 +384,9 @@ class Hold:
     def __init__(self, root):
         self.path = Path(root) / MARKER_RELPATH
         self.token = (uuid.uuid4().hex + "-" + str(os.getpid()) + "\n").encode()
+        # ``created`` tracks a marker that exists on disk; ``acquired``
+        # additionally requires this run's token to be persisted.
+        self.created = False
         self.acquired = False
 
     def acquire(self):
@@ -371,10 +398,46 @@ class Hold:
             raise Refused(
                 "admission is already held by " + str(self.path)
                 + "; another deploy or a manual hold owns it") from exc
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(self.token)
-            handle.flush()
-            os.fsync(handle.fileno())
+        # From here the marker exists even if the token never lands.
+        self.created = True
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(self.token)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            if not self.owns():
+                # The bytes cannot prove this run's ownership, so the
+                # marker must stay: it holds admission, and only the owner
+                # may verify and remove it. Report recovery with the
+                # retained identity rather than a refusal that claims the
+                # host is unchanged.
+                raise RecoveryRequired(
+                    "the admission marker " + str(self.path)
+                    + " was created but its token could not be persisted ("
+                    + repr(exc)[:200] + "); the marker is retained and "
+                    "admission stays disabled; remove it only after "
+                    "verifying its contents are "
+                    + self.token.decode().strip()) from exc
+            # The persisted bytes match this run's token, so ownership is
+            # proven: remove the marker as release() would and refuse with
+            # the host genuinely unchanged.
+            try:
+                self.path.unlink()
+            except OSError as removal:
+                raise RecoveryRequired(
+                    "the admission marker " + str(self.path)
+                    + " could not be persisted (" + repr(exc)[:200]
+                    + ") and could not be removed (" + repr(removal)[:200]
+                    + "); the marker is retained with this run's token "
+                    + self.token.decode().strip() + " and admission stays "
+                    "disabled") from removal
+            raise Refused(
+                "the admission marker " + str(self.path)
+                + " could not be persisted (" + repr(exc)[:200]
+                + "); its bytes matched this run's token, so ownership was "
+                "proven and the marker was removed; the host is unchanged"
+            ) from exc
         self.acquired = True
 
     def owns(self):
@@ -455,6 +518,7 @@ class Run:
         self.sleep = sleep
         self.hold = None
         self.lock = DeployLock(self.root)
+        self.controller_guard = None
         self.run_dir = None
         self.target = None
         self.prior_sha = None
@@ -578,6 +642,29 @@ class Run:
                     "Nothing has been switched.")
 
     # -- steps ---------------------------------------------------------
+    def refuse_unfinished_controller_transactions(self):
+        """Run the controller's unfinished-transaction guard before a switch.
+
+        deploy_plan runs this guard before its own switch; this runbook
+        bypasses deploy_plan, so it runs the same guard itself, under the
+        controller lock this run holds. Controller journals
+        (``controller-*.json``) live in ``--record-dir`` and, for unit
+        transactions, in the overlay's ``record_dir``; the run's private
+        directory never holds them, so both real directories are scanned.
+        """
+        directories = [Path(self.args.record_dir)]
+        overlay_dir = (self.overlay or {}).get("record_dir")
+        if overlay_dir is not None and Path(overlay_dir) not in directories:
+            directories.append(Path(overlay_dir))
+        for directory in directories:
+            try:
+                self.controller.refuse_unfinished_transactions(
+                    self.controller.Effects(self.root, directory))
+            except self.controller.Refused as exc:
+                raise Refused("unfinished controller transaction in "
+                              + str(directory) + "; recover it before "
+                              "switching: " + str(exc)) from exc
+
     def _run(self):
         require(self.args.root and Path(self.args.root).is_dir(),
                 "--root must name the deployment checkout")
@@ -602,6 +689,22 @@ class Run:
             Path(self.args.overlay))
         self.helper.root_check(self.root, self.overlay)
         self.effects = self.controller.Effects(self.root, self.run_dir)
+        # One shared exclusion with controller transactions, entered before
+        # any mutation: every controller mutation (checkout deploy or
+        # rollback, a --unit switch, recovery) holds this same controller
+        # lock through Effects.controller_lock, and this driver is the only
+        # other checkout/unit mutator. deploy.lock cannot provide this:
+        # controller transactions read neither it nor the admission marker.
+        # Held through the switches, the released health window and any
+        # rollback; released in run().
+        self.controller_guard = contextlib.ExitStack()
+        self.controller_guard.enter_context(self.effects.controller_lock())
+        # prior_sha was read before the lock; a controller switch may have
+        # moved HEAD in between. Refuse before any switch so the rollback
+        # target and the measured baseline describe the same checkout.
+        require(self.git("rev-parse", "HEAD") == self.prior_sha,
+                "live HEAD changed before the controller lock was acquired; "
+                "nothing has been switched. Retry the deploy.")
         if self.units is None:
             self.units = RealUnits()
         self.original_config = read_config(self.root)
@@ -648,6 +751,8 @@ class Run:
         self.drain_queue()
         self.recheck_baseline()
         self.phase("drained")
+
+        self.refuse_unfinished_controller_transactions()
 
         self.narrate("switching to " + self.target)
         self.switch_attempted = True
@@ -948,6 +1053,10 @@ class Run:
                 "automatic rollback is disabled after the rollback drain: "
                 + compatibility_reason(compatibility) + "; the hold is retained"
                 + " (after: " + reason[:200] + ")")
+        # The rollback switch is fenced by the same unfinished-transaction
+        # guard as the forward switch; a refusal keeps the hold and is
+        # surfaced as recovery_required.
+        self.refuse_unfinished_controller_transactions()
         self.helper.switch(self.root, self.overlay, self.overlay_raw,
                            self.prior_sha, None)
         self.switched = False
@@ -1012,13 +1121,29 @@ class Run:
 
     # -- failure paths -------------------------------------------------
     def fail_stop(self, reason):
-        """Keep the hold and leave the host inert; owner recovery."""
+        """Keep the hold (reacquiring it if this run released admission)
+        and leave the host inert; owner recovery."""
+        reacquire_refusal = None
+        if self.hold is not None and not getattr(self.hold, "acquired", False):
+            # Admission was released for the health window: reclaim this
+            # run's marker before stopping triggers so the host stays inert
+            # behind it. A refusal (typically a foreign marker) still holds
+            # admission, so keep it and report it below rather than hide it;
+            # triggers are only ever stopped under a hold this run owns.
+            try:
+                self.hold.acquire()
+            except Exception as exc:
+                reacquire_refusal = repr(exc)
+                self.narrate("fail-stop could not reacquire admission: "
+                             + repr(exc))
         if self.hold is not None and self.hold.owns():
             try:
                 self.units.stop(sorted(self.triggers))
             except Exception as exc:  # the hold is what matters
                 self.narrate("fail-stop could not stop triggers: " + repr(exc))
         record = self.document("recovery_required", reason=str(reason)[:400])
+        if reacquire_refusal is not None:
+            record["admission_reacquire_refusal"] = reacquire_refusal[:400]
         record["written_at"] = now_iso()
         if self.run_dir is not None:
             try:
@@ -1108,7 +1233,15 @@ class Run:
                     rollback_error) + ") after: " + reason[:200])
             return "rolled_back"
         if self.switch_attempted:
-            head = self.git("rev-parse", "HEAD")
+            try:
+                head = self.git("rev-parse", "HEAD")
+            except Exception as exc:
+                # A switch was attempted, so an unreadable HEAD means the
+                # checkout cannot be proven unchanged; it may have moved.
+                # That is recovery required, never an unchanged-host
+                # refusal: keep the hold and leave recovery to the owner.
+                self.fail_stop("the post-switch HEAD could not be observed ("
+                               + repr(exc)[:200] + "): " + reason[:200])
             if head == self.target:
                 try:
                     self.rollback_to_prior(reason)
@@ -1150,6 +1283,8 @@ class Run:
                 return self.document("rolled_back", reason=str(exc)[:400])
             raise Refused(str(exc)) from exc
         finally:
+            if self.controller_guard is not None:
+                self.controller_guard.close()
             self.lock.release()
 
 

@@ -39,7 +39,7 @@ import {
   type RepairDispatchCallerContext,
   type RepairDispatchEffects,
   type RepairGuidanceScanEvidence,
-  type RepairHarvestEffects,
+  type RepairRunEffects,
   type RepairSelectionContext,
   type RepairSourceScanEvidence,
   type RunRepairDispatchResult,
@@ -172,9 +172,12 @@ interface EffectOptions {
   readonly blobFailure?: boolean;
   readonly showFailure?: boolean;
   readonly onRead?: () => void;
+  /** Successive answers for the runner-disabled marker; the last repeats. Default: enabled. */
+  readonly runnerDisabled?: readonly boolean[];
 }
 
-function effects(options: EffectOptions = {}): RepairDispatchEffects {
+function effects(options: EffectOptions = {}): RepairDispatchEffects & RepairRunEffects {
+  let markerReads = 0;
   const tip = options.tip ?? sourceSha;
   const observedBlob = options.blobOid ?? blob;
   const text = options.sourceText ?? sourceText;
@@ -199,10 +202,14 @@ function effects(options: EffectOptions = {}): RepairDispatchEffects {
       if (id !== jobId) throw new Error('prepared job missing');
       return prepared;
     },
+    runnerDisabled: async () => {
+      const answers = options.runnerDisabled ?? [false];
+      return answers[Math.min(markerReads++, answers.length - 1)] ?? false;
+    },
   };
 }
 
-function harvestEffects(options: EffectOptions = {}): RepairHarvestEffects {
+function harvestEffects(options: EffectOptions = {}): RepairRunEffects {
   return effects(options);
 }
 
@@ -595,7 +602,7 @@ describe('repair dispatch bridge', () => {
   test('the invocation guard refuses mechanical/retry payload changes made after preflight, inside the lease', async () => {
     const journalDir = await tempJournal();
     let prepared = preparedJobText;
-    const mutable: RepairHarvestEffects = {
+    const mutable: RepairRunEffects = {
       ...effects(),
       readPreparedJob: async () => prepared,
     };
@@ -675,7 +682,7 @@ describe('repair dispatch bridge', () => {
     runOk(first.run);
 
     let prepared = preparedJobText;
-    const mutable: RepairHarvestEffects = {
+    const mutable: RepairRunEffects = {
       ...effects(),
       readPreparedJob: async () => prepared,
     };
@@ -849,6 +856,68 @@ describe('repair dispatch bridge', () => {
       }
     }
     expect(second.invocations).toHaveLength(0);
+  });
+
+  test('refuses a fresh run while the runner is disabled: no provider launch, no journal write', async () => {
+    const journalDir = await tempJournal();
+    const scripted = scriptedFindingOp([completeWorker(FIXED)]);
+    const plan = await planRepairDispatch(
+      { context: context(), attempt: { journalDir, resume: false } },
+      effects(),
+    );
+    planOk(plan);
+    const run = await runRepairDispatch(
+      plan.value,
+      { resume: false, registry: registryFor(scripted.op) },
+      harvestEffects({ runnerDisabled: [true] }),
+    );
+    expect(run.ok).toBe(false);
+    if (!run.ok) {
+      expect(run.refusal).toBe('runner-disabled');
+      expect(run.run).toBeUndefined();
+    }
+    expect(scripted.invocations).toHaveLength(0);
+    expect(scripted.requests).toHaveLength(0);
+    expect(existsSync(journalDir)).toBe(false);
+  });
+
+  test('a marker written after admission still stops the provider call at invocation', async () => {
+    const journalDir = await tempJournal();
+    const scripted = scriptedFindingOp([completeWorker(FIXED)]);
+    const plan = await planRepairDispatch(
+      { context: context(), attempt: { journalDir, resume: false } },
+      effects(),
+    );
+    planOk(plan);
+    const run = await runRepairDispatch(
+      plan.value,
+      { resume: false, registry: registryFor(scripted.op) },
+      harvestEffects({ runnerDisabled: [false, true] }),
+    );
+    expect(run.ok).toBe(false);
+    if (!run.ok) expect(run.refusal).toBe('runner-disabled');
+    expect(scripted.invocations).toHaveLength(0);
+    expect(scripted.requests).toHaveLength(0);
+  });
+
+  test('a retained-ok replay launches no provider, so the marker does not block it', async () => {
+    const journalDir = await tempJournal();
+    const first = await freshRun({ journalDir, opResults: [completeWorker(FIXED)] });
+    runOk(first.run);
+    const plan = await planRepairDispatch(
+      { context: context(), attempt: { journalDir, resume: true } },
+      effects(),
+    );
+    planOk(plan);
+    expect(plan.value.attempt).toBe('retained-ok');
+    const second = scriptedFindingOp([completeWorker(FIXED)]);
+    const run = await runRepairDispatch(
+      plan.value,
+      { resume: true, registry: registryFor(second.op) },
+      harvestEffects({ runnerDisabled: [true] }),
+    );
+    runOk(run);
+    expect(second.requests).toHaveLength(0);
   });
 
   test('harvests the exact run artifact, not the latest run with the same input', async () => {

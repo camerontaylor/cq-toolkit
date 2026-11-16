@@ -557,6 +557,32 @@ function replayRequest(queue: JsonObject, requestId: string, key: string): JsonO
 }
 
 /** Disk bytes, not queue metadata, authorize completed-result reuse. */
+/** `local_review_runtime.retained`'s receipt half: the disk receipt must parse, match the
+ * item's identity and inputs, be scope-adequate and carry a clean/findings outcome. Any
+ * unreadable or invalid receipt is "not retained". */
+export async function receiptRetainsItem(
+  item: JsonObject,
+  readReceipt: (receiptId: string) => Promise<Uint8Array>,
+): Promise<boolean> {
+  const receiptId = itemFields(item).receiptId;
+  if (receiptId === null) return false;
+  try {
+    const data = await readReceipt(receiptId);
+    const parsed = parseJsonValue(new TextDecoder('utf-8', { fatal: true }).decode(data), {
+      duplicates: 'error',
+    });
+    if (!(parsed instanceof JsonObject)) return false;
+    if (!ReceiptSchema.safeParse(toPlainJson(parsed)).success) return false;
+    const document = fromPlainJson(parsed) as JsonObject;
+    if (document.get('identity') !== item.get('identity')) return false;
+    if (!sameJson(document.get('identity_inputs'), item.get('identity_inputs'))) return false;
+    if (document.get('scope_adequate') !== true) return false;
+    return document.get('outcome') === 'clean' || document.get('outcome') === 'findings';
+  } catch {
+    return false;
+  }
+}
+
 async function retainedReceiptIds(
   queue: JsonObject,
   effects: ReviewCapabilityEffects,
@@ -567,22 +593,7 @@ async function retainedReceiptIds(
     if (item === null || item.get('kind') !== 'local-review') continue;
     const receiptId = itemFields(item).receiptId;
     if (receiptId === null || verified.has(receiptId)) continue;
-    try {
-      const data = await effects.readReceipt(receiptId);
-      const parsed = parseJsonValue(new TextDecoder('utf-8', { fatal: true }).decode(data), {
-        duplicates: 'error',
-      });
-      if (!(parsed instanceof JsonObject)) continue;
-      if (!ReceiptSchema.safeParse(toPlainJson(parsed)).success) continue;
-      const document = fromPlainJson(parsed) as JsonObject;
-      if (document.get('identity') !== item.get('identity')) continue;
-      if (!sameJson(document.get('identity_inputs'), item.get('identity_inputs'))) continue;
-      if (document.get('scope_adequate') !== true) continue;
-      if (document.get('outcome') !== 'clean' && document.get('outcome') !== 'findings') continue;
-      verified.add(receiptId);
-    } catch {
-      // Missing or unreadable receipt: not reused.
-    }
+    if (await receiptRetainsItem(item, effects.readReceipt)) verified.add(receiptId);
   }
   return verified;
 }
@@ -887,7 +898,8 @@ export function encode(value: JsonObject): Uint8Array {
   return Buffer.from(receiptJsonText(value), 'utf8');
 }
 
-function reviewProfile(config: JsonObject, base: string): JsonObject {
+/** `review_transport.profile`: server configuration is the only source of revision and argv. */
+export function reviewProfile(config: JsonObject, base: string): JsonObject {
   const section = objectOrNull(config.get('local_review_profile')) ?? new JsonObject([]);
   const revision = section.get('revision');
   const flags = section.get('flags');
