@@ -270,13 +270,21 @@ describe('deliverPendingReviewRefreshes', () => {
       expect(input.identityReason).toBe(null);
       return doc({ state: 'existing' });
     });
-    await deliverPendingReviewRefreshes(
+    const out = await deliverPendingReviewRefreshes(
       doc({ items: [item('a', { pr_review_request: { ...REQUEST, posting_identity: 'me' } })] }),
       {
         ...base,
-        checkpoint: async (id, l, r) => void cp.push(`${String(toPlainJson(id))}:${l}:${r}`),
+        checkpoint: async (id, prefix, l, r) =>
+          void cp.push(`${String(toPlainJson(id))}:${prefix}:${l}:${r}`),
       },
     );
-    expect(cp).toEqual(['a:login:why']);
+    expect(cp).toEqual(['a:pr_review:login:why']);
+    const request = toPlainJson(out.queue) as {
+      items: { pr_review_request: { posting_identity: string; identity_reason: string } }[];
+    };
+    expect(request.items[0]?.pr_review_request).toMatchObject({
+      posting_identity: 'login',
+      identity_reason: 'why',
+    });
   });
 });

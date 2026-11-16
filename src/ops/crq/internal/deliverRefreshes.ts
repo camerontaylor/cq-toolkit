@@ -34,7 +34,7 @@ export interface RefreshEffects {
   now(): string;
   primaryRepo: string;
   /** Records a changed identity checkpoint against the request, then saves the queue. */
-  checkpoint(itemId: JsonValue, login: string, reason: string): Promise<void>;
+  checkpoint(itemId: JsonValue, prefix: Prefix, login: string, reason: string): Promise<void>;
 }
 
 const SETTLED = ['created', 'existing', 'abandoned', 'skipped-head', 'skipped-range', 'body-major'];
@@ -138,7 +138,18 @@ export async function deliverPendingReviewRefreshes(
         head,
         postingIdentity: request.get('posting_identity') ?? null,
         identityReason: request.get('identity_reason') ?? null,
-        checkpoint: (login, reason) => effects.checkpoint(itemId, login, reason),
+        checkpoint: async (login, reason) => {
+          await effects.checkpoint(itemId, prefix, login, reason);
+          item = withObjectKeys(item, [
+            [
+              `${prefix}_request`,
+              withObjectKeys(request, [
+                ['posting_identity', login],
+                ['identity_reason', reason],
+              ]),
+            ],
+          ]);
+        },
       });
     } catch (error) {
       if (error instanceof ThreadsNotVisibleError)
