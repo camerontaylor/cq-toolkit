@@ -625,6 +625,9 @@ export async function disposeAddressTerminalSession(token: object): Promise<void
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
   await rmdir(session.directory);
+  // The directory is gone, so the cached session is dead: drop it so a later
+  // terminal operation cannot resurrect it. Only while it is still ours.
+  if (terminalSessions.get(token) === pending) terminalSessions.delete(token);
 }
 
 export async function recordAddressTerminalEvidence(
