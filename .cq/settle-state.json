@@ -638,6 +638,45 @@
           "by": "self-merge-prs:observe"
         }
       ]
+    },
+    "1963": {
+      "tuple": {
+        "head": "60e7d5d36b494cc4955a3e3bac283ae26959c9d3",
+        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-16T21:10:47.917Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "1964": {
+      "tuple": {
+        "head": "9f6ed10899488acf8f47e714c596edf96b895897",
+        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-16T21:10:47.917Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "1965": {
+      "tuple": {
+        "head": "cba48d96f33d01ca8184b76754afad985edc9436",
+        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-16T21:10:47.917Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
     }
   }
 }
