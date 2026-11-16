@@ -1,3 +1,5 @@
+import { Refused } from './errors.js';
+export { Refused };
 /**
  * The two git-reading guards of the deploy runbook, over an injected git.
  *
@@ -5,11 +7,6 @@
  * `apps/crq-python/ops/deploy-runbook.py`. Inactive and unimported: nothing
  * here runs a process; the caller supplies `git`.
  */
-
-/** Python `Refused`: a precondition failed. */
-export class Refused extends Error {
-  override name = 'Refused';
-}
 
 /** The tracked file the overlay renders; the only change a live checkout may carry. */
 export const CONFIG_RELPATH = 'apps/crq-python/config.json';

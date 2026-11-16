@@ -18,20 +18,8 @@ import {
 } from '../../../policy/crq/jsonValue.js';
 import { ledgerValueEqual } from '../../../policy/crq/ledger.js';
 import { pythonJsonText } from '../../../policy/crq/pythonJson.js';
-
-/** Python `ValueError`, the refusal prepare-host raises for every bad input. */
-export class ValueError extends Error {
-  override name = 'ValueError';
-}
-/** A Python exception prepare-host would let escape (`KeyError`, `AttributeError`...). */
-export class PythonError extends Error {
-  constructor(
-    override readonly name: string,
-    message: string,
-  ) {
-    super(message);
-  }
-}
+import { ValueError, PythonError } from './errors.js';
+export { ValueError, PythonError };
 
 export const CONFIG = 'apps/crq-python/config.json';
 

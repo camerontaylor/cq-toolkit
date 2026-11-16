@@ -1,11 +1,10 @@
+import { Refused } from './errors.js';
+export { Refused };
 /** `resolve_target` from `apps/crq-python/ops/deploy-runbook.py`: the merged main SHA a
  * deploy will apply. A tag is not required; the deployable predicate is that the target
  * is a full commit already contained in `refs/remotes/origin/main`. Git is injected and
  * nothing is fetched or switched unless the caller supplies a runner.
  */
-export class Refused extends Error {
-  override readonly name = 'Refused';
-}
 
 export interface GitResult {
   readonly code: number;

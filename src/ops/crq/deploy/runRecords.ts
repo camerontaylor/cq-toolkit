@@ -6,11 +6,8 @@
  * nothing here touches the disk; the caller supplies every effect.
  */
 import { createHash } from 'node:crypto';
-
-/** Python `Refused`: a precondition failed. */
-export class Refused extends Error {
-  override name = 'Refused';
-}
+import { Refused } from './errors.js';
+export { Refused };
 
 function require_(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Refused(message);

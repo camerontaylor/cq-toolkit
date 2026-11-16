@@ -9,23 +9,8 @@
  * exit, and the routing of each failure to recovery.
  */
 import { pythonJsonText } from '../../../policy/crq/pythonJson.js';
-
-/** Python `Refused`: a precondition failed. */
-export class Refused extends Error {
-  override name = 'Refused';
-}
-/** Python `HealthFailed(Refused)`: roll back, do not fail-stop. */
-export class HealthFailed extends Refused {
-  override name = 'HealthFailed';
-}
-/** Python `RecoveryRequired`: the host could not be returned to a verified state. */
-export class RecoveryRequired extends Error {
-  override name = 'RecoveryRequired';
-}
-/** Python `KeyboardInterrupt`: not an `Exception`, so it takes its own branch. */
-export class Interrupted extends Error {
-  override name = 'Interrupted';
-}
+import { Refused, HealthFailed, Interrupted, RecoveryRequired } from './errors.js';
+export { Refused, HealthFailed, Interrupted, RecoveryRequired };
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const TAG_RE = /^crq-runner\/[0-9]{8}-[0-9]+$/;
