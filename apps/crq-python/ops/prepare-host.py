@@ -778,13 +778,13 @@ def switch(root, overlay, raw, target, tag=None):
             atomic_bytes(root / CONFIG, destination)
             if git(root, 'status', '--porcelain', '--untracked-files=all') not in ('', ' M ' + CONFIG):
                 raise ValueError('post-switch status must contain only rendered config')
-        except BaseException:
+        except BaseException as failure:
             # Recovery spans the whole post-checkout window: the audit and
             # config writes above run after HEAD moved, so a failure there
             # (e.g. a full audit volume) must roll the checkout back too, or
             # the host is left on the target with its committed config and no
-            # host overrides and a retry fails drift_check. Best effort per
-            # step; the original error still propagates.
+            # host overrides and a retry fails drift_check. The original error
+            # still propagates; a failed rollback is reported instead.
             try:
                 # The rendered destination config may already be installed
                 # (e.g. a failing directory fsync after the replace). When the
@@ -793,8 +793,16 @@ def switch(root, overlay, raw, target, tag=None):
                 # first; the previous rendering is reinstalled below.
                 git(root, 'restore', '--', CONFIG)
                 git(root, 'checkout', '--detach', previous)
-            finally:
-                atomic_bytes(root / CONFIG, current)
+            except BaseException as rollback:
+                # HEAD may still name the target commit, so reinstalling the
+                # previous rendering here would install config from a different
+                # commit. Report both failures and leave the bytes untouched
+                # for owner recovery.
+                raise ValueError(
+                    'rollback to ' + previous + ' failed; live config left unrecovered ('
+                    + type(failure).__name__ + ': ' + str(failure)[:400] + '): '
+                    + type(rollback).__name__ + ': ' + str(rollback)[:400]) from failure
+            atomic_bytes(root / CONFIG, current)
             raise
     return target
 
