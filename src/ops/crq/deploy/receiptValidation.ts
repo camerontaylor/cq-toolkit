@@ -220,8 +220,7 @@ export async function localReviewSchema(
       const properties = subscript(variant, 'properties');
       if (subscript(properties, 'type') instanceof JsonObject) {
         const type = subscript(properties, 'type') as JsonObject;
-        const value = subscript(properties, 'value');
-        if (type.get('const') === 'receipt') rules.push(value);
+        if (type.get('const') === 'receipt') rules.push(subscript(properties, 'value'));
       } else {
         throw new PythonError('AttributeError', "object has no attribute 'get'");
       }
