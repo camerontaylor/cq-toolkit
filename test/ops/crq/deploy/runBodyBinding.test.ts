@@ -139,7 +139,13 @@ function build(w: World, patch: Partial<RunConfig> = {}) {
       statusPorcelain: async () => ({ returncode: 0, stdout: '', stderr: '' }),
       git: async () => '',
     },
-    targetEffects: { git: async () => ({ code: 0, stdout: TARGET, stderr: '' }) },
+    targetEffects: {
+      git: async (args: readonly string[]) => ({
+        code: 0,
+        stdout: args[0] === 'cat-file' ? 'commit\n' : args[0] === 'merge-base' ? '' : TARGET,
+        stderr: '',
+      }),
+    },
     claim: {
       resolve: (p) => p,
       join: (a, b) => `${a}/${b}`,
