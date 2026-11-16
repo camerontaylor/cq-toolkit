@@ -467,6 +467,27 @@ describe('preparePushCurrent', () => {
     expect(rows.find((r) => r.path === 'big.ts')!.disposition).toBe('unsupported');
   });
 
+  it('a failure before the capture is saved enrolls no follow-up child', async () => {
+    const log: string[] = [];
+    const big = (p: string): PathRow => row(p, { bytes: 1500000 });
+    const item = pushItem({ id: 'push-other-aaaaaaaaaa-bbbbbbbbbb-p2' });
+    await expect(
+      preparePushCurrent(
+        { items: [item] },
+        item,
+        false,
+        pushFx(log, {
+          paths: [big('c.ts'), big('a.ts'), big('b.ts')],
+          reviewerVersion: async () => {
+            throw new Error('version probe failed');
+          },
+        }),
+      ),
+    ).rejects.toThrow('version probe failed');
+    expect(log.some((l) => l.startsWith('enroll:'))).toBe(false);
+    expect(item.capture).toBeUndefined();
+  });
+
   it('overflow past 2 MiB defers to the next -pN part, which is enrolled with parent, filter and pin', async () => {
     const log: string[] = [];
     const big = (p: string): PathRow => row(p, { bytes: 1500000 });

@@ -336,19 +336,22 @@ export async function preparePushCurrent(
     }
     const { kept, overflow } = splitScope(list);
     for (const row of kept) if (!isSelected(row)) row.disposition = 'included';
+    let followup: Parameters<PreparePushEffects['enrollFollowup']>[2] | null = null;
     if (overflow.length > 0) {
       const id = str(item.id, 'id');
       const m = /-p(\d+)$/.exec(id);
       const n = m ? Number(m[1]) : 1;
       const followupId = id.replace(/-p\d+$/, '') + `-p${n + 1}`;
-      fx.enrollFollowup(q, cfg, {
+      // Enrolled only once the capture is assigned: the child's pin must never outlive a
+      // failed capture, or a retry against a newer default branch keeps the stale child.
+      followup = {
         id: followupId,
         base: str(subject.base, 'subject.base'),
         head: str(subject.head, 'subject.head'),
         dependsOn: id,
         pathsFilter: sortedPaths(overflow),
         pin: target,
-      });
+      };
       for (const row of overflow) {
         row.disposition = 'deferred-split';
         row.reason = `deferred to follow-up review ${followupId} (review scope cap)`;
@@ -375,6 +378,7 @@ export async function preparePushCurrent(
         await fx.updateRef(`refs/crq/current/${str(item.id, 'id')}/${part}`, built[part], clone);
     }
     item.capture = capture;
+    if (followup !== null) fx.enrollFollowup(q, cfg, followup);
     await fx.saveQueue(q);
   }
   const capture = rec(item.capture, 'item.capture');
