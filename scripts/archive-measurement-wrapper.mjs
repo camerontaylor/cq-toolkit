@@ -41,6 +41,52 @@ const reasonLine = (text, fallback) => {
   return sanitizeEvidenceText(picked).slice(0, 300);
 };
 const targetOf = (target) => target.replace(/\/+$/, '');
+/**
+ * Rclone also takes options from its environment (`RCLONE_MAX_DEPTH`,
+ * `RCLONE_FILTER`, ...). An inherited file-selection option applies to `copy`
+ * and to `check` alike, so with `RCLONE_MAX_DEPTH=1` a bundle's
+ * `evidence/metrics.json` is dropped from both and the surviving root manifest
+ * still verifies — the wrapper would call an incomplete bundle archived. These
+ * option names are removed from the child environment; remote configuration and
+ * credentials (`RCLONE_CONFIG*`, one per named remote) are kept, since the
+ * archive cannot be reached without them.
+ */
+const RCLONE_FILTER_ENV = [
+  'DELETE_EXCLUDED',
+  'EXCLUDE',
+  'EXCLUDE_FROM',
+  'EXCLUDE_IF_PRESENT',
+  'FILES_FROM',
+  'FILES_FROM_RAW',
+  'FILTER',
+  'FILTER_FROM',
+  'HASH_FILTER',
+  'IGNORE_CASE',
+  'INCLUDE',
+  'INCLUDE_FROM',
+  'MAX_AGE',
+  'MAX_DEPTH',
+  'MAX_SIZE',
+  'METADATA_EXCLUDE',
+  'METADATA_EXCLUDE_FROM',
+  'METADATA_FILTER',
+  'METADATA_FILTER_FROM',
+  'METADATA_INCLUDE',
+  'METADATA_INCLUDE_FROM',
+  'MIN_AGE',
+  'MIN_SIZE',
+];
+
+/** The environment for an rclone child: inherited filters dropped, rest kept. */
+function rcloneEnv(env) {
+  const child = { ...env };
+  for (const name of Object.keys(child)) {
+    if (!name.startsWith('RCLONE_')) continue;
+    if (RCLONE_FILTER_ENV.includes(name.slice('RCLONE_'.length).toUpperCase()))
+      delete child[name];
+  }
+  return child;
+}
 
 function validTarget(target) {
   if (typeof target !== 'string' || !target || target !== target.trim()) return false;
@@ -86,6 +132,7 @@ async function runRclone(command, args) {
     const { stdout, stderr } = await execFileAsync(command, args, {
       maxBuffer: 1024 * 1024,
       timeout: RCLONE_TIMEOUT_MS,
+      env: rcloneEnv(process.env),
     });
     return { code: 0, stdout, stderr };
   } catch (error) {
