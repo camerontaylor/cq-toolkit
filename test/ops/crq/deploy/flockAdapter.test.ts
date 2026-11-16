@@ -39,12 +39,13 @@ describe('flockLockFs with a fake process', () => {
     const p = f.fs().tryLock('/x/deploy.lock');
     f.s.exitCb(BUSY_EXIT);
     await p;
-    expect(f.s.args[0]!.slice(0, 6)).toEqual([
+    expect(f.s.args[0]!.slice(0, 7)).toEqual([
       '-x',
       '-n',
       '-F',
       '-E',
       String(BUSY_EXIT),
+      '--',
       '/x/deploy.lock',
     ]);
     expect(f.s.args[0]).toEqual(flockArgs('/x/deploy.lock'));
@@ -131,6 +132,20 @@ describe.skipIf(!flockOk)('flockLockFs with real flock(1)', () => {
     const again = await flockLockFs().tryLock(path);
     expect(again).not.toBeNull();
     await again!.release();
+  });
+  test('a lock path with a leading dash is a path, not an option', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'flock-dash-'));
+    const prior = process.cwd();
+    process.chdir(base);
+    try {
+      const first = await flockLockFs().tryLock('--unlock');
+      expect(first).not.toBeNull();
+      expect(await flockLockFs().tryLock('--unlock')).toBeNull();
+      await first!.release();
+    } finally {
+      process.chdir(prior);
+      rmSync(base, { recursive: true, force: true });
+    }
   });
   test('release kills the tracked holder and a later attempt acquires the lock', async () => {
     const path = join(dir, 'c.lock');
