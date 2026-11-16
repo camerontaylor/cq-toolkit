@@ -254,6 +254,27 @@ class LedgerTest(unittest.TestCase):
         with self.assertRaisesRegex(ledger.IntegrityError, "modifies/deletes"):
             publisher.read(tampered)
 
+    def test_durable_directory_syncs_existing_target_entry(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "outbox").mkdir()
+            synced = []
+            with mock.patch.object(ledger, "fsync_dir", side_effect=synced.append):
+                ledger.durable_directory(root / "outbox")
+            self.assertEqual(synced, [root])
+
+    def test_put_file_removes_staging_file_on_failure(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source.bin"
+            source.write_bytes(b"payload")
+            store = ledger.ArtifactStore(root / "store")
+            with mock.patch.object(ledger.shutil, "copyfileobj", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    store.put_file(source)
+            self.assertEqual(list((root / "store" / "sha256").iterdir()), [])
+            self.assertEqual(store.put_file(source)["sha256"], hashlib.sha256(b"payload").hexdigest())
+
 
 if __name__ == "__main__":
     unittest.main()
