@@ -116,9 +116,9 @@ describe('local-review exit harvest lifecycle', () => {
     const result = await harvestLocalReviewExit(x.queue, x.item, false, 5, {
       ...x.effects,
       classify: () => doc('{"outcome":"auth","counted":false,"findings":0,"severity_counts":{}}'),
-      complete: async (q, current, run, cls, at, code) => {
+      complete: async (q, current, run, cls, at, code, stream) => {
         paused = q.get('paused');
-        return x.effects.complete(q, current, run, cls, at, code);
+        return x.effects.complete(q, current, run, cls, at, code, stream);
       },
     });
     expect(paused).toBe(true);
@@ -186,9 +186,9 @@ describe('local-review exit harvest lifecycle', () => {
         doc(
           '{"outcome":"rate_limited","counted":false,"findings":1,"severity_counts":{"major":1},"wait_seconds":120}',
         ),
-      complete: async (q, current, run, cls, at, code) => {
+      complete: async (q, current, run, cls, at, code, stream) => {
         received = q;
-        return x.effects.complete(q, current, run, cls, at, code);
+        return x.effects.complete(q, current, run, cls, at, code, stream);
       },
       cleanup: async () => {
         throw new LocalReviewCleanupError('cleanup failed');

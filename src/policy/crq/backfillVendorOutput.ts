@@ -38,10 +38,22 @@ function isBlank(line: Uint8Array): boolean {
   return line.every((byte) => byte === 0x20 || (byte >= 0x09 && byte <= 0x0d));
 }
 
-function parseVendorLine(line: Uint8Array): JsonValue {
+/** One parsed vendor line and whether it carried a raw (unpaired or byte-encoded) surrogate. */
+interface VendorLine {
+  value: JsonValue;
+  rawSurrogate: boolean;
+}
+
+function parseVendorLine(line: Uint8Array): VendorLine {
   const decoded = decodeLedgerBytes(line);
+  let rawSurrogate = decoded.rawSurrogate;
   try {
-    return parseJsonValue(decoded.text, {
+    const value = parseJsonValue(decoded.text, {
+      // Provenance only: Python keeps these as separate code points, so the
+      // credit path must see them even though JS merges an adjacent pair.
+      onRawSurrogate: () => {
+        rawSurrogate = true;
+      },
       // Python's parse_float builds a float and refuses one that overflows.
       parseFloat: (raw) => {
         const parsed = Number(raw);
@@ -57,6 +69,7 @@ function parseVendorLine(line: Uint8Array): JsonValue {
         return new JsonObject(pairs);
       },
     });
+    return { value, rawSurrogate };
   } catch (error) {
     if (error instanceof JsonParseError) throw new LedgerJsonDecodeError(error.message);
     throw error;
@@ -69,17 +82,21 @@ function parseVendorLine(line: Uint8Array): JsonValue {
  * refusal; malformed JSON or bytes keep their Python decode error classes.
  */
 export function vendorEvents(raw: Uint8Array): JsonObject[] {
-  const events: JsonObject[] = [];
+  return vendorLines(raw).map((line) => line.event);
+}
+
+function vendorLines(raw: Uint8Array): Array<{ event: JsonObject; rawSurrogate: boolean }> {
+  const events: Array<{ event: JsonObject; rawSurrogate: boolean }> = [];
   let start = 0;
   for (let end = 0; end <= raw.length; end += 1) {
     if (end !== raw.length && raw[end] !== 0x0a) continue;
     const line = raw.subarray(start, end);
     start = end + 1;
     if (isBlank(line)) continue;
-    const value = parseVendorLine(line);
+    const { value, rawSurrogate } = parseVendorLine(line);
     if (!(value instanceof JsonObject))
       throw new LedgerIntegrityError('vendor event must be an object');
-    events.push(value);
+    events.push({ event: value, rawSurrogate });
   }
   return events;
 }
@@ -138,7 +155,8 @@ export function findingIntervals(value: JsonObject): Array<[number, number]> {
  * evidence bound to `expectedHead` is scoped completion.
  */
 export function terminalScope(raw: Uint8Array, expectedHead: JsonValue): JsonObject[] {
-  const events = vendorEvents(raw);
+  const lines = vendorLines(raw);
+  const events = lines.map((line) => line.event);
   if (
     events.length === 0 ||
     events.some((event) => {
@@ -152,6 +170,10 @@ export function terminalScope(raw: Uint8Array, expectedHead: JsonValue): JsonObj
     throw new LedgerIntegrityError('terminal non-skipped completion absent');
   if (!ledgerValueEqual(complete.get('head') ?? null, expectedHead))
     throw new LedgerIntegrityError('terminal evidence binds wrong/unknown reviewed head');
+  // Credit rows come only from the terminal completion. A raw surrogate there
+  // is refused as the ledger domain refuses it; other vendor lines stay valid.
+  if ((lines[lines.length - 1] as { rawSurrogate: boolean }).rawSurrogate)
+    throw new LedgerIntegrityError('non-scalar Unicode');
   const files = complete.get('reviewedFiles');
   if (!Array.isArray(files) || files.length === 0)
     throw new LedgerIntegrityError('reviewed scope absent');
