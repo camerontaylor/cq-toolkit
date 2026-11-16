@@ -4,11 +4,11 @@
  * freezes a state root into two scratch copies, proves the live root was not touched, and
  * compares the artefacts the Python and TypeScript sides left behind.
  *
- * Safety: the live root is opened for reading only (`copyFileSync` source, `readFileSync`),
+ * Safety: the live root is opened for reading only (`readFileSync`),
  * never locked and never written. The pre/post `queue.json` digest is the abort signal.
  */
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { JsonValue } from '../../policy/crq/jsonValue.js';
 import { JsonObject, parseJsonValue } from '../../policy/crq/jsonValue.js';
@@ -47,11 +47,15 @@ export function freezeStateRoot(liveRoot: string, scratch: string): FrozenInput 
   const liveDigest = liveQueueDigest(liveRoot);
   const a = join(scratch, 'a');
   const b = join(scratch, 'b');
+  // Capture each live file once, so both copies come from one consistent snapshot.
+  const captured = SHADOW_FILES.map((name) => {
+    const source = join(liveRoot, name);
+    return { name, bytes: existsSync(source) ? readFileSync(source) : null };
+  });
   for (const dir of [a, b]) {
     mkdirSync(dir, { recursive: true });
-    for (const name of SHADOW_FILES) {
-      const source = join(liveRoot, name);
-      if (existsSync(source)) copyFileSync(source, join(dir, name));
+    for (const { name, bytes } of captured) {
+      if (bytes !== null) writeFileSync(join(dir, name), bytes);
     }
   }
   return { a, b, liveDigest };
