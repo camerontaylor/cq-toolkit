@@ -1309,6 +1309,8 @@ def cmd_destroy(args) -> int:
 def cmd_verify(args) -> int:
     report_path = pathlib.Path(args.report).resolve()
     report = json.loads(report_path.read_text())
+    if not isinstance(report, dict):
+        raise ValueError("report is not a JSON object: " + str(report_path))
     problems = verify_report(report, report_path.parent)
     print(json.dumps({"problems": problems}, indent=2, sort_keys=True))
     return 0 if not problems else 1
