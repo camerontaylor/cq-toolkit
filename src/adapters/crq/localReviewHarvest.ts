@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { lstat, readFile, realpath } from 'node:fs/promises';
+import { isAbsolute, join, relative } from 'node:path';
 import { JsonNumber, JsonObject, toPlainJson } from '../../policy/crq/jsonValue.js';
 import { IdentitySchema, ReceiptSchema } from '../../ops/review/internal/reviewOperation.js';
 import type { LocalHarvestEffects } from '../../ops/crq/internal/localReviewHarvest.js';
@@ -23,23 +23,39 @@ export function validateLocalReviewReceipt(value: JsonObject): void {
   ReceiptSchema.parse(toPlainJson(value));
 }
 
+/** Resolve a regular run artifact without following symlinked run ownership. */
+export async function containedLocalRunArtifact(
+  stateRoot: string,
+  runId: string,
+  name: string,
+): Promise<string> {
+  if (!runId || runId === '.' || runId === '..' || /[/\\\0]/.test(runId))
+    throw new Error('invalid run id');
+  const root = await realpath(join(stateRoot, 'runs'));
+  const dir = join(root, runId);
+  if ((await lstat(dir)).isSymbolicLink() || (await lstat(join(dir, name))).isSymbolicLink())
+    throw new Error('symlinked run artifact unsupported');
+  const path = await realpath(join(dir, name));
+  const rel = relative(root, path);
+  if (!rel || rel.startsWith('../') || rel === '..' || isAbsolute(rel))
+    throw new Error('run artifact outside runs directory');
+  return path;
+}
+
 /** Bind receipt completion I/O. The caller supplies its queue persistence and republisher under tick.lock. */
 export function fileLocalHarvestEffects(options: {
   stateRoot: string;
   saveQueue: (queue: JsonObject) => Promise<void>;
   republish: (queue: JsonObject, item: JsonObject) => Promise<JsonObject>;
 }): LocalHarvestEffects {
-  const runs = join(options.stateRoot, 'runs');
-  function file(runId: string, name: string): string {
-    if (!runId || runId === '.' || runId === '..' || /[/\\\0]/.test(runId))
-      throw new Error('invalid run id');
-    return join(runs, runId, name);
-  }
   return {
-    readReview: (runId) => readFile(file(runId, 'review.ndjson')),
+    readReview: async (runId) =>
+      readFile(await containedLocalRunArtifact(options.stateRoot, runId, 'review.ndjson')),
     async readReport(runId) {
       try {
-        return await readFile(file(runId, 'findings.md'));
+        return await readFile(
+          await containedLocalRunArtifact(options.stateRoot, runId, 'findings.md'),
+        );
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
         throw error;
