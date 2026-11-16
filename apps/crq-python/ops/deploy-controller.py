@@ -1023,7 +1023,7 @@ def receipt_problem(name: str, data: bytes, schema: dict | None = None) -> str |
         return "content identity: sha256 does not match the receipt name"
     try:
         doc = json.loads(data)
-    except ValueError:
+    except (ValueError, RecursionError):
         return "malformed: not valid JSON"
     if not isinstance(doc, dict):
         return "malformed: not a JSON object"
@@ -1128,7 +1128,7 @@ def receipt_validation(effects: Effects) -> dict | None:
             try:
                 doc = json.loads(data)
                 family = receipt_family(doc) if isinstance(doc, dict) else "malformed"
-            except ValueError:
+            except (ValueError, RecursionError):
                 family = "malformed"
         except OSError as exc:
             problem = "unreadable: " + str(exc)[:80]
