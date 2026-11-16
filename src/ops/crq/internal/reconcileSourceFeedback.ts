@@ -169,8 +169,13 @@ async function publishResolutions(
         pending = true;
         continue; // Keep feedback pending for retry.
       }
+      // Journal the next completion list before appending it here, so a failed write
+      // leaves `current()` without `id` and the feedback retries.
+      await effects.writeJournal(
+        first,
+        withObjectKeys(publication, [['source_resolutions', [...completed, id]]]),
+      );
       completed.push(id);
-      await effects.writeJournal(first, current());
     }
   } catch (error) {
     throw new SourcePublicationFailed(
