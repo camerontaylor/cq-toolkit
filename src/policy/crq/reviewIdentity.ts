@@ -10,12 +10,12 @@ import { JsonObject, parseJsonValue, type JsonValue } from './jsonValue.js';
 import {
   PrReviewRuntimeError,
   PrReviewValueError,
+  GhTimeoutError,
   authenticatedLogin,
   ghString,
   type GhPort,
   type GhResult,
 } from './prReviewFindings.js';
-import { GhTimeoutError } from './prReviewFindings.js';
 import { pythonIsSpace, pythonStrip, pythonTruthy } from './repairBinding.js';
 
 /** Safe reason code only: never carry helper output or exception detail. */

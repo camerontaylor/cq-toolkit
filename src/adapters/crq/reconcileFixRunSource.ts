@@ -135,7 +135,7 @@ export function fileFixRunSeams(
   if (!owner || !repoName || extra.length || !ghNameOk(owner) || !ghNameOk(repoName))
     throw new Error('invalid repo');
   const git = options.runGit ?? runGitIn(options.clone);
-  const rawGh = options.gh ?? makeGhRunner();
+  const rawGh = options.gh ?? makeGhRunner({ timeoutMs: 30_000 });
   const gh: GhFn = (args) => {
     options.take?.();
     return rawGh(args);

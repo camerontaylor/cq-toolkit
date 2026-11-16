@@ -70,7 +70,7 @@ export interface TickPhases {
   archiveLegacy(queue: JsonObject): Promise<JsonObject>;
   /** The 80/60 reconcile window and its report. */
   reconcile(queue: JsonObject): Promise<PhaseResult>;
-  /** `parse_iso` in epoch milliseconds; null when absent or unparseable. */
+  /** `parse_iso` in epoch milliseconds; null when absent; the adapter throws on a malformed value (Python `parse_iso`). */
   parseIso(value: JsonValue | undefined): number | null;
   nowMs(): number;
   nowIso(): string;
