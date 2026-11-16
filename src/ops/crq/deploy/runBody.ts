@@ -1,16 +1,16 @@
 /**
- * The deploy-runbook `_run` body and its `run` wrapper, over injected steps.
+ * The deploy-runbook `_run` body, over injected steps.
  *
- * Ports `Deploy._run` and `Deploy.run` from `apps/crq-python/ops/deploy-runbook.py`.
+ * Ports `Deploy._run` from `apps/crq-python/ops/deploy-runbook.py`.
  * Every earlier piece (target resolution, hold, lock, drain, switch, health,
  * recovery) is a callback typed here, so this file imports no unmerged module
  * and is inactive: nothing imports it and no deployed behaviour changes.
- * The value it adds is the exact phase ordering, release of the lock on every
- * exit, and the routing of each failure to recovery.
+ * The value it adds is the exact phase ordering. Routing failures to recovery and
+ * releasing the lock on every exit belong to `RunRecovery.run` (rollbackRecover.ts).
  */
 import { pythonJsonText } from '../../../policy/crq/pythonJson.js';
-import { Refused, HealthFailed, Interrupted, RecoveryRequired } from './errors.js';
-export { Refused, HealthFailed, Interrupted, RecoveryRequired };
+import { Refused, HealthFailed } from './errors.js';
+export { Refused, HealthFailed };
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const TAG_RE = /^crq-runner\/[0-9]{8}-[0-9]+$/;
@@ -217,61 +217,6 @@ export async function runBody(
   return steps.document('completed');
 }
 
-/** Python `run`: route every failure to recovery, and always release the lock. */
-export async function runWithRecovery(
-  args: RunBodyArgs,
-  steps: RunBodySteps,
-  state: RunBodyState,
-): Promise<unknown> {
-  let outcome: { ok: true; value: unknown } | { ok: false; error: unknown };
-  try {
-    outcome = { ok: true, value: await recoverFromFailure(args, steps, state) };
-  } catch (error) {
-    outcome = { ok: false, error };
-  }
-  try {
-    await steps.lock.release();
-  } catch (releaseError) {
-    // Keep the failure that was already propagating: it says why the run
-    // failed, and the release failure rides along on it.
-    if (!outcome.ok && outcome.error instanceof Error) {
-      Object.defineProperty(outcome.error, 'releaseFailure', {
-        value: releaseError,
-        configurable: true,
-        writable: true,
-      });
-      if (outcome.error.cause === undefined) outcome.error.cause = releaseError;
-      throw outcome.error;
-    }
-    if (!outcome.ok) throw outcome.error;
-    throw releaseError;
-  }
-  if (!outcome.ok) throw outcome.error;
-  return outcome.value;
-}
-
-async function recoverFromFailure(
-  args: RunBodyArgs,
-  steps: RunBodySteps,
-  state: RunBodyState,
-): Promise<unknown> {
-  try {
-    return await runBody(args, steps, state);
-  } catch (exc) {
-    if (exc instanceof HealthFailed) {
-      await steps.recover(exc);
-      return steps.document('rolled_back', clip(strOf(exc), 400));
-    }
-    if (exc instanceof Interrupted) {
-      await steps.recover(new Refused('interrupted by the operator'));
-      throw exc;
-    }
-    const outcome = await steps.recover(exc);
-    if (outcome === 'rolled_back') return steps.document('rolled_back', clip(strOf(exc), 400));
-    throw new Refused(strOf(exc), { cause: exc });
-  }
-}
-
 /** Python truthiness for the values a health record may carry. */
 function truthy(value: unknown): boolean {
   if (value === undefined || value === null || value === false || value === 0 || value === '')
@@ -279,11 +224,6 @@ function truthy(value: unknown): boolean {
   if (Array.isArray(value)) return value.length > 0;
   if (typeof value === 'object') return Object.keys(value as object).length > 0;
   return true;
-}
-
-/** Python `str[:n]` by code points. */
-function clip(text: string, n: number): string {
-  return Array.from(text).slice(0, n).join('');
 }
 
 /** Python `repr` of a string. */

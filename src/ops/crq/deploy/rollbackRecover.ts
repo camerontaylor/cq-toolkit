@@ -491,7 +491,36 @@ export class RunRecovery<E> {
     return 'refused';
   }
 
+  /** Python `run`: route every failure to recovery, and always release the lock. */
   async run(): Promise<Result> {
+    let outcome: { ok: true; value: Result } | { ok: false; error: unknown };
+    try {
+      outcome = { ok: true, value: await this.recoverFromFailure() };
+    } catch (error) {
+      outcome = { ok: false, error };
+    }
+    try {
+      await this.deps.releaseLock();
+    } catch (releaseError) {
+      // Keep the failure that was already propagating: it says why the run failed, and the
+      // release failure rides along on it.
+      if (!outcome.ok && outcome.error instanceof Error) {
+        Object.defineProperty(outcome.error, 'releaseFailure', {
+          value: releaseError,
+          configurable: true,
+          writable: true,
+        });
+        if (outcome.error.cause === undefined) outcome.error.cause = releaseError;
+        throw outcome.error;
+      }
+      if (!outcome.ok) throw outcome.error;
+      throw releaseError;
+    }
+    if (!outcome.ok) throw outcome.error;
+    return outcome.value;
+  }
+
+  private async recoverFromFailure(): Promise<Result> {
     try {
       return await this.deps.innerRun();
     } catch (exc) {
@@ -510,8 +539,6 @@ export class RunRecovery<E> {
       if (outcome === 'rolled_back')
         return this.document('rolled_back', { reason: clip(strOf(exc), 400) });
       throw new Refused(strOf(exc), { cause: exc });
-    } finally {
-      await this.deps.releaseLock();
     }
   }
 }

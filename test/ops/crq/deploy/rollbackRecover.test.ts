@@ -807,6 +807,22 @@ describe('run', () => {
     });
     expect(f.log.at(-1)).toBe('lock.release');
   });
+  test('a lock release failure does not hide the failure already propagating', async () => {
+    const f = fixture();
+    const release = new Error('unlock');
+    const original = new Refused('preflight');
+    f.inner.run = () => Promise.reject(original);
+    f.deps.releaseLock = () => Promise.reject(release);
+    const err = await caught(rec(f).run());
+    expect(err).toBeInstanceOf(Refused);
+    expect(err.message).toBe('preflight');
+    expect((err as { releaseFailure?: unknown }).releaseFailure).toBe(release);
+  });
+  test('a lock release failure on success surfaces after the run completes', async () => {
+    const f = fixture();
+    f.deps.releaseLock = () => Promise.reject(new Error('unlock'));
+    expect((await caught(rec(f).run())).message).toBe('unlock');
+  });
   test('a health failure with nothing switched still reports rolled_back, as Python does', async () => {
     const f = fixture();
     f.inner.run = () => Promise.reject(new HealthFailed('h'));
