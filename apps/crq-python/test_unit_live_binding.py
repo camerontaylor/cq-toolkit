@@ -628,6 +628,20 @@ class DiscoveryTests(PortFixture):
         self.assertIn("Service names crq-tick.service",
                       " ".join(evidence["foreign"]))
 
+    def test_dotted_instance_socket_service_template_target_is_unsupported(
+            self):
+        declared = self.declare()
+        # systemd takes the instance as everything between the first ``@`` and
+        # the final suffix, so ``ingress@crq-tick.service.socket`` resolves
+        # ``%i`` to ``crq-tick.service``; a dotted instance must still expand.
+        self.write("ingress@crq-tick.service.socket",
+                   "[Socket]\nListenStream=1\nService=%i\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Service names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
     def test_co_installed_socket_service_target_is_unsupported(self):
         declared = self.declare()
         # ``[Socket] Service=`` selects the unit that incoming traffic

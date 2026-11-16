@@ -105,11 +105,15 @@ def _expand_instance(path, value):
     as ``Service=%i.service``; without expansion the CRQ name is invisible to
     the dependency scan. A drop-in directory carries the instance in its
     parent name (``ingress@crq-tick.socket.d``).
+
+    systemd takes the instance as everything between the first ``@`` and the
+    final suffix, so an instance may itself contain dots:
+    ``ingress@crq-tick.service.socket`` resolves ``%i`` to ``crq-tick.service``.
     """
     name = path.name
     if path.parent.name.endswith(".d"):
         name = path.parent.name[:-2]
-    found = re.match(r"[^@]*@(?P<instance>[^.]*)\.[^.]+\Z", name)
+    found = re.match(r"[^@]*@(?P<instance>.*)\.[^.]+\Z", name)
     if found is None:
         return value
     instance = found.group("instance")
