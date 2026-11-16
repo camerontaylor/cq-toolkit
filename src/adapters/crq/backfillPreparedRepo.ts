@@ -82,9 +82,19 @@ export function preparedBackfillRepo(git: BackfillAsyncGit): {
       );
     },
     async verifyRecorded() {
+      // Entries leave the queue only once verified. A failed or not-yet-tried
+      // event stays queued for the next call, ahead of anything recorded while
+      // this pass was running, and the original rejection propagates.
       const events = recorded;
       recorded = [];
-      for (const event of events) await git.verifyReview(event);
+      for (const [index, event] of events.entries()) {
+        try {
+          await git.verifyReview(event);
+        } catch (error) {
+          recorded = [...events.slice(index), ...recorded];
+          throw error;
+        }
+      }
     },
   };
 }
