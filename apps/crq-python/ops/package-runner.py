@@ -166,6 +166,8 @@ def dependency_inventory(root):
                 document = json.loads(package.read_text())
             except (OSError, ValueError) as exc:
                 raise ArtifactError('unreadable dependency metadata: ' + str(package)) from exc
+            if not isinstance(document, dict):
+                raise ArtifactError('dependency metadata must be an object: ' + str(package))
             name = document.get('name')
             version = document.get('version')
             if not isinstance(name, str) or not isinstance(version, str):
