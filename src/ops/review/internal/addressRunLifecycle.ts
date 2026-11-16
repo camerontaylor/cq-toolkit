@@ -447,7 +447,9 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
           participant.reportDirectory = await lstat(dirname(target));
           targets.add(target);
         }
-      const attempts = open.flatMap((entry) =>
+      // Cancelled attempts are never released, so a participant closed without
+      // arriving (a rejected action that skipped arrive()) still holds one.
+      const attempts = [...this.participants].flatMap((entry) =>
         entry.attempts.filter((attempt) => attempt.cancelled),
       );
       let timer: ReturnType<typeof setTimeout> | undefined;
