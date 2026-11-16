@@ -492,13 +492,17 @@ export function makeReviewClient(transport: QueueTransport) {
       if (Date.now() >= retryUntil || (lifetimeRemaining(options) ?? Infinity) <= 0) throw fault;
     }
     const historyResponse = parsed.op === 'review-history' && 'status' in result;
+    const recordResponse = parsed.op === 'record' && 'op' in result;
+    const requestId =
+      parsed.op !== 'record' && 'request_id' in parsed ? parsed.request_id : undefined;
     if (
       parsed.op !== 'capabilities' &&
       !historyResponse &&
+      !recordResponse &&
       ((!('state' in result) && !(parsed.op === 'result' && 'index' in result)) ||
         ('request_id' in result &&
           result.request_id !== undefined &&
-          result.request_id !== parsed.request_id))
+          result.request_id !== requestId))
     )
       throw new Error('review response operation or request mismatch');
     return result;

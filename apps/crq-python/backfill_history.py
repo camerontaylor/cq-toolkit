@@ -15,7 +15,8 @@ from backfill_accounting import ranges
 
 REVIEWER_FORMATS = {"0.8.2": "coderabbit-agent-0.8.2", "0.9.2": "coderabbit-agent-0.9.2"}
 
-CLASSES = ("crq-counted-cycle", "merged-current-receipt", "github-app-review")
+CLASSES = ("crq-counted-cycle", "merged-current-receipt", "github-app-review",
+           "github-agent-review")
 # Collection stopped with the promotion retirement, but catalogs saved before
 # that change must still import: keep their rows as explicit unverified results.
 RETIRED_CLASSES = ("promotion-range",)
@@ -140,6 +141,54 @@ def import_source(repo, store, source_class, source_id, raw, envelope, at, exist
     source_digest = hashlib.sha256(raw).hexdigest()
     reference = store.put(raw)
     proof = store.put(ledger.canonical(envelope))
+    if source_class == "github-agent-review":
+        # Human/agent GitHub reviews collect through the S3b record path: the
+        # fetched review normalizes to an uncredited report record (never a
+        # vendor run), so the import carries the report artifact reference. A
+        # review whose bytes cannot normalize stays an explicit unverified gap.
+        import review_record
+        result_key = "import:" + source_class + ":" + source_id + ":" + source_digest
+        previous = next((v for v in existing if v["source_key"] == result_key), None)
+        if previous:
+            return [], previous
+        review = None
+        retained = None
+        reason = "github review collected as uncredited report"
+        try:
+            submitted = review_record.normalize_github_review(
+                envelope["review"], owner_repo=envelope.get("owner_repo") or ledger.REPO,
+                pr=envelope.get("pr"), at=at)
+            submitted["report_bytes"] = raw
+            review, _ = review_record.normalize_record(submitted, at)
+            # An interrupted import may have spooled the review but not its
+            # disposition; the retained outbox passed as `existing` still
+            # holds the review under its source_key. Reuse it unchanged (no
+            # rehash, no artifact replacement) so a retry at a later
+            # timestamp cannot mint a colliding second review.
+            retained = next((v for v in existing
+                             if v["event_type"] == "review" and v["source_key"] == review["source_key"]), None)
+            if retained:
+                review = None
+                reason = "github review already recorded as uncredited report"
+            else:
+                # The placeholder reference (imported-report:<digest>) has no
+                # durable backing; the collector's store reference is the retained
+                # artifact the outbox can verify, so it replaces the placeholder.
+                review["payload"]["artifacts"] = [dict(reference, kind="report")]
+                review["id"] = ledger.digest({k: v for k, v in review.items() if k != "id"})
+                ledger.validate(review)
+        except (review_record.RecordRefused, ledger.IntegrityError) as exc:
+            reason = "github review normalization refused: " + str(exc)
+        disposition = ledger.event("import-result", result_key, at, {
+            "source": {"repo": ledger.REPO, "producer": "github-agent-review",
+                       "type": "manual", "id": source_id,
+                       "authenticated": False},
+            "source_digest": source_digest,
+            "result": "unverified", "reason": reason,
+            "review_id": review["id"] if review else (retained["id"] if retained else None),
+            "duplicate_id": None,
+            "artifacts": [reference, proof]})
+        return ([review] if review else []) + [disposition], disposition
     producer = "coderabbitai[bot]" if source_class == "github-app-review" else "crq-runner-app"
     source = {"repo": ledger.REPO, "producer": producer,
               "type": "github-review" if source_class == "github-app-review" else "crq-run",
@@ -270,15 +319,33 @@ def collect_sources(queue, state, store, *, github=None):
             retain("merged-current-receipt", filename.stem, raw, {"authenticated": False, "reason": "receipt digest mismatch"})
             continue
         document = ledger.loads(raw)
-        retain("merged-current-receipt", str(document.get("run_id") or filename.stem), raw,
-               {"authenticated": True, "repo": ledger.REPO, "producer": "crq-runner-app", "exit_code": 0,
-                "completed_at": document.get("started_at"), "receipt_digest": filename.stem})
+        envelope = {"authenticated": True, "repo": ledger.REPO, "producer": "crq-runner-app", "exit_code": 0,
+                    "completed_at": document.get("started_at"), "receipt_digest": filename.stem}
+        retain("merged-current-receipt", str(document.get("run_id") or filename.stem), raw, envelope)
+        # The historical adapter projects the receipt for unified-summary and
+        # catalog consumers with its original digest; coverage is never claimed
+        # as full branch coverage and the evidence is never relabeled.
+        import review_record
+        envelope["historical_view"] = review_record.historical_view({
+            "event_type": "review", "id": filename.stem,
+            "payload": {"source": {"producer": "crq-runner-app", "type": "crq-run"},
+                        "head": document.get("head") or "0" * 40,
+                        "base": document.get("base") or "0" * 40,
+                        "outcome": "unverified",
+                        "completion": {"scope_verified": False},
+                        "provenance": None}})
     acquisition = {"local_queue": store.put(json.dumps(queue, sort_keys=True).encode()),
                    "github": "not-acquired" if github is None else "acquired-paginated", "source_classes": list(CLASSES)}
     if github is not None:
         for source in github():
             raw, metadata = source["raw"], source["metadata"]
             api = ledger.loads(raw)
+            if source.get("class") == "github-agent-review":
+                # S3b human/agent review: collected through the record path,
+                # never a vendor credit. The envelope carries the
+                # fetchReviewState-shaped projection of the same read.
+                retain("github-agent-review", metadata["review"]["id"], raw, metadata)
+                continue
             retain("github-app-review", str(api["id"]), raw,
                    {"authenticated": True, "repo": ledger.REPO, "producer": "coderabbitai[bot]", "exit_code": 0,
                     "completed_at": api.get("submitted_at"), "transport": metadata})
@@ -286,7 +353,12 @@ def collect_sources(queue, state, store, *, github=None):
 
 
 def github_sources(store):
-    """Paginate merged PRs and app reviews; retain every fetched response page."""
+    """Paginate merged PRs and reviews; retain every fetched response page.
+
+    Bot reviews (coderabbitai[bot]) collect as vendor evidence under the
+    github-app-review class; human/agent reviews collect through the S3b
+    github-agent-review class, normalizing to uncredited report records.
+    """
     import json
     def fetch(endpoint):
         raw = subprocess.run(["gh", "api", "--paginate", "--slurp", endpoint], capture_output=True, check=True, timeout=300).stdout
@@ -299,6 +371,21 @@ def github_sources(store):
     for pr in sorted((p for p in prs if p.get("merged_at")), key=lambda p: p["number"]):
         reviews, review_pages = fetch(f"repos/{ledger.REPO}/pulls/{pr['number']}/reviews?per_page=100")
         for review in reviews:
-            if (review.get("user") or {}).get("login") == "coderabbitai[bot]":
-                yield {"raw": json.dumps(review, sort_keys=True).encode(),
-                       "metadata": {"pr": pr["number"], "pr_pages": pr_pages, "review_pages": review_pages}}
+            login = (review.get("user") or {}).get("login")
+            raw = json.dumps(review, sort_keys=True).encode()
+            metadata = {"pr": pr["number"], "pr_pages": pr_pages, "review_pages": review_pages}
+            if login == "coderabbitai[bot]":
+                yield {"raw": raw, "metadata": metadata}
+            elif login:
+                # fetchReviewState-shaped: the collector input vocabulary. The
+                # raw bytes stay the report artifact; no poller, one read.
+                yield {"raw": raw, "class": "github-agent-review",
+                       "metadata": {**metadata, "review": {
+                           "id": str(review.get("node_id") or review.get("id")),
+                           "authorLogin": login,
+                           "authorType": (review.get("user") or {}).get("type"),
+                           "body": review.get("body") or "",
+                           "state": review.get("state"),
+                           "commitOid": review.get("commit_id"),
+                           "submittedAt": review.get("submitted_at")},
+                           "owner_repo": ledger.REPO, "pr": pr["number"]}}

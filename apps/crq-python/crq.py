@@ -3432,8 +3432,29 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         log += deliver_pending_review_refreshes(q)
         repair_tick.backfill(sys.modules[__name__], q)
         repair_tick.archive_legacy(sys.modules[__name__], q)
-        with forge_window(budget):
-            repair_tick.reconcile_fix_prs(sys.modules[__name__], q)
+        # Reconciliation runs last and used to get nothing: the 24-request shard
+        # budget is spent before this point by deferred refresh (limit 20) and
+        # merged discovery (page_budget 4, same budget object), and reconcile
+        # swallowed the resulting exhaustion per run. It gets its own allowance
+        # and reports what it managed below, because a starved pass and a quiet
+        # pass used to look identical in the tick log.
+        with forge_window(ForgeBudget(requests=80, seconds=60)):
+            reconciled = repair_tick.reconcile_fix_prs(sys.modules[__name__], q)
+        # Only a counts dict is a report. A caller or test double that returns
+        # anything else is reporting nothing, and must not break the tick.
+        if not isinstance(reconciled, dict):
+            reconciled = {}
+        # Report the pass even when it projected nothing: "examined 0" and
+        # "examined 12, starved 12" are different states, and only one of them
+        # means the queue is genuinely quiet.
+        if reconciled.get('examined'):
+            log.append(f"reconcile: {reconciled.get('examined', 0)} examined, "
+                       f"{reconciled.get('projected', 0)} projected, "
+                       f"{reconciled.get('starved', 0)} starved, {reconciled.get('deferred', 0)} deferred")
+        if reconciled.get('starved') or reconciled.get('deferred'):
+            event('reconcile_incomplete', examined=reconciled.get('examined', 0),
+                  projected=reconciled.get('projected', 0), starved=reconciled.get('starved', 0),
+                  deferred=reconciled.get('deferred', 0), errors=reconciled.get('errors') or [])
     prev = parse_iso(q.get("last_tick"))
     stale_min = CONFIG.get("stale_alarm_min", 36)
     if prev and not dry and (now() - prev).total_seconds() / 60 > stale_min:

@@ -16,6 +16,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from test_deploy_controller_fixtures import dc
 from test_unit_adapter import (
@@ -198,11 +199,12 @@ class FactoryFixture(AdapterFixture):
         settings = {"queue_drain": self.queue, "error_type": dc.Refused,
                     "clock": Ticker(), "sleep": lambda _seconds: None}
         settings.update(options)
+        settings.setdefault("journal_source", self.source)
         return factory.compose(
             root=self.root, unit=unit, runtime=runtime,
             source_sha=self.before, unit_dir=self.unit_dir,
             systemd=self.systemd, identity=LiveIdentity(),
-            journal_source=self.source, **settings)
+            journal_source=settings.pop("journal_source"), **settings)
 
     def records(self):
         return [json.loads(path.read_text())
@@ -410,6 +412,56 @@ class FactorySwitchTests(FactoryFixture):
         self.assertEqual(self.records(), [])
         self.assertEqual(_tree(self.unit_dir), before)
 
+    def test_publisher_forward_and_reverse_complete_at_its_declared_bound(self):
+        unit = "crq-publisher.service"
+        sha = "c" * 40
+        runtime = "node:" + sha
+        artifact = _node_artifact(self.base, sha, capabilities=["publish"])
+        _write(self.unit_dir / unit, self.python_service(unit)["bytes"], 0o600)
+        self.systemd.active[unit] = "inactive"
+        self.systemd.active["crq-publisher.timer"] = "active"
+        self.systemd.active["crq-publisher.path"] = "active"
+        self.systemd.prior(unit, "e" * 32, 900)
+
+        forward, _selection = self.compose(
+            unit=unit, runtime=runtime, artifact_root=artifact)
+        prior = forward.preflight(unit, runtime)
+        # 45 min service timeout + 65 s repeat cadence + 60 s margin.
+        self.assertEqual(prior["completion_window"], 2825)
+        first = dc.switch_unit(self.effects, forward, unit, runtime)
+        self.assertEqual(first["outcome"], "completed")
+        self.assertEqual(first["runtime"], runtime)
+        self.assertEqual(first["prior_runtime"], "python")
+        self.assertEqual(len(first["completions"]), 2)
+        self.assertLess(first["completions"][0]["sequence"],
+                        first["completions"][1]["sequence"])
+        self.assertNotEqual(first["completions"][0]["invocation"],
+                            first["completions"][1]["invocation"])
+        self.assertEqual({item["runtime"] for item in first["completions"]},
+                         {runtime})
+
+        reverse, _selection = self.compose(unit=unit, runtime="python")
+        reverse_prior = reverse.preflight(unit, "python")
+        self.assertEqual(reverse_prior["completion_window"], 2825)
+        second = dc.switch_unit(self.effects, reverse, unit, "python")
+        self.assertEqual(second["outcome"], "completed")
+        self.assertEqual(second["runtime"], "python")
+        self.assertEqual(second["prior_runtime"], runtime)
+        self.assertEqual(len(second["completions"]), 2)
+        self.assertLess(second["completions"][0]["sequence"],
+                        second["completions"][1]["sequence"])
+        self.assertNotEqual(second["completions"][0]["invocation"],
+                            second["completions"][1]["invocation"])
+        self.assertEqual({item["runtime"] for item in second["completions"]},
+                         {"python"})
+        self.assertEqual((self.unit_dir / unit).read_bytes(),
+                         self.python_service(unit)["bytes"])
+
+        started = {call[1] for call in self.systemd.calls
+                   if call and call[0] == "start"}
+        self.assertEqual(started, {unit, "crq-publisher.timer",
+                                   "crq-publisher.path"})
+
     def test_watchdog_declared_timeout_bounds_completion(self):
         unit = "crq-watchdog.service"
         self.assertEqual(self.inventory[unit]["service_timeout_seconds"], 300)
@@ -421,6 +473,44 @@ class FactorySwitchTests(FactoryFixture):
         adapter, _selection = self.compose(unit=unit)
         prior = adapter.preflight(unit, "python")
         self.assertEqual(prior["completion_window"], 1140)
+
+    def test_watchdog_switch_and_reverse_are_admitted_with_live_queue_work(self):
+        unit = "crq-watchdog.service"
+        sha = "c" * 40
+        runtime = "node:" + sha
+        artifact = _node_artifact(self.base, sha, capabilities=["watchdog"])
+        _write(self.unit_dir / unit, self.python_service(unit)["bytes"], 0o644)
+        self.systemd.active[unit] = "inactive"
+        self.systemd.active["crq-watchdog.timer"] = "active"
+        self.systemd.prior(unit, "d" * 32, 900)
+        progress = []
+
+        def advance(_service):
+            progress.append(len(progress) + 1)
+            self.write_state("queue.json", {
+                "items": [], "progress": progress[-1]})
+
+        self.systemd.after_service_start = advance
+        self.write_state("queue.json", {"items": [], "progress": 0})
+        probe = mock.Mock(side_effect=AssertionError(
+            "a watchdog unit transaction must not observe queue ownership"))
+        forward, _selection = self.compose(
+            unit=unit, runtime=runtime, queue_drain=probe,
+            artifact_root=artifact)
+        first = dc.switch_unit(self.effects, forward, unit, runtime)
+        self.assertEqual(first["outcome"], "completed")
+        self.assertNotIn("preserved/queue.json", first["state"])
+        probe.assert_not_called()
+        # Reverse composes without a queue observation provider at all.
+        reverse, _selection = self.compose(unit=unit, runtime="python",
+                                           queue_drain=None)
+        second = dc.switch_unit(self.effects, reverse, unit, "python")
+        self.assertEqual(second["outcome"], "completed")
+        probe.assert_not_called()
+        self.assertEqual(progress, [1, 2])
+        self.assertEqual(json.loads((self.runner
+                                     / "state/queue.json").read_text()),
+                         {"items": [], "progress": 2})
 
     def test_changed_installed_bytes_refuse_completion(self):
         alternate = self.python_service("crq-slot.service")
@@ -437,19 +527,64 @@ class FactorySwitchTests(FactoryFixture):
         self.assertEqual(recovery["phase"], "activation_pending")
         self.assertIn("digest", recovery["reason"])
 
-    def test_reboot_during_completion_is_recovery_required(self):
+    def test_reboot_during_completion_rolls_back_after_a_demonstrated_fence(self):
         self.systemd.after_service_start = \
             lambda _service: self.source.reboot()
         adapter, _selection = self.compose()
         with self.assertRaises(dc.RecoveryRequired) as failure:
             dc.switch_unit(self.effects, adapter, UNIT, "python")
         recovery = failure.exception.recovery
-        self.assertEqual(recovery["outcome"], "recovery_required")
-        self.assertEqual(recovery["phase"], "activation_pending")
+        self.assertEqual(recovery["outcome"], "rolled_back")
+        self.assertEqual(recovery["failed_phase"], "activation_pending")
         self.assertIn("boot ID changed", recovery["reason"])
+        self.assertIsInstance(recovery["fence"], dict)
+        prior = self.node_service(UNIT)
         service = self.unit_dir / UNIT
-        self.assertTrue(service.is_symlink())
-        self.assertEqual(os.readlink(service), "/dev/null")
+        self.assertEqual(service.read_bytes(), prior["bytes"])
+        self.assertEqual(service.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual(self.systemd.active["crq-tick.timer"], "active")
+
+    def test_completion_observation_failure_rolls_back_without_manual_recovery(self):
+        class FailingJournalSource(StructuredJournalSource):
+            def records(self, unit, *, after_monotonic):
+                raise factory.completion_module.CompletionRefused(
+                    "systemd read exceeds the byte bound")
+
+        timer = self.unit_dir / "crq-tick.timer"
+        original_timer = timer.read_bytes()
+        queue_path = self.runner / "state/queue.json"
+        heartbeat_path = self.runner / "state/heartbeat.json"
+        queue_before = queue_path.read_bytes()
+        heartbeat_before = heartbeat_path.read_bytes()
+        adapter, _selection = self.compose(
+            journal_source=FailingJournalSource(self.systemd),
+            require_journal_witness=True)
+        with self.assertRaises(dc.RecoveryRequired) as failure:
+            dc.switch_unit(self.effects, adapter, UNIT, "python")
+        recovery = failure.exception.recovery
+        self.assertEqual(recovery["outcome"], "rolled_back")
+        self.assertEqual(recovery["failed_phase"], "activation_pending")
+        self.assertIn("byte bound", recovery["reason"])
+        self.assertIsInstance(recovery["fence"], dict)
+        record_path = Path(recovery["record_path"])
+        final = json.loads(record_path.read_text())
+        self.assertEqual(final["outcome"], "rolled_back")
+        self.assertEqual(final["phase"], "restore_activation_pending")
+        self.assertEqual(dc._classify_record(record_path)[0], "finished")
+        prior = self.node_service(UNIT)
+        service = self.unit_dir / UNIT
+        self.assertEqual(service.read_bytes(), prior["bytes"])
+        self.assertEqual(service.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual(timer.read_bytes(), original_timer)
+        self.assertEqual(self.systemd.active["crq-tick.timer"], "active")
+        self.assertFalse((self.unit_dir
+                          / ("." + UNIT + ".staged")).exists())
+        self.assertEqual(queue_path.read_bytes(), queue_before)
+        self.assertEqual(heartbeat_path.read_bytes(), heartbeat_before)
+        # The rolled_back record is finished, so a later switch is not blocked.
+        forward, _selection = self.compose()
+        completed = dc.switch_unit(self.effects, forward, UNIT, "python")
+        self.assertEqual(completed["outcome"], "completed")
 
     def test_rollback_and_recovery_restore_the_prior_runtime(self):
         timer = self.unit_dir / "crq-tick.timer"

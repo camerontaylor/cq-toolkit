@@ -90,7 +90,10 @@ def invoke(config, role, job, wt, directory):
                 if logs.returncode or start < 0:
                     raise ValueError('judge returned no JSON verdict')
                 answer, end = json.JSONDecoder().raw_decode(text[start:])
-                if set(answer) != {'verdict', 'reason'} or answer['verdict'] not in ('valid', 'invalid', 'unsure') or not isinstance(answer['reason'], str):
+                # Reject content after the object: the single-object response
+                # contract means trailing payloads (e.g. a valid verdict
+                # followed by an invalid one) must not pass validation.
+                if text[start + end:].strip() or set(answer) != {'verdict', 'reason'} or answer['verdict'] not in ('valid', 'invalid', 'unsure') or not isinstance(answer['reason'], str):
                     raise ValueError('invalid judge output')
                 atomic(Path(directory) / 'judge-result.json', answer)
                 return {**answer, 'stop': 'ok'}

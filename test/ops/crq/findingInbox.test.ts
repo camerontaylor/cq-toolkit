@@ -10,6 +10,8 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 import { JsonObject, toPlainJson, type JsonValue } from '../../../src/policy/crq/jsonValue.js';
 import {
+  ledgerEvent,
+  ledgerCanonicalBytes,
   LedgerIntegrityError,
   LedgerJsonDecodeError,
   LedgerKeyError,
@@ -368,5 +370,77 @@ describe('finding inbox effect vectors', () => {
     );
     expect(source).not.toMatch(/node:child_process|node:fs|process\.env|new Date|Date\(/);
     expect(source).not.toMatch(/\bOutbox\b/);
+  });
+});
+
+describe('current fixed event', () => {
+  test('checks terminal identity, retained event and successor under lock', async () => {
+    const fid = 'a'.repeat(64),
+      review = 'b'.repeat(64),
+      merge = 'c'.repeat(40);
+    const job = new JsonObject([
+      ['canonical_finding_id', fid],
+      ['review_id', review],
+      ['job', 'job-1'],
+    ]);
+    const event = ledgerEvent(
+      'finding-event',
+      'fixed:test',
+      '2026-11-14T00:00:00Z',
+      new JsonObject([
+        ['finding_id', fid],
+        ['review_id', review],
+        ['previous_event_id', null],
+        ['action', 'fixed'],
+        [
+          'evidence',
+          new JsonObject([
+            ['fixing_commit', merge],
+            ['verification', 'verified'],
+          ]),
+        ],
+        ['actor', 'test'],
+      ]),
+    );
+    const row = new JsonObject([
+      ['canonical_id', fid],
+      ['finding', new JsonObject([['id', fid]])],
+      ['review_id', review],
+      ['receipt', new JsonObject([['repair_task', 'job-1']])],
+      ['status', 'fixed'],
+      ['previous_event_id', event.get('id')!],
+    ]);
+    const files = new MemoryFiles();
+    files.triage.set(fid, ledgerCanonicalBytes(row));
+    const inbox = new FindingInbox(files);
+    const publication = {
+      retained: async (): Promise<JsonValue[]> => [event],
+      spool: async (): Promise<string> => {
+        throw new Error('unexpected spool');
+      },
+    };
+    expect(await inbox.currentFixedEvent(publication, job, merge)).toBe(event.get('id'));
+    await expect(inbox.currentFixedEvent(publication, job, 'd'.repeat(40))).rejects.toThrow(
+      'evidence does not match',
+    );
+    const successor = ledgerEvent(
+      'finding-event',
+      'successor:test',
+      '2026-11-14T00:00:01Z',
+      new JsonObject([
+        ['finding_id', fid],
+        ['review_id', review],
+        ['previous_event_id', event.get('id')!],
+        ['action', 'superseded'],
+        ['evidence', new JsonObject([['reason', 'superseded']])],
+        ['actor', 'test'],
+      ]),
+    );
+    let reads = 0;
+    const raced = {
+      ...publication,
+      retained: async (): Promise<JsonValue[]> => (++reads === 1 ? [event] : [event, successor]),
+    };
+    await expect(inbox.currentFixedEvent(raced, job, merge)).rejects.toThrow('retained successor');
   });
 });

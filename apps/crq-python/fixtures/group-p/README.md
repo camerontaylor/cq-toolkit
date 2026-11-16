@@ -92,6 +92,25 @@ byte equality.
 | `status-helpers.json` | `status_summary.timestamp`, `merged_current`, `repos_summary` | epoch parsing, receipt-less merged-current counts, discovery passthrough, configured/push-only repo visibility and per-state counts |
 | `ledger.json` | `review_ledger.timestamp`, `path`, `intervals`, `scope`, `validate`, `validate_sequence`, `creditable` | exact UTC, canonical paths, interval overlap, scope duplicates, event hash, quarantine operator requirement, credit authority |
 | `summary.json` | `status_summary.summarize` | backlog, bounded pending preview, 24 h outcomes, merged discovery, historical promotion exclusion, invalid tick refusal |
+| `tick-schedule.json` | `crq.rank`, `sort_key`, `launch_band`, `deps_met`, `optional_wait`, `parked_merged_linked_receipt`, `inflight`, `has_collectable_runs`, `background_turn`, `starts_last_hour`, `item_repo` | required/delta/merged/backlog/rank-4/optional ranking, foreign-repo tiers, local-review aging boundary, dependency satisfaction, optional-cycle waits, reservation chronology, rolling-hour starts |
+| `liveness.json` | `author_quota.identity_kind`, `author_quota.run_state`, `crq.ident_pid` | managed/legacy/invalid identities, foreign bindings, detached-session shape, queue-pid agreement, the full exit/identity/wrapper liveness matrix, bool/float/string pid refusals |
+| `tick-admission.json` | `crq.admit_available` | observed and fallback slot arithmetic, reserved holds, per-tick and in-flight ceilings, paused/cooldown/slots/inflight gate order, operator log lines |
+
+## Tick rows
+
+`tick-schedule.json` rows carry the module bindings the oracle reads:
+`primary_repo`, `repos`, `local_review_aging_minutes` and `now`. The emitter
+and the Python replay temporarily bind `crq.REPO`, `crq.REPOS`, `crq.CONFIG`
+and `crq.now()` for the call and restore them, so no row records a host fact;
+an absolute `now` is an input, never an emission. `tick-admission.json` rows
+carry the queue, the usage observation, the `reserved` stamps and the three
+pacing knobs. `crq.admit_available` is replayed with its launch loop stubbed
+(each iteration journals one deterministic start) and with the backfill usage
+context stubbed, because `backfill_usage` is a later slice. The recorded value
+is therefore the gate, `start_attempts`, `remaining`, the log lines and the
+usage/start projections the admission pass owns. `liveness.json` rows are
+read with the lossless reader in TypeScript so a Python `float` pid (`42.0`)
+keeps its lexeme and is refused exactly as `isinstance(value, int)` refuses it.
 
 ## Decision D2
 
@@ -118,6 +137,9 @@ Not vectorized here because they need real effect doubles, filesystem state
 or live repository objects: `backfill_report.finding_triage` and
 `status_summary.finding_triage` (directory reads), `status_summary.publish`
 (systemd and home filesystem), real Git lineage/carry capture, receipt reading
-and the tick/slot launch and harvest loops. The report's accounting is
+and the tick/slot launch and harvest effects. Scheduling, admission and the
+liveness decision are vectorized above; the launch spawn, run-directory
+harvest, discovery calls and delivery/status writes still need real effect
+doubles. The report's accounting is
 vectorized against a documented repository stub. Group E fixtures seeded from
 `fixtures/state-<date>/` cover the remaining effects in Phase 1.

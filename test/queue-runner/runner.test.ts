@@ -52,11 +52,17 @@ describe('queue runner skeleton', () => {
 
 it('executes the built CLI dry-run against a queue without changing its bytes', async () => {
   const { spawnSync } = await import('node:child_process');
-  const { writeFile } = await import('node:fs/promises');
+  const { mkdir, writeFile } = await import('node:fs/promises');
   const { fileURLToPath } = await import('node:url');
   const root = await mkdtemp(join(tmpdir(), 'crq-cli-'));
+  // The deployed layout: config.json in the runner root, state/ beside it.
+  await mkdir(join(root, 'state', 'runs'), { recursive: true });
+  await writeFile(
+    join(root, 'config.json'),
+    JSON.stringify({ repo: 'acme/widgets', clone: 'clone-not-created' }),
+  );
   const queue = '{"items":[],"last_tick":"old"}\n';
-  await writeFile(join(root, 'queue.json'), queue);
+  await writeFile(join(root, 'state', 'queue.json'), queue);
   const cli = fileURLToPath(new URL('../../dist/queue-runner/crq.js', import.meta.url));
   const result = spawnSync(process.execPath, [cli, 'tick', '--dry-run'], {
     cwd: root,
@@ -68,22 +74,51 @@ it('executes the built CLI dry-run against a queue without changing its bytes', 
   const files = await readdir(join(root, 'shadow'));
   expect(files).toHaveLength(1);
   const shadow = JSON.parse(await readFile(join(root, 'shadow', files[0]!), 'utf8')) as {
-    value: { complete: boolean };
+    value: { complete: boolean; reason: string; admission: { gate: unknown } };
     mutations: { operation: string; target: string; value: string }[];
   };
   expect(shadow.value.complete).toBe(false);
-  expect(shadow.mutations).toHaveLength(1);
-  expect(shadow.mutations[0]?.operation).toBe('set');
-  expect(shadow.mutations[0]?.target).toBe('queue.json#/last_tick');
-  expect(shadow.mutations[0]?.value).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
-  expect(await readFile(join(root, 'queue.json'), 'utf8')).toBe(queue);
+  expect(shadow.value.reason).toMatch(/^tick effects not implemented: /);
+  // No usage probe is available here, so the conservative start-log fallback
+  // owns the slot count; an empty queue raises no gate.
+  expect(shadow.value.admission.gate).toBeNull();
+  expect(shadow.mutations.map((mutation) => mutation.target)).toEqual([
+    'queue.json#/usage',
+    'queue.json#/backfill_starts_at_observation',
+    'queue.json#/last_tick',
+  ]);
+  expect(shadow.mutations[2]?.value).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+  expect(await readFile(join(root, 'state', 'queue.json'), 'utf8')).toBe(queue);
+});
+
+it('writes backfill wrapper JSON with Python sorted keys and separators', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const root = await mkdtemp(join(tmpdir(), 'crq-backfill-output-'));
+  const cli = fileURLToPath(new URL('../../dist/queue-runner/crq.js', import.meta.url));
+  const result = spawnSync(process.execPath, [cli, 'backfill', 'unknown'], {
+    cwd: root,
+    encoding: 'utf8',
+  });
+  expect(result.status).toBe(2);
+  expect(result.stdout).toBe(
+    '{"error": {"exitCode": 2, "kind": "usage", "message": "Unknown or missing backfill subcommand", "subcommand": "backfill"}}\n',
+  );
 });
 
 describe('operator-live command seam (D1)', () => {
   it('keeps the operator-live set separate from the unit live set', async () => {
     const { LIVE_OPERATOR_COMMANDS } = await import('../../src/queue-runner/runner.js');
     const { LIVE_UNIT_COMMANDS } = await import('../../src/queue-runner/capabilities.js');
-    expect([...LIVE_OPERATOR_COMMANDS]).toEqual(['repair-prepare']);
+    // `backfill` joins the set in S4 and `reconcile-merged` in S2: each is its
+    // own argv-bearing route, still outside `capabilities.json` so no unit
+    // adapter can select it.
+    expect([...LIVE_OPERATOR_COMMANDS]).toEqual([
+      'repair-prepare',
+      'status',
+      'backfill',
+      'reconcile-merged',
+    ]);
     for (const command of LIVE_OPERATOR_COMMANDS) {
       expect([...LIVE_UNIT_COMMANDS]).not.toContain(command);
     }

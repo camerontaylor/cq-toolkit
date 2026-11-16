@@ -6,7 +6,9 @@ export {
   assertCqEnv,
   checkEntryEnv,
   enterWithCqEnv,
+  enterWithEntryEnv,
   type EntryEnvCheck,
 } from '../config/entry.js';
 export type { CqEnv } from '../config/env.js';
-export { runWithCqEnv } from '../config/run-env.js';
+export type { EntryEnv } from '../config/run-env.js';
+export { currentEntryEnv, runWithCqEnv } from '../config/run-env.js';

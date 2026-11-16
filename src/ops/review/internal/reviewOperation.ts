@@ -150,6 +150,49 @@ export const HistorySchema = z
     digest: DigestSchema,
   })
   .strict();
+/** One claimed path/line anchor on an imported report; unverified by itself. */
+const ClaimedScopeRowSchema = z
+  .object({
+    path: z.string().min(1),
+    blob: z.string().regex(new RegExp('^[0-9a-f]{40,64}$')),
+    intervals: z.array(z.tuple([z.number().int().min(1), z.number().int().min(1)])),
+  })
+  .strict();
+/** Wire form of review.record: an external report import, never a dispatch. */
+export const RecordWireSchema = z
+  .object({
+    v: z.literal(1),
+    op: z.literal('record'),
+    producer: z.enum(['manual', 'agent']),
+    source_id: z.string().min(1).max(200),
+    repo: SlotSchema.optional(),
+    head_commit: CommitSchema.optional(),
+    base_commit: CommitSchema.optional(),
+    head_tree: CommitSchema.optional(),
+    target: z.string().min(1).max(200).optional(),
+    reviewer: z.string().min(1).max(200).optional(),
+    authenticated_submitter: z.string().min(1).max(200).optional(),
+    verdict: z.enum(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']).optional(),
+    claimed_scope: z.array(ClaimedScopeRowSchema).max(256).optional(),
+    independence: z.string().min(1).max(500).optional(),
+    supersedes: DigestSchema.optional(),
+    forge_evidence: z.enum(['off-forge-import', 'github-review-comment']).optional(),
+    report: z.object({ encoding: z.literal('utf8'), data: z.string().max(262144) }).strict(),
+  })
+  .strict();
+/** Response for review.record: idempotent import disposition, never credit. */
+export const RecordResponseSchema = z
+  .object({
+    v: z.literal(1),
+    op: z.literal('record'),
+    action: z.enum(['recorded', 'duplicate', 'quarantined', 'refused']),
+    record_digest: DigestSchema.nullable(),
+    duplicate_of: DigestSchema.nullable(),
+    supersedes: DigestSchema.nullable(),
+    publication: z.enum(['spooled', 'disabled']).optional(),
+    reason: z.string().min(1).max(500).optional(),
+  })
+  .strict();
 export const RequestSchema = z
   .object({
     v: z.literal(1),
@@ -158,6 +201,8 @@ export const RequestSchema = z
     item: z.string().min(1),
     created_at: z.string().min(1),
     principal: z.string().min(1).optional(),
+    // Retained queue-binding admission decision (S3c metrics); never on the wire.
+    admission_action: z.enum(['created', 'joined', 'reused', 'observed']).optional(),
     notify_status: NotifyStateSchema.optional(),
     supersedes: z
       .string()
@@ -283,6 +328,7 @@ export const WireSchema = z.union([
       cursor: z.number().int().min(0),
     })
     .strict(),
+  RecordWireSchema,
 ]);
 export const ResponseSchema = z.union([
   z
@@ -319,6 +365,7 @@ export const ResponseSchema = z.union([
           'cancel',
           'notify-update',
           'review-history',
+          'record',
         ]),
       ),
       features: z.array(
@@ -327,6 +374,7 @@ export const ResponseSchema = z.union([
           'chunked-result-v1',
           'repeat-generations-v1',
           'review-history-v1',
+          'review-record-v1',
         ]),
       ),
       limits: z
@@ -362,6 +410,7 @@ export const ResponseSchema = z.union([
         .strict(),
     })
     .strict(),
+  RecordResponseSchema,
 ]);
 export const ReceiptSchema = z
   .object({
@@ -536,5 +585,24 @@ export const HistoryInputSchema = z
     predecessor: RequestIdSchema.optional(),
     limit: z.number().int().min(1).max(50).default(20),
     cursor: z.number().int().min(0).default(0),
+  })
+  .strict();
+export const RecordInputSchema = z
+  .object({
+    producer: z.enum(['manual', 'agent']),
+    sourceId: z.string().min(1).max(200),
+    repo: SlotSchema.optional(),
+    head: CommitSchema.optional(),
+    base: CommitSchema.optional(),
+    headTree: CommitSchema.optional(),
+    target: z.string().min(1).max(200).optional(),
+    reviewer: z.string().min(1).max(200).optional(),
+    authenticatedSubmitter: z.string().min(1).max(200).optional(),
+    verdict: z.enum(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']).optional(),
+    claimedScope: z.array(ClaimedScopeRowSchema).max(256).optional(),
+    independence: z.string().min(1).max(500).optional(),
+    supersedes: DigestSchema.optional(),
+    forgeEvidence: z.enum(['off-forge-import', 'github-review-comment']).optional(),
+    report: z.string().min(1).max(262144),
   })
   .strict();

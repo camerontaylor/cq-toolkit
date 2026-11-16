@@ -59,15 +59,33 @@ def _capture(
     except Exception as exc:  # the oracle refusal is part of the contract
         expect = {"ok": False, "error": type(exc).__name__, "message": str(exc)}
     else:
-        expect = {"ok": True, "value": value}
+        expect = {"ok": True, "value": _a1_keys(value)}
         if reserialize:
-            expect["bytes"] = _compact(value)
+            expect["bytes"] = _compact(_a1_keys(value))
     return {"name": name, "source": source, "input": inputs, "expect": expect}
 
 
 def _compact(value: Any) -> str:
     """The exact `status_summary.publish` reserialisation (compact, ASCII)."""
     return json.dumps(value, separators=(",", ":"), ensure_ascii=True)
+
+
+def _a1_keys(value: Any) -> Any:
+    """Project a summary to the A1-scoped shared-oracle keys.
+
+    The a1-status fixtures are the byte oracle for the TypeScript summary-core
+    port (`src/policy/crq/statusSummary.ts`), which mirrors the summary as of
+    slice A1. The S3c `review_metrics` block is additive and Python-only: it
+    has no TS counterpart yet, so these fixtures strip it (with this
+    documented reason) instead of carrying a key the TS port silently
+    ignores. review_metrics stays snapshotted for the Python replay in
+    fixtures/group-p/summary.json.
+    """
+    if isinstance(value, dict):
+        return {key: _a1_keys(item) for key, item in value.items() if key != "review_metrics"}
+    if isinstance(value, list):
+        return [_a1_keys(item) for item in value]
+    return value
 
 
 def _utc_iso(epoch: float) -> str:
@@ -1597,6 +1615,9 @@ def publish_sections_family() -> Dict[str, Any]:
                 # Keep the publisher's own core in its own key order; on success
                 # `data` carries the receipt-aware `merged_current` replacement.
                 core = {key: data[key] for key in inputs["core"]}
+                # Strip the S3c review_metrics block from the A1-scoped core
+                # (see _a1_keys); the TS summary-core oracle predates it.
+                core.pop("review_metrics", None)
                 inputs["core"] = core
                 sections = {
                     "utilization": data["utilization"],

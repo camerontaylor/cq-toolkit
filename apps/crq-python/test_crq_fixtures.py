@@ -369,7 +369,7 @@ class CurrentFixture:
             for name in ("enroll",):
                 stack.enter_context(mock.patch.object(crq, name, return_value=[]))
             stack.enter_context(mock.patch.object(crq.repair_tick, "reconcile_fix_prs",
-                side_effect=lambda *args: self.assertIsNotNone(crq._FORGE_BUDGET)))
+                side_effect=lambda *args: self.assertIsNotNone(crq._FORGE_BUDGET) and {}))
             stack.enter_context(mock.patch.object(crq, "make_worktree", return_value=(self.root / "wt", "fixture")))
             stack.enter_context(mock.patch.object(crq, "secret_scan_diff", return_value=(True, {})))
             child = stack.enter_context(mock.patch.object(crq.subprocess, "Popen", side_effect=fake_child))
