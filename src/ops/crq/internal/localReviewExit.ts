@@ -22,6 +22,7 @@ export interface LocalExitHarvestEffects {
     cls: JsonObject,
     endedAt: string,
     exitCode: number | null,
+    stream: Uint8Array | null,
   ): Promise<JsonObject>;
   cleanup(item: JsonObject, meta: JsonObject): Promise<void>;
   nowIso(): string;
@@ -162,7 +163,7 @@ export async function harvestLocalReviewExit(
       ['pause_reason', `${outcome} on ${runId}; owner action needed`],
     ]);
   const endedAt = string(required(exit, 'ended_at'));
-  next = await effects.complete(next, item, runId, cls, endedAt, exitCode);
+  next = await effects.complete(next, item, runId, cls, endedAt, exitCode, stream);
   try {
     await effects.cleanup(item, meta);
   } catch (error) {
