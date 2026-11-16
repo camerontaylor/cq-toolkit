@@ -288,7 +288,7 @@ const UTF16_LE_BOM = [0xff, 0xfe] as const;
 const UTF32_BE_BOM = [0x00, 0x00, 0xfe, 0xff] as const;
 const UTF32_LE_BOM = [0xff, 0xfe, 0x00, 0x00] as const;
 
-interface DecodedLedgerText {
+export interface DecodedLedgerText {
   readonly text: string;
   /** The bytes contained a surrogate code point, not a scalar character. */
   readonly rawSurrogate: boolean;
@@ -300,7 +300,7 @@ interface DecodedLedgerText {
  * heuristics. The decoded text is what Python hands to the JSON scanner
  * (`surrogatepass`, so lone surrogates survive to the canonical-domain check).
  */
-function decodeLedgerBytes(raw: Uint8Array): DecodedLedgerText {
+export function decodeLedgerBytes(raw: Uint8Array): DecodedLedgerText {
   if (startsWithBytes(raw, UTF32_BE_BOM)) return decodeUtf32(raw.subarray(4), true);
   if (startsWithBytes(raw, UTF32_LE_BOM)) return decodeUtf32(raw.subarray(4), false);
   if (startsWithBytes(raw, UTF16_BE_BOM)) return decodeUtf16(raw.subarray(2), true);

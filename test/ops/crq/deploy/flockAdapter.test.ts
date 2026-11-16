@@ -7,6 +7,7 @@ import {
   BUSY_EXIT,
   flockArgs,
   flockLockFs,
+  spawnFlock,
   type FlockProc,
 } from '../../../../src/ops/crq/deploy/flockAdapter.js';
 
@@ -38,11 +39,13 @@ describe('flockLockFs with a fake process', () => {
     const p = f.fs().tryLock('/x/deploy.lock');
     f.s.exitCb(BUSY_EXIT);
     await p;
-    expect(f.s.args[0]!.slice(0, 5)).toEqual([
+    expect(f.s.args[0]!.slice(0, 7)).toEqual([
       '-x',
       '-n',
+      '--no-fork',
       '-E',
       String(BUSY_EXIT),
+      '--',
       '/x/deploy.lock',
     ]);
     expect(f.s.args[0]).toEqual(flockArgs('/x/deploy.lock'));
@@ -73,6 +76,35 @@ describe('flockLockFs with a fake process', () => {
     const pc = c.fs().tryLock('/l');
     c.s.errCb(new Error('spawn flock ENOENT'));
     await expect(pc).rejects.toThrow('cannot run flock(1) for /l: spawn flock ENOENT');
+  });
+  test('lost resolves when the holder exits while held, not after release', async () => {
+    const a = fake();
+    const pa = a.fs().tryLock('/l');
+    a.s.stdoutCb('held\n');
+    const ha = (await pa)!;
+    let lostA = false;
+    ha.lost!.then(
+      () => (lostA = true),
+      () => undefined,
+    );
+    a.s.exitCb(1);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(lostA).toBe(true);
+    const b = fake();
+    const pb = b.fs().tryLock('/l');
+    b.s.stdoutCb('held\n');
+    const hb = (await pb)!;
+    let lostB = false;
+    hb.lost!.then(
+      () => (lostB = true),
+      () => undefined,
+    );
+    const rel = hb.release();
+    b.s.exitCb(0);
+    await rel;
+    await Promise.resolve();
+    expect(lostB).toBe(false);
   });
   test('release closes stdin, waits for the exit, and is idempotent', async () => {
     const f = fake();
@@ -129,6 +161,38 @@ describe.skipIf(!flockOk)('flockLockFs with real flock(1)', () => {
     const again = await flockLockFs().tryLock(path);
     expect(again).not.toBeNull();
     await again!.release();
+  });
+  test('a lock path with a leading dash is a path, not an option', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'flock-dash-'));
+    const prior = process.cwd();
+    process.chdir(base);
+    try {
+      const first = await flockLockFs().tryLock('--unlock');
+      expect(first).not.toBeNull();
+      expect(await flockLockFs().tryLock('--unlock')).toBeNull();
+      await first!.release();
+    } finally {
+      process.chdir(prior);
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+  test('release kills the tracked holder and a later attempt acquires the lock', async () => {
+    const path = join(dir, 'c.lock');
+    // Suppress the stdin close so only kill() can end the holder. That path frees
+    // the lock only when the process we track is the flock(2) owner, which is why
+    // flockArgs passes --no-fork instead of letting flock(1) fork a child.
+    const start = (args: readonly string[]): FlockProc => ({
+      ...spawnFlock(args),
+      closeStdin: () => undefined,
+    });
+    const fs = flockLockFs({ spawn: start, releaseGraceMs: 0 });
+    const holder = (await fs.tryLock(path))!;
+    expect(holder).not.toBeNull();
+    expect(await flockLockFs().tryLock(path)).toBeNull();
+    await holder.release();
+    const next = await flockLockFs().tryLock(path);
+    expect(next).not.toBeNull();
+    await next!.release();
   });
   test('the lock dies with the holder: closing stdin of a killed parent frees it', async () => {
     const path = join(dir, 'b.lock');

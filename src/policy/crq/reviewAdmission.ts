@@ -115,6 +115,13 @@ function pythonDeepEqual(left: JsonValue | undefined, right: JsonValue | undefin
       ([key, value]) => right.has(key) && pythonDeepEqual(value, right.get(key)),
     );
   }
+  if (left instanceof JsonNumber && right instanceof JsonNumber) {
+    if (left.integer !== null && right.integer !== null) return left.integer === right.integer;
+    if (left.float !== null && right.float !== null) return left.float === right.float;
+    const [int, float] =
+      left.integer !== null ? [left.integer, right.float] : [right.integer, left.float];
+    return float !== null && int !== null && Number.isInteger(float) && BigInt(float) === int;
+  }
   if (Array.isArray(left) && Array.isArray(right)) {
     return (
       left.length === right.length &&
