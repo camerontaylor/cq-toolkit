@@ -28,6 +28,9 @@ const HELD = 'held\n';
 
 export function flockArgs(path: string): string[] {
   return [
+    // --no-fork: the command is exec'd in flock(1)'s own process, so the process this
+    // adapter monitors holds the inherited lock and the lock cannot outlive it.
+    '--no-fork',
     '-x',
     '-n',
     '-E',
