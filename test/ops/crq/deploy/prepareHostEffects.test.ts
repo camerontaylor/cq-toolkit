@@ -515,3 +515,18 @@ describe('main', () => {
     );
   });
 });
+
+describe('withTickLock lock loss', () => {
+  test('rejects when the holder is lost while the protected work is running', async () => {
+    const dir = fresh();
+    mkdirSync(join(dir, 'apps/crq-python'), { recursive: true });
+    let lose: () => void = () => undefined;
+    const lost = new Promise<void>((r) => (lose = r));
+    const lockFs = {
+      mkdirp: async () => undefined,
+      tryLock: async () => ({ release: async () => undefined, lost }),
+    };
+    const work = withTickLock(lockFs, dir, () => new Promise<string>(() => lose()));
+    await expect(work).rejects.toThrow('tick lock lost while held');
+  });
+});

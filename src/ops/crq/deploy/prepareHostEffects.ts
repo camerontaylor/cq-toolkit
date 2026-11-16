@@ -236,7 +236,11 @@ export async function withTickLock<T>(
   const handle = await lockFs.tryLock(`${state}/tick.lock`);
   if (handle === null) throw new BlockingIOError();
   try {
-    return await fn();
+    if (handle.lost === undefined) return await fn();
+    const lostSignal = handle.lost.then(() => {
+      throw new Error(`tick lock lost while held: ${state}/tick.lock`);
+    });
+    return await Promise.race([fn(), lostSignal]);
   } finally {
     await handle.release();
   }

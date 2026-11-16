@@ -146,8 +146,10 @@ async function walk(directory: string, prefix: string, out: Walked[]): Promise<v
   let names: string[];
   try {
     names = await readdir(directory);
-  } catch {
-    return; // os.walk ignores unreadable directories.
+  } catch (error) {
+    // Python's os.walk skips unreadable directories; an inventory that does so
+    // would match on both sides while omitting files, so fail instead.
+    return fail(`cannot inventory directory: ${directory}: ${(error as Error).message}`);
   }
   const dirs: string[] = [];
   const files: string[] = [];

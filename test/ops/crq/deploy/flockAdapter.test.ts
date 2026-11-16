@@ -74,6 +74,35 @@ describe('flockLockFs with a fake process', () => {
     c.s.errCb(new Error('spawn flock ENOENT'));
     await expect(pc).rejects.toThrow('cannot run flock(1) for /l: spawn flock ENOENT');
   });
+  test('lost resolves when the holder exits while held, not after release', async () => {
+    const a = fake();
+    const pa = a.fs().tryLock('/l');
+    a.s.stdoutCb('held\n');
+    const ha = (await pa)!;
+    let lostA = false;
+    ha.lost!.then(
+      () => (lostA = true),
+      () => undefined,
+    );
+    a.s.exitCb(1);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(lostA).toBe(true);
+    const b = fake();
+    const pb = b.fs().tryLock('/l');
+    b.s.stdoutCb('held\n');
+    const hb = (await pb)!;
+    let lostB = false;
+    hb.lost!.then(
+      () => (lostB = true),
+      () => undefined,
+    );
+    const rel = hb.release();
+    b.s.exitCb(0);
+    await rel;
+    await Promise.resolve();
+    expect(lostB).toBe(false);
+  });
   test('release closes stdin, waits for the exit, and is idempotent', async () => {
     const f = fake();
     const p = f.fs().tryLock('/l');

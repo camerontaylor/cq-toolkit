@@ -12,6 +12,8 @@ import { mkdir } from 'node:fs/promises';
 
 export interface FlockHandle {
   release(): Promise<void>;
+  /** Resolves if the holder dies while the lock is still wanted (the lock is gone). */
+  readonly lost?: Promise<void>;
 }
 export interface FlockProc {
   onStdout(cb: (chunk: string) => void): void;
@@ -70,17 +72,24 @@ export function flockLockFs(
         const proc = start(flockArgs(path));
         let acquired = false;
         let exited = false;
+        let releasing = false;
+        let signalLost: () => void = () => undefined;
+        const lost = new Promise<void>((r) => (signalLost = r));
         let buffer = '';
         const exitWaiters: (() => void)[] = [];
         proc.onError((e) => {
           exited = true;
+          if (acquired && !releasing) signalLost();
           if (!acquired) reject(new Error(`cannot run flock(1) for ${path}: ${e.message}`));
           exitWaiters.splice(0).forEach((w) => w());
         });
         proc.onExit((code) => {
           exited = true;
           exitWaiters.splice(0).forEach((w) => w());
-          if (acquired) return;
+          if (acquired) {
+            if (!releasing) signalLost();
+            return;
+          }
           if (code === BUSY_EXIT) resolve(null);
           else reject(new Error(`flock(1) exited ${String(code)} before acquiring ${path}`));
         });
@@ -90,8 +99,10 @@ export function flockLockFs(
           acquired = true;
           let released: Promise<void> | null = null;
           resolve({
+            lost,
             release: () =>
               (released ??= new Promise<void>((done) => {
+                releasing = true;
                 if (exited) return done();
                 const timer = setTimeout(() => proc.kill(), grace);
                 exitWaiters.push(() => {
