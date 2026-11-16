@@ -14,7 +14,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { beforeAll, describe, expect, test } from 'vitest';
 import { parseJsonValue } from '../../../../src/policy/crq/jsonValue.js';
 import { pythonJsonText } from '../../../../src/policy/crq/pythonJson.js';
 import {
@@ -341,29 +341,34 @@ const norm = (text: string, tail: boolean | undefined): string =>
   tail === true ? text.replace(TAIL, '$1…$2') : text;
 
 describe.skipIf(!haveOracle)('unit guards match deploy-controller.py', () => {
-  const base = mkdtempSync(join(tmpdir(), 'unit-guards-'));
-  const pyDirs = scenarios.map((sc, i) => {
-    const dir = join(base, `py-${i}`);
-    mkdirSync(dir);
-    materialise(dir, sc);
-    return dir;
+  let base: string;
+  let expected: Record<string, Record<string, unknown>>[];
+
+  beforeAll(() => {
+    base = mkdtempSync(join(tmpdir(), 'unit-guards-'));
+    const pyDirs = scenarios.map((sc, i) => {
+      const dir = join(base, `py-${i}`);
+      mkdirSync(dir);
+      materialise(dir, sc);
+      return dir;
+    });
+    const python = spawnSync(
+      'python3',
+      [
+        '-I',
+        '-c',
+        PY,
+        controller,
+        JSON.stringify(UNITS),
+        JSON.stringify(GIT),
+        JSON.stringify(UNIT_DIGESTS),
+        ...pyDirs,
+      ],
+      { encoding: 'utf8' },
+    );
+    if (python.status !== 0) throw new Error(`oracle failed: ${python.stderr}`);
+    expected = JSON.parse(python.stdout) as Record<string, Record<string, unknown>>[];
   });
-  const python = spawnSync(
-    'python3',
-    [
-      '-I',
-      '-c',
-      PY,
-      controller,
-      JSON.stringify(UNITS),
-      JSON.stringify(GIT),
-      JSON.stringify(UNIT_DIGESTS),
-      ...pyDirs,
-    ],
-    { encoding: 'utf8' },
-  );
-  if (python.status !== 0) throw new Error(`oracle failed: ${python.stderr}`);
-  const expected = JSON.parse(python.stdout) as Record<string, Record<string, unknown>>[];
 
   scenarios.forEach((sc, i) => {
     test(sc.name, async () => {
