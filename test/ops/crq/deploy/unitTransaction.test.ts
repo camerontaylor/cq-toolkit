@@ -28,7 +28,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { beforeAll, describe, expect, test } from 'vitest';
 import {
   parseJsonValue,
   toPlainJsonRetainingNumbers,
@@ -733,13 +733,16 @@ describe.skipIf(!haveOracle)('unit transaction matches deploy-controller.py', ()
     materialise(dir, sc);
     return dir;
   });
-  const python = spawnSync(
-    'python3',
-    ['-I', '-c', PY, controller, JSON.stringify(GIT), JSON.stringify(UNIT_DIGESTS), TX, ...pyDirs],
-    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
-  );
-  if (python.status !== 0) throw new Error(`oracle failed: ${python.stderr}`);
-  const expected = toPlainJsonRetainingNumbers(parseJsonValue(python.stdout)) as unknown[];
+  let expected: unknown[];
+  beforeAll(() => {
+    const python = spawnSync(
+      'python3',
+      ['-I', '-c', PY, controller, JSON.stringify(GIT), JSON.stringify(UNIT_DIGESTS), TX, ...pyDirs],
+      { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+    );
+    if (python.status !== 0) throw new Error(`oracle failed: ${python.stderr}`);
+    expected = toPlainJsonRetainingNumbers(parseJsonValue(python.stdout)) as unknown[];
+  });
 
   scenarios.forEach((sc, i) => {
     test(sc.name, async () => {
