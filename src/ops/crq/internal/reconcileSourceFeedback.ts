@@ -132,12 +132,34 @@ export interface SourcePublishEffects extends MergeProofEffects {
   resolveSourceThread(firstJob: string, jobId: string, threadId: string): Promise<boolean>;
 }
 
+/** `planRepairHarvest`'s ownership stamp: a row whose `receipt.repair_task` names another
+ * repair job belongs to a newer generation (`preserved-newer-generation`), and one with no
+ * task stamp is not contested. Only a contested row is a non-owner. */
+async function ownsFindingRow(
+  job: JsonObject,
+  id: string,
+  effects: SourcePublishEffects,
+): Promise<boolean> {
+  const findingId = job.get('canonical_finding_id');
+  if (typeof findingId !== 'string' || !findingId) return true; // Threadless truth is the ledger.
+  const row = await effects.evidence.readTriage(findingId);
+  if (row === null) return true;
+  const receipt = row.get('receipt');
+  const current = receipt instanceof JsonObject ? receipt.get('repair_task') : undefined;
+  if (current === undefined || current === null) return true;
+  return pythonValueEqual(current, id);
+}
+
 /** `publish_source_resolution`: resume source comments and thread resolutions from the
- * journal. Any failure carries the publication as mutated so far. */
+ * journal. Any failure carries the publication as mutated so far. A non-projected proof
+ * only reaches here after `markFixedOutcome` ran, so a job whose harvest plan preserved a
+ * newer generation's finding row is skipped: resolving its source thread would close
+ * feedback that generation still owns. */
 async function publishResolutions(
   record: JsonObject,
   publication: JsonObject,
   merge: string,
+  projected: boolean,
   effects: SourcePublishEffects,
 ): Promise<{ pending: boolean; publication: JsonObject }> {
   const jobs = record.get('jobs');
@@ -158,6 +180,9 @@ async function publishResolutions(
       const job = await effects.readJob(id);
       const pr = job.get('pr') ?? null;
       if (!pyTruthy(pr)) continue; // Threadless source truth is the finding ledger.
+      // `markFixedOutcome` did not write this finding: its harvest plan preserved a newer
+      // generation, so the source thread belongs to that generation, not to this job.
+      if (!projected && !(await ownsFindingRow(job, id, effects))) continue;
       const marker = `<!-- crq-repair-source:${id} -->`;
       if (!(await effects.hasSourceComment(pr, marker)))
         await effects.postSourceComment(first, id, pr, marker, merge);
@@ -218,6 +243,6 @@ export async function publishSource(
   }
   if (!pyTruthy(publication)) return { pending: false };
   if (!(publication instanceof JsonObject)) throw new Error('publication must be an object');
-  const done = await publishResolutions(record, publication, merge, effects);
+  const done = await publishResolutions(record, publication, merge, merged.projected, effects);
   return { pending: done.pending, publication: done.publication };
 }

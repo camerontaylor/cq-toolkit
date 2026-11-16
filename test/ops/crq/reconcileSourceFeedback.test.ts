@@ -324,6 +324,76 @@ describe('publishSource', () => {
     );
     expect(log).toEqual([]);
   });
+  test('a finding row a newer generation owns keeps its thread unresolved', async () => {
+    const { e, log } = feedback({
+      threads: { 'crq-j1': { kind: 'found', id: 'T1' } },
+      evidence: {
+        git: async (args) => ({ args, code: 0, stdout: new Uint8Array(), stderr: '' }),
+        readJob: async (id) => obj({ job: id, item: ctx.itemId, run: ctx.run, finding: {} }),
+        readTriage: async () =>
+          obj({
+            canonical_id: FINDING,
+            previous_event_id: null,
+            status: 'delivered',
+            receipt: { repair_task: 'crq-j9' },
+          }),
+        resolveTarget: async () => 'd'.repeat(40),
+        ensureCommit: async () => true,
+      },
+    });
+    const out = await publishSource(ctx, rec(), info(), plainProof, merge, e);
+    expect(log).toEqual([]);
+    expect(out.pending).toBe(false);
+    expect(plain((out.publication as JsonObject).get('source_resolutions'))).toEqual([]);
+  });
+  test('a finding row this job still owns is resolved as before', async () => {
+    const { e, log } = feedback({
+      threads: { 'crq-j1': { kind: 'found', id: 'T1' } },
+      evidence: {
+        git: async (args) => ({ args, code: 0, stdout: new Uint8Array(), stderr: '' }),
+        readJob: async (id) => obj({ job: id, item: ctx.itemId, run: ctx.run, finding: {} }),
+        readTriage: async () =>
+          obj({
+            canonical_id: FINDING,
+            previous_event_id: null,
+            status: 'delivered',
+            receipt: { repair_task: 'crq-j1' },
+          }),
+        resolveTarget: async () => 'd'.repeat(40),
+        ensureCommit: async () => true,
+      },
+    });
+    await publishSource(ctx, rec(), info(), plainProof, merge, e);
+    expect(log).toEqual(['comment:crq-j1', 'resolve:crq-j1:T1', 'journal:crq-j1:["crq-j1"]']);
+  });
+  test('a projected proof still resolves a row another generation stamps', async () => {
+    const { e, log } = feedback({
+      threads: { 'crq-j1': { kind: 'found', id: 'T1' } },
+      evidence: {
+        git: async (args) => ({ args, code: 0, stdout: new Uint8Array(), stderr: '' }),
+        readJob: async (id) => obj({ job: id, item: ctx.itemId, run: ctx.run, finding: {} }),
+        readTriage: async () =>
+          obj({
+            canonical_id: FINDING,
+            previous_event_id: null,
+            status: 'delivered',
+            receipt: { repair_task: 'crq-j9' },
+          }),
+        resolveTarget: async () => 'd'.repeat(40),
+        ensureCommit: async () => true,
+      },
+    });
+    const proof = {
+      projected: true,
+      proof: obj({
+        published_head: published,
+        actual_head: published,
+        canonical_fixed_events: { 'crq-j1': 'ev-1' },
+      }),
+    };
+    await publishSource(ctx, rec(), info(), proof, merge, e);
+    expect(log).toEqual(['comment:crq-j1', 'resolve:crq-j1:T1', 'journal:crq-j1:["crq-j1"]']);
+  });
   test('a projected proof that still holds publishes', async () => {
     const { e, log } = feedback();
     const proof = {
