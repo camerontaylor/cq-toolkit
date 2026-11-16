@@ -63,43 +63,6 @@ const KNOWN: Record<string, Record<string, (d: Disagreement) => boolean>> = {
     'integers beyond 2**53 lose precision': (d) =>
       d.python.ok && d.ts.ok && JSON.stringify(d.python).includes('"int:'),
   },
-  next_slot: {
-    // Python: `10 - None` raises TypeError. TS: `limit ?? 10` / `remaining ?? 0` default it.
-    // The divergence is "Python raised, TS returned a value".
-    'explicit null limit or remaining': (d) => {
-      const u = d.case.usage as Case | null;
-      return !d.python.ok && d.ts.ok && (u?.limit === null || u?.remaining === null);
-    },
-    // Python: True is an int (1 ms). TS: typeof boolean is refused.
-    // The divergence is "Python returned a value, TS raised".
-    'boolean millisecond field': (d) => {
-      const u = d.case.usage as Case | null;
-      return (
-        d.python.ok &&
-        !d.ts.ok &&
-        (typeof u?.rollingWindowMs === 'boolean' || typeof u?.fullCapacityInMs === 'boolean')
-      );
-    },
-    // Python timedelta rounds half-even to the microsecond; TS Math.round is half-up.
-    // Both return a value; the values differ.
-    'sub-microsecond rounding': (d) => {
-      const u = d.case.usage as Case | null;
-      return (
-        d.python.ok &&
-        d.ts.ok &&
-        [u?.rollingWindowMs, u?.fullCapacityInMs].some(
-          (v) => typeof v === 'number' && !Number.isInteger(v * 1000),
-        )
-      );
-    },
-  },
-  starts_last_hour: {
-    // Python: parse_iso('') / parse_iso(None) is None, then `None > cutoff`
-    // raises TypeError. TS skips the entry and counts the rest.
-    // The divergence is "Python raised, TS returned a count".
-    'null or empty start': (d) =>
-      !d.python.ok && d.ts.ok && (d.case.starts as unknown[]).some((v) => v === null || v === ''),
-  },
 };
 
 function check(name: string, run: (c: Case) => unknown) {
@@ -124,7 +87,7 @@ describe.skipIf(!python)('differential: Python oracle vs TS port', () => {
     expect(r.total - r.disagreeing).toBeGreaterThan(250);
   });
 
-  it('next_slot: only the documented divergences', () => {
+  it('next_slot: agrees exactly', () => {
     const r = check('next_slot', (c) => {
       const at = new UtcInstant(BigInt(c.at as number));
       const starts = (c.starts as (number | null)[]).map((s) =>
@@ -135,17 +98,15 @@ describe.skipIf(!python)('differential: Python oracle vs TS port', () => {
     });
     expect(r.total).toBeGreaterThan(400);
     expect(r.unexplained).toEqual([]);
-    expect(r.pinned.every(([, n]) => (n as number) > 0)).toBe(true);
-    expect(r.total - r.disagreeing).toBeGreaterThan(350);
+    expect(r.disagreeing).toBe(0);
   });
 
-  it('starts_last_hour: only the documented divergence', () => {
+  it('starts_last_hour agrees exactly', () => {
     const r = check('starts_last_hour', (c) =>
       startsLastHour({ starts: c.starts } as never, BigInt(c.now as number)),
     );
     expect(r.total).toBeGreaterThan(300);
     expect(r.unexplained).toEqual([]);
-    expect(r.pinned.every(([, n]) => (n as number) > 0)).toBe(true);
-    expect(r.total - r.disagreeing).toBeGreaterThan(250);
+    expect(r.disagreeing).toBe(0);
   });
 });

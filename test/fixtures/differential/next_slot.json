@@ -3016,6 +3016,23 @@
     "starts": [1794000000000000],
     "at": 1794000000000000,
     "usage": {
+      "remaining": true,
+      "limit": 2
+    }
+  },
+  {
+    "starts": [1794000000000000],
+    "at": 1794000000000000,
+    "usage": {
+      "remaining": false,
+      "limit": 1,
+      "fullCapacityInMs": 9
+    }
+  },
+  {
+    "starts": [1794000000000000],
+    "at": 1794000000000000,
+    "usage": {
       "remaining": 0,
       "fullCapacityInMs": 2.0000005
     }
