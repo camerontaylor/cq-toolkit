@@ -22,6 +22,7 @@
  *   the mode must be a regular file, claimed lines must lie within the blob's
  *   line count, and the claimed set must be a subset of the changed intervals.
  */
+import { splitNul } from '../../policy/crq/backfillAccounting.js';
 import { JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
 import {
   LedgerIntegrityError,
@@ -38,6 +39,11 @@ function integrity(message: string): LedgerIntegrityError {
 
 function decode(bytes: Uint8Array): string {
   return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+}
+
+/** Python's `name.decode("utf-8")`: non-UTF8 bytes raise, they never replace. */
+function decodeStrict(bytes: Uint8Array): string {
+  return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
 }
 
 /** One git call over the injected runner; stderr is surfaced on failures. */
@@ -106,21 +112,25 @@ export async function repositoryEntries(
 ): Promise<Map<string, { mode: string; blob: string }>> {
   const out = git(await runGit(['ls-tree', '-r', '-z', commit]));
   const result = new Map<string, { mode: string; blob: string }>();
-  for (const raw of decode(out).split('\0')) {
-    if (raw === '') continue;
-    const tab = raw.indexOf('\t');
+  // Record-split on the raw bytes first: decoding the whole stream would merge
+  // distinct Git paths (`ff2e7473` and `efbfbd2e7473` both become `\ufffd.ts`)
+  // before the byte-hex fallback could preserve them.
+  for (const raw of splitNul(out)) {
+    if (raw.length === 0) continue;
+    const tab = raw.indexOf(0x09);
     if (tab < 0) throw integrity('malformed ls-tree entry');
-    const meta = raw.slice(0, tab).split(' ');
+    const meta = decode(raw.slice(0, tab)).split(' ');
     const mode = meta[0] ?? '';
     const blob = meta[2] ?? '';
-    let name = raw.slice(tab + 1);
+    const nameBytes = raw.slice(tab + 1);
+    let name: string;
     // Python's `ledger.path` normalizes and refuses non-canonical paths; a
     // path it refuses is recorded under its byte-hex form, matching Python's
     // `git-path-bytes:` fallback for undecodable names.
     try {
-      name = ledgerPath(name);
+      name = ledgerPath(decodeStrict(nameBytes));
     } catch {
-      name = `git-path-bytes:${Buffer.from(name, 'utf8').toString('hex')}`;
+      name = `git-path-bytes:${Buffer.from(nameBytes).toString('hex')}`;
     }
     result.set(name, { mode, blob });
   }
