@@ -307,12 +307,7 @@ function summary(queue: JsonObject, linked: readonly LinkedRow[]): JsonObject {
     const item = asObject(entry);
     if (item === null || !itemIds.has(itemId(item))) continue;
     invocations += arrayOrEmpty(item.get('attempts')).length + (pyTruthy(item.get('run')) ? 1 : 0);
-    if (
-      item.get('state') === 'done' &&
-      item.get('scope_adequate') === true &&
-      typeof item.get('receipt_id') === 'string' &&
-      item.get('receipt_id')
-    ) {
+    if (isReviewed(item)) {
       completed += 1;
     }
     const failures = item.get('failures');
@@ -328,11 +323,22 @@ function summary(queue: JsonObject, linked: readonly LinkedRow[]): JsonObject {
   ]);
 }
 
+/** Completion evidence that this one item was actually reviewed. */
+function isReviewed(item: JsonObject): boolean {
+  return (
+    item.get('state') === 'done' &&
+    item.get('scope_adequate') === true &&
+    typeof item.get('receipt_id') === 'string' &&
+    Boolean(item.get('receipt_id'))
+  );
+}
+
 function cue(
   predecessor: LinkedRow | null,
   delta: JsonObject | null,
   totals: JsonObject,
   repeat: boolean,
+  reviewed: boolean,
 ): string | null {
   if (predecessor === null) return null;
   const head = (predecessor.headCommit ?? '').slice(0, 12);
@@ -362,7 +368,8 @@ function cue(
   } else if (delta !== null) {
     since.push('line counts unknown (binary or missing trees)');
   }
-  let result = `Previously reviewed at ${head}. Since then: ${since.join(', ')}. ${completed} CodeRabbit review(s) completed for this work.`;
+  const lead = reviewed ? 'Previously reviewed' : 'Earlier review request';
+  let result = `${lead} at ${head}. Since then: ${since.join(', ')}. ${completed} CodeRabbit review(s) completed for this work.`;
   if (repeat) {
     result += ' This request will wait behind first reviews. It is queued; keep working or wait.';
   }
@@ -390,12 +397,14 @@ function historyMaterial(
   totals: JsonObject,
   delta: JsonObject | null,
   headline: LinkedRow | null,
+  reviewed: boolean,
 ): JsonValue {
   return new JsonObject([
     ['relation', relation],
     ['repeat', repeat],
     ['summary', totals],
     ['delta', delta],
+    ['reviewed', reviewed],
     [
       'predecessor',
       headline === null
@@ -561,7 +570,19 @@ export async function projectHistory(
   const scope = input.task !== null ? 'task' : branch !== null ? 'branch' : 'none';
   const page = linked.slice(input.cursor, input.cursor + input.limit);
   const nextCursor = input.cursor + input.limit < linked.length ? input.cursor + input.limit : null;
-  const material = historyMaterial(relation, repeat, totals, delta, headline);
+  // Completion evidence for the selected predecessor only; totals.completed is
+  // an aggregate that can include other linked items.
+  let reviewed = false;
+  if (headline !== null) {
+    for (const entry of arrayOrEmpty(queue.get('items'))) {
+      const item = asObject(entry);
+      if (item !== null && itemId(item) === headline.item) {
+        reviewed = isReviewed(item);
+        break;
+      }
+    }
+  }
+  const material = historyMaterial(relation, repeat, totals, delta, headline, reviewed);
   return new JsonObject([
     ['v', JsonNumber.int(1)],
     ['status', 'ok'],
@@ -571,7 +592,7 @@ export async function projectHistory(
     ['predecessor', headline === null ? null : predecessorObject(headline)],
     ['delta', delta],
     ['summary', totals],
-    ['cue', cue(headline, delta, totals, repeat)],
+    ['cue', cue(headline, delta, totals, repeat, reviewed)],
     ['entries', page.map(rowObject)],
     ['cursor', JsonNumber.int(input.cursor)],
     ['next_cursor', nextCursor === null ? null : JsonNumber.int(nextCursor)],
