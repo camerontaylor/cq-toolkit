@@ -472,6 +472,48 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("declared entries", " ".join(evidence["foreign"]))
 
+    def test_type_wide_inherited_dropin_directory_is_unsupported(self):
+        declared = self.declare()
+        override = self.unit_dir / "service.d"
+        override.mkdir()
+        # systemd merges the type-wide directory into every service unit, so
+        # an ExecStart override there would execute outside the verified
+        # bytes even though FragmentPath still names the main unit file.
+        (override / "override.conf").write_text(
+            "[Service]\nExecStart=/bin/false\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("undeclared drop-in directory: " + str(override),
+                      " ".join(evidence["foreign"]))
+
+    def test_dash_prefix_inherited_dropin_directory_is_unsupported(self):
+        declared = self.declare()
+        override = self.unit_dir / "crq-.service.d"
+        override.mkdir()
+        # The dash-prefix directory applies to crq-tick.service even though
+        # it is not named after the unit, so discovery must reject it too.
+        (override / "override.conf").write_text(
+            "[Service]\nExecStart=/bin/false\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("undeclared drop-in directory: " + str(override),
+                      " ".join(evidence["foreign"]))
+
+    def test_symlinked_type_wide_dropin_directory_is_unsupported(self):
+        declared = self.declare()
+        held = self.base / "repos/held.service.d"
+        held.mkdir(parents=True)
+        (held / "override.conf").write_text(
+            "[Service]\nExecStart=/bin/false\n")
+        (self.unit_dir / "service.d").symlink_to(held)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("undeclared drop-in directory: " + str(
+            self.unit_dir / "service.d"), " ".join(evidence["foreign"]))
+
     def test_symlinked_dropin_directory_is_unsupported(self):
         declared = self.declare()
         held = self.unit_dir / "held-dropin"
@@ -573,6 +615,32 @@ class DiscoveryTests(PortFixture):
         foreign = " ".join(evidence["foreign"])
         self.assertIn("Unit names crq-tick.service", foreign)
         self.assertIn("PartOf names crq-tick.service", foreign)
+
+    def test_instance_socket_service_template_target_is_unsupported(self):
+        declared = self.declare()
+        # ``Service=%i.service`` on ``ingress@crq-tick.socket`` activates
+        # crq-tick.service; the instance name must be expanded before the scan.
+        self.write("ingress@crq-tick.socket",
+                   "[Socket]\nListenStream=1\nService=%i.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Service names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_co_installed_socket_service_target_is_unsupported(self):
+        declared = self.declare()
+        # ``[Socket] Service=`` selects the unit that incoming traffic
+        # activates, so a differently named co-installed socket is a foreign
+        # activation edge even without the selected unit's name prefix.
+        self.write("ingress.socket",
+                   "[Socket]\nListenStream=127.0.0.1:4440\n"
+                   "Service=crq-tick.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Service names crq-tick.service",
+                      " ".join(evidence["foreign"]))
 
     def test_declared_source_may_name_expected_units(self):
         declared = self.declare()
@@ -1013,7 +1081,9 @@ class LayoutTests(ControllerFixture):
         other_root = self.base / "other-root"
         state = other_root / "apps/crq-python/state"
         state.mkdir(parents=True)
-        (state / dc.LOCK_NAME).write_text("")
+        lock = state / dc.LOCK_NAME
+        lock.write_text("")
+        lock.chmod(0o600)
         other = live.HostLayout(
             root=other_root, unit_dir=self.units_home,
             record_dir=self.overlay_records, overlay=self.overlay)
