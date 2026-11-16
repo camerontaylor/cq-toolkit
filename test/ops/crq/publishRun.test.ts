@@ -1950,14 +1950,26 @@ describe('round-2 coverage: publisher clone ownership and durable transitions', 
       await writeFile(join(stateRoot, 'queue.json'), '{"items":[]}\n');
       const clone = join(root, 'clone');
       await import('node:fs/promises').then((fs) => fs.mkdir(clone, { recursive: true }));
+      // The drain reads `crq.CONFIG` (`config.json`), which Python loads at
+      // import; the live route validates it before the unit runs. No `notify`
+      // section means nothing is deliverable.
+      await writeFile(join(root, 'config.json'), `${JSON.stringify({ clone })}\n`);
       const { runPublishUnit } = await import('../../../src/adapters/crq/publishSource.js');
       const outcome = await runPublishUnit({
         stateRoot,
         cloneRoot: clone,
+        runnerRoot: root,
         durableArtifactRoot: join(root, 'artifacts'),
       });
-      // Python: {"publication": "disabled"}, a unit success with exit 0.
-      expect(outcome).toEqual({ status: 'ok', value: { publication: 'disabled' } });
+      // Python: {"publication": "disabled"} plus the coverage phase's own
+      // disabled report; a unit success with exit 0.
+      expect(outcome).toEqual({
+        status: 'ok',
+        value: { publication: 'disabled', coverage: 'disabled' },
+        exitCode: 0,
+      });
+      // The drain ran (it creates its own lock inode) and delivered nothing.
+      await expect(stat(join(stateRoot, 'review-notify.lock'))).resolves.toBeDefined();
       // No failure marker was written.
       await expect(
         stat(join(stateRoot, 'backfill', 'publication-failure.json')),
@@ -1993,13 +2005,16 @@ describe('round-2 coverage: publisher clone ownership and durable transitions', 
       // Absent rollout at the configured root: disabled, not failure.
       expect(await crq.publishLiveCommand(root)).toEqual({
         status: 'ok',
-        value: { publication: 'disabled' },
+        value: { publication: 'disabled', coverage: 'disabled' },
+        exitCode: 0,
       });
-      // A malformed rollout at the configured root is the integrity refusal.
+      // A malformed rollout at the configured root is a decode failure, as in
+      // Python (`runtime.settings` calls `ledger.loads` unguarded), never
+      // disabled and never the prerequisites refusal.
       await writeFile(join(stateRoot, 'backfill-rollout.json'), '{"durable_artifact_root":');
       const failed = await crq.publishLiveCommand(root);
       expect(failed.status).toBe('failed');
-      expect(failed.error).toBe('backfill rollout prerequisites incomplete');
+      expect(failed.error).toMatch(/JSON|position|Unexpected|Expected|end/i);
       // A missing or clone-less config.json is the CONFIG-load failure:
       // Python raises before settings() could ever return None.
       await writeFile(join(root, 'config.json'), '{}\n');
@@ -2031,17 +2046,147 @@ describe('round-2 coverage: publisher clone ownership and durable transitions', 
       await import('node:fs/promises').then((fs) => fs.mkdir(clone, { recursive: true }));
       const crq = (await import('../../../src/queue-runner/crq.js')) as {
         publisherStateRoot: (runnerRoot: string) => Promise<string>;
-        readPublisherRoots: (
-          runnerRoot: string,
-        ) => Promise<{ stateRoot: string; cloneRoot: string } | null>;
+        readPublisherRoots: (runnerRoot: string) => Promise<{
+          stateRoot: string;
+          cloneRoot: string;
+          runnerRoot: string;
+          durableArtifactRoot: string | null;
+        } | null>;
       };
       const probed = await crq.publisherStateRoot(root);
       expect(isAbsolute(probed)).toBe(true);
       expect(probed).toBe(join(root, 'state'));
-      // No rollout at the resolved root: readPublisherRoots reports null and
-      // the CLI branch reports disabled (already covered above).
+      // No rollout at the resolved root: the roots resolve and the durable
+      // artifact root stays null, which the unit reports as disabled.
       const roots = await crq.readPublisherRoots(root);
-      expect(roots).toBeNull();
+      expect(roots).toEqual({
+        stateRoot: join(root, 'state'),
+        cloneRoot: clone,
+        runnerRoot: root,
+        durableArtifactRoot: null,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the publish unit end to end (live bindings over real git)', () => {
+  /**
+   * The whole unit through `filePublishUnitEffects`: real `tick.lock`/
+   * `review-notify.lock`/`coverage.lock` inodes, the real queue file, the real
+   * git ledger over a real bare remote, the real notification drain, and the
+   * real coverage refresher over the publisher-owned clone. Only the transport
+   * signer is a stand-in, exactly as the memory replay injects `pushCommit`;
+   * Python's spool push is an ssh side effect this host cannot host.
+   */
+  test('publishes once, drains, refreshes, and reruns without a second append', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-unit-live-'));
+    try {
+      const stateRoot = join(root, 'state');
+      const durable = join(root, 'artifacts');
+      await mkdir(stateRoot, { recursive: true });
+      await mkdir(durable, { recursive: true });
+      await writeFile(join(stateRoot, 'queue.json'), '{"items":[]}\n');
+
+      const { pending } = seedCase('single-enrollment');
+      const publication = join(stateRoot, 'backfill', 'publication', 'pending');
+      await mkdir(publication, { recursive: true });
+      for (const value of pending) {
+        await writeFile(join(publication, `${recordId(value)}.json`), ledgerCanonicalBytes(value));
+      }
+      await writeFile(
+        join(stateRoot, 'backfill-rollout.json'),
+        `${JSON.stringify({
+          operational_ruling: 'fixture',
+          no_live_run_verification: 'fixture',
+          owner_branch_ruleset_evidence: 'fixture',
+          durable_artifact_root: durable,
+          runner_identity: 'crq-runner-app',
+          publisher_spool: { ssh_alias: 'crq@spool.invalid', ssh_key: '/unused/key' },
+        })}\n`,
+      );
+
+      // A real bare remote plus a real scheduler clone over actual git.
+      const { execFileSync } = await import('node:child_process');
+      const git = (...args: string[]): void => {
+        execFileSync('git', args, { stdio: 'pipe' });
+      };
+      const remote = join(root, 'remote.git');
+      const clone = join(root, 'clone');
+      git('init', '--bare', '--initial-branch=cq/review-ledger', remote);
+      git('init', clone);
+      git('-C', clone, 'config', 'user.name', 'crq-fixture');
+      git('-C', clone, 'config', 'user.email', 'crq-fixture@localhost');
+      git('-C', clone, 'remote', 'add', 'origin', remote);
+      git('-C', clone, 'commit', '--allow-empty', '-m', 'seed');
+      git('-C', clone, 'push', 'origin', 'HEAD:cq/review-ledger');
+
+      // Python loads `crq.CONFIG` at import; the drain reads the same document.
+      await writeFile(join(root, 'config.json'), `${JSON.stringify({ clone })}\n`);
+
+      const { filePublishUnitEffects } = await import('../../../src/adapters/crq/publishSource.js');
+      const { runPublishMain } = await import('../../../src/ops/crq/publishUnit.js');
+      const publisherGit = join(stateRoot, 'backfill', 'publisher.git');
+      const effects = {
+        ...filePublishUnitEffects({
+          stateRoot,
+          cloneRoot: clone,
+          runnerRoot: root,
+          durableArtifactRoot: durable,
+        }),
+        // The signer stand-in: publish the committed batch from the
+        // publisher-owned clone to the origin the driver then re-fetches.
+        pushCommit: async (_base: string, head: string): Promise<void> => {
+          execFileSync(
+            'git',
+            ['-C', publisherGit, 'push', 'origin', `${head}:refs/heads/cq/review-ledger`],
+            { stdio: 'pipe' },
+          );
+        },
+      };
+
+      const remoteHead = (): string =>
+        execFileSync('git', ['-C', remote, 'rev-parse', 'cq/review-ledger'], {
+          encoding: 'utf8',
+        }).trim();
+      const recordPaths = (): string[] =>
+        execFileSync('git', ['-C', remote, 'ls-tree', '-r', '--name-only', 'cq/review-ledger'], {
+          encoding: 'utf8',
+        })
+          .split('\n')
+          .filter((line) => line.startsWith('records/'));
+
+      // First tick: drain (nothing to deliver), publish, refresh.
+      const first = await runPublishMain(effects);
+      expect(first.publication).toBe('reconciled');
+      expect(first.notifications).toBeUndefined();
+      expect(first.ledger_head).toBe(remoteHead());
+      // The refresh ran because the publication supplied a published head; it
+      // found no live targets, so its result carries the fetched head only and
+      // no wake was written (nothing could change admission).
+      expect(first.coverage).toEqual({ head: remoteHead(), targets: {} });
+      await expect(stat(join(stateRoot, 'next-review-at'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      const firstHead = remoteHead();
+      expect(recordPaths()).toHaveLength(pending.length);
+      expect((await readdir(join(stateRoot, 'backfill', 'publication', 'ack'))).length).toBe(
+        pending.length,
+      );
+      // The drain created its own persistent lock inode; nothing was spooled.
+      await expect(stat(join(stateRoot, 'review-notify.lock'))).resolves.toBeDefined();
+
+      // Second tick: the outbox is acknowledged and the request marker is
+      // absent, so publication and coverage both idle and the ledger head is
+      // byte-identical: a rerun can never append the same record twice.
+      const second = await runPublishMain(effects);
+      expect(second).toEqual({ publication: 'idle', coverage: 'idle' });
+      expect(remoteHead()).toBe(firstHead);
+      expect(recordPaths()).toHaveLength(pending.length);
+      await expect(stat(join(stateRoot, 'next-review-at'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

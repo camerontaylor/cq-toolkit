@@ -28,6 +28,19 @@ export async function atomicWrite(path: string, data: string | Uint8Array): Prom
   }
 }
 
+/**
+ * Python `ledger.fsync_dir`: make a directory entry change durable. Used after
+ * unlinking a marker Python removes under its atomic-write discipline.
+ */
+export async function fsyncDir(dir: string): Promise<void> {
+  const directory = await open(dir, 'r');
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
+
 /** Caller must hold the same exclusive writer lock for this path throughout cleanup.
  * Only UUID-named adapter temps are removed by default. Python's eight-character
  * tempfile names require explicit opt-in because their namespace is less specific.

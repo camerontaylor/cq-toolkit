@@ -233,6 +233,13 @@ After the real event the observe phase requires the same record bytes, the same
 owned file bytes and metadata, and only source-bound activation transitions:
 both activators remain enabled, and an active service must be explained by an
 enabled active timer or path. The actual recovery CLI is then invoked twice.
+**Superseded 2026-11-14:** the paragraphs below record a run of the former
+`activation_pending` gate, which refused every post-`start` recovery. The
+controller now restores the snapshot when recovery re-establishes and observes
+a complete fence, and refuses only when the fence cannot be demonstrated. This
+partial-mode harness still asserts the old rc-3 branch and is not evidence for
+the new gate; re-run it on a disposable VM and re-baseline the expected result
+before citing this mode for release.
 Each invocation must return rc ``3`` with the controller's own
 ``activation may have occurred`` ambiguity branch, a drained queue, an empty
 job observation, no owned process, inactive activators, the durable mask, a

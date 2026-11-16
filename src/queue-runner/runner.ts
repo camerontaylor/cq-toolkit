@@ -45,7 +45,12 @@ const liveCommands = new Set<string>(LIVE_UNIT_COMMANDS);
  * returns the single JSON artifact plus its own exit code (3 for a busy tick
  * lock, Python parity).
  */
-export const LIVE_OPERATOR_COMMANDS = ['repair-prepare', 'status'] as const;
+export const LIVE_OPERATOR_COMMANDS = [
+  'repair-prepare',
+  'status',
+  'backfill',
+  'reconcile-merged',
+] as const;
 const operatorLiveCommands = new Set<string>(LIVE_OPERATOR_COMMANDS);
 const backfillCommands = new Set([
   'inventory',
@@ -70,7 +75,15 @@ export interface Plan {
   value: unknown;
 }
 export type Planner = (command: string, args: string[]) => Promise<Plan>;
-export type LiveDispatch = (command: string, args: string[]) => Promise<OpResult<unknown>>;
+/**
+ * A live unit's result, optionally carrying an explicit exit code. Python's
+ * publisher exits 1 when only the coverage refresh failed: publication
+ * succeeded and is still reported, but the unit must be visibly unhealthy.
+ * The runner strips `exitCode` from the artifact it prints.
+ */
+export type LiveDispatchResult = OpResult<unknown> & { readonly exitCode?: number };
+
+export type LiveDispatch = (command: string, args: string[]) => Promise<LiveDispatchResult>;
 export type OperatorLiveDispatch = (command: string, args: string[]) => Promise<RunnerResult>;
 
 /**
@@ -179,7 +192,11 @@ export async function run(
       };
     try {
       const result = await options.live(command, []);
-      return { artifact: result, exitCode: liveUnitExitCode(command, result) };
+      const { exitCode, ...artifact } = result;
+      return {
+        artifact,
+        exitCode: exitCode ?? liveUnitExitCode(command, result),
+      };
     } catch (error) {
       return {
         artifact: {

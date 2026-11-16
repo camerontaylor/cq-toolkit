@@ -41,7 +41,9 @@ dependency-scanned, so an outside unit naming an expected unit remains
 foreign, and systemd continuations are joined with ``config_parse`` semantics
 so a wrapped directive cannot hide a dependency. Symlinked directories and
 special files are not followed. It never follows an ``EnvironmentFile``
-target.
+target. A stale undeclared co-tenant ``*.wants``/``*.requires`` link to a gone
+target is skipped only when neither its link name nor its target name is a CRQ
+unit; a CRQ name remains a foreign dependency edge.
 """
 from __future__ import annotations
 
@@ -516,6 +518,33 @@ class SubprocessSystemd:
                         "symlink: " + str(entry))
         return None
 
+    @staticmethod
+    def _inherited_dropin_applies(base, units):
+        """Whether a drop-in directory name also applies to an expected unit.
+
+        Next to the exact ``<unit>.d/`` directory, systemd merges inherited
+        drop-in directories into the selected unit: a dash-prefix
+        ``<prefix>-.<suffix>.d/`` directory applies to every unit whose name
+        begins with ``<prefix>-``, and a type-wide ``<type>.d/`` directory
+        applies to every unit of that type. An applicable inherited drop-in
+        overrides the verified unit's directives without changing its
+        ``FragmentPath``, so discovery must reject it unless declared.
+        """
+        for unit in units:
+            if base == unit:
+                return True
+            if "." not in unit:
+                continue
+            type_name = unit.rsplit(".", 1)[1]
+            if base == type_name:
+                return True
+            suffix = "." + type_name
+            if base.endswith(suffix):
+                stem = base[:-len(suffix)]
+                if stem.endswith("-") and unit.startswith(stem):
+                    return True
+        return False
+
     def _scan_dependencies(self, base, expected, declared, foreign,
                            declared_dropins):
         declared_paths = {str(path) for path in declared}
@@ -558,6 +587,26 @@ class SubprocessSystemd:
                             # followed, matching the directory policy.
                             try:
                                 info = path.stat()
+                            except FileNotFoundError as exc:
+                                outcome, name = self._dangling_enablement(
+                                    path, target, base, declared_paths,
+                                    declared_resolved)
+                                if outcome == "skip":
+                                    # A stale undeclared co-tenant enablement
+                                    # link beside a still-present unit is not
+                                    # evidence about the selected topology.
+                                    # Keep scanning the remaining entries.
+                                    continue
+                                if outcome == "foreign":
+                                    # The entry name is the dependency edge
+                                    # systemd records, so a dangling link that
+                                    # names a CRQ unit is still foreign.
+                                    foreign.append(
+                                        "dangling enablement link names %s: %s"
+                                        % (name, path))
+                                    continue
+                                return ("dependency scan cannot resolve a symlink: "
+                                        + str(path) + ": " + str(exc)[:120])
                             except (OSError, RuntimeError) as exc:
                                 return ("dependency scan cannot resolve a symlink: "
                                         + str(path) + ": " + str(exc)[:120])
@@ -613,6 +662,27 @@ class SubprocessSystemd:
             except OSError as exc:
                 return "unit directory is unreadable: " + str(exc)[:160]
         return None
+
+    @staticmethod
+    def _dangling_enablement(path, target, base, declared_paths,
+                             declared_resolved):
+        """Classify a symlink whose target no longer exists.
+
+        Only an undeclared ``*.wants``/``*.requires`` entry whose link name and
+        resolved target name are both outside the CRQ namespace is skipped. A
+        CRQ name in either position is still a dependency edge and is reported
+        as foreign; a declared link or a non-enablement link keeps the existing
+        fail-closed refusal.
+        """
+        if path.parent.parent != base \
+                or not path.parent.name.endswith((".wants", ".requires")):
+            return "refuse", None
+        if str(path) in declared_paths or target in declared_resolved:
+            return "refuse", None
+        for name in (path.name, target.name):
+            if CRQ_NAME_RE.fullmatch(name) is not None:
+                return "foreign", name
+        return "skip", None
 
     def discover(self, unit, declared_paths):
         self._unit(unit)
@@ -710,7 +780,13 @@ class SubprocessSystemd:
                     and name.endswith((".d", ".wants", ".requires")):
                 error = error or probe_failure
                 continue
-            if is_dir and name.endswith(".d") and name[:-2] in units:
+            # An inherited type-wide or dash-prefix drop-in directory is
+            # merged into an expected unit even though it is not named after
+            # one, so its overrides would run outside the verified bytes.
+            # The name check also rejects a symlinked or plain entry systemd
+            # would traverse as the drop-in directory.
+            if name.endswith(".d") and self._inherited_dropin_applies(
+                    name[:-2], units):
                 foreign.append("undeclared drop-in directory: " + str(entry))
             if is_dir and name.endswith((".wants", ".requires")):
                 try:

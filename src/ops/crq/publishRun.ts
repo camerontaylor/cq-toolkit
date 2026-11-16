@@ -40,8 +40,11 @@
  * Effects are injected through `PublishRunEffects`: filesystem roots, the
  * hardened git runner and the tick-lock/queue seam. The adapter binding in
  * `src/adapters/crq/publishSource.ts` realizes them against the production
- * layout; tests bind memory seams. The notification drain and the coverage
- * refresh remain Python-side in this slice and are reported accordingly.
+ * layout; tests bind memory seams. This module is the publication body only:
+ * the two daemon phases around it (the notification drain and the off-lock
+ * coverage refresh) live in `./notifyDrain.ts` and `./coverageRefresh.ts` and
+ * are composed by `./publishUnit.ts`, exactly Python's
+ * `backfill_publisher.main`.
  */
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, stat, unlink } from 'node:fs/promises';
@@ -260,8 +263,17 @@ function fileOutboxFiles(root: string): OutboxFiles {
   };
 }
 
-/** `worker_services`: publisher-owned bare clone plus the injected stores. */
-async function workerServices(effects: PublishRunEffects, config: JsonObject): Promise<Services> {
+/**
+ * Python's `worker_services`' ledger half: the publisher-owned bare clone
+ * (initialised bare, `origin` pinned to the scheduler clone's URL) with the
+ * rollout's dedicated `publisher_spool` signer as the only transport. The
+ * coverage refresher fetches through exactly this clone, so it never moves the
+ * scheduler checkpoint.
+ */
+export async function publisherLedger(
+  effects: PublishRunEffects,
+  config: JsonObject,
+): Promise<GitLedger> {
   const repoRoot = join(effects.stateRoot, 'backfill', 'publisher.git');
   const origin = await effects.runSchedulerGit(['remote', 'get-url', 'origin']);
   if (origin.code !== 0) {
@@ -277,6 +289,12 @@ async function workerServices(effects: PublishRunEffects, config: JsonObject): P
     pushCommit: effects.pushCommit ?? publisherSpoolPushCommit(spool),
   });
   await ledger.ensureBareRepo(new TextDecoder().decode(origin.stdout).trim());
+  return ledger;
+}
+
+/** `worker_services`: publisher-owned bare clone plus the injected stores. */
+async function workerServices(effects: PublishRunEffects, config: JsonObject): Promise<Services> {
+  const ledger = await publisherLedger(effects, config);
   const artifacts = fileArtifactStore(effects.durableArtifactRoot);
   const artifactVerify = effects.verifyArtifact ?? artifacts.verify.bind(artifacts);
   const publicationRoot = join(effects.stateRoot, 'backfill', 'publication');
@@ -311,7 +329,7 @@ async function workerServices(effects: PublishRunEffects, config: JsonObject): P
  * (`unique_pairs`). The rollout reads stay on `ledgerLoads` (its canonical
  * integer domain).
  */
-function queueLoads(bytes: Uint8Array): JsonValue {
+export function parseQueueBytes(bytes: Uint8Array): JsonValue {
   return parseJsonValue(new TextDecoder().decode(bytes), {
     objectPairs: (pairs) => {
       const seen = new Set<string>();
@@ -335,8 +353,11 @@ function queueLoads(bytes: Uint8Array): JsonValue {
  * An absent file disables publication; present-but-incomplete prerequisites
  * are Python's integrity refusal, including the dispatch-side `publisher_spool`
  * shape check Python's `settings()` runs on every read.
+ *
+ * Exported so the coverage refresher reads exactly the same rollout document
+ * (`runtime.settings(c.STATE)`), and reports an absent one as `disabled`.
  */
-async function readRollout(effects: PublishRunEffects): Promise<JsonObject> {
+export async function readRollout(effects: PublishRunEffects): Promise<JsonObject> {
   const filename = join(effects.stateRoot, 'backfill-rollout.json');
   const bytes = await readFileBytes(filename);
   if (bytes === null) throw new PublishRolloutDisabled();
@@ -374,7 +395,8 @@ export class PublishRolloutDisabled extends Error {
 /**
  * `backfill_publisher.run` over injected effects. Throws after persisting
  * the failure marker and (best effort) halting the queue, exactly Python.
- * `PublishRolloutDisabled` is reported as `disabled`, not a failure.
+ * An absent rollout throws `PublishRolloutDisabled`, the signal the unit
+ * (`./publishUnit.ts`) reports as `disabled`.
  */
 export async function runPublish(effects: PublishRunEffects): Promise<PublishRunResult> {
   const config = await readRollout(effects);
@@ -582,8 +604,11 @@ function stringField(value: JsonValue, key: string): string {
  * review-ledger-publisher.lock` (review_ledger.py:574-577). For the bare
  * publisher clone that resolves inside `state/backfill/publisher.git`, so a
  * Python and a TypeScript publisher on one state root share the inode.
+ *
+ * Exported for the coverage refresher, which fetches the ledger under this
+ * same lock (`backfill_coverage.run`'s `ledger.locked(publisher.lock)`).
  */
-async function publisherLockPath(effects: PublishRunEffects): Promise<string> {
+export async function publisherLockPath(effects: PublishRunEffects): Promise<string> {
   const repoRoot = join(effects.stateRoot, 'backfill', 'publisher.git');
   const probe = await effects.runPublisherGit(['rev-parse', '--git-common-dir']);
   if (probe.code !== 0) {
@@ -628,7 +653,7 @@ async function reconcileQueue(
   if (!jsonEqual(current, config)) {
     throw integrity('publication configuration changed; retry reconciliation');
   }
-  let queue = queueLoads(await effects.readQueue());
+  let queue = parseQueueBytes(await effects.readQueue());
   if (!(queue instanceof JsonObject)) throw integrity('queue must be an object');
   for (const candidate of itemsOf(queue)) {
     if (!(candidate instanceof JsonObject)) continue;
@@ -840,7 +865,7 @@ async function recordFailure(
   try {
     const halted = await effects.withTickLock(
       async () => {
-        const parsed = queueLoads(await effects.readQueue());
+        const parsed = parseQueueBytes(await effects.readQueue());
         if (!(parsed instanceof JsonObject)) throw integrity('queue must be an object');
         const text = truncated(error);
         let queue = setKeys(parsed, [['backfill_publication_error', text]]);

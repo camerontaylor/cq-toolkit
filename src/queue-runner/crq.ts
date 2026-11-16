@@ -1,20 +1,32 @@
 #!/usr/bin/env node
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { OpResult } from '../kernel/types.js';
 import { runRepairPrepare } from '../adapters/crq/repairPreparation.js';
 import { runPublishUnit } from '../adapters/crq/publishSource.js';
+import {
+  AUTHOR_DEADLINE_MS,
+  runAuthorCapabilityMain,
+} from '../adapters/crq/authorCapabilityMain.js';
+import {
+  REVIEW_DEADLINE_MS,
+  runReviewCapabilityMain,
+} from '../adapters/crq/reviewCapabilityMain.js';
 import { runStatusWriter } from '../adapters/crq/statusWriter.js';
+import { runBackfillUnit } from '../adapters/crq/backfillSource.js';
+import { pythonJsonText } from '../policy/crq/pythonJson.js';
+import { runReconcileMergedUnit } from '../adapters/crq/reconcileSource.js';
 import { MAX_REQUEST_BYTES, runQueueCapabilityMain } from '../adapters/crq/queueCapabilityMain.js';
+import { REVIEW_MAX_BYTES } from '../ops/crq/reviewCapability.js';
+import { AUTHOR_MAX_SNAPSHOT_BYTES } from '../policy/crq/authorWire.js';
 import { run } from './runner.js';
 import { planTick } from './tick.js';
 import { runWatchdog } from './watchdog.js';
 
 /** Read at most one wire frame plus the byte that proves it is over-long. */
-async function readFrame(): Promise<Uint8Array> {
-  const limit = MAX_REQUEST_BYTES + 1;
+async function readFrame(limit: number = MAX_REQUEST_BYTES + 1): Promise<Uint8Array> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of process.stdin) {
@@ -47,6 +59,36 @@ if (command === 'queue-capability') {
     terminate: () => process.exit(2),
     root,
   });
+} else if (command === 'review-capability') {
+  process.exitCode = await runReviewCapabilityMain({
+    argv: rest,
+    env: (name) => process.env[name],
+    readStdin: () => readFrame(REVIEW_MAX_BYTES + 1),
+    stdout: (bytes) => {
+      process.stdout.write(bytes);
+    },
+    stderr: (message) => {
+      process.stderr.write(`${message}\n`);
+    },
+    terminate: (code = 2) => process.exit(code),
+    root,
+    deadlineMs: REVIEW_DEADLINE_MS,
+  });
+} else if (command === 'author-capability') {
+  process.exitCode = await runAuthorCapabilityMain({
+    argv: rest,
+    env: (name) => process.env[name],
+    readStdin: () => readFrame(AUTHOR_MAX_SNAPSHOT_BYTES + 1),
+    stdout: (bytes) => {
+      process.stdout.write(bytes);
+    },
+    stderr: (message) => {
+      process.stderr.write(`${message}\n`);
+    },
+    terminate: () => process.exit(2),
+    root,
+    deadlineMs: AUTHOR_DEADLINE_MS,
+  });
 } else {
   const stateHome = process.env.XDG_STATE_HOME;
   const gitleaksPath = process.env.PATH;
@@ -74,6 +116,43 @@ if (command === 'queue-capability') {
     // Operator-only: explicit roots, no cwd/env default, never a unit command.
     operatorLive: async (liveCommand, args) => {
       if (liveCommand === 'repair-prepare') return runRepairPrepare(args, { gitleaksPath });
+      if (liveCommand === 'backfill') {
+        // The backfill route reads and writes the same state root the publisher
+        // resolves (config.state_root, default `<runner>/state`).
+        const roots = await readPublisherRoots(root);
+        if (roots === null) {
+          return {
+            artifact: {
+              status: 'failed' as const,
+              error: 'runner config.json missing, malformed, or has no clone path',
+            },
+            exitCode: 3,
+          };
+        }
+        return runBackfillUnit(args, {
+          stateRoot: roots.stateRoot,
+          cloneRoot: roots.cloneRoot,
+          runnerRoot: root,
+        });
+      }
+      if (liveCommand === 'reconcile-merged') {
+        // Python's `reconcile-merged` takes the tick lock, reads the persisted
+        // wrapper under `<state>/reconcile` and stages enrollment in queue.json.
+        const repo = await readRunnerRepo(root);
+        if (repo === null) {
+          return {
+            artifact: {
+              status: 'failed' as const,
+              error: 'runner config.json missing, malformed, or has no repo',
+            },
+            exitCode: 1,
+          };
+        }
+        return runReconcileMergedUnit(args, {
+          repo,
+          stateRoot: await publisherStateRoot(root),
+        });
+      }
       if (liveCommand === 'status') {
         const parsed = parseStatusArgv(args);
         if (!parsed.ok) return usageArtifact('status', parsed.message);
@@ -100,7 +179,7 @@ if (command === 'queue-capability') {
         exitCode: 1,
       });
     },
-    live: async (liveCommand): Promise<OpResult<unknown>> => {
+    live: async (liveCommand): Promise<OpResult<unknown> & { readonly exitCode?: number }> => {
       if (liveCommand === 'watchdog') {
         return runWatchdog(stateHome === undefined ? {} : { stateHome });
       }
@@ -110,65 +189,58 @@ if (command === 'queue-capability') {
       return Promise.resolve({ status: 'failed', error: `${liveCommand} is not implemented` });
     },
   });
-  process.stdout.write(`${JSON.stringify(result.artifact)}\n`);
+  const output =
+    command === 'backfill'
+      ? pythonJsonText(result.artifact, {
+          asciiOnly: true,
+          sortKeys: true,
+          keyOrder: 'code-point',
+          spacedSeparators: true,
+        })
+      : JSON.stringify(result.artifact);
+  process.stdout.write(`${output}\n`);
   process.exitCode = result.exitCode;
-}
-
-/**
- * The publisher roots from the runner's own `config.json` (Python's CONFIG:
- * `clone` and the rollout's `durable_artifact_root`), resolved against the
- * runner root. Absent or unusable config is a refusal, never a guess.
- */
-async function isRolloutAbsent(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return false;
-  } catch (error) {
-    // Only a missing file is "absent". EACCES/EIO and friends must surface:
-    // reporting a disabled success for an inaccessible rollout would stop a
-    // live publisher with exit 0.
-    if (
-      error instanceof Error &&
-      'code' in error &&
-      (error as { code?: string }).code === 'ENOENT'
-    ) {
-      return true;
-    }
-    throw error;
-  }
 }
 
 /**
  * The `publish` live unit over the runner's own roots. Mirrors Python's
  * crq.py: the CONFIG load (config.json with a clone path) happens before
- * `runtime.settings`, so a missing, malformed or clone-less config.json is a
- * failure (Python raises at import), never a disabled outcome. A usable
- * configuration whose rollout file is genuinely absent is Python's
- * `settings() -> None` (disabled); a present-but-incomplete rollout is the
- * IntegrityError failure path. An unusable config must not let
- * publisherStateRoot's default guess stand in for the configured state root.
+ * `runtime.settings`, so a missing or clone-less config.json is a failure
+ * (Python raises at import), never a disabled outcome. Every other outcome is
+ * the unit's own: an absent rollout reports `publication`/`coverage` disabled
+ * (exit 0) after the notification drain, a present-but-incomplete rollout is
+ * the integrity refusal, and a failed coverage refresh exits 1 while still
+ * reporting the publication result.
  */
-export async function publishLiveCommand(runnerRoot: string): Promise<OpResult<unknown>> {
+export async function publishLiveCommand(
+  runnerRoot: string,
+): Promise<OpResult<unknown> & { readonly exitCode?: number }> {
   if (!(await readRunnerConfig(runnerRoot))) {
     return {
       status: 'failed',
       error: 'runner config.json missing, malformed, or has no clone path',
     };
   }
-  const stateRoot = await publisherStateRoot(runnerRoot);
   const validated = await readPublisherRoots(runnerRoot);
   if (validated === null) {
-    if (await isRolloutAbsent(join(stateRoot, 'backfill-rollout.json'))) {
-      // A usable configuration whose rollout file is missing: Python's
-      // settings() returns None, run() reports {"publication":"disabled"}.
-      return { status: 'ok', value: { publication: 'disabled' } };
-    }
     return {
       status: 'failed',
-      error: 'backfill rollout prerequisites incomplete',
+      error: 'runner config.json missing, malformed, or has no clone path',
     };
   }
   return runPublishUnit(validated);
+}
+
+/** `crq.REPO`: the runner's configured repository, or null when unusable. */
+async function readRunnerRepo(runnerRoot: string): Promise<string | null> {
+  try {
+    const config = JSON.parse(await readFile(join(runnerRoot, 'config.json'), 'utf8')) as unknown;
+    if (typeof config !== 'object' || config === null || Array.isArray(config)) return null;
+    const repo = (config as Record<string, unknown>)['repo'];
+    return typeof repo === 'string' && repo !== '' ? repo : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -210,7 +282,13 @@ export async function publisherStateRoot(runnerRoot: string): Promise<string> {
   return join(runnerRoot, 'state');
 }
 
-/** The publisher roots from the runner's own config.json, state_root resolved. */
+/**
+ * The publisher roots from the runner's own config.json, state_root resolved.
+ * Returns null only when config.json is unusable (missing, malformed or without
+ * a clone path): Python raises at import in that case. The durable artifact
+ * root is null when the rollout file is absent or unusable, which the unit
+ * itself reports as `disabled` or as the integrity refusal.
+ */
 export async function readPublisherRoots(runnerRoot: string) {
   let config: unknown;
   try {
@@ -233,7 +311,7 @@ export async function readPublisherRoots(runnerRoot: string) {
   const stateRoot = isAbsolute(configuredStateRoot)
     ? configuredStateRoot
     : resolve(runnerRoot, configuredStateRoot);
-  let durableArtifactRoot: string;
+  let durableArtifactRoot: string | null = null;
   try {
     const rollout = JSON.parse(
       await readFile(join(stateRoot, 'backfill-rollout.json'), 'utf8'),
@@ -242,12 +320,11 @@ export async function readPublisherRoots(runnerRoot: string) {
       typeof rollout === 'object' && rollout !== null && !Array.isArray(rollout)
         ? (rollout as Record<string, unknown>)['durable_artifact_root']
         : undefined;
-    if (typeof durable !== 'string' || durable === '') return null;
-    durableArtifactRoot = durable;
+    if (typeof durable === 'string' && durable !== '') durableArtifactRoot = durable;
   } catch {
-    return null;
+    durableArtifactRoot = null;
   }
-  return { stateRoot, cloneRoot: clone, durableArtifactRoot };
+  return { stateRoot, cloneRoot: clone, runnerRoot, durableArtifactRoot };
 }
 
 /** `crq status [--state-root <dir>]` argv; the runner root is the cwd. */

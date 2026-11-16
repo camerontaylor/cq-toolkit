@@ -1506,14 +1506,22 @@ def recover_unit(effects, adapter, path, *, adapter_factory=None):
             raise Refused("no unit recovery adapter")
         adapter.validate_snapshot(record["unit"], record["snapshot"])
         try:
-            adapter.stop_and_drain(record["unit"])
-            if record["phase"] in ("activation_pending", "restore_activation_pending"):
-                raise ValueError("activation may have occurred; inspect runtime evidence before recovery")
+            failed_phase = record.get("failed_phase", record["phase"])
+            # Recovery does not infer a fence from the journal. It re-establishes
+            # and observes one: stop_and_drain must show no matching job, no
+            # owned process, an inactive service and inactive activators, and
+            # (for an issuing unit) a drained queue. A successful fence makes
+            # restoring the authenticated snapshot safe even after activation;
+            # a fence that cannot establish absence raises and the record stays
+            # recovery_required. The record retains the failed phase, the
+            # original reason and the fence evidence.
+            fence = adapter.stop_and_drain(record["unit"])
             adapter.restore(record["unit"], record["snapshot"])
             if record["state"] is not None:
                 preservation_check(effects, record["state"],
                                    preserved_surfaces(record["unit"]))
-            record["phase"] = "restore_activation_pending"
+            record = {**record, "phase": "restore_activation_pending",
+                      "failed_phase": failed_phase, "fence": fence}
             effects.journal_replace(path, record)
             adapter.restore_activation(record["unit"], record["snapshot"])
             completed = {**record, "outcome": "rolled_back"}
@@ -1851,17 +1859,26 @@ def switch_unit(effects, adapter, unit, runtime):
             return record
         except (Exception, KeyboardInterrupt) as exc:
             try:
-                adapter.stop_and_drain(unit)
-                if identity["phase"] == "activation_pending":
-                    raise ValueError("activation may have occurred; inspect runtime evidence before recovery")
+                failed_phase = identity["phase"]
+                # The fence is the discriminator, not the phase alone: a
+                # successful stop_and_drain has observed no matching job, no
+                # owned process, an inactive service and inactive activators,
+                # and (for an issuing unit) a drained queue. In that state a
+                # switch that failed after start may restore the authenticated
+                # snapshot. The target still ran; the record keeps the failed
+                # phase, the reason and the fence evidence. A fence that cannot
+                # establish absence raises and stays recovery_required.
+                fence = adapter.stop_and_drain(unit)
                 adapter.restore(unit, snapshot)
                 if identity["state"] is not None:
                     preservation_check(effects, identity["state"],
                                        preserved_surfaces(unit))
-                identity = {**identity, "phase": "restore_activation_pending"}
+                identity = {**identity, "phase": "restore_activation_pending",
+                            "failed_phase": failed_phase, "fence": fence,
+                            "reason": str(exc)[:400]}
                 effects.journal_replace(path, identity)
                 adapter.restore_activation(unit, snapshot)
-                record = {**identity, "outcome": "rolled_back", "reason": str(exc)[:400]}
+                record = {**identity, "outcome": "rolled_back"}
                 effects.journal_replace(path, record)
             except (Exception, KeyboardInterrupt) as rollback_exc:
                 recovery = {**identity, "outcome": "recovery_required", "record_path": str(path),
@@ -2219,7 +2236,15 @@ def main(argv=None) -> int:
         return 2
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         if args.operation == "health":
-            raise  # keep the health observation exit-1 contract
+            # The observation itself failed (e.g. state/runs not listable), so
+            # no health result exists: emit the I1 error artifact and keep the
+            # health exit-1 contract (a failed observation is never a refusal).
+            message = str(exc)[:400] or type(exc).__name__
+            print(json.dumps(_error_artifact("thrown", args.operation, message, 1),
+                             indent=2, sort_keys=True))
+            if not parser.json_mode:
+                print("health observation failed: " + message, file=sys.stderr)
+            return 1
         # Escaped outside mutation_record: the helper was never entered, so the
         # deployment surfaces are unchanged and this is a refusal (exit 2).
         message = str(exc)[:400] or type(exc).__name__

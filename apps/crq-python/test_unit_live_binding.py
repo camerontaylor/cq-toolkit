@@ -8,6 +8,7 @@ actual ``deploy_controller.switch_unit`` seam and asserts a discovery refusal
 before any journal or unit mutation.
 """
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -20,6 +21,11 @@ from unittest import mock
 
 from test_deploy_controller_fixtures import ControllerFixture, dc
 from test_unit_adapter import LiveIdentity, _write
+from test_unit_completion import (
+    FakeJournalPopen,
+    journal_text,
+    realistic_journal_record,
+)
 from test_unit_switch_factory import FactoryFixture, UNIT
 
 ROOT = Path(__file__).resolve().parent
@@ -466,6 +472,48 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("declared entries", " ".join(evidence["foreign"]))
 
+    def test_type_wide_inherited_dropin_directory_is_unsupported(self):
+        declared = self.declare()
+        override = self.unit_dir / "service.d"
+        override.mkdir()
+        # systemd merges the type-wide directory into every service unit, so
+        # an ExecStart override there would execute outside the verified
+        # bytes even though FragmentPath still names the main unit file.
+        (override / "override.conf").write_text(
+            "[Service]\nExecStart=/bin/false\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("undeclared drop-in directory: " + str(override),
+                      " ".join(evidence["foreign"]))
+
+    def test_dash_prefix_inherited_dropin_directory_is_unsupported(self):
+        declared = self.declare()
+        override = self.unit_dir / "crq-.service.d"
+        override.mkdir()
+        # The dash-prefix directory applies to crq-tick.service even though
+        # it is not named after the unit, so discovery must reject it too.
+        (override / "override.conf").write_text(
+            "[Service]\nExecStart=/bin/false\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("undeclared drop-in directory: " + str(override),
+                      " ".join(evidence["foreign"]))
+
+    def test_symlinked_type_wide_dropin_directory_is_unsupported(self):
+        declared = self.declare()
+        held = self.base / "repos/held.service.d"
+        held.mkdir(parents=True)
+        (held / "override.conf").write_text(
+            "[Service]\nExecStart=/bin/false\n")
+        (self.unit_dir / "service.d").symlink_to(held)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("undeclared drop-in directory: " + str(
+            self.unit_dir / "service.d"), " ".join(evidence["foreign"]))
+
     def test_symlinked_dropin_directory_is_unsupported(self):
         declared = self.declare()
         held = self.unit_dir / "held-dropin"
@@ -704,6 +752,108 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("cannot resolve a symlink", evidence["error"])
 
+    def test_dangling_cotenant_enablement_links_are_skipped(self):
+        declared = self.declare()
+        stale = self.base / "old-home/systemd/user"
+        stale.mkdir(parents=True)
+        # Enabling a unit creates a link under the target's wants (or
+        # requires) directory. A co-tenant's link can outlive the target it
+        # named while the still-present unit is installed beside it. Ceres
+        # carries exactly this shape for codexbar-quota-cues.timer,
+        # portkey-gateway.service and ntfy-server.service.
+        (self.unit_dir / "timers.target.wants/codexbar-quota-cues.timer"
+         ).symlink_to(stale / "codexbar-quota-cues.timer")
+        self.link("default.target.wants/portkey-gateway.service",
+                  stale / "portkey-gateway.service")
+        self.link("default.target.requires/ntfy-server.service",
+                  stale / "ntfy-server.service")
+        self.write("codexbar-quota-cues.timer",
+                   "[Timer]\nUnit=codexbar-quota-cues.service\n")
+        self.write("portkey-gateway.service",
+                   "[Service]\nExecStart=/bin/true\n")
+        self.write("ntfy-server.service",
+                   "[Service]\nExecStart=/bin/true\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+        self.assertIsNone(evidence["error"])
+
+    def test_dangling_enablement_skip_continues_with_sibling_content(self):
+        declared = self.declare()
+        stale = self.base / "old-home/systemd/user"
+        stale.mkdir(parents=True)
+        # The scan must keep reading the remaining entries after a skipped
+        # stale link, so a cotenant dependency on the selected unit is still
+        # foreign.
+        (self.unit_dir / "timers.target.wants/stale-cotenant.timer"
+         ).symlink_to(stale / "stale-cotenant.timer")
+        self.write("telemetry.service",
+                   "[Unit]\nWants=crq-tick.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Wants names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_dangling_enablement_link_naming_the_selected_unit_is_foreign(
+            self):
+        declared = self.declare()
+        # The link name is the dependency edge systemd records, so it is
+        # foreign even though the target is gone. This must not be skipped
+        # with the benign co-tenant links.
+        self.link("default.target.wants/crq-tick.service",
+                  self.base / "repos/missing/crq-tick.service")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("dangling enablement link names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_dangling_enablement_link_target_naming_a_crq_unit_is_not_skipped(
+            self):
+        declared = self.declare()
+        self.link("default.target.wants/telemetry.service",
+                  self.base / "repos/missing/crq-tick.service")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("dangling enablement link names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_declared_dangling_enablement_link_is_incomplete(self):
+        declared = self.declare()
+        wants = declared[2]
+        wants.unlink()
+        wants.symlink_to(self.base / "repos/missing/crq-tick.timer")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("cannot resolve a symlink", evidence["error"])
+
+    def test_unreadable_enablement_target_is_incomplete(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can read a mode-000 file")
+        declared = self.declare()
+        outside = self.base / "repos/locked-cotenant.timer"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("[Timer]\n")
+        outside.chmod(0o000)
+        self.addCleanup(outside.chmod, 0o600)
+        (self.unit_dir / "timers.target.wants/locked-cotenant.timer"
+         ).symlink_to(outside)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("cannot read", evidence["error"])
+
+    def test_enablement_symlink_loop_is_incomplete(self):
+        declared = self.declare()
+        self.link("default.target.wants/loop.timer", "loop.timer")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("cannot resolve a symlink", evidence["error"])
+
     def test_unreadable_cotenant_symlink_target_is_incomplete(self):
         if os.geteuid() == 0:
             self.skipTest("root can read a mode-000 file")
@@ -905,7 +1055,9 @@ class LayoutTests(ControllerFixture):
         other_root = self.base / "other-root"
         state = other_root / "apps/crq-python/state"
         state.mkdir(parents=True)
-        (state / dc.LOCK_NAME).write_text("")
+        lock = state / dc.LOCK_NAME
+        lock.write_text("")
+        lock.chmod(0o600)
         other = live.HostLayout(
             root=other_root, unit_dir=self.units_home,
             record_dir=self.overlay_records, overlay=self.overlay)
@@ -1005,6 +1157,87 @@ class ProductionAdapterTests(FactoryFixture):
 
     def write(self, name, text, mode=0o644):
         _write(self.unit_dir / name, text.encode(), mode)
+
+
+class BoundedJournalSeamTests(FactoryFixture):
+    """The production composition over the real bounded journal source.
+
+    The host boundary is still injected, but ``SystemdJournalSource`` is the
+    production class and ``_read_bounded`` is the production reader. The fake
+    child emits the same record volume as a real 256-record user-journal tail,
+    projected only when the source asks for ``--output-fields``.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.overlay_records = Path(self.overlay["record_dir"])
+        self.overlay_records.mkdir(mode=0o700)
+        self.overlay_records.chmod(0o700)
+        self.effects = dc.Effects(self.root, self.overlay_records)
+
+    def journal_records(self, unit):
+        padding = [realistic_journal_record("%032x" % (index + 1),
+                                            1000 + index,
+                                            boot=self.systemd.boot,
+                                            unit=unit)
+                   for index in range(256)]
+        return padding + list(self.systemd.journal.get(unit, []))
+
+    def responder(self, *, honor_projection):
+        def respond(command):
+            if command[0].endswith("journalctl"):
+                unit = command[command.index("--user-unit") + 1]
+                return journal_text(command, self.journal_records(unit),
+                                    honor_projection=honor_projection)
+            unit = command[command.index("show") + 1]
+            props = [command[index + 1] for index, argument
+                     in enumerate(command) if argument == "--property"]
+            values = self.systemd.show(unit, props)
+            return "".join("%s=%s\n" % (prop, values.get(prop, ""))
+                           for prop in props)
+        return respond
+
+    def compose_live(self, *, honor_projection=True):
+        popen = FakeJournalPopen(
+            self.responder(honor_projection=honor_projection))
+        self.addCleanup(popen.cleanup)
+        source = live.completion.SystemdJournalSource(popen=popen)
+        patch = mock.patch.object(live.completion, "read_boot_id",
+                                  return_value=self.systemd.boot)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return live.production_adapter(
+            self.effects, self.overlay, unit=UNIT, runtime="python",
+            systemd=self.systemd, journal_source=source,
+            identity=LiveIdentity(), queue_drain=self.queue)
+
+    def test_large_realistic_journal_completes_through_the_live_source(self):
+        full = "".join(json.dumps(record) + "\n"
+                       for record in self.journal_records(UNIT))
+        self.assertGreater(len(full.encode()), 256 * 1024)
+        adapter, _selection = self.compose_live()
+        record = dc.switch_unit(self.effects, adapter, UNIT, "python")
+        self.assertEqual(record["outcome"], "completed")
+        self.assertEqual(len(record["completions"]), 2)
+        for evidence in record["completions"]:
+            self.assertEqual(evidence["witness"], "manager")
+            self.assertEqual(evidence["boot_id"], self.systemd.boot)
+
+    def test_unprojected_large_journal_rolls_back_after_the_byte_bound(self):
+        adapter, _selection = self.compose_live(honor_projection=False)
+        with self.assertRaises(dc.RecoveryRequired) as failure:
+            dc.switch_unit(self.effects, adapter, UNIT, "python")
+        recovery = failure.exception.recovery
+        self.assertEqual(recovery["outcome"], "rolled_back")
+        self.assertEqual(recovery["failed_phase"], "activation_pending")
+        self.assertIn("byte bound", recovery["reason"])
+        records = [json.loads(path.read_text()) for path in
+                   sorted(self.effects.record_dir.glob("controller-*.json"))]
+        self.assertEqual(records[-1]["outcome"], "rolled_back")
+        service = self.unit_dir / UNIT
+        self.assertEqual(service.read_bytes(),
+                         self.node_service(UNIT)["bytes"])
+        self.assertEqual(self.systemd.active["crq-tick.timer"], "active")
 
 
 if __name__ == "__main__":

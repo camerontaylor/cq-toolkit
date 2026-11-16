@@ -36,10 +36,10 @@ Known limits, unchanged by this composition:
 * root, record-directory and shared-lock coverage are wiring preconditions
   owned by the coordinator, not fields in this factory;
 * a Node target is accepted only when the verified artifact's declaration
-  names the selected command. ``watchdog`` is currently the only declared live
-  command; ``tick``, ``slot``, ``publisher``, ``backfill`` and ``repair`` still
-  refuse. The selected artifact must already be installed and inventory
-  verified; this factory does not stage it.
+  names the selected command. ``watchdog`` and ``publish`` are the declared
+  live commands; ``tick``, ``slot``, ``backfill`` and ``repair`` still refuse.
+  The selected artifact must already be installed and inventory verified; this
+  factory does not stage it.
 """
 from __future__ import annotations
 
@@ -249,6 +249,7 @@ def build(
             "sha256": selection.render["sha256"],
             "source_sha": selection.render["source_sha"],
             "template_blob_oid": selection.render["template_blob_oid"],
+            "artifact": selection.render.get("artifact"),
         },
         "clock": clock,
         "sleep": sleep,
