@@ -7,10 +7,9 @@
  * passes that value, so the home directory is an explicit argument.
  */
 
-/** Python `ValueError`, the refusal prepare-host raises for every bad input. */
-export class ValueError extends Error {
-  override name = 'ValueError';
-}
+import { ValueError } from './hostOverlay.js';
+
+export { ValueError };
 
 export const UNIT_COMMANDS: Readonly<Record<string, string>> = Object.freeze({
   'crq-tick.service': 'tick',

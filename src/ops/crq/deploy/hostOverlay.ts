@@ -104,7 +104,7 @@ function codePointCompare(left: string, right: string): number {
 }
 
 /** Python truthiness of a JSON value. */
-function truthy(v: JsonValue | undefined): boolean {
+export function truthy(v: JsonValue | undefined): boolean {
   if (v === undefined || v === null || v === false) return false;
   if (v === true) return true;
   if (typeof v === 'string') return v !== '';
@@ -306,7 +306,7 @@ export function validate(overlay: JsonValue, resolve: Resolve): JsonObject {
 }
 
 /** `config.set(parts, value)` on an immutable tree, replacing in place or appending. */
-function withKey(obj: JsonObject, key: string, value: JsonValue): JsonObject {
+export function withKey(obj: JsonObject, key: string, value: JsonValue): JsonObject {
   const found = obj.has(key);
   const entries = obj.entries.map(([k, v]): [string, JsonValue] =>
     k === key ? [k, value] : [k, v],
