@@ -159,7 +159,7 @@ export async function runReviewChild(options: {
     try {
       const child = spawn(
         options.timeoutBinary ?? 'timeout',
-        ['--foreground', '--kill-after=60', `${options.timeoutMinutes}m`, ...meta.cmd],
+        ['--kill-after=60', `${options.timeoutMinutes}m`, ...meta.cmd],
         {
           cwd: meta.worktree,
           stdio: ['ignore', out.fd, err.fd],
