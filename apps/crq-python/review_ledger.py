@@ -337,6 +337,8 @@ def validate_sequence(values):
             linked = p["review_id"] if p["result"] == "credited" else p["duplicate_id"]
             if linked and linked not in reviews:
                 raise IntegrityError("import references missing review")
+            if p["result"] == "credited" and not creditable(reviews[linked]):
+                raise IntegrityError("credited import references a non-creditable review")
     return ids
 
 
@@ -348,9 +350,27 @@ def fsync_dir(directory):
         os.close(fd)
 
 
+def durable_directory(directory):
+    """Create a directory tree and persist each new entry in its parent."""
+    directory = Path(directory)
+    created = []
+    probe = directory
+    while probe.parent != probe and not probe.exists():
+        created.append(probe)
+        probe = probe.parent
+    if created:
+        directory.mkdir(parents=True, exist_ok=True)
+    # Sync every created entry, and the target's own entry even when it
+    # already exists: an earlier call (or another process) may have created it
+    # and stopped before its parent was synced.
+    for entry in created or [directory]:
+        if entry.parent != entry:
+            fsync_dir(entry.parent)
+
+
 def atomic(filename, data):
     filename = Path(filename)
-    filename.parent.mkdir(parents=True, exist_ok=True)
+    durable_directory(filename.parent)
     with tempfile.NamedTemporaryFile(dir=filename.parent, delete=False) as stream:
         stream.write(data)
         stream.flush()
@@ -363,7 +383,7 @@ def atomic(filename, data):
 @contextlib.contextmanager
 def locked(filename):
     filename = Path(filename)
-    filename.parent.mkdir(parents=True, exist_ok=True)
+    durable_directory(filename.parent)
     with filename.open("a+b") as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         yield
@@ -404,13 +424,24 @@ class ArtifactStore:
                 hasher.update(chunk)
         ident = hasher.hexdigest()
         destination = self.root / "sha256" / ident
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        durable_directory(destination.parent)
         if not destination.exists():
-            with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
-                with Path(filename).open("rb") as source:
-                    shutil.copyfileobj(source, stream)
-                stream.flush(); os.fsync(stream.fileno()); temporary = stream.name
-            os.replace(temporary, destination); fsync_dir(destination.parent)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
+                    temporary = stream.name
+                    with Path(filename).open("rb") as source:
+                        shutil.copyfileobj(source, stream)
+                    stream.flush(); os.fsync(stream.fileno())
+                os.replace(temporary, destination)
+                temporary = None
+            finally:
+                if temporary is not None:
+                    Path(temporary).unlink(missing_ok=True)
+        # Always persist the destination's directory entry, also when the
+        # artifact already exists: a previous call may have replaced it and
+        # failed before this sync, and a retry must not skip it.
+        fsync_dir(destination.parent)
         reference = {"sha256": ident, "location": str(destination)}
         self.verify(reference)
         return reference

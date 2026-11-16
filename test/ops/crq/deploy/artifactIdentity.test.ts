@@ -138,6 +138,8 @@ describe('artifactIdentity', () => {
     await symlink(root, link);
     roots.push(link);
     await rejects(artifactIdentity(link, RUNTIME, UNITS), 'not a regular directory');
+    await rejects(artifactIdentity(`${link}/`, RUNTIME, UNITS), 'not a regular directory');
+    await rejects(artifactIdentity(`${link}/.`, RUNTIME, UNITS), 'not a regular directory');
     await rm(join(root, MANIFEST_NAME));
     await rejects(artifactIdentity(root, RUNTIME, UNITS), 'manifest is unavailable');
   });
@@ -158,6 +160,16 @@ describe('artifactIdentity', () => {
     const c = await build();
     await chmod(join(c.root, 'package.json'), 0o600);
     await rejects(artifactIdentity(c.root, RUNTIME, UNITS), 'does not match the manifest');
+  });
+  test('refuses a directory that cannot be inventoried', async () => {
+    const a = await build();
+    await put(a.root, 'hidden/file.txt', 'x');
+    await chmod(join(a.root, 'hidden'), 0o000);
+    try {
+      await rejects(artifactIdentity(a.root, RUNTIME, UNITS), 'inventory is invalid');
+    } finally {
+      await chmod(join(a.root, 'hidden'), 0o755);
+    }
   });
   test('refuses an absolute or escaping symlink', async () => {
     const a = await build();
@@ -230,6 +242,12 @@ describe('validateManifest', () => {
       'v23.1.0',
       'disagree',
     ],
+    [
+      'unsafe node version major',
+      ['provenance', 'runtime', 'node_version'],
+      'v9007199254740992.1.0',
+      'disagree',
+    ],
     ['bad platform', ['provenance', 'runtime', 'platform'], 'darwin', 'linux-x64'],
     [
       'missing fs-ext dependency',
@@ -284,6 +302,20 @@ describe('inventory and staging facts', () => {
     await symlink('/etc/passwd', join(root, 'abs'));
     await rejects(inventory(root), 'absolute symlink: abs');
   });
+  test.skipIf(process.getuid?.() === 0)(
+    'an unreadable subtree is an invalid inventory',
+    async () => {
+      const { root } = await build();
+      await put(root, 'locked/inner.txt', 'x');
+      await chmod(join(root, 'locked'), 0o111);
+      try {
+        await rejects(inventory(root), 'cannot inventory directory: .*locked');
+        await rejects(artifactIdentity(root, RUNTIME, UNITS), 'inventory is invalid');
+      } finally {
+        await chmod(join(root, 'locked'), 0o755);
+      }
+    },
+  );
   test('staging facts skip dot directories and scoped packages are read', async () => {
     const { root } = await build();
     await put(root, 'node_modules/.hidden/package.json', '{"name":"hidden","version":"1.0.0"}');

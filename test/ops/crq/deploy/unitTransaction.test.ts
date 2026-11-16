@@ -28,7 +28,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { beforeAll, describe, expect, test } from 'vitest';
 import {
   parseJsonValue,
   toPlainJsonRetainingNumbers,
@@ -42,6 +42,7 @@ import {
   type TransactionEffects,
   type UnitAdapter,
 } from '../../../../src/ops/crq/deploy/unitTransaction.js';
+import { pythonConstant } from '../../../../src/ops/crq/deploy/controllerRecords.js';
 
 const TICK = 'crq-tick.service';
 const WD = 'crq-watchdog.service';
@@ -282,6 +283,9 @@ const scenarios: Sc[] = [
   // ---- recover: validation chain
   rc('recover snapshot phase', rec()),
   rc('recover drained', drained()),
+  // Python json.loads accepts NaN and Infinity: the snapshot reaches the adapter untouched.
+  rc('recover snapshot NaN constant', rec().replace('"a":"b"', '"a":NaN')),
+  rc('recover snapshot -Infinity constant', rec().replace('"a":"b"', '"a":-Infinity')),
   rc('recover activation_pending', rec({ phase: 'activation_pending', state: GOOD_STATE })),
   rc('recover restore_pending null state', rec({ phase: 'restore_activation_pending' })),
   rc(
@@ -597,7 +601,9 @@ function harness(root: string, sc: Sc): Harness {
   const journal: unknown[] = [];
   let count = 0;
   const script = (
-    sc.script === undefined ? {} : toPlainJsonRetainingNumbers(parseJsonValue(sc.script))
+    sc.script === undefined
+      ? {}
+      : toPlainJsonRetainingNumbers(parseJsonValue(sc.script, { parseConstant: pythonConstant }))
   ) as Record<string, Step[]>;
   const digest = (rel: string): string | null => {
     try {
@@ -733,13 +739,27 @@ describe.skipIf(!haveOracle)('unit transaction matches deploy-controller.py', ()
     materialise(dir, sc);
     return dir;
   });
-  const python = spawnSync(
-    'python3',
-    ['-I', '-c', PY, controller, JSON.stringify(GIT), JSON.stringify(UNIT_DIGESTS), TX, ...pyDirs],
-    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
-  );
-  if (python.status !== 0) throw new Error(`oracle failed: ${python.stderr}`);
-  const expected = toPlainJsonRetainingNumbers(parseJsonValue(python.stdout)) as unknown[];
+  let expected: unknown[];
+  beforeAll(() => {
+    const python = spawnSync(
+      'python3',
+      [
+        '-I',
+        '-c',
+        PY,
+        controller,
+        JSON.stringify(GIT),
+        JSON.stringify(UNIT_DIGESTS),
+        TX,
+        ...pyDirs,
+      ],
+      { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+    );
+    if (python.status !== 0) throw new Error(`oracle failed: ${python.stderr}`);
+    expected = toPlainJsonRetainingNumbers(
+      parseJsonValue(python.stdout, { parseConstant: pythonConstant }),
+    ) as unknown[];
+  });
 
   scenarios.forEach((sc, i) => {
     test(sc.name, async () => {

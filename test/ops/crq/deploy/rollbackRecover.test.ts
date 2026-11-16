@@ -353,14 +353,16 @@ describe('restoreBeforeSwitch', () => {
     await rec(b).restoreBeforeSwitch('why');
     expect(b.log).toEqual([]);
   });
-  test('a hold it no longer owns fail-stops without restarting or releasing', async () => {
+  test('losing ownership before the restart fail-stops with the triggers unchanged', async () => {
     const f = fixture();
     f.hold.owned = false;
     const err = await caught(rec(f).restoreBeforeSwitch('why'));
     expect(err).toBeInstanceOf(RecoveryRequired);
-    expect(err.message).toContain('hold lost before the pre-switch restart');
-    expect(f.log).not.toContain('hold.release');
+    expect(err.message).toBe(
+      "pre-switch restore failed after refusal (why): Refused('admission ownership was lost before the pre-switch restart')",
+    );
     expect(f.log.some((l) => l.startsWith('start:'))).toBe(false);
+    expect(f.log).not.toContain('hold.release');
     expect(f.writes[0]!.value).toMatchObject({ outcome: 'recovery_required' });
   });
   test('skips the restart when no original triggers were recorded', async () => {
@@ -420,6 +422,24 @@ describe('restoreBeforeSwitch', () => {
       "the refused record could not be persisted (OSError('ro')) after: why",
     );
     expect(f.log).toContain('hold.release');
+  });
+  test('a refusal record failure after release reacquires admission before the fail-stop', async () => {
+    const f = fixture();
+    const release = f.hold.release.bind(f.hold);
+    f.hold.release = () => {
+      f.hold.owned = false;
+      return release();
+    };
+    f.deps.newHold = () => {
+      const next = new FakeHold(false, f.log);
+      return next;
+    };
+    f.fail.write = new OSError('ro');
+    const err = await caught(rec(f).restoreBeforeSwitch('why'));
+    expect(err).toBeInstanceOf(RecoveryRequired);
+    const log = f.log;
+    expect(log.indexOf('hold.acquire')).toBeGreaterThan(log.indexOf('hold.release'));
+    expect(log.filter((l) => l.startsWith('stop:'))).toEqual(['stop:a.timer,b.timer']);
   });
   test('a non-OSError record failure propagates', async () => {
     const f = fixture();
@@ -786,6 +806,22 @@ describe('run', () => {
       target: TARGET,
     });
     expect(f.log.at(-1)).toBe('lock.release');
+  });
+  test('a lock release failure does not hide the failure already propagating', async () => {
+    const f = fixture();
+    const release = new Error('unlock');
+    const original = new Refused('preflight');
+    f.inner.run = () => Promise.reject(original);
+    f.deps.releaseLock = () => Promise.reject(release);
+    const err = await caught(rec(f).run());
+    expect(err).toBeInstanceOf(Refused);
+    expect(err.message).toBe('preflight');
+    expect((err as { releaseFailure?: unknown }).releaseFailure).toBe(release);
+  });
+  test('a lock release failure on success surfaces after the run completes', async () => {
+    const f = fixture();
+    f.deps.releaseLock = () => Promise.reject(new Error('unlock'));
+    expect((await caught(rec(f).run())).message).toBe('unlock');
   });
   test('a health failure with nothing switched still reports rolled_back, as Python does', async () => {
     const f = fixture();

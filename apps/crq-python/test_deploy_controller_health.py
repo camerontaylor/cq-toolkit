@@ -171,6 +171,11 @@ class HealthTests(ControllerFixture):
         data = review_receipt.canonical(valid)
         self.assertIn("content identity", dc.receipt_problem("0" * 64 + ".json", data))
 
+    def test_excessively_nested_receipt_is_malformed_not_a_crash(self):
+        raw = b"[" * 100000 + b"]" * 100000
+        name = hashlib.sha256(raw).hexdigest() + ".json"
+        self.assertIn("not valid JSON", dc.receipt_problem(name, raw))
+
     def test_invalid_receipt_sample_is_a_distinct_verdict_not_a_tick_failure(self):
         good = self.write_receipt(self.receipt_document())
         bad = self.write_receipt(self.receipt_document(

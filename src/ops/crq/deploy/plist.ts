@@ -14,10 +14,17 @@ const HEADER =
   '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n' +
   '<plist version="1.0">\n';
 
+const XML_ENTITIES: Readonly<Record<string, string>> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+};
+
 function unescapeXml(text: string): string {
   return text.replace(/&(#x[0-9A-Fa-f]+|#[0-9]+|amp|lt|gt|quot|apos);/g, (_m, name: string) => {
-    if (name[0] !== '#')
-      return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[name] as string;
+    if (name[0] !== '#') return XML_ENTITIES[name] as string;
     const code = name[1] === 'x' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
     if (!(code === 9 || code === 10 || code === 13 || (code >= 0x20 && code <= 0x10ffff)))
       throw new ValueError('invalid character reference in plist');
@@ -71,7 +78,7 @@ export function parsePlist(source: string): PlistValue {
   };
   const value = (): PlistValue => {
     skipMisc();
-    const m = /^<([A-Za-z]+)(\/?)>/.exec(source.slice(pos));
+    const m = /^<([A-Za-z]+)\s*(\/?)>/.exec(source.slice(pos));
     if (!m) return fail('expected an element');
     const tag = (m as RegExpExecArray)[1] as string;
     const empty = (m as RegExpExecArray)[2] === '/';

@@ -108,26 +108,22 @@ async function checked(run: RunProcess, argv: readonly string[]): Promise<Uint8A
 // ---- Path.resolve -------------------------------------------------------
 
 /**
- * `Path(path).resolve()` (non-strict): components are walked left to right, so
- * symlinks are followed and a `..` component then applies to the resolved
- * location (never to the literal `..`), and the unresolvable tail is appended.
+ * `Path(path).resolve()` (non-strict): symlinks of the existing prefix are followed
+ * before any `..` that follows them, as the filesystem would; the missing tail is
+ * then joined lexically.
  */
 export function pyResolve(path: string): string {
-  let current = posix.isAbsolute(path) ? '/' : posix.resolve('.');
-  for (const part of path.split('/')) {
-    if (part === '' || part === '.') continue;
-    if (part === '..') {
-      current = posix.dirname(current);
-      continue;
-    }
-    const next = posix.join(current, part);
+  const absolute = path.startsWith('/') ? path : `${process.cwd()}/${path}`;
+  const parts = absolute.split('/').filter((part) => part !== '' && part !== '.');
+  for (let keep = parts.length; keep >= 0; keep -= 1) {
     try {
-      current = realpathSync(next);
+      const real = realpathSync.native(`/${parts.slice(0, keep).join('/')}`);
+      return posix.join(real, ...parts.slice(keep));
     } catch {
-      current = next;
+      // The prefix does not exist: drop one more component.
     }
   }
-  return current;
+  return '/';
 }
 
 // ---- atomic_bytes -------------------------------------------------------
@@ -178,6 +174,12 @@ export async function requireOutsideGit(path: string, env: OverlayEnv): Promise<
   const result = await env.run(['git', '-C', parent, 'rev-parse', '--show-toplevel']);
   if (result.code === 0)
     throw new ValueError('private host artifacts must be outside every Git checkout');
+  // Only git's "not a git repository" answer proves the path is outside a checkout: a
+  // malformed config or any other probe failure says nothing about exclusion.
+  if (result.code !== 128 || !/not a git repository/i.test(text(result.stderr)))
+    throw new ValueError(
+      `cannot establish that the path is outside every Git checkout: git exited ${result.code}`,
+    );
 }
 
 export interface LoadedOverlay {
@@ -232,7 +234,11 @@ export async function withTickLock<T>(
   const handle = await lockFs.tryLock(`${state}/tick.lock`);
   if (handle === null) throw new BlockingIOError();
   try {
-    return await fn();
+    if (handle.lost === undefined) return await fn();
+    const lostSignal = handle.lost.then(() => {
+      throw new Error(`tick lock lost while held: ${state}/tick.lock`);
+    });
+    return await Promise.race([fn(), lostSignal]);
   } finally {
     await handle.release();
   }
@@ -413,14 +419,19 @@ const OPERATIONS: Readonly<Record<string, readonly (readonly [string, boolean])[
   preview: [['--output', true]],
   switch: [
     ['--sha', true],
-    ['--tag', false],
+    ['--tag', true],
   ],
   'legacy-check': [['--legacy-root', true]],
 };
 
 /** argparse option lookup: exact, `--opt=value`, or a unique prefix (`allow_abbrev`). */
-function lookup(flag: string, known: readonly string[]): string {
+function lookup(flag: string, known: readonly string[], shown: string = flag): string {
   if (known.includes(flag)) return flag;
+  // A bare `--` names no option, so it abbreviates all of them (argparse: ambiguous).
+  if (flag === '--')
+    throw new UsageError(
+      `ambiguous option: ${shown} could match ${['--help', ...known].join(', ')}`,
+    );
   const hits = known.filter((name) => name.startsWith(flag));
   if (hits.length === 1) return hits[0] as string;
   if (hits.length > 1)
@@ -437,12 +448,23 @@ function readOptions(
   let i = start;
   while (i < tokens.length) {
     const token = tokens[i] as string;
+    if (token === '--') {
+      // End of options: the top level stops here; a subcommand has no positionals.
+      if (stop) return { values, next: i + 1 };
+      if (i + 1 < tokens.length)
+        throw new UsageError(`unrecognized arguments: ${tokens.slice(i + 1).join(' ')}`);
+      break;
+    }
     if (!token.startsWith('-') || token === '-') {
       if (stop) break;
       throw new UsageError(`unrecognized arguments: ${tokens.slice(i).join(' ')}`);
     }
     const eq = token.indexOf('=');
-    const flag = lookup(eq >= 0 && token.startsWith('--') ? token.slice(0, eq) : token, known);
+    const flag = lookup(
+      eq >= 0 && token.startsWith('--') ? token.slice(0, eq) : token,
+      known,
+      token,
+    );
     let value: string | undefined =
       eq >= 0 && token.startsWith('--') ? token.slice(eq + 1) : undefined;
     if (value === undefined) {

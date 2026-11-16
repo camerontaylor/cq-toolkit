@@ -80,6 +80,7 @@ const DIR = 'apps/crq-python/ops/systemd/';
 function gitFixture(
   trees: Record<string, string[]>,
   blobs: Record<string, string>,
+  refs: Record<string, string> = {},
 ): { effects: GitGuardEffects; calls: string[][] } {
   const calls: string[][] = [];
   return {
@@ -89,6 +90,8 @@ function gitFixture(
       git: async (...args) => {
         calls.push(args);
         if (args[0] === 'ls-tree') return (trees[args[3]!] ?? []).join('\n');
+        if (args[0] === 'rev-parse' && args[1] === '--verify')
+          return `${refs[args[2]!.replace('^{commit}', '')] ?? args[2]!.replace('^{commit}', '')}\n`;
         if (args[0] === 'rev-parse') return blobs[args[1]!] ?? 'missing';
         throw new Error(`unexpected ${args.join(' ')}`);
       },
@@ -103,13 +106,28 @@ describe('requireUnchangedUnitTemplates', () => {
     for (const sha of [PRIOR, TARGET]) for (const n of names) blobs[`${sha}:${n}`] = `blob-${n}`;
     const f = gitFixture({ [PRIOR]: names, [TARGET]: names }, blobs);
     await requireUnchangedUnitTemplates(f.effects, PRIOR, TARGET);
-    expect(f.calls.filter((c) => c[0] === 'rev-parse').map((c) => c[1])).toEqual([
+    expect(
+      f.calls.filter((c) => c[0] === 'rev-parse' && c[1] !== '--verify').map((c) => c[1]),
+    ).toEqual([
       `${PRIOR}:${DIR}crq-a.service`,
       `${PRIOR}:${DIR}crq-b.timer`,
       `${TARGET}:${DIR}crq-a.service`,
       `${TARGET}:${DIR}crq-b.timer`,
     ]);
     expect(f.calls[0]).toEqual(['ls-tree', '-r', '--name-only', PRIOR, DIR]);
+  });
+
+  test('a moving ref is resolved to one commit before the listing and blob reads', async () => {
+    const f = gitFixture(
+      { [PRIOR]: [`${DIR}crq-a.service`], [TARGET]: [`${DIR}crq-a.service`] },
+      { [`${PRIOR}:${DIR}crq-a.service`]: 'x', [`${TARGET}:${DIR}crq-a.service`]: 'x' },
+      { 'origin/main': TARGET },
+    );
+    await requireUnchangedUnitTemplates(f.effects, PRIOR, 'origin/main');
+    expect(f.calls.filter((c) => c.some((a) => a.startsWith('origin/main')))).toEqual([
+      ['rev-parse', '--verify', 'origin/main^{commit}'],
+    ]);
+    expect(f.calls.some((c) => c[0] === 'ls-tree' && c[3] === TARGET)).toBe(true);
   });
 
   test('non crq files may change freely', async () => {

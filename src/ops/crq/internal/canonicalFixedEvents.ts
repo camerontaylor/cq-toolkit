@@ -8,7 +8,8 @@ export interface CanonicalFixedEventsEffects {
   readJob(id: string): Promise<JsonObject>;
   triageExists(canonicalId: string): Promise<boolean>;
   currentFixedEvent(job: JsonObject, merge: string | undefined): Promise<string | null>;
-  isAncestor(ancestor: string, descendant: string): Promise<boolean>;
+  /** `fixPrNumber` lets the adapter fetch the PR head when the clone lacks it. */
+  isAncestor(ancestor: string, descendant: string, fixPrNumber?: JsonValue): Promise<boolean>;
 }
 export interface CanonicalFixedEventsInput {
   /** Job ids whose recorded verdict is FIXED, in record order. */
@@ -63,7 +64,7 @@ export async function canonicalFixedEvents(
     !input.publishedHead ||
     typeof actual !== 'string' ||
     !actual ||
-    !(await effects.isAncestor(input.publishedHead, actual))
+    !(await effects.isAncestor(input.publishedHead, actual, input.fixPrNumber))
   )
     throw new Error('canonical fixed repair PR lineage mismatch');
   return { publishedHead: input.publishedHead, actualHead: actual, events };

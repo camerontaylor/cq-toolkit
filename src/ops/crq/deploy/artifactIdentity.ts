@@ -136,6 +136,17 @@ const isSymlink = async (path: string): Promise<boolean> =>
     () => false,
   )) as boolean;
 
+/** Drop trailing separators and `/.` components so `link/` and `link/.` still lstat the
+ * link itself; `/` and `..` are left alone. */
+function withoutTrailingDots(path: string): string {
+  let current = path;
+  for (;;) {
+    const next = current.replace(/(?<=.)\/+$/, '').replace(/(?<=.)\/\.$/, '');
+    if (next === current) return current;
+    current = next;
+  }
+}
+
 interface Walked {
   readonly path: string;
   readonly relative: string;
@@ -146,8 +157,10 @@ async function walk(directory: string, prefix: string, out: Walked[]): Promise<v
   let names: string[];
   try {
     names = await readdir(directory);
-  } catch {
-    return; // os.walk ignores unreadable directories.
+  } catch (error) {
+    // Python's os.walk skips unreadable directories; an inventory that does so
+    // would match on both sides while omitting files, so fail instead.
+    return fail(`cannot inventory directory: ${directory}: ${(error as Error).message}`);
   }
   const dirs: string[] = [];
   const files: string[] = [];
@@ -382,7 +395,8 @@ export function validateProvenance(
     return fail('provenance runtime.node_version must be a full Node version');
   if (!equalsInt(runtime.get('node_major'), NODE_MAJOR))
     return fail(`provenance runtime.node_major must be ${String(NODE_MAJOR)}`);
-  if (!equalsInt(runtime.get('node_major'), pyInt(nodeVersion.slice(1).split('.')[0] as string)))
+  const versionMajor = pyInt(nodeVersion.slice(1).split('.')[0] as string);
+  if (!Number.isSafeInteger(versionMajor) || !equalsInt(runtime.get('node_major'), versionMajor))
     return fail('provenance runtime.node_version and node_major disagree');
   const nodeAbi = checkString(runtime.get('node_abi'), 'runtime.node_abi');
   if (!/^\p{Nd}+$/u.test(nodeAbi)) return fail('provenance runtime.node_abi must be numeric');
@@ -508,7 +522,7 @@ export async function artifactIdentity(
   if (!/^node:[0-9a-f]{40}$/.test(runtime))
     return fail('runtime must be python or node:<full SHA>');
   const root = artifactRoot;
-  if ((await isSymlink(root)) || !(await isDir(root)))
+  if ((await isSymlink(withoutTrailingDots(root))) || !(await isDir(root)))
     return fail('artifact root is not a regular directory');
   const manifestPath = `${root}/${MANIFEST_NAME}`;
   if ((await isSymlink(manifestPath)) || !(await isFile(manifestPath)))
