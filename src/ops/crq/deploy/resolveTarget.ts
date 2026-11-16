@@ -39,12 +39,13 @@ export async function resolveTarget(
   fetch: boolean,
   effects: ResolveTargetEffects,
 ): Promise<string> {
+  if (requested !== null && !SHA_RE.test(requested))
+    throw new Refused('--target-sha must be a full 40-hex commit SHA');
   if (fetch) await gitChecked(effects, ['fetch', '--quiet', 'origin', 'main']);
   let target: string;
   if (requested === null) {
     target = await gitChecked(effects, ['rev-parse', '--verify', `${MAIN}^{commit}`]);
   } else {
-    if (!SHA_RE.test(requested)) throw new Refused('--target-sha must be a full 40-hex commit SHA');
     target = requested;
   }
   // `-t` reports the object's own type: `^{commit}` would peel an annotated tag to its

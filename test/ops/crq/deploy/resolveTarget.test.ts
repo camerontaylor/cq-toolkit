@@ -41,6 +41,11 @@ describe('resolveTarget', () => {
       );
       expect(g.calls).toEqual([]);
     }
+    const h = fake(() => ok());
+    await expect(resolveTarget('abc123', true, h.effects)).rejects.toThrow(
+      '--target-sha must be a full 40-hex commit SHA',
+    );
+    expect(h.calls).toEqual([]);
   });
   test('refuses a target that is not a commit here, before the ancestry test', async () => {
     const f = fake((a) => (a[0] === 'cat-file' ? { code: 1, stdout: '', stderr: '' } : ok()));
