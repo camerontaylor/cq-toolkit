@@ -235,10 +235,12 @@ async function terminalSession(
         if (!path || !isAbsolute(path)) continue;
         try {
           const candidate = await realpath(join(path, 'git'));
-          // Only a real parent traversal leaves the checkout; a descendant such
-          // as `<root>/..tools/git` also begins with two dots.
+          // Outside means outside by whole path components. A candidate inside
+          // the checkout whose path merely begins with '..' (`..tools/git`) is
+          // still checkout-controlled and must not become the trusted binary.
           const relation = relative(canonical, candidate);
-          if (relation !== '..' && !relation.startsWith(`..${sep}`)) continue;
+          if (relation !== '..' && !relation.startsWith(`..${sep}`) && !isAbsolute(relation))
+            continue;
           await access(candidate, constants.X_OK);
           const stat = await lstat(candidate);
           if (stat.isFile()) {
