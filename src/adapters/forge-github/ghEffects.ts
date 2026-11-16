@@ -101,6 +101,25 @@ export function mapGhFault(
 }
 
 /**
+ * Strip an inherited `GH_REPO` from the child environment (the review-debt
+ * #163 lesson, applied to this adapter): gh resolves its repository as
+ * `-R` > `GH_REPO` > cwd, and this adapter binds its repository through the
+ * spawn `cwd` (`repoRoot`) ALONE — no `-R` in any argv. A parent `GH_REPO`
+ * would therefore redirect every effect (createPr, editPrBody, comment, the
+ * pr views) at ANOTHER repository, if authorized, so it never reaches the
+ * child. The strip is case-insensitive on every platform: gh's Go runtime
+ * folds env names on win32, and a lowercase `gh_repo` carries no meaning on
+ * POSIX.
+ */
+function stripGhRepoOverride(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (name.toUpperCase() !== 'GH_REPO') result[name] = value;
+  }
+  return result;
+}
+
+/**
  * Run gh with an execFile ARGS ARRAY. A non-zero exit, a spawn failure, or
  * a run exceeding `timeoutMs` (SIGKILL) rejects with the mapped fault.
  * `stdin` (a PR body or comment) is written to the child and the pipe
@@ -115,7 +134,10 @@ function runGhWith(
   cqEnv?: CqEnv,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const env = ghSpawnEnv({ ...process.env, GH_PROMPT_DISABLED: '1' });
+    // The spawn cwd is this adapter's repository binding; an inherited
+    // GH_REPO would override it (gh's `-R` > `GH_REPO` > cwd precedence), so
+    // it is stripped before the child ever sees it.
+    const env = ghSpawnEnv(stripGhRepoOverride({ ...process.env, GH_PROMPT_DISABLED: '1' }));
     const bin = resolveWindowsCommand(resolveGhBin(cqEnv), env, process.platform, process.env);
     if (bin === undefined) {
       reject(new Error('gh executable not found'));

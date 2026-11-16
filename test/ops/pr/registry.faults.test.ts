@@ -1,6 +1,10 @@
 // Split provenance: test/ops/pr/registry.test.ts was split into the
 // registry.*.test.ts subject files plus registry.helpers.ts; this file keeps
-// the execFile fault taxonomy (mapGhFault) and the inert-construction pin.
+// the execFile fault taxonomy (mapGhFault), the inert-construction pin, and
+// the spawn-env repo-binding pin.
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
   makeSubprocessPrEffects,
@@ -57,5 +61,55 @@ describe('makeSubprocessPrEffects construction is inert', () => {
     const effects = makeSubprocessPrEffects('/repo');
     expect(typeof effects.searchPrByHead).toBe('function');
     expect(typeof effects.createPr).toBe('function');
+  });
+});
+
+describe('makeSubprocessPrEffects spawn env — repoRoot is the only repo selector', () => {
+  test('an inherited GH_REPO never reaches the child (gh: -R > GH_REPO > cwd)', async () => {
+    // gh resolves its repository as `-R` > `GH_REPO` > cwd. This adapter
+    // carries no `-R`; it binds the repository through the spawn cwd alone,
+    // so a parent `GH_REPO` (e.g. `other/repo`) would silently aim
+    // editPrBody/comment/createPr at ANOTHER repository. The child env must
+    // therefore see NO GH_REPO, while the spawn still runs inside repoRoot.
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-pr-ghrepo-'));
+    const binDir = join(scratch, 'bin');
+    const repoDir = join(scratch, 'repo');
+    const ghRepoFile = join(scratch, 'ghrepo');
+    const cwdFile = join(scratch, 'cwd');
+    try {
+      await mkdir(binDir, { recursive: true });
+      await mkdir(repoDir, { recursive: true });
+      await writeFile(
+        join(binDir, 'gh'),
+        [
+          '#!/bin/sh',
+          `printf '%s' "\${GH_REPO-unset}" > '${ghRepoFile}'`,
+          `printf '%s' "$PWD" > '${cwdFile}'`,
+          `echo '{"body":"x"}'`,
+          '',
+        ].join('\n'),
+      );
+      await chmod(join(binDir, 'gh'), 0o755);
+      const originalPath = process.env['PATH'];
+      const originalGhRepo = process.env['GH_REPO'];
+      process.env['PATH'] = `${binDir}:${originalPath ?? ''}`;
+      process.env['GH_REPO'] = 'other/repo';
+      try {
+        const effects = makeSubprocessPrEffects(repoDir);
+        await expect(effects.getPrBody(123)).resolves.toBe('x');
+        expect(await readFile(ghRepoFile, 'utf8')).toBe('unset');
+        // Compare REAL paths: os.tmpdir() may hand out a symlinked spelling.
+        const { realpath: realpathFsp } = await import('node:fs/promises');
+        const spawnedCwd = await realpathFsp(await readFile(cwdFile, 'utf8'));
+        expect(spawnedCwd).toBe(await realpathFsp(repoDir));
+      } finally {
+        if (originalPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = originalPath;
+        if (originalGhRepo === undefined) delete process.env['GH_REPO'];
+        else process.env['GH_REPO'] = originalGhRepo;
+      }
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
   });
 });
