@@ -387,6 +387,24 @@ describe('startOne selection', () => {
     expect(res.started).toBe('run-b');
   });
 
+  it('a blocked launch run id is not returned when a later reservation stops the pass', async () => {
+    const q = queueOf(open('a', { order: 1 }), open('b', { order: 2 }));
+    const h = harness((item) => {
+      if (item.id === 'b') {
+        h.starts += 1; // unknown delivery journaled a start before failing
+        throw new StartNotReady('unknown delivery');
+      }
+      return ok();
+    });
+    (h.effects as { launch: StartOneEffects['launch'] }).launch = async (item) => {
+      if (item.id === 'a') item.state = 'blocked';
+      return `run-${String(item.id)}`;
+    };
+    const res = await startOne({ queue: q, log: [], dry: false }, h.effects);
+    expect(h.planned).toEqual(['a', 'b']);
+    expect(res.started).toBeNull();
+  });
+
   it('propagates non-refusal launch errors', async () => {
     const h = harness(ok);
     (h.effects as { launch: StartOneEffects['launch'] }).launch = async () => {
