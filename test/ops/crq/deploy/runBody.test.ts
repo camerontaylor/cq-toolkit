@@ -524,7 +524,9 @@ describe('exception routing', () => {
     f.fail.set('assertClean', new Error('first'));
     f.fail.set('recover', new RecoveryRequired('cannot recover'));
     f.fail.set('lock.release', release);
-    const error = await runWithRecovery(f.args, f.steps, newRunBodyState()).catch((e: unknown) => e);
+    const error = await runWithRecovery(f.args, f.steps, newRunBodyState()).catch(
+      (e: unknown) => e,
+    );
     expect(error).toBeInstanceOf(RecoveryRequired);
     expect((error as Error).message).toBe('cannot recover');
     expect((error as { releaseFailure?: unknown }).releaseFailure).toBe(release);
