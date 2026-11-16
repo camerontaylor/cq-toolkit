@@ -78,6 +78,12 @@ const runnerRoot = (root: string): string => `${hostPath(root)}/apps/crq-python`
 
 const SOURCE_DIR = 'apps/crq-python/ops/systemd/';
 
+/** A runtime unit template must carry exactly one `ExecStart=` line. */
+const validateSingleExecStart = (name: string, text: string): void => {
+  if (splitLines(text).filter((line) => line.startsWith('ExecStart=')).length !== 1)
+    throw new ValueError(`unit must have exactly one ExecStart: ${name}`);
+};
+
 /** Read-only, source-bound render of one unit at an immutable commit. */
 export async function renderService(
   effects: RenderServiceEffects & ArtifactEffects,
@@ -108,8 +114,7 @@ export async function renderService(
   if (expected !== blob) throw new ValueError('template bytes do not match the pinned Git blob');
   const text = decodeUtf8(raw);
   validateUnitTemplate(unit, text);
-  if (splitLines(text).filter((line) => line.startsWith('ExecStart=')).length !== 1)
-    throw new ValueError(`unit must have exactly one ExecStart: ${unit}`);
+  validateSingleExecStart(unit, text);
   const rendered = renderServiceText(unit, text, runnerRoot(root), command);
   const encoded = Buffer.from(rendered, 'utf8');
   let artifact: unknown = null;
@@ -163,7 +168,13 @@ export async function renderUnits(
     if (nameOf(source).startsWith('crq-'))
       templates.push([nameOf(source), pyText(await effects.git(['show', `${commit}:${source}`]))]);
   if (!templates.length) throw new ValueError('target lacks CRQ unit templates');
-  for (const [name, text] of templates) validateUnitTemplate(name, text);
+  for (const [name, text] of templates) {
+    validateUnitTemplate(name, text);
+    // Every known runtime service is validated, whether or not a runtime is
+    // selected for it: the default Python render keeps the committed ExecStart.
+    if (Object.prototype.hasOwnProperty.call(UNIT_COMMANDS, name))
+      validateSingleExecStart(name, text);
+  }
   const runtimes = options.runtimes ?? new Map<string, unknown>();
   if ([...runtimes.keys()].some((u) => !Object.prototype.hasOwnProperty.call(UNIT_COMMANDS, u)))
     throw new ValueError('unknown runtime unit');
