@@ -550,7 +550,8 @@ export async function main(argv: readonly string[], deps: MainDeps): Promise<Mai
         args.tag ?? null,
       );
     } else if (args.operation === 'prepare') {
-      const out = args.unitsOutput as string;
+      // Validate the resolved destination, then write to that same one.
+      const out = pyResolve(args.unitsOutput as string);
       await requireOutsideGit(out, env);
       if (!outside(out, root, pyResolve))
         throw new ValueError('rendered units must be outside checkout');
@@ -561,7 +562,8 @@ export async function main(argv: readonly string[], deps: MainDeps): Promise<Mai
         args.tag ?? null,
       );
     } else if (args.operation === 'preview') {
-      const out = args.output as string;
+      // Validate the resolved destination, then write to that same one.
+      const out = pyResolve(args.output as string);
       const host = hostBundle(env, root, overlay, raw);
       await rootCheck(host, root, overlay);
       await requireOutsideGit(out, env);
