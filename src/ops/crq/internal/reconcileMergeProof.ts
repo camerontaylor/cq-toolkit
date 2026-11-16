@@ -152,7 +152,11 @@ export async function canonicalProof(
   ]);
 }
 
-/** The `try` block that selects the merge proof; throws when none is valid. */
+/**
+ * The `try` block that selects the merge proof. Throws when a proof exists but is
+ * invalid. Returns `{ proof: null }` when the run has no recorded publication head:
+ * `repair_tick` parity, where an unpublished run has no other finalization route.
+ */
 export async function proveMerge(
   context: MergeProofContext,
   record: JsonObject,
@@ -179,6 +183,9 @@ export async function proveMerge(
   const fixed = fixedJobs(record);
   const anchors: string[] = [];
   for (const id of fixed) {
+    // Ownership before any read: an unowned FIXED verdict never reaches a source path.
+    if (!strings(record.get('jobs')).includes(id))
+      throw new Error('merge-head repair job identity mismatch');
     const job = await effects.evidence.readJob(id);
     if (
       job.get('job') !== id ||
