@@ -64,6 +64,13 @@ describe('renderPlists differential against plistlib goldens', () => {
 });
 
 describe('plist codec', () => {
+  test('accepts XML whitespace before the empty-element terminator', () => {
+    const doc = '<plist><dict><key>RunAtLoad</key><true /></dict></plist>';
+    const v = parsePlist(doc);
+    expect(dumpPlist(v)).toBe(
+      dumpPlist(parsePlist('<plist><dict><key>RunAtLoad</key><true/></dict></plist>')),
+    );
+  });
   test('parse/dump round trip and malformed input', () => {
     const v = parsePlist(golden.watchdog!.in);
     expect(dumpPlist(parsePlist(dumpPlist(v)))).toBe(dumpPlist(v));

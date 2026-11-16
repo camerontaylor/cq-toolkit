@@ -78,7 +78,7 @@ export function parsePlist(source: string): PlistValue {
   };
   const value = (): PlistValue => {
     skipMisc();
-    const m = /^<([A-Za-z]+)(\/?)>/.exec(source.slice(pos));
+    const m = /^<([A-Za-z]+)\s*(\/?)>/.exec(source.slice(pos));
     if (!m) return fail('expected an element');
     const tag = (m as RegExpExecArray)[1] as string;
     const empty = (m as RegExpExecArray)[2] === '/';
