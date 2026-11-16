@@ -205,6 +205,26 @@ describe('runMetadataSample', () => {
     });
   });
 
+  test('keeps the effects receiver when sampling mtimes', async () => {
+    const inner = fake({
+      '/s/runs': dir(),
+      '/s/runs/ok': dir(3n),
+      '/s/runs/ok/meta.json': file('{}'),
+    });
+    class Adapter implements RunMetadataEffects {
+      readonly fs = inner;
+      stateDir = (): string => this.fs.stateDir();
+      isDir = (p: string): Promise<boolean> => this.fs.isDir(p);
+      isFile = (p: string): Promise<boolean> => this.fs.isFile(p);
+      listDir = (p: string): Promise<readonly DirEntry[]> => this.fs.listDir(p);
+      readFile = (p: string): Promise<Uint8Array> => this.fs.readFile(p);
+      mtimeNs(p: string): Promise<bigint> {
+        return this.fs.mtimeNs(p);
+      }
+    }
+    expect((await runMetadataSample(new Adapter()))?.readable).toBe(1);
+  });
+
   test('samples only the newest RECEIPT_SAMPLE runs', async () => {
     const tree: Record<string, Node> = { '/s/runs': dir() };
     for (let i = 0; i < RECEIPT_SAMPLE + 2; i++) {

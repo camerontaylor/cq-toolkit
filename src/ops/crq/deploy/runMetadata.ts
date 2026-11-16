@@ -180,7 +180,7 @@ export async function runMetadataSample(
   let readable = 0;
   let prelaunch = 0;
   const unreadable: UnreadableRun[] = [];
-  for (const entry of await newest(entries, RECEIPT_SAMPLE, effects.mtimeNs)) {
+  for (const entry of await newest(entries, RECEIPT_SAMPLE, (path) => effects.mtimeNs(path))) {
     const problem = await runMetadataProblem(entry.path, effects);
     if (problem === null) readable += 1;
     else if (problem === 'prelaunch') prelaunch += 1;
