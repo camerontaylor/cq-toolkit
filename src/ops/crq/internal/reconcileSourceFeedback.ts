@@ -194,8 +194,12 @@ async function publishResolutions(
         pending = true;
         continue; // Keep feedback pending for retry.
       }
+      // Journal the candidate publication first: `completed` only gains the id once the
+      // journal holding it is durable, so recovery state never claims an unrecorded
+      // resolution.
+      const candidate = withObjectKeys(publication, [['source_resolutions', [...completed, id]]]);
+      await effects.writeJournal(first, candidate);
       completed.push(id);
-      await effects.writeJournal(first, current());
     }
   } catch (error) {
     throw new SourcePublicationFailed(
