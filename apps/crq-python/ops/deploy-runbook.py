@@ -715,6 +715,12 @@ class Run:
         self.phase("drained")
 
         self.narrate("switching to " + self.target)
+        # self.effects reads this run's private record directory (run_dir is
+        # what Effects was built with), so this is the same unfinished-
+        # transaction guard the controller's own checkout seams run before
+        # any helper switch: a pending or unresolved controller-*.json record
+        # must block the switch here too.
+        self.controller.refuse_unfinished_transactions(self.effects)
         self.switch_attempted = True
         self.helper.switch(self.root, self.overlay, self.overlay_raw,
                            self.target, self.args.tag)
@@ -1013,6 +1019,10 @@ class Run:
                 "automatic rollback is disabled after the rollback drain: "
                 + compatibility_reason(compatibility) + "; the hold is retained"
                 + " (after: " + reason[:200] + ")")
+        # The rollback switch is fenced by the same unfinished-transaction
+        # guard as the forward switch; a refusal keeps the hold and is
+        # surfaced as recovery_required.
+        self.controller.refuse_unfinished_transactions(self.effects)
         self.helper.switch(self.root, self.overlay, self.overlay_raw,
                            self.prior_sha, None)
         self.switched = False
@@ -1077,13 +1087,29 @@ class Run:
 
     # -- failure paths -------------------------------------------------
     def fail_stop(self, reason):
-        """Keep the hold and leave the host inert; owner recovery."""
+        """Keep the hold (reacquiring it if this run released admission)
+        and leave the host inert; owner recovery."""
+        reacquire_refusal = None
+        if self.hold is not None and not getattr(self.hold, "acquired", False):
+            # Admission was released for the health window: reclaim this
+            # run's marker before stopping triggers so the host stays inert
+            # behind it. A refusal (typically a foreign marker) still holds
+            # admission, so keep it and report it below rather than hide it;
+            # triggers are only ever stopped under a hold this run owns.
+            try:
+                self.hold.acquire()
+            except Exception as exc:
+                reacquire_refusal = repr(exc)
+                self.narrate("fail-stop could not reacquire admission: "
+                             + repr(exc))
         if self.hold is not None and self.hold.owns():
             try:
                 self.units.stop(sorted(self.triggers))
             except Exception as exc:  # the hold is what matters
                 self.narrate("fail-stop could not stop triggers: " + repr(exc))
         record = self.document("recovery_required", reason=str(reason)[:400])
+        if reacquire_refusal is not None:
+            record["admission_reacquire_refusal"] = reacquire_refusal[:400]
         record["written_at"] = now_iso()
         if self.run_dir is not None:
             try:
@@ -1173,7 +1199,15 @@ class Run:
                     rollback_error) + ") after: " + reason[:200])
             return "rolled_back"
         if self.switch_attempted:
-            head = self.git("rev-parse", "HEAD")
+            try:
+                head = self.git("rev-parse", "HEAD")
+            except Exception as exc:
+                # A switch was attempted, so an unreadable HEAD means the
+                # checkout cannot be proven unchanged; it may have moved.
+                # That is recovery required, never an unchanged-host
+                # refusal: keep the hold and leave recovery to the owner.
+                self.fail_stop("the post-switch HEAD could not be observed ("
+                               + repr(exc)[:200] + "): " + reason[:200])
             if head == self.target:
                 try:
                     self.rollback_to_prior(reason)
