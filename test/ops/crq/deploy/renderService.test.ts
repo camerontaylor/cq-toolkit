@@ -208,6 +208,38 @@ describe('renderUnits', () => {
     expect(f.written).toEqual([]);
     expect(f.dirs).toEqual([]);
   });
+  test('refuses before any write when a runtime service lacks an ExecStart', async () => {
+    const f = fx({
+      'crq-tick.service': Buffer.from('[Service]\nWorkingDirectory=@CRQ_ROOT@\n'),
+      'crq-tick.timer': Buffer.from('[Timer]\n'),
+    });
+    await expect(renderUnits(f, '/r', '/out', '/h')).rejects.toThrow(
+      'unit must have exactly one ExecStart: crq-tick.service',
+    );
+    expect(f.written).toEqual([]);
+    expect(f.dirs).toEqual([]);
+  });
+  test('refuses before any write when a runtime service duplicates its ExecStart', async () => {
+    const tpls = {
+      'crq-tick.service': Buffer.from(
+        '[Service]\nWorkingDirectory=@CRQ_ROOT@\nExecStart=a\nExecStart=b\n',
+      ),
+      'crq-tick.timer': Buffer.from('[Timer]\n'),
+    };
+    const runtimes: (ReadonlyMap<string, unknown> | null)[] = [
+      null,
+      new Map([['crq-tick.service', 'python']]),
+      new Map([['crq-tick.service', `node:${SHA}`]]),
+    ];
+    for (const rts of runtimes) {
+      const f = fx(tpls);
+      await expect(renderUnits(f, '/r', '/out', '/h', { runtimes: rts })).rejects.toThrow(
+        'unit must have exactly one ExecStart: crq-tick.service',
+      );
+      expect(f.written).toEqual([]);
+      expect(f.dirs).toEqual([]);
+    }
+  });
   test('refuses an empty target and bad runtime maps', async () => {
     await expect(
       renderUnits(fx({ 'other.service': Buffer.from('x') }), '/r', '/out', '/h'),

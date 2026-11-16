@@ -222,6 +222,39 @@ describe('proof-gated source feedback', () => {
     expect(f.calls).toContain('post');
     expect(f.calls).not.toContain('write');
   });
+  test('a pending source thread does not block resolving later jobs', async () => {
+    const f = fixture();
+    const second = object({
+      job: 'crq-job-2',
+      item: 'item-1',
+      run: 'run-1',
+      pr: 13,
+      finding: { path: 'src/a.ts' },
+    });
+    const input = {
+      ...f.input,
+      jobs: [...f.input.jobs, { id: 'crq-job-2', job: second, sourcePr: 13 }],
+    };
+    const readFirst = f.effects.readJob;
+    f.effects.readJob = async (id) => (id === 'crq-job-2' ? second : readFirst(id));
+    const resolved: string[] = [];
+    const written: string[][] = [];
+    f.effects.sourceThread = async (job) =>
+      job.get('job') === 'crq-job-1' ? { kind: 'pending' } : { kind: 'found', id: 'thread-2' };
+    f.effects.resolveSourceThread = async (id) => {
+      resolved.push(id);
+      return true;
+    };
+    f.effects.writeJournal = async (p) => {
+      written.push([...p.sourceResolutions]);
+    };
+    const result = await publishRepairSourceFeedback(input, f.effects);
+    expect(result.kind).toBe('pending');
+    expect(resolved).toEqual(['thread-2']);
+    expect(written).toEqual([['crq-job-2']]);
+    if (result.kind === 'pending')
+      expect(result.publication.sourceResolutions).toEqual(['crq-job-2']);
+  });
   test('refuses a journal identity change and a merge outside target', async () => {
     const f = fixture();
     f.effects.readJournal = async () => ({
