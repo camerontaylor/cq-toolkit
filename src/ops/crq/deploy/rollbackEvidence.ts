@@ -6,13 +6,11 @@
 import { JsonNumber, JsonObject, parseJsonValue } from '../../../policy/crq/jsonValue.js';
 import { pythonFloatRepr } from '../../../policy/crq/pythonJson.js';
 import { pyTruthy } from '../../../policy/crq/queueDoc.js';
+import { Refused } from './errors.js';
+export { Refused };
 
 /** Where the overlay has not rendered a runtime yet. */
 export const PLACEHOLDER = '@HOST_CQ_BIN@';
-
-export class Refused extends Error {
-  override readonly name = 'Refused';
-}
 
 export interface CqBinRecord {
   readonly pointer: string | null;

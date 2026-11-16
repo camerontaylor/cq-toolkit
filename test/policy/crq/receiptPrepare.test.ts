@@ -112,6 +112,16 @@ const SCENARIOS: Scenario[] = [
     gh: tail(),
   },
   {
+    name: 'prepare: stale receipt fields in meta are replaced',
+    fn: 'prepare',
+    args: P({
+      meta: { ...META, receipt_verdict: 'PASS', receipt_header: 'old', whole_pr_scan: false },
+      findings: [{ severity: 'Major' }],
+    }),
+    files: good(),
+    gh: tail(),
+  },
+  {
     name: 'prepare: minor finding still PASS',
     fn: 'prepare',
     args: P({ findings: [{ severity: 'minor' }] }),
@@ -674,6 +684,45 @@ const normalise = (o: Outcome): Outcome =>
             ? 'JSON'
             : o.msg.replace(/^cannot use '[^']*' as a set element \((.*)\)$/, '$1'),
       };
+
+describe('prepare replaces stale receipt fields', () => {
+  test('JsonObject.get sees the new verdict, with no duplicate keys', () => {
+    const answers = [...tail()];
+    const gh: GhPort = () => {
+      const a = answers.shift() ?? {};
+      return {
+        returncode: JsonNumber.int(BigInt(a.returncode ?? 0)),
+        stdout: a.stdout ?? '',
+        stderr: a.stderr ?? '',
+      };
+    };
+    const text = good();
+    const files = {
+      readBytes: (path: string): Uint8Array | null => {
+        const value = text[path.slice(DIR.length + 1)];
+        return value === undefined || typeof value !== 'string'
+          ? null
+          : new TextEncoder().encode(value);
+      },
+    };
+    const meta = obj({ ...META, receipt_verdict: 'PASS', receipt_header: 'old' });
+    const out = prepare(
+      gh,
+      files,
+      'o/r',
+      7,
+      meta,
+      `${DIR}/review.ndjson`,
+      [obj({ severity: 'Major' })],
+      LOGIN,
+    );
+    expect(out?.get('receipt_verdict')).toBe('ITERATE');
+    expect(
+      out?.entries.map(([key]) => key).filter((key) => key === 'receipt_verdict'),
+    ).toHaveLength(1);
+    expect(out?.get('receipt_header')).toContain('ITERATE');
+  });
+});
 
 describe.skipIf(!HAVE_PYTHON)(
   'receipt prepare/refresh differential against crq_review_receipt',

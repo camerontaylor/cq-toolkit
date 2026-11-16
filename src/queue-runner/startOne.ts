@@ -285,8 +285,9 @@ export async function startOne(
           `head ${plan.head.slice(0, 12)} target ${plan.target}`,
       );
     } else {
+      let launched: string;
       try {
-        started = await effects.launch(item, plan);
+        launched = await effects.launch(item, plan);
       } catch (error) {
         if (!(error instanceof StartAuthorRefused)) throw error;
         item.wait_reason = error.message;
@@ -297,7 +298,8 @@ export async function startOne(
         log.push(`${String(item.id)}: blocked before vendor start`);
         continue;
       }
-      log.push(`started ${String(item.id)} [${plan.label}] run ${started}`);
+      started = launched;
+      log.push(`started ${String(item.id)} [${plan.label}] run ${launched}`);
     }
     broke = true;
     break;

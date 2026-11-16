@@ -54,6 +54,8 @@ export interface FixRunSeamsOptions {
   /** The reconcile pass's budgeted `gh pr view`. */
   readonly prInfo: (number: JsonValue) => Promise<JsonObject>;
   readonly gh?: GhFn;
+  /** Spends one reconcile-budget request; throws when exhausted. Called before each feedback `gh` call. */
+  readonly take?: () => void;
   readonly runGit?: RunGit;
   readonly now?: () => Date;
   /** `CONFIG['repair'].get('max_finding_retries', 2)`. */
@@ -133,7 +135,11 @@ export function fileFixRunSeams(
   if (!owner || !repoName || extra.length || !ghNameOk(owner) || !ghNameOk(repoName))
     throw new Error('invalid repo');
   const git = options.runGit ?? runGitIn(options.clone);
-  const gh = options.gh ?? makeGhRunner();
+  const rawGh = options.gh ?? makeGhRunner();
+  const gh: GhFn = (args) => {
+    options.take?.();
+    return rawGh(args);
+  };
   const now = options.now ?? (() => new Date());
   const repairDir = join(options.stateRoot, 'repair');
   const findingsRoot = findingLedgerRoots(options.stateRoot).findings;
@@ -192,7 +198,12 @@ export function fileFixRunSeams(
       },
       currentFixedEvent: (job, merge) =>
         new FindingInbox(files).currentFixedEvent(publication, job, merge ?? ''),
-      isAncestor,
+      async isAncestor(ancestor, descendant, fixPrNumber) {
+        // A merged head may be gone from branch refs: fetch the PR ref before ancestry, or a
+        // missing object reads as a lineage mismatch on every pass.
+        if (fixPrNumber !== undefined) await ensureCommit(fixPrNumber, descendant);
+        return isAncestor(ancestor, descendant);
+      },
     },
     evidence: {
       git,

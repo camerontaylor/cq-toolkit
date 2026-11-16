@@ -20,6 +20,10 @@ state, before any cutover is proposed.
    `runTick`/`runScheduledSlot` against copy B (identical bytes), with the clock
    pinned to one instant (`now` injected in TS; `CRQ_NOW` or a faketime wrapper
    for Python).
+   For mid-slot samples, hold an exclusive `flock` on the scratch copies of the
+   tick lock and the slot lock in both runs before starting them. The copied
+   files do not carry the live process's OS lock, so without this step the
+   early-exit branch is not exercised.
 3. **Heavy phases stubbed identically.** Forge, vendor and git calls are
    replaced by one recorded-response fixture set replayed to both sides. No
    network, no `gh`, no vendor invocation, no `notifyOwner`.

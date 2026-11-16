@@ -3,6 +3,8 @@
  * text=True, input=..., timeout=..., env=...)` over `spawnSync`. A spawn failure maps to a
  * `ProcessLaunchError` (`ENOENT` is Python's `FileNotFoundError`; everything else, including
  * a timeout, is the generic `other`), so the pure layer only ever sees safe reason codes.
+ * The timeout kills with `SIGKILL`: a helper that ignores `SIGTERM` cannot keep the wait
+ * unbounded.
  */
 import { spawnSync } from 'node:child_process';
 import { currentEntryEnv } from '../../config/run-env.js';
@@ -18,6 +20,7 @@ export function nodeIdentityDeps(): IdentityDeps {
         encoding: 'utf8',
         input: options.inputText ?? undefined,
         timeout: options.timeoutSec * 1000,
+        killSignal: 'SIGKILL',
         env: options.env === null ? currentEntryEnv() : { ...options.env },
       });
       if (result.error) {

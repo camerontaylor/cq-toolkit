@@ -291,6 +291,30 @@ describe('coverageFallback', () => {
     expect(f.log).toEqual(['coverage measurement failed: ' + 'x'.repeat(150)]);
   });
 
+  it('pins a producer-returned candidate without coverage_sha on the non-dry path', async () => {
+    const fresh = cov({ id: 'cov-new' });
+    const seen: unknown[] = [];
+    const h = harness(
+      {
+        coverageCandidate: () => fresh,
+        buildSynthetic: async (_item, sha) => {
+          seen.push(sha);
+          return { base: 'b', head: 'h', paths: 1 };
+        },
+        launch: async (_q, item, plan) => {
+          seen.push(plan.target);
+          item.state = 'reviewing';
+          return 'run-1';
+        },
+      },
+      [],
+    );
+    const r = await coverageFallback(h.q, h.log, false, null, true, h.fx);
+    expect(seen).toEqual(['mq1', 'mq1']);
+    expect(fresh.coverage_sha).toBe('mq1');
+    expect(r.started).toBe('run-1');
+  });
+
   it('exposes backfill_ordinary_exhausted during the call and restores it after', async () => {
     let during: unknown;
     const h = harness({

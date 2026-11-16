@@ -1080,6 +1080,17 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(vm.cmd_plan(args), 0)
             self.assertFalse(state.exists())
 
+    def test_json_mode_serializes_operating_system_failures(self):
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = vm.main(["--json", "verify", "/definitely-missing-crq-report.json"])
+        self.assertEqual(code, 1)
+        self.assertEqual(err.getvalue(), "")
+        artifact = json.loads(out.getvalue())
+        self.assertEqual(artifact["error"]["kind"], "thrown")
+
 
 if __name__ == "__main__":
     unittest.main()

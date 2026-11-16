@@ -225,6 +225,7 @@ async function coverageFallbackInner(
       return { started: null, available: true };
     }
     try {
+      if (!('coverage_sha' in item)) item.coverage_sha = mq;
       const sha = item.coverage_sha as string;
       const { base, head } = await fx.buildSynthetic(item, sha);
       if (!(await fx.diffNameOnly(base, head))) {

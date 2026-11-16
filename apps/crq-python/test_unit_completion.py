@@ -56,6 +56,13 @@ def _node_unit(sha=NODE_SHA):
     ).encode()
 
 
+def _exec_start_record(argv):
+    """Render one argv the way ``systemctl show`` reports ExecStart."""
+    return ("{ path=" + argv[0] + " ; argv[]=" + " ".join(argv)
+            + " ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; "
+            "pid=0 ; code=(null) ; status=0/UNKNOWN }")
+
+
 _JOURNAL_ALWAYS = ("__CURSOR", "__REALTIME_TIMESTAMP",
                    "__MONOTONIC_TIMESTAMP", "_BOOT_ID", "__SEQNUM",
                    "__SEQNUM_ID")
@@ -216,7 +223,19 @@ class FakeSource:
         self.show_calls += 1
         if not unit == UNIT:
             raise AssertionError("unexpected unit " + unit)
-        return {prop: self.state.get(prop, "") for prop in props}
+        values = {prop: self.state.get(prop, "") for prop in props}
+        if "ExecStart" in values and "ExecStart" not in self.state:
+            values["ExecStart"] = self._exec_start_record()
+        return values
+
+    def _exec_start_record(self):
+        """Serve the installed file's command as the manager would see it."""
+        lines = [line for line in self.unit_path.read_text().splitlines()
+                 if line.startswith("ExecStart=")]
+        if len(lines) != 1:
+            return ""
+        argv = lines[0][len("ExecStart="):].split()
+        return _exec_start_record(argv) if argv else ""
 
     def records(self, unit, *, after_monotonic):
         self.records_calls += 1
@@ -276,6 +295,20 @@ class CompletionFixture(unittest.TestCase):
 class SequenceTests(CompletionFixture):
     def test_zero_without_completed_invocation(self):
         self.assertEqual(self.port().sequence(UNIT), 0)
+
+    def test_drop_in_reset_effective_exec_start_refuses_baseline(self):
+        # systemd merges drop-ins after the main unit file; a drop-in in any
+        # search path may reset ExecStart= while the fragment digest still
+        # matches.
+        self.source.state["ExecStart"] = _exec_start_record(
+            ["/usr/bin/env", "python3", "/checkout/other", "tick"])
+        with self.assertRaises(completion.CompletionRefused):
+            self.port().sequence(UNIT)
+
+    def test_unobservable_effective_exec_start_refuses_baseline(self):
+        self.source.state["ExecStart"] = ""
+        with self.assertRaises(completion.CompletionRefused):
+            self.port().sequence(UNIT)
 
     def test_masked_service_has_zero_baseline(self):
         self.unit_path.write_bytes(_python_unit())
@@ -427,6 +460,31 @@ class ReadTests(CompletionFixture):
         with self.assertRaises(completion.CompletionRefused):
             port.read(UNIT, "python", 100)
 
+    def test_drop_in_reset_effective_exec_start_refuses(self):
+        port = self.port()
+        self.baseline(invocation="1" * 32, exit_monotonic=100)
+        self.source.complete("2" * 32, 200)
+        self.source.state["ExecStart"] = _exec_start_record(
+            ["/usr/bin/env", "python3", "/checkout/other", "tick"])
+        with self.assertRaises(completion.CompletionRefused):
+            port.read(UNIT, "python", 100)
+
+    def test_dependency_only_drop_in_keeps_the_completion(self):
+        # The declared repair drop-in sets only Requires= and After=, so the
+        # rendered command stays effective and the completion is credited.
+        dropins = self.unit_dir / (UNIT + ".d")
+        dropins.mkdir()
+        (dropins / "10-repair.conf").write_bytes(
+            b"[Unit]\n"
+            b"Requires=crq-probe-blocker.service\n"
+            b"After=crq-probe-blocker.service\n")
+        port = self.port()
+        self.baseline(invocation="1" * 32, exit_monotonic=100)
+        self.source.complete("2" * 32, 200)
+        evidence = port.read(UNIT, "python", 100)
+        self.assertIsNotNone(evidence)
+        self.assertEqual(evidence["invocation"], "2" * 32)
+
     def test_runtime_mismatch_refuses(self):
         self.unit_path.write_bytes(_node_unit())
         port = self.port(service_sha256=_sha256(_node_unit()))
@@ -505,6 +563,9 @@ class WitnessTests(CompletionFixture):
             "ExecMainStatus": "0",
             "ExecMainExitTimestampMonotonic": "5000",
             "FragmentPath": str(self.unit_path),
+            "ExecStart": _exec_start_record(
+                ["/usr/bin/env", "python3",
+                 "/checkout/apps/crq-python/crq.py", "tick"]),
         }
         records = [realistic_journal_record("%032x" % (index + 1),
                                             1000 + index)
@@ -769,6 +830,53 @@ class ParserTests(unittest.TestCase):
     def test_show_output_rejects_duplicate_property(self):
         with self.assertRaises(completion.CompletionRefused):
             completion.parse_show_output("Result=success\nResult=success\n")
+
+    def test_show_exec_start_parses_the_manager_record(self):
+        record = _exec_start_record(
+            ["/usr/bin/env", "python3", "/checkout/apps/crq-python/crq.py",
+             "tick"])
+        self.assertEqual(
+            completion.parse_show_exec_start(record),
+            ("/usr/bin/env",
+             "/usr/bin/env python3 /checkout/apps/crq-python/crq.py tick"))
+
+    def test_show_exec_start_keeps_a_semicolon_argument_intact(self):
+        record = _exec_start_record(["/bin/x", "a ; b", "c"])
+        self.assertEqual(
+            completion.parse_show_exec_start(record),
+            ("/bin/x", "/bin/x a ; b c"))
+
+    def test_render_argv_refuses_ambiguous_arguments(self):
+        for argv in (["/bin/x", ""], ["/bin/x", "a b"], []):
+            with self.subTest(argv=argv):
+                with self.assertRaises(completion.CompletionRefused):
+                    completion.render_argv(argv)
+
+    def test_show_exec_start_rejects_malformed_records(self):
+        records = (
+            "",
+            "loaded",
+            "{ path=/usr/bin/env ; ignore_errors=no }",
+            "{ argv[]=/usr/bin/env python3 x ; ignore_errors=no }",
+            "{ path=/usr/bin/env ; argv[]=/bin/other python3 x }",
+            "{ path=/usr/bin/env ; argv[]=/usr/bin/env python3 x ; "
+            "path=/other }",
+            "{ path=/usr/bin/env ; argv[]=/usr/bin/env python3 x ; "
+            "argv[]=/usr/bin/env python3 y }",
+        )
+        for record in records:
+            with self.subTest(record=record):
+                with self.assertRaises(completion.CompletionRefused):
+                    completion.parse_show_exec_start(record)
+
+    def test_exec_start_tokens_come_from_the_unit_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / UNIT
+            path.write_bytes(_python_unit())
+            self.assertEqual(
+                completion.parse_exec_start_from_unit(path),
+                ["/usr/bin/env", "python3",
+                 "/checkout/apps/crq-python/crq.py", "tick"])
 
     def test_journal_json_parses_records(self):
         records = completion.parse_journal_json(

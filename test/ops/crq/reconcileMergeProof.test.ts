@@ -142,6 +142,29 @@ describe('proveMerge', () => {
     expect(result.proof?.has('fixed_revalidation')).toBe(false);
   });
 
+  test("the merge-head fallback rejects a FIXED job that is not this record's", async () => {
+    const { e } = effects({
+      evidence: {
+        ...effects().e.evidence,
+        readJob: async (id) =>
+          obj({ job: id, item: ctx.itemId, run: ctx.run, finding: { path: 'src/a.ts' } }),
+      },
+    });
+    await expect(proveMerge(ctx, record({ jobs: ['crq-j2'] }), info(published), e)).rejects.toThrow(
+      'identity mismatch',
+    );
+    const other = effects({
+      evidence: {
+        ...effects().e.evidence,
+        readJob: async (id) =>
+          obj({ job: id, item: 'other', run: ctx.run, finding: { path: 'src/a.ts' } }),
+      },
+    });
+    await expect(proveMerge(ctx, record(), info(published), other.e)).rejects.toThrow(
+      'identity mismatch',
+    );
+  });
+
   test('saved journal revalidation is validated, not merge-head evidence', async () => {
     const saved = obj({ ...publication, fixed_revalidation: { reason: 'r' } });
     const { e } = effects({ journal: saved });
