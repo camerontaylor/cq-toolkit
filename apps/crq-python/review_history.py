@@ -306,7 +306,7 @@ def project(q, *, repo, target, head_commit=None, head_tree=None, task=None,
     elif headline is not None:
         delta = {**(delta or dict(method="tree", files=None, insertions=None,
                                   deletions=None, binary_files=None, partial=True)),
-                 "commits_ahead": None, "ancestry": headline["ancestry"]}
+                 "commits_ahead": headline["commits_ahead"], "ancestry": headline["ancestry"]}
     scope = SCOPE_TASK if task is not None else SCOPE_BRANCH if branch is not None else SCOPE_NONE
     material = dict(relation=relation, repeat=repeat, summary=summary, delta=delta,
                     predecessor=None if headline is None else

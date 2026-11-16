@@ -306,11 +306,26 @@ def measure_cq_bin(config_bytes):
     return record
 
 
+def command_failure(args, exc):
+    """One operator-facing reason for a failed child command.
+
+    stderr is captured, never inherited: in machine mode (--json) stderr
+    must stay empty, so the diagnostic travels inside the refusal artifact.
+    """
+    detail = (exc.stderr or "").strip().splitlines()
+    return (" ".join(args) + " failed: "
+            + (detail[-1] if detail else "exit " + str(exc.returncode)))
+
+
 class RealUnits:
     """The live systemd user-unit provider; the only host-mutating seam."""
 
     def _run(self, *args):
-        return subprocess.check_output(args, text=True).strip()
+        try:
+            return subprocess.check_output(args, text=True,
+                                           stderr=subprocess.PIPE).strip()
+        except subprocess.CalledProcessError as exc:
+            raise Refused(command_failure(args, exc)) from exc
 
     def state(self, unit):
         return self._run("systemctl", "--user", "show", unit,
@@ -323,14 +338,16 @@ class RealUnits:
             args.append("--all")
         args.append("crq-*")
         try:
-            output = subprocess.check_output(args, text=True)
+            output = subprocess.check_output(args, text=True,
+                                             stderr=subprocess.PIPE)
         except subprocess.CalledProcessError as exc:
             # A unit-file pattern that matches nothing exits 1 with no
-            # diagnostic; an unavailable bus or any other failure raises.
+            # diagnostic; an unavailable bus or any other failure raises
+            # with the captured diagnostic, not on inherited stderr.
             if (command == "list-unit-files" and exc.returncode == 1
                     and not (exc.stderr or "").strip()):
                 return set()
-            raise
+            raise Refused(command_failure(args, exc)) from exc
         names = set()
         for line in output.splitlines():
             fields = line.split()
