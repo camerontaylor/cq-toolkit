@@ -524,7 +524,8 @@ describe('prepare', () => {
       ['crq-b.timer', 'B'],
     ]);
     const rec = s.log.find((l) => l.startsWith('record prepare')) as string;
-    expect(rec).toContain(`"crq-a.service",${JSON.stringify(digest(bytes('A')))}`.slice(0, 0));
+    expect(rec).toContain(`"crq-a.service",${JSON.stringify(digest(bytes('A')))}`);
+    expect(rec).toContain(`"crq-b.timer",${JSON.stringify(digest(bytes('B')))}`);
   });
   test('a failed verify writes nothing and does not reload', async () => {
     const { s, fx, out } = pr({ verifyFails: true });

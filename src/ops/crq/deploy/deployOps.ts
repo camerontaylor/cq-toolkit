@@ -319,11 +319,20 @@ export async function switchCheckout(
       throw error;
     }
     // Same tick lock spans drift check, checkout, render and audit.
-    await effects.record(destination, 'switch-render', [
-      ['previous_sha', previous],
-      ['tag', tag],
-    ]);
-    await effects.writeConfig(destination);
+    try {
+      await effects.record(destination, 'switch-render', [
+        ['previous_sha', previous],
+        ['tag', tag],
+      ]);
+      await effects.writeConfig(destination);
+    } catch (error) {
+      // A failed destination record or config write leaves the lock holding the
+      // target checkout with the previous config: restore both before it goes.
+      await gitText(effects, ['restore', '--', CONFIG]);
+      await gitText(effects, ['checkout', '--detach', previous]);
+      await effects.writeConfig(current);
+      throw error;
+    }
     const status = await gitText(effects, STATUS);
     if (status !== '' && status !== ` M ${CONFIG}`)
       throw new ValueError('post-switch status must contain only rendered config');
