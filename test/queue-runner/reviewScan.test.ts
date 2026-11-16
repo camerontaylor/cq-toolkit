@@ -112,6 +112,40 @@ describe('review scan evidence', () => {
     await expect(scanReviewDiff(input, f.effects)).rejects.toThrow('matcher unavailable');
     expect(f.report()).toBe('');
   });
+  it('decodes Git-quoted header paths before the path-scoped rule match', async () => {
+    let report = '';
+    const effects: ReviewScannerEffects = {
+      match: async ({ rules, lines }) => {
+        const hits: [number, number][] = [];
+        for (const [lineIndex, line] of lines.entries())
+          for (const [ruleIndex, rule] of rules.entries())
+            if (
+              (rule.path === null || new RegExp(rule.path, 'u').test(line.path)) &&
+              line.text.includes(rule.regex)
+            )
+              hits.push([lineIndex, ruleIndex]);
+        return hits;
+      },
+      gitleaks: async () => ({ kind: 'not-run' }),
+      writeReport: async (text) => {
+        report = text;
+      },
+    };
+    const scoped = `rules:\n  - id: 'class:scoped'\n    description: 'fixture'\n    regex: 'MARK'\n    path: '^src/'\n    sample: 'fixture'\nclean_probes:\n  - 'clean'\n`;
+    // Git quotes a pathname containing a tab and escapes the tab as `\t`.
+    const text = [
+      String.raw`diff --git "a/src/\tprobe.txt" "b/src/\tprobe.txt"`,
+      String.raw`--- "a/src/\tprobe.txt"`,
+      String.raw`+++ "b/src/\tprobe.txt"`,
+      '@@ -1 +1 @@',
+      '+MARK secret',
+    ].join('\n');
+    const result = await scanReviewDiff({ ...input, patternsText: scoped, diff: text }, effects);
+    expect(result.denylistHits).toBe(1);
+    expect(JSON.parse(report)).toMatchObject({
+      denylist_hits: [{ rule: 'class:scoped', file: 'src/\tprobe.txt', diff_line: 5 }],
+    });
+  });
   it('uses Python splitlines and the injected Unicode matcher', async () => {
     const f = fixture();
     f.effects.match = async ({ rules, lines }) => {

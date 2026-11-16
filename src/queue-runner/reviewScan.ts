@@ -18,6 +18,88 @@ const allow = [
   /(^|\/)\.DS_Store$/,
   /^policy\/denylist\/patterns\.yml$/,
 ];
+/** Git's C-quote letter escapes (quote.c); every other unusual byte is `\NNN` octal. */
+const gitQuoteEscapes: Record<string, number> = {
+  a: 0x07,
+  b: 0x08,
+  f: 0x0c,
+  n: 0x0a,
+  r: 0x0d,
+  t: 0x09,
+  v: 0x0b,
+  '\\': 0x5c,
+  '"': 0x22,
+};
+const utf8 = new TextEncoder();
+
+/**
+ * Decode git's C-quoted pathname form (`core.quotePath`): git wraps a header
+ * path carrying a tab, quote, backslash or non-ASCII byte in double quotes and
+ * escapes `\\`, `\"`, the C control letters, and every other unusual byte as
+ * `\NNN` octal. The quoted text is not the path, so a path-scoped rule would
+ * test the escapes instead of the name and miss the file's lines. A quoted
+ * form that does not decode cleanly throws: a path the scan cannot name is
+ * content it cannot attribute.
+ */
+function decodeGitPath(raw: string): string {
+  if (raw.length < 2 || !raw.startsWith('"') || !raw.endsWith('"')) return raw;
+  const inner = raw.slice(1, -1);
+  const bytes: number[] = [];
+  let index = 0;
+  while (index < inner.length) {
+    const ch = inner[index] as string;
+    if (ch !== '\\') {
+      const code = inner.codePointAt(index) as number;
+      // Literal non-ASCII inside the quotes is git's core.quotePath=false
+      // form; re-encode it so literal UTF-8 and octal escapes mix losslessly.
+      if (code > 0x7f) {
+        for (const b of utf8.encode(ch)) bytes.push(b);
+        index += ch.length;
+        continue;
+      }
+      bytes.push(code);
+      index += 1;
+      continue;
+    }
+    const next = inner[index + 1];
+    const letter = next === undefined ? undefined : gitQuoteEscapes[next];
+    if (letter !== undefined) {
+      bytes.push(letter);
+      index += 2;
+      continue;
+    }
+    const octal = /^\\([0-7]{3})/.exec(inner.slice(index));
+    if (octal === null) throw new Error('undecodable review scan path');
+    bytes.push(parseInt(octal[1] as string, 8));
+    index += 4;
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(bytes));
+  } catch {
+    throw new Error('undecodable review scan path');
+  }
+}
+
+/** Drop the pinned `a/` or `b/` diff prefix from a decoded path. */
+function withoutDiffPrefix(value: string): string {
+  return value.startsWith('a/') || value.startsWith('b/') ? value.slice(2) : value;
+}
+
+/**
+ * The b-side path of a `diff --git` header. Git quotes a name that needs it,
+ * so a quoted b-side field is decoded before the prefix strip — the separator
+ * is the last space from which a whole quoted string runs to end of line,
+ * which keeps spaces inside the quotes intact. The unquoted form stays as it
+ * was: git leaves spaces bare there, and the greedy a-side ends at the last
+ * ` b/` boundary.
+ */
+function diffGitPath(line: string): string | null {
+  const rest = line.slice('diff --git '.length);
+  const quoted = /^.* ("(?:[^"\\]|\\.)*")$/.exec(rest);
+  if (quoted !== null) return withoutDiffPrefix(decodeGitPath(quoted[1] as string));
+  return /^a\/(.*) b\/(.*)$/.exec(rest)?.[2] ?? null;
+}
+
 export interface ReviewScannerEffects {
   /** Compile all rules, then return strictly ordered [line, rule] matches, or throw. */
   match(input: {
@@ -70,7 +152,7 @@ export async function scanReviewDiff(
   const lines = pythonSplitlines(input.diff);
   for (const [index, line] of lines.entries()) {
     if (line.startsWith('diff --git')) {
-      path = /^diff --git a\/(.*) b\/(.*)$/.exec(line)?.[2] ?? null;
+      path = diffGitPath(line);
       header = true;
       continue;
     }
@@ -81,8 +163,7 @@ export async function scanReviewDiff(
     if (header) {
       if (line.startsWith('+++ ') || line.startsWith('--- ')) {
         const next = line.slice(4);
-        if (next !== '/dev/null')
-          path = next.startsWith('a/') || next.startsWith('b/') ? next.slice(2) : next;
+        if (next !== '/dev/null') path = withoutDiffPrefix(decodeGitPath(next));
       }
       continue;
     }
