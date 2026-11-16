@@ -21,6 +21,7 @@ import {
 import {
   JOURNAL_SCHEMA,
   UNIT_RUNTIMES,
+  pythonConstant,
   RecordRefused,
   refuseUnfinishedTransactions,
   type RecordEntry,
@@ -182,7 +183,8 @@ async function completion(
     error.name = 'ValueError';
     throw error;
   }
-  return evidence;
+  // Copy: an adapter that reuses one object must not rewrite an earlier journal entry.
+  return { ...evidence };
 }
 
 /** Python `switch_unit`. */
@@ -302,7 +304,9 @@ export async function recoverUnit(
     refuseUnfinishedTransactions(await effects.recordEntries(), await effects.resolvedPath(path));
     let parsed: unknown;
     try {
-      parsed = toPlainJsonRetainingNumbers(parseJsonValue(await effects.readRecordText(path)));
+      parsed = toPlainJsonRetainingNumbers(
+        parseJsonValue(await effects.readRecordText(path), { parseConstant: pythonConstant }),
+      );
     } catch {
       throw new RecordRefused('unreadable unit recovery record');
     }
