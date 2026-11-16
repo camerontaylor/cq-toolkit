@@ -344,6 +344,22 @@ describe('review-v1 pure handler', () => {
     });
   });
 
+  test('cancel requires the recorded principal', async () => {
+    const h = harness();
+    await h.call(frame());
+    const saves = h.state.saves;
+    await expect(
+      h.call(
+        { v: 1, op: 'cancel', request_id: 'req-1' },
+        { principal: 'client-b', policy: policy({ write: [PRINCIPAL, 'client-b'] }) },
+      ),
+    ).rejects.toMatchObject({
+      name: 'ValueError',
+      message: 'cancel request owner denied',
+    });
+    expect(h.state.saves).toBe(saves);
+  });
+
   test('record with a policy-disallowed repository is refused before any ledger work', async () => {
     const h = harness();
     const result = await h.call({
