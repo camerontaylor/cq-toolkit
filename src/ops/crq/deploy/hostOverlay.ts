@@ -18,20 +18,8 @@ import {
 } from '../../../policy/crq/jsonValue.js';
 import { ledgerValueEqual } from '../../../policy/crq/ledger.js';
 import { pythonJsonText } from '../../../policy/crq/pythonJson.js';
-
-/** Python `ValueError`, the refusal prepare-host raises for every bad input. */
-export class ValueError extends Error {
-  override name = 'ValueError';
-}
-/** A Python exception prepare-host would let escape (`KeyError`, `AttributeError`...). */
-export class PythonError extends Error {
-  constructor(
-    override readonly name: string,
-    message: string,
-  ) {
-    super(message);
-  }
-}
+import { ValueError, PythonError } from './errors.js';
+export { ValueError, PythonError };
 
 export const CONFIG = 'apps/crq-python/config.json';
 
@@ -104,7 +92,7 @@ function codePointCompare(left: string, right: string): number {
 }
 
 /** Python truthiness of a JSON value. */
-function truthy(v: JsonValue | undefined): boolean {
+export function truthy(v: JsonValue | undefined): boolean {
   if (v === undefined || v === null || v === false) return false;
   if (v === true) return true;
   if (typeof v === 'string') return v !== '';
@@ -306,7 +294,7 @@ export function validate(overlay: JsonValue, resolve: Resolve): JsonObject {
 }
 
 /** `config.set(parts, value)` on an immutable tree, replacing in place or appending. */
-function withKey(obj: JsonObject, key: string, value: JsonValue): JsonObject {
+export function withKey(obj: JsonObject, key: string, value: JsonValue): JsonObject {
   const found = obj.has(key);
   const entries = obj.entries.map(([k, v]): [string, JsonValue] =>
     k === key ? [k, value] : [k, v],

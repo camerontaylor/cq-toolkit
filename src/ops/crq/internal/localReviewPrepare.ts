@@ -8,7 +8,7 @@ export interface LocalReviewPrepareEffects {
   resolveFacts(repo: string, base: string, head: string, profile: JsonObject): Promise<JsonObject>;
   validateIdentity(identity: JsonObject): void;
   readRunMeta(runId: string): Promise<JsonObject>;
-  classifyCompleted(runId: string, ndjson: string): Promise<JsonObject>;
+  classifyCompleted(runId: string, ndjson: string, cycle: JsonObject): Promise<JsonObject>;
   completeFromCycle(
     queue: JsonObject,
     runId: string,
@@ -97,7 +97,11 @@ export async function prepareLocalReview(
         continue;
       if (!dry) {
         const runId = text(candidate.get('run_id'));
-        const cls = await effects.classifyCompleted(runId, text(candidate.get('ndjson')));
+        const cls = await effects.classifyCompleted(
+          runId,
+          text(candidate.get('ndjson')),
+          candidate,
+        );
         if (cls.get('counted') !== true || cls.get('outcome') !== 'completed') continue;
         const completedQueue = await effects.completeFromCycle(
           queue,

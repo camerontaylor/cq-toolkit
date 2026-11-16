@@ -237,7 +237,7 @@ function unitSwitchShape(record: JsonObject, outcome: string): boolean {
 }
 
 /** Python `json.loads` accepts `NaN`, `Infinity` and `-Infinity` as floats. */
-function pythonConstant(raw: string): JsonValue {
+export function pythonConstant(raw: string): JsonValue {
   const value = raw === 'NaN' ? Number.NaN : raw === '-Infinity' ? -Infinity : Infinity;
   return JsonNumber.float(value, raw);
 }

@@ -179,7 +179,15 @@ export async function proveMerge(
   const fixed = fixedJobs(record);
   const anchors: string[] = [];
   for (const id of fixed) {
-    const path = sourcePath((await effects.evidence.readJob(id)).get('finding') ?? null);
+    const job = await effects.evidence.readJob(id);
+    if (
+      job.get('job') !== id ||
+      job.get('item') !== context.itemId ||
+      job.get('run') !== context.run ||
+      !strings(record.get('jobs')).includes(id)
+    )
+      throw new Error('merge-head repair job identity mismatch');
+    const path = sourcePath(job.get('finding') ?? null);
     if (!path.ok) throw new Error('invalid repair source path');
     if (!anchors.includes(path.path)) anchors.push(path.path);
   }

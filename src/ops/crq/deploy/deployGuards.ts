@@ -1,10 +1,9 @@
+import { Refused } from './errors.js';
+export { Refused };
 /** `Hold` (admission marker) and `DeployLock` (host-wide advisory lock) from
  * `apps/crq-python/ops/deploy-runbook.py`. Filesystem and lock primitives are injected;
  * nothing here touches disk, and nothing imports this module yet.
  */
-export class Refused extends Error {
-  override readonly name = 'Refused';
-}
 
 export const MARKER_RELPATH = 'apps/crq-python/state/runner-disabled';
 export const LOCK_RELPATH = 'apps/crq-python/state/deploy.lock';

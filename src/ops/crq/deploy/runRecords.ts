@@ -6,11 +6,8 @@
  * nothing here touches the disk; the caller supplies every effect.
  */
 import { createHash } from 'node:crypto';
-
-/** Python `Refused`: a precondition failed. */
-export class Refused extends Error {
-  override name = 'Refused';
-}
+import { Refused } from './errors.js';
+export { Refused };
 
 function require_(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Refused(message);
@@ -158,6 +155,8 @@ export interface CompleteContext {
   readonly target: string;
   readonly cqBin: unknown;
   readonly finalTriggers: Record<string, string>;
+  /** Why post-switch verification disabled rollback, or `null`/absent when still permitted. */
+  readonly rollbackDisabled?: string | null;
 }
 export interface CompleteEffects {
   /** Sets the run's `rollback` evidence so the next record carries it. */
@@ -169,8 +168,10 @@ export interface CompleteEffects {
 
 /** Python `complete`: the completed record, the `released` phase and the narration. */
 export function complete(effects: CompleteEffects, ctx: CompleteContext): void {
+  const disabled = ctx.rollbackDisabled ?? null;
   effects.setRollback({
-    permitted: true,
+    permitted: disabled === null,
+    ...(disabled === null ? {} : { reason: disabled }),
     to: ctx.priorSha,
     cq_bin: ctx.cqBin,
     statement:
