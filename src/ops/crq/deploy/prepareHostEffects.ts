@@ -107,20 +107,27 @@ async function checked(run: RunProcess, argv: readonly string[]): Promise<Uint8A
 
 // ---- Path.resolve -------------------------------------------------------
 
-/** `Path(path).resolve()` (non-strict): symlinks of the existing prefix are followed. */
+/**
+ * `Path(path).resolve()` (non-strict): components are walked left to right, so
+ * symlinks are followed and a `..` component then applies to the resolved
+ * location (never to the literal `..`), and the unresolvable tail is appended.
+ */
 export function pyResolve(path: string): string {
-  let current = posix.resolve(path);
-  const rest: string[] = [];
-  for (;;) {
-    try {
-      const real = realpathSync(current);
-      return rest.length ? posix.join(real, ...rest.reverse()) : real;
-    } catch {
-      if (current === '/') return '/';
-      rest.push(posix.basename(current));
+  let current = posix.isAbsolute(path) ? '/' : posix.resolve('.');
+  for (const part of path.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
       current = posix.dirname(current);
+      continue;
+    }
+    const next = posix.join(current, part);
+    try {
+      current = realpathSync(next);
+    } catch {
+      current = next;
     }
   }
+  return current;
 }
 
 // ---- atomic_bytes -------------------------------------------------------
@@ -521,7 +528,8 @@ export async function main(argv: readonly string[], deps: MainDeps): Promise<Mai
         args.tag ?? null,
       );
     } else if (args.operation === 'prepare') {
-      const out = args.unitsOutput as string;
+      // Validate the resolved destination, then write to that same one.
+      const out = pyResolve(args.unitsOutput as string);
       await requireOutsideGit(out, env);
       if (!outside(out, root, pyResolve))
         throw new ValueError('rendered units must be outside checkout');
@@ -532,7 +540,8 @@ export async function main(argv: readonly string[], deps: MainDeps): Promise<Mai
         args.tag ?? null,
       );
     } else if (args.operation === 'preview') {
-      const out = args.output as string;
+      // Validate the resolved destination, then write to that same one.
+      const out = pyResolve(args.output as string);
       const host = hostBundle(env, root, overlay, raw);
       await rootCheck(host, root, overlay);
       await requireOutsideGit(out, env);
