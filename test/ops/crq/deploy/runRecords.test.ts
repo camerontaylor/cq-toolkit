@@ -270,6 +270,24 @@ describe('complete', () => {
     ]);
   });
 
+  test('a post-switch rollback denial is recorded, not permitted:true', () => {
+    const rollbacks: Array<Record<string, unknown>> = [];
+    const effects: CompleteEffects = {
+      setRollback: (r) => rollbacks.push(r),
+      writeRecord: () => undefined,
+      phase: () => undefined,
+      narrate: () => undefined,
+    };
+    complete(effects, {
+      priorSha: 'p',
+      target: 't',
+      cqBin: null,
+      finalTriggers: {},
+      rollbackDisabled: 'queue carries author_* keys',
+    });
+    expect(rollbacks[0]).toMatchObject({ permitted: false, reason: 'queue carries author_* keys' });
+  });
+
   test('a failing record stops before the phase and the narration', () => {
     const log: string[] = [];
     const effects: CompleteEffects = {

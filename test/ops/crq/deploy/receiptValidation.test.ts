@@ -135,6 +135,16 @@ describe('receiptProblem merged-current', () => {
     expect(problem(merged({ request_id: 5 }))).toBe('run identity: malformed request_id');
     expect(problem(merged({ started_at: 5 }))).toBe('run identity: malformed started_at');
   });
+  test('a non-finite request_id constant is a number, not a null', () => {
+    for (const constant of ['NaN', 'Infinity', '-Infinity']) {
+      const data = new TextEncoder().encode(
+        JSON.stringify(merged()).replace('"request_id":null', `"request_id":${constant}`),
+      );
+      expect(receiptProblem(`${sha(data)}.json`, data, schema)).toBe(
+        'run identity: malformed request_id',
+      );
+    }
+  });
   test('source binding', () => {
     const src = (over: Record<string, unknown>): unknown =>
       merged({ source: { ...(merged().source as object), ...over } });

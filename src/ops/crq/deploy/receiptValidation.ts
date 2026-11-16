@@ -154,7 +154,13 @@ function loadBytes(data: Uint8Array): JsonValue | typeof INVALID {
   try {
     // A UTF-8 BOM is accepted for bytes input (`utf-8-sig`), unlike for str input.
     const body = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(data);
-    return parseJsonValue(body, { parseConstant: () => null });
+    return parseJsonValue(body, {
+      parseConstant: (raw) =>
+        JsonNumber.float(
+          raw === 'NaN' ? Number.NaN : raw === '-Infinity' ? -Infinity : Infinity,
+          raw,
+        ),
+    });
   } catch {
     return INVALID;
   }
@@ -209,7 +215,13 @@ export async function localReviewSchema(
     }
     let document: JsonValue;
     try {
-      document = parseJsonValue(body, { parseConstant: () => null });
+      document = parseJsonValue(body, {
+        parseConstant: (raw) =>
+          JsonNumber.float(
+            raw === 'NaN' ? Number.NaN : raw === '-Infinity' ? -Infinity : Infinity,
+            raw,
+          ),
+      });
     } catch (error) {
       throw new PythonError('JSONDecodeError', messageOf(error));
     }

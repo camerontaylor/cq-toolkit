@@ -270,6 +270,7 @@ export function bindRun<E, H, C extends BoundController<E>>(deps: RunDeps<E, H, 
   let loaded: LoadedOverlay<E> | null = null;
   let services: readonly string[] = [];
   let cqBin: CqBinRecord | null = null;
+  let rollbackDisabled: string | null = null;
 
   const narrate = (message: string): void => {
     if (!cfg.json) deps.narrate(message);
@@ -439,6 +440,7 @@ export function bindRun<E, H, C extends BoundController<E>>(deps: RunDeps<E, H, 
         priorSha: need(state.priorSha, 'priorSha'),
       });
       state.postCompatibility = r.postCompatibility as Result;
+      rollbackDisabled = r.rollbackDisabled;
     },
     restartTriggers: async () =>
       restartTriggers({
@@ -474,6 +476,7 @@ export function bindRun<E, H, C extends BoundController<E>>(deps: RunDeps<E, H, 
           target: need(state.target, 'target'),
           cqBin: state.cqBin,
           finalTriggers: need(state.finalTriggers, 'finalTriggers'),
+          rollbackDisabled,
         },
       );
       for (const op of ops) await op();

@@ -107,18 +107,23 @@ async function checked(run: RunProcess, argv: readonly string[]): Promise<Uint8A
 
 // ---- Path.resolve -------------------------------------------------------
 
-/** `Path(path).resolve()` (non-strict): symlinks of the existing prefix are followed. */
+/** `Path(path).resolve()` (non-strict): symlinks of the existing prefix are followed. A `..`
+ * after a symlink is applied to the link's target, so the path is never normalised lexically
+ * before the filesystem resolves it; only a non-existent tail is joined lexically. */
 export function pyResolve(path: string): string {
-  let current = posix.resolve(path);
+  let current = posix.isAbsolute(path) ? path : `${process.cwd()}/${path}`;
   const rest: string[] = [];
   for (;;) {
     try {
-      const real = realpathSync(current);
+      const real = realpathSync.native(current);
       return rest.length ? posix.join(real, ...rest.reverse()) : real;
     } catch {
       if (current === '/') return '/';
-      rest.push(posix.basename(current));
-      current = posix.dirname(current);
+      const base = posix.basename(current);
+      const up = posix.dirname(current);
+      if (base === '' || up === current) return '/';
+      rest.push(base);
+      current = up;
     }
   }
 }
@@ -171,6 +176,12 @@ export async function requireOutsideGit(path: string, env: OverlayEnv): Promise<
   const result = await env.run(['git', '-C', parent, 'rev-parse', '--show-toplevel']);
   if (result.code === 0)
     throw new ValueError('private host artifacts must be outside every Git checkout');
+  // Only git's "not a git repository" answer proves the path is outside a checkout: a
+  // malformed config or any other probe failure says nothing about exclusion.
+  if (result.code !== 128 || !/not a git repository/i.test(text(result.stderr)))
+    throw new ValueError(
+      `cannot establish that the path is outside every Git checkout: git exited ${result.code}`,
+    );
 }
 
 export interface LoadedOverlay {
