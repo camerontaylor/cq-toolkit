@@ -98,6 +98,24 @@ DEPENDENCY_RE = re.compile(
 UNIT_SUFFIXES = {".service", ".timer", ".path"}
 
 
+def _expand_instance(path, value):
+    """Substitute ``%i``/``%I`` with the unit's instance name.
+
+    An instance unit such as ``ingress@crq-tick.socket`` can name its target
+    as ``Service=%i.service``; without expansion the CRQ name is invisible to
+    the dependency scan. A drop-in directory carries the instance in its
+    parent name (``ingress@crq-tick.socket.d``).
+    """
+    name = path.name
+    if path.parent.name.endswith(".d"):
+        name = path.parent.name[:-2]
+    found = re.match(r"[^@]*@(?P<instance>[^.]*)\.[^.]+\Z", name)
+    if found is None:
+        return value
+    instance = found.group("instance")
+    return value.replace("%i", instance).replace("%I", instance)
+
+
 class LiveBindingRefused(RuntimeError):
     """The live binding cannot establish a safe host observation."""
 
@@ -622,7 +640,9 @@ class SubprocessSystemd:
                             match = DEPENDENCY_RE.match(stripped)
                             if match is None:
                                 continue
-                            for name in CRQ_NAME_RE.findall(match.group("value")):
+                            value = _expand_instance(path,
+                                                     match.group("value"))
+                            for name in CRQ_NAME_RE.findall(value):
                                 # An undeclared source is foreign only when it
                                 # names an expected unit; a declared source is
                                 # foreign when it names a unit outside the set.
