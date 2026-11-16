@@ -170,6 +170,19 @@
           "by": "self-merge-prs:observe"
         }
       ]
+    },
+    "1927": {
+      "tuple": {
+        "head": "963fe8b46bb3c0ab7cea7adcfe4957b685ae0c0d",
+        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-16T08:50:23.266Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
     }
   }
 }
