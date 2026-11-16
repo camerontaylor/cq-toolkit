@@ -242,6 +242,10 @@
               "type": "string",
               "minLength": 1
             },
+            "admission_action": {
+              "type": "string",
+              "enum": ["created", "joined", "reused", "observed"]
+            },
             "notify_status": {
               "type": "object",
               "required": ["state"],

@@ -164,7 +164,7 @@ describe('1.1 defaultSessionsDir', () => {
     expect(defaultSessionsDir()).toBe(join('/state', 'cq', 'sessions'));
   });
 
-  test('a snapshot binds CQ_SESSIONS_DIR while XDG_STATE_HOME stays a live foreign read', () => {
+  test('a snapshot binds CQ_SESSIONS_DIR; outside a run XDG_STATE_HOME stays a live read', () => {
     vi.stubEnv('CQ_SESSIONS_DIR', '/ambient');
     const snapshot = readCqEnv({ CQ_SESSIONS_DIR: '/snapshot' });
     vi.stubEnv('CQ_SESSIONS_DIR', '/drifted');
@@ -172,10 +172,25 @@ describe('1.1 defaultSessionsDir', () => {
     // Negative control: no snapshot outside a run reads the ambient value.
     expect(defaultSessionsDir()).toBe('/drifted');
     // The snapshot leaves CQ_SESSIONS_DIR unset, so the FOREIGN XDG value is
-    // still read live (it is never snapshotted).
+    // still read live outside a run (no entry record exists to pin).
     vi.stubEnv('CQ_SESSIONS_DIR', '');
     vi.stubEnv('XDG_STATE_HOME', '/state');
     expect(defaultSessionsDir(readCqEnv({}))).toBe(join('/state', 'cq', 'sessions'));
+  });
+
+  test('the run entry record pins XDG_STATE_HOME against a mid-run ambient change', () => {
+    vi.stubEnv('CQ_SESSIONS_DIR', '');
+    vi.stubEnv('XDG_STATE_HOME', '/entry-state');
+    const expected = join('/entry-state', 'cq', 'sessions');
+    runWithCqEnv(
+      readCqEnv({}),
+      () => {
+        // An ambient change AFTER entry cannot move the store.
+        vi.stubEnv('XDG_STATE_HOME', '/drifted-state');
+        expect(defaultSessionsDir()).toBe(expected);
+      },
+      { XDG_STATE_HOME: '/entry-state' },
+    );
   });
 
   test('the enclosing run snapshot binds defaultSessionsDir without an argument', () => {

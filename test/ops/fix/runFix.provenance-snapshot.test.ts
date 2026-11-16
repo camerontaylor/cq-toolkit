@@ -1,11 +1,10 @@
 // Issue #1185: the fix composition's provenance parent must come from the
-// ENTRY CqEnv snapshot. captureProvenance used to read CQ_WORK_ID /
+// ENTRY records. captureProvenance used to read CQ_WORK_ID /
 // CQ_PARENT_WORK_ID through inboundParentWorkId(processEnv()), so an ambient
-// identity change after entry could move the recorded parent. These tests
-// drive the REAL composition with a hostile ambient identity and a
+// identity change after entry could move the recorded parent; the foreign
+// PASEO_AGENT_ID fallback now comes from the same entry environment record.
+// These tests drive the REAL composition with a hostile ambient identity and a
 // memory-only observation writer, and assert the composition-started header.
-// The explicit CQ_* tiers are snapshot-only; the foreign PASEO_AGENT_ID
-// fallback stays a live read (pinned in the correlation-env unit tests).
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';

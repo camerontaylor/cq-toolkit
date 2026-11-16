@@ -52,8 +52,20 @@ function expectEveryJobGuarded(text: string, file: string): void {
     const blockLines = jobBlock(text, id);
     const guard = blockLines.find((line) => line.startsWith('    if:'));
     expect(guard, `${file} job ${id} has event selection`).toBeDefined();
-    if (file.includes('denylist')) expect(blockLines).toContain(jobLevelGuard);
-    else {
+    if (file.includes('denylist')) {
+      // denylist is a required check, so it may lead the same guard with
+      // always() to report on a cancelled run instead of being skipped. The
+      // event selection itself is unchanged, which is what this asserts.
+      // always() needs parentheses around the disjunction (&& binds tighter
+      // than ||), so normalization drops the wrapper before comparing.
+      const strip = (line: string): string =>
+        line.includes('always() && (')
+          ? line.replace('${{ always() && (', '${{ ').replace(/\) \}\}$/, ' }}')
+          : line;
+      expect(strip(guard ?? ''), `${file} job ${id} carries the job-level event selection`).toBe(
+        strip(jobLevelGuard),
+      );
+    } else {
       expect(guard).toContain("github.event_name == 'pull_request'");
       expect(guard).toContain(
         "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",

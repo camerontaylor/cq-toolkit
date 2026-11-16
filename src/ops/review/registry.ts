@@ -678,6 +678,7 @@ export const registry: OpRegistryEntry[] = [
       const managed = await import('../dev/managedReview.js');
       return (await import('./addressMany.js')).makeReviewAddressMany({
         managedSubmit: managed.makeConfiguredManagedReviewSubmit(wiring?.cqEnv),
+        ...(wiring?.env !== undefined ? { env: wiring.env } : {}),
         drivers: createDriverFactory({
           ...(wiring?.onDeprecatedAlias !== undefined
             ? { onDeprecatedAlias: wiring.onDeprecatedAlias }

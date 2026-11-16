@@ -28,6 +28,22 @@ unit only in memory, transient or generated state, another namespace, or an
 activation created between the scan and the fence is outside this scope and
 is not claimed by ``supported``. Production enablement still requires actual
 topology evidence; until then this module is an offline-tested seam.
+
+The exception is the declared environment drop-in topology shared with
+``unit-adapter.py``: for the named CRQ service units, exactly the declared
+entry names are accepted in a real directory of the declared shape. The
+selected unit's entries are validated as environment-only by the adapter.
+The dependency scanner still reads declared drop-in text for unit dependency
+directives, so a co-installed drop-in cannot introduce an unaccounted incoming
+activator. A cotenant unit installed as a symlink into a repository or config
+tree is read the same way: its resolved regular-file target is bounded and
+dependency-scanned, so an outside unit naming an expected unit remains
+foreign, and systemd continuations are joined with ``config_parse`` semantics
+so a wrapped directive cannot hide a dependency. Symlinked directories and
+special files are not followed. It never follows an ``EnvironmentFile``
+target. A stale undeclared co-tenant ``*.wants``/``*.requires`` link to a gone
+target is skipped only when neither its link name nor its target name is a CRQ
+unit; a CRQ name remains a foreign dependency edge.
 """
 from __future__ import annotations
 
@@ -62,6 +78,7 @@ dc = _load("crq_unit_live_binding_controller", OPS / "deploy-controller.py")
 completion = _load("crq_unit_live_binding_completion",
                    OPS / "unit-completion.py")
 factory = _load("crq_unit_live_binding_factory", OPS / "unit-switch-factory.py")
+adapter = factory.adapter_module
 
 MAX_UNIT_ENTRIES = 4096
 MAX_SCAN_ENTRIES = 512
@@ -90,15 +107,77 @@ def _text(value: bytes, what: str) -> str:
 
 
 def _read_file(path: Path, *, max_bytes: int) -> bytes:
+    """Read a bounded regular file without blocking on a replaced target.
+
+    The descriptor is opened non-blocking and re-checked before any read, so a
+    path swapped to a FIFO after the caller's type observation refuses instead
+    of waiting for a writer. The existing byte bound still applies.
+    """
     try:
-        with path.open("rb") as handle:
-            data = handle.read(max_bytes + 1)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except OSError as exc:
         raise LiveBindingRefused(
             "cannot read " + str(path) + ": " + str(exc)[:160]) from exc
+    try:
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise LiveBindingRefused(
+                    "not a regular file: " + str(path))
+            chunks = []
+            remaining = max_bytes + 1
+            while remaining > 0:
+                chunk = os.read(fd, min(remaining, 65536))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+        except OSError as exc:
+            raise LiveBindingRefused(
+                "cannot read " + str(path) + ": " + str(exc)[:160]) from exc
+    finally:
+        os.close(fd)
     if len(data) > max_bytes:
         raise LiveBindingRefused("file exceeds the byte bound: " + str(path))
     return data
+
+
+def _logical_lines(text):
+    """Yield ``(line_number, line, continued)`` with systemd continuations.
+
+    ``config_parse`` continues a line only when the trailing run of
+    backslashes is odd, replacing the last backslash with a space. A comment
+    line inside a continuation is ignored, while a blank line flushes the
+    accumulated line and ends the continuation. ``continued`` is true when the
+    yielded line absorbed a continuation, so a declared drop-in can still
+    refuse the shape outright while a cotenant unit's dependency text is
+    scanned truthfully.
+    """
+    pending = None
+    start = 0
+    continued = False
+    for number, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith(("#", ";")):
+            continue
+        if not stripped:
+            if pending is not None:
+                yield start, pending, continued
+                pending = None
+            continue
+        if pending is None:
+            pending = ""
+            start = number
+            continued = False
+        pending += line
+        if (len(pending) - len(pending.rstrip("\\"))) % 2 == 1:
+            pending = pending[:-1] + " "
+            continued = True
+            continue
+        yield start, pending, continued
+        pending = None
+    if pending is not None:
+        yield start, pending, continued
 
 
 def _directory_probe(path: Path) -> tuple[bool, str | None]:
@@ -395,8 +474,79 @@ class SubprocessSystemd:
                 detail[:300] or "rc " + str(result["rc"]))
         return result["stdout"].splitlines(), None
 
-    def _scan_dependencies(self, base, expected, declared, foreign):
-        root = base.resolve()
+    def _declared_dropin_dirs(self, units):
+        """Declared environment drop-in directories for the expected units."""
+        declared = {}
+        for name in sorted(units):
+            names = adapter.DECLARED_DROPINS.get(name)
+            if names:
+                declared[str(self.unit_dir / (name + ".d"))] = names
+        return declared
+
+    def _all_declared_dropin_dirs(self):
+        """Every declared drop-in directory, including co-installed units."""
+        return {str(self.unit_dir / (name + ".d")): names
+                for name, names in adapter.DECLARED_DROPINS.items()}
+
+    @staticmethod
+    def _declared_dropin_error(path, declared):
+        """Check the declared drop-in shape without reading entry contents."""
+        try:
+            info = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            return ("declared drop-in directory is unreadable: "
+                    + str(path) + ": " + str(exc)[:120])
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            return "declared drop-in path is not a real directory: " + str(path)
+        try:
+            entries = sorted(path.iterdir())
+        except OSError as exc:
+            return ("declared drop-in directory is unreadable: "
+                    + str(path) + ": " + str(exc)[:120])
+        if {entry.name for entry in entries} != set(declared):
+            return ("declared drop-in directory does not contain exactly the "
+                    "declared entries: " + str(path))
+        for entry in entries:
+            try:
+                entry_info = os.stat(entry, follow_symlinks=False)
+            except OSError as exc:
+                return ("declared drop-in entry is unreadable: "
+                        + str(entry) + ": " + str(exc)[:120])
+            if not (stat.S_ISREG(entry_info.st_mode)
+                    or stat.S_ISLNK(entry_info.st_mode)):
+                return ("declared drop-in entry is not a regular file or "
+                        "symlink: " + str(entry))
+        return None
+
+    @staticmethod
+    def _inherited_dropin_applies(base, units):
+        """Whether a drop-in directory name also applies to an expected unit.
+
+        Next to the exact ``<unit>.d/`` directory, systemd merges inherited
+        drop-in directories into the selected unit: a dash-prefix
+        ``<prefix>-.<suffix>.d/`` directory applies to every unit whose name
+        begins with ``<prefix>-``, and a type-wide ``<type>.d/`` directory
+        applies to every unit of that type. An applicable inherited drop-in
+        overrides the verified unit's directives without changing its
+        ``FragmentPath``, so discovery must reject it unless declared.
+        """
+        for unit in units:
+            if base == unit:
+                return True
+            if "." not in unit:
+                continue
+            type_name = unit.rsplit(".", 1)[1]
+            if base == type_name:
+                return True
+            suffix = "." + type_name
+            if base.endswith(suffix):
+                stem = base[:-len(suffix)]
+                if stem.endswith("-") and unit.startswith(stem):
+                    return True
+        return False
+
+    def _scan_dependencies(self, base, expected, declared, foreign,
+                           declared_dropins):
         declared_paths = {str(path) for path in declared}
         declared_resolved = set()
         for path in declared:
@@ -424,15 +574,39 @@ class SubprocessSystemd:
                             if target == path:
                                 return ("dependency scan cannot resolve a symlink: "
                                         + str(path))
-                            try:
-                                if target == Path(os.devnull):
-                                    continue
-                                target.relative_to(root)
-                            except ValueError:
-                                return ("dependency scan found a symlink outside "
-                                        "the unit directory: " + str(path))
+                            if target == Path(os.devnull):
+                                continue
+                            # A cotenant unit is routinely installed as an
+                            # absolute symlink into a repository or config
+                            # tree outside the unit directory. The target is
+                            # read-only evidence, so it is read under the same
+                            # bound as a unit-directory entry and its text is
+                            # dependency-scanned; a target that names an
+                            # expected unit is still foreign. Symlinked
+                            # directories and special files are never
+                            # followed, matching the directory policy.
                             try:
                                 info = path.stat()
+                            except FileNotFoundError as exc:
+                                outcome, name = self._dangling_enablement(
+                                    path, target, base, declared_paths,
+                                    declared_resolved)
+                                if outcome == "skip":
+                                    # A stale undeclared co-tenant enablement
+                                    # link beside a still-present unit is not
+                                    # evidence about the selected topology.
+                                    # Keep scanning the remaining entries.
+                                    continue
+                                if outcome == "foreign":
+                                    # The entry name is the dependency edge
+                                    # systemd records, so a dangling link that
+                                    # names a CRQ unit is still foreign.
+                                    foreign.append(
+                                        "dangling enablement link names %s: %s"
+                                        % (name, path))
+                                    continue
+                                return ("dependency scan cannot resolve a symlink: "
+                                        + str(path) + ": " + str(exc)[:120])
                             except (OSError, RuntimeError) as exc:
                                 return ("dependency scan cannot resolve a symlink: "
                                         + str(path) + ": " + str(exc)[:120])
@@ -450,6 +624,10 @@ class SubprocessSystemd:
                             data = _read_file(path, max_bytes=MAX_UNIT_BYTES)
                         except LiveBindingRefused as exc:
                             return str(exc)
+                        declared_file = (
+                            str(path.parent) in declared_dropins
+                            and path.name
+                            in declared_dropins[str(path.parent)])
                         source_declared = str(path) in declared_paths
                         if not source_declared:
                             try:
@@ -457,7 +635,11 @@ class SubprocessSystemd:
                             except (OSError, RuntimeError):
                                 source_declared = False
                         text = _text(data, str(path))
-                        for number, line in enumerate(text.splitlines(), 1):
+                        for number, line, continued in _logical_lines(text):
+                            if declared_file and continued:
+                                return ("dependency scan found a line "
+                                        "continuation in a declared drop-in: "
+                                        + str(path))
                             stripped = line.strip()
                             if not stripped or stripped.startswith(("#", ";")):
                                 continue
@@ -480,6 +662,27 @@ class SubprocessSystemd:
             except OSError as exc:
                 return "unit directory is unreadable: " + str(exc)[:160]
         return None
+
+    @staticmethod
+    def _dangling_enablement(path, target, base, declared_paths,
+                             declared_resolved):
+        """Classify a symlink whose target no longer exists.
+
+        Only an undeclared ``*.wants``/``*.requires`` entry whose link name and
+        resolved target name are both outside the CRQ namespace is skipped. A
+        CRQ name in either position is still a dependency edge and is reported
+        as foreign; a declared link or a non-enablement link keeps the existing
+        fail-closed refusal.
+        """
+        if path.parent.parent != base \
+                or not path.parent.name.endswith((".wants", ".requires")):
+            return "refuse", None
+        if str(path) in declared_paths or target in declared_resolved:
+            return "refuse", None
+        for name in (path.name, target.name):
+            if CRQ_NAME_RE.fullmatch(name) is not None:
+                return "foreign", name
+        return "skip", None
 
     def discover(self, unit, declared_paths):
         self._unit(unit)
@@ -509,6 +712,8 @@ class SubprocessSystemd:
             paths[str(path)] = {"type": self._path_type(path)}
         units, units_error = self._expected_units(unit, declared)
         units = units or set()
+        declared_dropins = self._declared_dropin_dirs(units)
+        all_dropins = self._all_declared_dropin_dirs()
         foreign = []
         unsupported = []
         error = units_error
@@ -553,6 +758,21 @@ class SubprocessSystemd:
         prefix = unit.split(".")[0]
         for entry in sorted(entries):
             name = entry.name
+            if str(entry) in declared_dropins:
+                dropin_error = self._declared_dropin_error(
+                    entry, declared_dropins[str(entry)])
+                if dropin_error is not None:
+                    foreign.append(dropin_error)
+                continue
+            if str(entry) in all_dropins:
+                # A co-installed declared drop-in is not part of this unit's
+                # topology, but its shape is still validated and its text is
+                # still scanned for dependencies on the selected unit.
+                dropin_error = self._declared_dropin_error(
+                    entry, all_dropins[str(entry)])
+                if dropin_error is not None:
+                    foreign.append(dropin_error)
+                continue
             if name.startswith(prefix) and str(entry) not in declared_set:
                 foreign.append("unexpected installed entry: " + str(entry))
             is_dir, probe_failure = _directory_probe(entry)
@@ -560,7 +780,13 @@ class SubprocessSystemd:
                     and name.endswith((".d", ".wants", ".requires")):
                 error = error or probe_failure
                 continue
-            if is_dir and name.endswith(".d") and name[:-2] in units:
+            # An inherited type-wide or dash-prefix drop-in directory is
+            # merged into an expected unit even though it is not named after
+            # one, so its overrides would run outside the verified bytes.
+            # The name check also rejects a symlinked or plain entry systemd
+            # would traverse as the drop-in directory.
+            if name.endswith(".d") and self._inherited_dropin_applies(
+                    name[:-2], units):
                 foreign.append("undeclared drop-in directory: " + str(entry))
             if is_dir and name.endswith((".wants", ".requires")):
                 try:
@@ -576,7 +802,7 @@ class SubprocessSystemd:
                                        + str(child))
 
         scan_error = self._scan_dependencies(
-            self.unit_dir, units, declared, foreign)
+            self.unit_dir, units, declared, foreign, all_dropins)
         if scan_error is not None:
             error = error or scan_error
 

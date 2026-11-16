@@ -31,7 +31,7 @@ import {
 } from '../../sweep/taskLoop.js';
 import type { ModelSpec } from '../../../driver/types.js';
 import { SWEEP_DIFF_FLAGS } from '../../../shared/gitDiffFlags.js';
-import { processEnv } from '../../../config/process-env.js';
+import { currentEntryEnv } from '../../../config/run-env.js';
 
 export interface AddressFailedAttempt extends FailedAttempt {
   finding: string;
@@ -231,7 +231,7 @@ async function terminalSession(
       const context = await validate();
       const canonical = await realpath(root);
       let bin: string | undefined;
-      for (const path of (processEnv().PATH ?? '').split(delimiter)) {
+      for (const path of (currentEntryEnv()['PATH'] ?? '').split(delimiter)) {
         if (!path || !isAbsolute(path)) continue;
         try {
           const candidate = await realpath(join(path, 'git'));
