@@ -103,6 +103,20 @@ function upgradeIssueDebt(items: JsonValue[]): void {
   });
 }
 
+/**
+ * The queue with undelivered legacy issue debt upgraded into a PR-review request, exactly
+ * as the pass does before it delivers. An adapter that checkpoints the review identity
+ * against that request must start from this queue: the request does not exist before the
+ * upgrade, so the checkpoint would find nothing to record.
+ */
+export function upgradeLegacyIssueDebt(queue: JsonObject): JsonObject {
+  const raw = queue.get('items');
+  if (!Array.isArray(raw)) return queue;
+  const items: JsonValue[] = [...raw];
+  upgradeIssueDebt(items);
+  return withObjectKeys(queue, [['items', items]]);
+}
+
 /** `request[key]`: the value, or the Python exception text `{exc!r}` shows. */
 function subscript(
   request: JsonValue,

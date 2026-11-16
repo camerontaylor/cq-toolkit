@@ -225,6 +225,39 @@ describe('bindDeliveryPhases', () => {
     expect(out.log).toEqual(['findings review on PR #5 (skipped-closed)']);
   });
 
+  test('a legacy issue debt upgraded by the pass is checkpointed before its receipt posts', async () => {
+    const h = env();
+    const legacy = {
+      id: 'a',
+      kind: 'open',
+      pr: 5,
+      issue_pending: true,
+      issue_request: {
+        run_id: RUN,
+        pr: 5,
+        base: BASE,
+        head: HEAD,
+        findings_md: '/runs/x/findings.md',
+        severity_counts: {},
+      },
+    };
+    const out = await bindDeliveryPhases(h.value).deliverPrReviews(doc({ items: [legacy] }));
+    const item = (plain(out.queue) as { items: Rows }).items[0]!;
+    expect(item.issue_pending).toBe(false);
+    expect(item.pr_review_request).toMatchObject({
+      run_id: RUN,
+      head: HEAD,
+      ndjson: '/runs/x/review.ndjson',
+      posting_identity: 'cq-review[bot]',
+    });
+    expect(item.pr_review).toMatchObject({ state: 'skipped-closed' });
+    expect(h.saves).toHaveLength(1);
+    expect(
+      (plain(h.saves[0] as JsonObject) as { items: Rows }).items[0]?.pr_review_request,
+    ).toMatchObject({ posting_identity: 'cq-review[bot]' });
+    expect(out.log).toEqual(['findings review on PR #5 (skipped-closed)']);
+  });
+
   test('the checkpoint save happens before any pull request lookup', async () => {
     const order: string[] = [];
     const h = env();
