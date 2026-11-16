@@ -492,6 +492,9 @@ describe('receiptSchema', () => {
     expect(await src(bytes({ oneOf: [{ properties: { type: { const: 'receipt' } } }] }))).toBe(
       "unavailable: KeyError: 'value'",
     );
+    const receipt = { properties: { type: { const: 'receipt' }, value: { required: [] } } };
+    const noValue = { properties: { type: { const: 'other' } } };
+    expect(await src(bytes({ oneOf: [noValue, receipt] }))).toMatch(/^deployment:/);
     expect(
       await src(bytes({ oneOf: [{ properties: { type: { const: 'receipt' }, value: [] } }] })),
     ).toMatch(/^unavailable: ValueError/);
