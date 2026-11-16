@@ -859,6 +859,19 @@
           "by": "self-merge-prs:observe"
         }
       ]
+    },
+    "1980": {
+      "tuple": {
+        "head": "bd0e10f7329aca4cd33166f52c6225243101ac9a",
+        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-16T23:40:04.896Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
     }
   }
 }
