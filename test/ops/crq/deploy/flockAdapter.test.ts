@@ -38,9 +38,10 @@ describe('flockLockFs with a fake process', () => {
     const p = f.fs().tryLock('/x/deploy.lock');
     f.s.exitCb(BUSY_EXIT);
     await p;
-    expect(f.s.args[0]!.slice(0, 5)).toEqual([
+    expect(f.s.args[0]!.slice(0, 6)).toEqual([
       '-x',
       '-n',
+      '--no-fork',
       '-E',
       String(BUSY_EXIT),
       '/x/deploy.lock',

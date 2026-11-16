@@ -115,7 +115,10 @@ export async function requireUnchangedUnitTemplates(
     return blobs;
   };
   const prior = await templates(priorSha);
-  const next = await templates(target);
+  // Pin a moving ref (`origin/main`) to one commit so the listing and every blob read
+  // see the same tree.
+  const targetSha = pyStrip(await effects.git('rev-parse', '--verify', `${target}^{commit}`));
+  const next = await templates(targetSha);
   const changed = codePointSorted(
     [...new Set([...prior.keys(), ...next.keys()])].filter(
       (name) => prior.get(name) !== next.get(name),

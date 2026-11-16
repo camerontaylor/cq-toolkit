@@ -179,18 +179,41 @@ describe('bounded backfill failure harvest', () => {
       harvestBackfillFailure(queue(), 0, { ...proof, runId: 'other' }, fixture().effects),
     ).rejects.toThrow('ownership');
   });
-  it('does not mutate mixed quota and hard failure outcomes', async () => {
-    const f = fixture(
-      artifacts(
-        '{"type":"error","errorType":"rate_limit","recoverable":true}\n{"type":"error","errorType":"auth"}\n',
-      ),
-    );
-    const initial = queue();
-    const result = await harvestBackfillFailure(initial, 0, proof, f.effects);
+  const rl = '{"type":"error","errorType":"rate_limit","recoverable":true}\n';
+  const itemOf = (q: JsonObject) => (q.get('items') as JsonObject[])[0] as JsonObject;
+  it('treats vendor quota mixed with an auth failure as auth: pauses, no cooldown, no quota deferral', async () => {
+    const f = fixture(artifacts(`${rl}{"type":"error","errorType":"auth"}\n`));
+    const result = await harvestBackfillFailure(queue(), 0, proof, f.effects, 2);
     expect(result.classification.get('outcome')).toBe('auth');
-    expect(result.status).toBe('unhandled');
-    expect(result.queue).toBe(initial);
-    expect(f.calls).toEqual([]);
+    expect(result.status).toBe('handled');
+    expect(result.queue.get('paused')).toBe(true);
+    expect(result.queue.get('cooldown_until')).toBeUndefined();
+    expect(itemOf(result.queue).get('vendor_state')).toBe('terminal');
+    expect((itemOf(result.queue).get('attempts') as JsonObject[])[0]?.get('outcome')).toBe('auth');
+    expect(f.calls).toEqual(['retain', 'retain', 'event', 'save', 'cleanup']);
+  });
+  it('treats vendor quota mixed with any other failure as integrity without pausing', async () => {
+    for (const other of ['boom', 'action_required']) {
+      const f = fixture(artifacts(`${rl}{"type":"error","errorType":"${other}"}\n`));
+      const result = await harvestBackfillFailure(queue(), 0, proof, f.effects, 2);
+      expect(result.status).toBe('handled');
+      expect(result.queue.get('paused')).toBeUndefined();
+      expect(result.queue.get('cooldown_until')).toBeUndefined();
+      expect(itemOf(result.queue).get('state')).toBe('quarantined');
+      expect(itemOf(result.queue).get('not_before')).toBe('2026-10-30T02:00:00Z');
+    }
+  });
+  it('treats a quota exit with extra queue-sourced causes as integrity', async () => {
+    const f = fixture(artifacts(rl, 7));
+    const result = await harvestBackfillFailure(
+      queue(),
+      0,
+      { ...proof, exitCode: 7 },
+      f.effects,
+      2,
+    );
+    expect(result.status).toBe('handled');
+    expect(result.queue.get('cooldown_until')).toBeUndefined();
   });
   it.each([
     ['state', 'pending'],
