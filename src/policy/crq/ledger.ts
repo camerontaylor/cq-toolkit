@@ -38,6 +38,8 @@ export const LEDGER_SCHEMA_VERSION = 'cq.review-ledger/v1';
 export const LEDGER_REPOSITORY = 'camerontaylor/cq-toolkit';
 
 const MAX_INTERVAL_LINE = 1_000_000n;
+/** Shared budget for the three review scopes validated together. */
+const MAX_REVIEW_SCOPE_LINES = 10_000_000n;
 
 /** `review_ledger.IntegrityError`: publication must stop and be reconciled. */
 export class LedgerIntegrityError extends Error {
@@ -510,9 +512,14 @@ export function ledgerPath(value: JsonValue | undefined): string {
 /**
  * `review_ledger.intervals`: disjoint, ascending 1-based inclusive ranges.
  * The total and the largest line are bounded so a hostile record cannot make
- * validation allocate unbounded memory.
+ * validation allocate unbounded memory. `budget` carries the unspent lines of
+ * a larger caller (the three review scopes share one) and defaults to a single
+ * `MAX_INTERVAL_LINE` so per-row callers keep their current limit.
  */
-export function ledgerIntervals(rows: JsonValue): Set<number> {
+export function ledgerIntervals(
+  rows: JsonValue,
+  budget: { remaining: bigint } = { remaining: MAX_INTERVAL_LINE },
+): Set<number> {
   if (!Array.isArray(rows)) fail('invalid or overlapping intervals');
   const result = new Set<number>();
   let last = 0n;
@@ -538,6 +545,9 @@ export function ledgerIntervals(rows: JsonValue): Set<number> {
     ) {
       fail('invalid or overlapping intervals');
     }
+    const span = final - first + 1n;
+    if (span > budget.remaining) fail('scope exceeds line budget');
+    budget.remaining -= span;
     for (let line = Number(first); line <= Number(final); line += 1) result.add(line);
     last = final;
   }
@@ -545,7 +555,7 @@ export function ledgerIntervals(rows: JsonValue): Set<number> {
 }
 
 /** `review_ledger.scope`: keyed by path and blob, rejecting duplicates. */
-export function ledgerScope(rows: JsonValue): LedgerScope {
+export function ledgerScope(rows: JsonValue, budget?: { remaining: bigint }): LedgerScope {
   if (!Array.isArray(rows)) fail('scope must be an array');
   const result: LedgerScope = new Map();
   for (const row of rows) {
@@ -554,7 +564,7 @@ export function ledgerScope(rows: JsonValue): LedgerScope {
     const blob = stringField(object, 'blob');
     const byBlob = result.get(name);
     if (byBlob !== undefined && byBlob.has(blob)) fail('duplicate scope path/blob');
-    const lines = ledgerIntervals(field(object, 'intervals'));
+    const lines = ledgerIntervals(field(object, 'intervals'), budget);
     if (byBlob === undefined) {
       result.set(name, new Map([[blob, lines]]));
     } else {
@@ -663,9 +673,10 @@ function validateReview(record: JsonObject, payload: JsonObject): void {
   }
 
   const requestedRows = arrayField(payload, 'requested_scope');
-  const requested = ledgerScope(requestedRows);
-  const input = ledgerScope(arrayField(payload, 'input_scope'));
-  const reviewed = ledgerScope(arrayField(payload, 'reviewed_scope'));
+  const scopeBudget = { remaining: MAX_REVIEW_SCOPE_LINES };
+  const requested = ledgerScope(requestedRows, scopeBudget);
+  const input = ledgerScope(arrayField(payload, 'input_scope'), scopeBudget);
+  const reviewed = ledgerScope(arrayField(payload, 'reviewed_scope'), scopeBudget);
   if (digestOf(requestedRows) !== stringField(payload, 'scope_digest')) {
     fail('scope digest mismatch');
   }
