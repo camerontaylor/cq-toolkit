@@ -119,45 +119,6 @@
         }
       ]
     },
-    "1736": {
-      "tuple": {
-        "head": "5f9c62f979ae81ef0ea83120392d258ff7690b02",
-        "base": "b21b08fbf57a84f51758d6f2f801870be2f41ac2",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T02:39:51.318Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1750": {
-      "tuple": {
-        "head": "05ccef7f25c2e84fbe00b1aba34e23118f480033",
-        "base": "becb41e4dd54c036f1980ee3b2ebe1211f932012",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T02:44:58.809Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1752": {
-      "tuple": {
-        "head": "306b1c282ea5c59b8e189dd53ecd0ed80c3f38f7",
-        "base": "1b8c0546070bd777578f395143305e1d1491583c",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-14T02:04:47.380Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1758": {
       "tuple": {
         "head": "cb1336ca6c7a10ab8c2efa2063992bf701b25a07",
@@ -171,45 +132,6 @@
         }
       ]
     },
-    "1763": {
-      "tuple": {
-        "head": "6037ec24da9fec002bed3eb28b5fd75d1da9af4e",
-        "base": "dd0ed4ee47c45c5ba1ae87cf7a8a648413aeb06d",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-14T08:26:00.858Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1765": {
-      "tuple": {
-        "head": "8a6e3cf0473d0ffb6c48ffdc3552f3eb640b9dd9",
-        "base": "dd0ed4ee47c45c5ba1ae87cf7a8a648413aeb06d",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-14T08:30:19.275Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1766": {
-      "tuple": {
-        "head": "986db093e7b407b5176f2d0ad790dba168f42db9",
-        "base": "dd0ed4ee47c45c5ba1ae87cf7a8a648413aeb06d",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-14T08:31:02.798Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1768": {
       "tuple": {
         "head": "cb253d76e5714bc67081d105cb7b969725daa0a2",
@@ -219,45 +141,6 @@
       "observations": [
         {
           "observedAt": "2026-11-14T09:13:54.947Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1773": {
-      "tuple": {
-        "head": "e4db2512a06637bee8de25d446c4395d3343d6ed",
-        "base": "b5f5aa2c27ceeecae8344cca8ee278ab50925965",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T02:39:51.318Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1775": {
-      "tuple": {
-        "head": "e89ef5504360a8c58590198c3bbdb36d3a643ef3",
-        "base": "b5f5aa2c27ceeecae8344cca8ee278ab50925965",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T02:43:06.470Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1809": {
-      "tuple": {
-        "head": "e65d755511255a4623a01f880459835ebcb9d037",
-        "base": "92f991ef23ee168dc63b38b31cbbae9eb8af0750",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T02:47:33.712Z",
           "by": "self-merge-prs:observe"
         }
       ]
@@ -570,19 +453,6 @@
       "observations": [
         {
           "observedAt": "2026-11-16T02:36:51.064Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1909": {
-      "tuple": {
-        "head": "a1c6c3ed94780028846eee0596e76903ac9e1977",
-        "base": "becb41e4dd54c036f1980ee3b2ebe1211f932012",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T02:38:46.002Z",
           "by": "self-merge-prs:observe"
         }
       ]
