@@ -55,12 +55,13 @@ const graph = (comments: unknown[]) => [
   },
 ];
 
-function bind(route: (args: string[]) => GhResult, calls: string[][] = []) {
+function bind(route: (args: string[]) => GhResult, calls: string[][] = [], take?: () => void) {
   const seams = fileFixRunSeams({
     stateRoot: root,
     clone: '/fake/clone',
     repo: 'o/r',
     prInfo: async (number) => obj({ asked: number instanceof JsonObject ? 0 : String(number) }),
+    ...(take ? { take } : {}),
     gh: async (args) => {
       calls.push(args);
       return route(args);
@@ -189,6 +190,24 @@ describe('fileFixRunSeams', () => {
         '--body-file',
         join(root, 'repair/j1/source-j1.md'),
       ]);
+    });
+
+    it('charges every feedback gh call to the reconcile budget and stops when it is spent', async () => {
+      await writeJob('j1', SOURCE_JOB);
+      const calls: string[][] = [];
+      let taken = 0;
+      const seams = bind(
+        (args) => (args[1]?.endsWith('/issues/5/comments') ? ok([[]]) : ok(graph([COMMENT]))),
+        calls,
+        () => {
+          if (taken >= 1) throw new Error('budget exhausted');
+          taken += 1;
+        },
+      );
+      const record = obj({ ...RECORD, publication: { ...RECORD.publication } });
+      await expect(publish(seams, record)).rejects.toThrow('budget exhausted');
+      expect(taken).toBe(1);
+      expect(calls).toHaveLength(1);
     });
 
     it('skips the comment when the marker is already there', async () => {

@@ -1,6 +1,7 @@
-/** Bounded backfill harvest: verified non-counted failures and vendor-only quota.
- * Caller holds tick.lock and supplies independently verified terminal liveness.
- * Counted completion and mixed-provenance paths remain unhandled.
+/** Bounded backfill harvest: verified non-counted failures, vendor-only quota and
+ * mixed-provenance quota (a hard failure). Caller holds tick.lock and supplies
+ * independently verified terminal liveness. Counted completion is in
+ * backfillHarvestCounted.ts.
  */
 import { JsonNumber, JsonObject, type JsonValue } from '../../../policy/crq/jsonValue.js';
 import {
@@ -99,19 +100,32 @@ export async function harvestBackfillFailure(
   const outcome = text(classification.get('outcome'), 'outcome');
   const provenance = obj(classification.get('failure_provenance'), 'failure provenance');
   const causes = array(provenance.get('causes'), 'failure causes');
-  const quota = outcome === 'rate_limited';
+  const isVendorQuota = (v: JsonValue): boolean => {
+    const cause = obj(v, 'cause');
+    return cause.get('source') === 'vendor' && cause.get('category') === 'vendor-rate-limited';
+  };
+  const hasQuotaCause = causes.some(
+    (v) => obj(v, 'cause').get('category') === 'vendor-rate-limited',
+  );
+  // Python: vendor quota mixed with any non-vendor cause is a hard failure, and a
+  // rate-limit label without complete vendor-only provenance is an integrity failure.
+  // Terminal ownership is already proven above, so Python's `known_terminal` holds.
+  const mixed = hasQuotaCause && causes.some((v) => obj(v, 'cause').get('source') !== 'vendor');
+  const authLike = outcome === 'auth' || outcome === 'action_required';
+  const unprovenQuota =
+    outcome === 'rate_limited' &&
+    (provenance.get('complete') !== true || causes.length === 0 || !causes.every(isVendorQuota));
+  const resolved = mixed
+    ? authLike
+      ? 'auth'
+      : 'integrity'
+    : unprovenQuota
+      ? 'integrity'
+      : outcome;
+  const quota = resolved === 'rate_limited';
   if (
     classification.get('counted') !== false ||
-    (quota
-      ? provenance.get('complete') !== true ||
-        causes.length === 0 ||
-        causes.some((v) => {
-          const cause = obj(v, 'cause');
-          return (
-            cause.get('source') !== 'vendor' || cause.get('category') !== 'vendor-rate-limited'
-          );
-        })
-      : causes.some((v) => obj(v, 'cause').get('category') === 'vendor-rate-limited'))
+    (!quota && !mixed && !unprovenQuota && hasQuotaCause)
   )
     return { queue: initial, status: 'unhandled', classification };
   const positiveInt = (value: JsonValue | undefined): number | null => {
@@ -132,8 +146,8 @@ export async function harvestBackfillFailure(
   await effects.retain(artifacts.review);
   await effects.retain(artifacts.exit);
   let queue = initial;
-  let terminalOutcome = outcome;
-  if (outcome === 'auth' || outcome === 'action_required') {
+  let terminalOutcome = resolved;
+  if (resolved === 'auth' || resolved === 'action_required') {
     queue = withObjectKeys(queue, [
       ['paused', true],
       ['pause_reason', 'backfill vendor authentication/action required; operator ruling needed'],
@@ -165,12 +179,30 @@ export async function harvestBackfillFailure(
         retryAfter,
         typeof message === 'string' && message ? message : terminalOutcome,
       );
-  queue = await effects.stateEvent(result.queue, result.item, endedAt, outcome);
+  queue = await finishHarvest(result, index, attempt, proof.runId, run, endedAt, outcome, effects);
+  await effects.saveQueue(queue);
+  await effects.cleanup(meta);
+  return { queue, status: 'handled', classification };
+}
+
+/** Shared harvest tail: state event, one-time capacity row, one attempt record.
+ * Python increments `completed_partitions` when the item reached publication-pending. */
+export async function finishHarvest(
+  result: { readonly queue: JsonObject; readonly item: JsonObject },
+  index: number,
+  attempt: string,
+  runId: string,
+  run: JsonObject,
+  endedAt: string,
+  outcome: string,
+  effects: Pick<BackfillFailureHarvestEffects, 'stateEvent'>,
+): Promise<JsonObject> {
+  let queue = await effects.stateEvent(result.queue, result.item, endedAt, outcome);
   const capacityRuns =
     queue.get('backfill_capacity_runs') === undefined
       ? []
       : array(queue.get('backfill_capacity_runs'), 'capacity runs');
-  if (!capacityRuns.includes(proof.runId)) {
+  if (!capacityRuns.includes(runId)) {
     const capacity =
       queue.get('backfill_daily_capacity') === undefined
         ? new JsonObject([])
@@ -183,19 +215,26 @@ export async function harvestBackfillFailure(
             ['completed_partitions', JsonNumber.int(0)],
           ])
         : obj(capacity.get(day), 'daily capacity day');
+    const done = row.get('completed_partitions');
+    if (!(done instanceof JsonNumber) || done.kind !== 'int' || done.integer === null)
+      throw new LedgerTypeError('completed_partitions must be an integer');
+    const counted =
+      result.item.get('state') === 'publication-pending'
+        ? withObjectKeys(row, [['completed_partitions', JsonNumber.int(Number(done.integer) + 1)]])
+        : row;
     queue = withObjectKeys(queue, [
-      ['backfill_capacity_runs', [...capacityRuns, proof.runId]],
-      ['backfill_daily_capacity', withObjectKeys(capacity, [[day, row]])],
+      ['backfill_capacity_runs', [...capacityRuns, runId]],
+      ['backfill_daily_capacity', withObjectKeys(capacity, [[day, counted]])],
     ]);
   }
   const current = itemAt(queue, index);
-  if (current.get('id') !== item.get('id') || current.get('attempt_id') !== attempt)
+  if (current.get('id') !== result.item.get('id') || current.get('attempt_id') !== attempt)
     throw new LedgerIntegrityError('harvest event owner changed');
   const attempts =
     current.get('attempts') === undefined ? [] : array(current.get('attempts'), 'attempts');
-  if (!attempts.some((v) => v instanceof JsonObject && v.get('run_id') === proof.runId)) {
+  if (!attempts.some((v) => v instanceof JsonObject && v.get('run_id') === runId)) {
     const newAttempt = new JsonObject([
-      ['run_id', proof.runId],
+      ['run_id', runId],
       ['band', run.get('band') ?? 'background'],
       ['started_at', run.get('started_at') ?? null],
       ['outcome', outcome],
@@ -210,7 +249,5 @@ export async function harvestBackfillFailure(
       ],
     ]);
   }
-  await effects.saveQueue(queue);
-  await effects.cleanup(meta);
-  return { queue, status: 'handled', classification };
+  return queue;
 }

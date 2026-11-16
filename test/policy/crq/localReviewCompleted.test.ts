@@ -77,6 +77,7 @@ describe('completed cycle adapter', () => {
         saved = q;
       },
       rollout: async () => null,
+      rescan: async () => true,
       now: () => {
         if (swap && ++calls === 2) writeFileSync(path, '{"type":"finding","comment":"swapped"}\n');
         return new Date('2026-11-14T12:00:00Z');
@@ -159,6 +160,7 @@ describe('completed cycle adapter', () => {
       },
       saveQueue: async () => {},
       rollout: async () => null,
+      rescan: async () => true,
       now: () => new Date('2026-11-14T12:00:00Z'),
     });
     for (const runId of ['old', 'gone']) {
@@ -190,5 +192,101 @@ describe('completed cycle adapter', () => {
     await expect(effects.readReview('run')).rejects.toThrow();
     await expect(effects.readReport('linked')).rejects.toThrow();
     await expect(effects.readReport('run')).rejects.toThrow();
+  });
+
+  async function refusalFixture(
+    cycleExtra: Record<string, unknown>,
+    rescan: () => Promise<boolean>,
+  ) {
+    const root = await mkdtemp(join(tmpdir(), 'crq-reuse-guard-'));
+    const dir = join(root, 'runs', 'old');
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, 'review.ndjson');
+    await writeFile(path, '{"type":"complete","status":"review_completed"}\n');
+    const oid = 'a'.repeat(40);
+    const digest = 'b'.repeat(64);
+    const repo = 'a/b';
+    const profile = { adapter: 'coderabbit-cli', revision: 'v1', flags: [] };
+    const identity = {
+      v: 1,
+      repo,
+      base_commit: oid,
+      base_tree: oid,
+      head_commit: oid,
+      head_tree: oid,
+      scope: 'full-diff',
+      projection: 'full-diff',
+      config_digest: digest,
+      profile: { adapter: 'coderabbit-cli', revision: 'v1' },
+    };
+    const wanted = parseJsonValue(JSON.stringify(identity)) as JsonObject;
+    const queue = parseJsonValue(
+      JSON.stringify({
+        items: [
+          {
+            id: 'local-1',
+            kind: 'local-review',
+            state: 'pending',
+            identity: digest,
+            identity_inputs: identity,
+            profile,
+            generation: 1,
+          },
+          {
+            kind: 'open',
+            repo,
+            cycles: [
+              {
+                base: oid,
+                head: oid,
+                profile,
+                range_policy: 'full-range-once-v1',
+                run_id: 'old',
+                ndjson: path,
+                ...cycleExtra,
+              },
+            ],
+          },
+        ],
+      }),
+    ) as JsonObject;
+    const caller = createLocalReviewCompletedCaller({
+      stateRoot: root,
+      runnerRepo: repo,
+      facts: {
+        historyGit: () => async () => Buffer.from(oid),
+        resolveIdentity: async () => wanted,
+      },
+      saveQueue: async () => {},
+      rollout: async () => null,
+      rescan,
+      now: () => new Date('2026-11-14T12:00:00Z'),
+    });
+    return { caller, queue };
+  }
+  it('refuses reuse when the current scanner forbids the retained range', async () => {
+    const { caller, queue } = await refusalFixture({}, async () => false);
+    await expect(
+      caller.prepare(queue, (queue.get('items') as JsonObject[])[0]!, false, true),
+    ).rejects.toThrow('forbidden by the current scanner');
+  });
+  it('refuses reuse when the retained log does not match its recorded digest', async () => {
+    const { caller, queue } = await refusalFixture(
+      { ndjson_sha256: 'c'.repeat(64) },
+      async () => true,
+    );
+    await expect(
+      caller.prepare(queue, (queue.get('items') as JsonObject[])[0]!, false, true),
+    ).rejects.toThrow('recorded digest');
+  });
+  it('reuses a cycle whose recorded digest matches and the scanner accepts', async () => {
+    const bytes = '{"type":"complete","status":"review_completed"}\n';
+    const { createHash } = await import('node:crypto');
+    const { caller, queue } = await refusalFixture(
+      { ndjson_sha256: createHash('sha256').update(bytes).digest('hex') },
+      async () => true,
+    );
+    const out = await caller.prepare(queue, (queue.get('items') as JsonObject[])[0]!, false, true);
+    expect(out.plan).toBeNull();
   });
 });

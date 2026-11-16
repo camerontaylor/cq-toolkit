@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
 import { JsonObject, parseJsonValue } from '../../policy/crq/jsonValue.js';
 import { classify } from '../../policy/crq/classification.js';
@@ -21,6 +22,8 @@ export function createLocalReviewCompletedCaller(options: {
   facts: Pick<ReviewCapabilityEffects, 'historyGit' | 'resolveIdentity'>;
   saveQueue: (queue: JsonObject) => Promise<void>;
   rollout: () => Promise<{ durableArtifactRoot: string } | null>;
+  /** Current-policy scan of the reviewed range; false means the scanner now forbids it. */
+  rescan: (input: { repo: string; base: string; head: string }) => Promise<boolean>;
   now?: () => Date;
 }) {
   const publication = fileLocalReviewPublishEffects(options);
@@ -57,7 +60,7 @@ export function createLocalReviewCompletedCaller(options: {
         if (!(value instanceof JsonObject)) throw new Error('invalid run metadata');
         return value;
       },
-      async classifyCompleted(runId, ndjson) {
+      async classifyCompleted(runId, ndjson, cycle) {
         // Python parity: a missing retained log classifies as uncounted evidence
         // (proof_complete requires the stream to exist), so preparation falls
         // through to a fresh plan instead of retrying the same reject forever.
@@ -78,6 +81,25 @@ export function createLocalReviewCompletedCaller(options: {
             ]);
           throw error;
         }
+        // A recorded digest, when present, must match the bytes being counted;
+        // historic cycles without one stay reusable (docs/coderabbit-review.md).
+        const recorded = cycle.get('ndjson_sha256');
+        if (
+          recorded !== undefined &&
+          recorded !== null &&
+          recorded !== createHash('sha256').update(classifiedBytes).digest('hex')
+        )
+          throw new Error('retained review log does not match its recorded digest');
+        // Scanner policy is not frozen in a cycle's identity: rescan under the
+        // current policy and refuse, without dispatch, when it now forbids the range.
+        const inputs = item.get('identity_inputs');
+        const repo = inputs instanceof JsonObject ? inputs.get('repo') : undefined;
+        const base = cycle.get('base');
+        const head = cycle.get('head');
+        if (typeof repo !== 'string' || typeof base !== 'string' || typeof head !== 'string')
+          throw new Error('retained review cycle has no scannable range');
+        if (!(await options.rescan({ repo, base, head })))
+          throw new Error('retained review content is forbidden by the current scanner');
         return classify(classifiedBytes, 0);
       },
       async completeFromCycle(current, runId, classification, endedAt) {

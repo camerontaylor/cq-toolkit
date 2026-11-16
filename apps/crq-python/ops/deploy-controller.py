@@ -1023,7 +1023,7 @@ def receipt_problem(name: str, data: bytes, schema: dict | None = None) -> str |
         return "content identity: sha256 does not match the receipt name"
     try:
         doc = json.loads(data)
-    except ValueError:
+    except (ValueError, RecursionError):
         return "malformed: not valid JSON"
     if not isinstance(doc, dict):
         return "malformed: not a JSON object"
@@ -1128,7 +1128,7 @@ def receipt_validation(effects: Effects) -> dict | None:
             try:
                 doc = json.loads(data)
                 family = receipt_family(doc) if isinstance(doc, dict) else "malformed"
-            except ValueError:
+            except (ValueError, RecursionError):
                 family = "malformed"
         except OSError as exc:
             problem = "unreadable: " + str(exc)[:80]
@@ -2236,7 +2236,15 @@ def main(argv=None) -> int:
         return 2
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         if args.operation == "health":
-            raise  # keep the health observation exit-1 contract
+            # The observation itself failed (e.g. state/runs not listable), so
+            # no health result exists: emit the I1 error artifact and keep the
+            # health exit-1 contract (a failed observation is never a refusal).
+            message = str(exc)[:400] or type(exc).__name__
+            print(json.dumps(_error_artifact("thrown", args.operation, message, 1),
+                             indent=2, sort_keys=True))
+            if not parser.json_mode:
+                print("health observation failed: " + message, file=sys.stderr)
+            return 1
         # Escaped outside mutation_record: the helper was never entered, so the
         # deployment surfaces are unchanged and this is a refusal (exit 2).
         message = str(exc)[:400] or type(exc).__name__

@@ -52,6 +52,16 @@ describe('canonical fixed events projection', () => {
     expect([...result!.events]).toEqual([['crq-j1', 'ev-1']]);
     expect(calls).toEqual([`event:${merge}`, `anc:${published}:${actual}`]);
   });
+  test('hands the fix PR number to the ancestry check so the adapter can fetch the PR head', async () => {
+    const { input, effects } = fixture();
+    const seen: unknown[] = [];
+    effects.isAncestor = async (_a, _d, pr) => {
+      seen.push(pr);
+      return true;
+    };
+    await canonicalFixedEvents(input, effects);
+    expect(seen).toEqual([input.fixPrNumber]);
+  });
   test('is null with no FIXED job, a missing triage row, or a non-current event', async () => {
     const a = fixture();
     expect(await canonicalFixedEvents({ ...a.input, fixedJobs: [] }, a.effects)).toBeNull();

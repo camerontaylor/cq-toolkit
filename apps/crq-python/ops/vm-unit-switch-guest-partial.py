@@ -850,6 +850,10 @@ def main(argv=None):
     if args.phase == "host-identity":
         return base.main(["host-identity", "--label", args.label or "identity"])
     try:
+        # Every partial phase (prepare deletes ~/checkout) refuses off the
+        # disposable guest before any host effect, as base.main() does.
+        require(os.uname().nodename == "crq-probe",
+                "proof driver only runs on the disposable crq-probe guest")
         if args.phase == "prepare":
             payload = partial_prepare(args)
         elif args.phase == "partial-install":

@@ -79,6 +79,7 @@ export function fileReconcilePhaseEffects(
           clone: options.clone,
           repo: options.repo,
           prInfo: (number) => repair.prInfo(number),
+          take: () => void budget.take(),
           now,
           ...(options.gh ? { gh: options.gh } : {}),
           ...(options.runGit ? { runGit: options.runGit } : {}),
