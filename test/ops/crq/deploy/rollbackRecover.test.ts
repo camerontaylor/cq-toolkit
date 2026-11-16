@@ -353,12 +353,15 @@ describe('restoreBeforeSwitch', () => {
     await rec(b).restoreBeforeSwitch('why');
     expect(b.log).toEqual([]);
   });
-  test('does not release a hold it no longer owns', async () => {
+  test('a hold it no longer owns fail-stops without restarting or releasing', async () => {
     const f = fixture();
     f.hold.owned = false;
-    await rec(f).restoreBeforeSwitch('why');
+    const err = await caught(rec(f).restoreBeforeSwitch('why'));
+    expect(err).toBeInstanceOf(RecoveryRequired);
+    expect(err.message).toContain('hold lost before the pre-switch restart');
     expect(f.log).not.toContain('hold.release');
-    expect(f.writes[0]!.value).toMatchObject({ outcome: 'refused' });
+    expect(f.log.some((l) => l.startsWith('start:'))).toBe(false);
+    expect(f.writes[0]!.value).toMatchObject({ outcome: 'recovery_required' });
   });
   test('skips the restart when no original triggers were recorded', async () => {
     const f = fixture({ original: {} });

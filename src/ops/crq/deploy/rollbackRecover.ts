@@ -294,6 +294,9 @@ export class RunRecovery<E> {
       );
       await this.deps.runtimePointerCheck();
       if (truthy(s.original)) {
+        // Restarting resumes admission: a marker this run no longer owns means another deploy
+        // may be live, so fall through to the fail-stop without starting anything.
+        require_(await hold.owns(), 'hold lost before the pre-switch restart');
         await this.deps.units.start(this.active());
         const observed = await this.observe();
         require_(
