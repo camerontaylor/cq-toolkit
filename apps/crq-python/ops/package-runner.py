@@ -521,8 +521,26 @@ def _first_difference(expected, actual):
     return None
 
 
+def _resolve_node(node):
+    """Make an explicit node path absolute without following symlinks.
+
+    Bare names stay unchanged for PATH lookup. A relative path is prefixed with
+    the current directory and nothing else: ``os.path.abspath`` would collapse
+    ``..`` lexically before the kernel follows symlinks (``/opt/active/../bin``
+    with ``/opt/active`` -> ``/srv/releases/24`` opens ``/srv/releases/bin``,
+    not ``/opt/bin``), and ``Path.resolve()`` would dereference a
+    version-manager shim (mise, Volta), which selects the real node from its
+    own invocation name.
+    """
+    if node is None or os.path.basename(node) == node:
+        return node
+    if os.path.isabs(node):
+        return node
+    return os.path.join(os.getcwd(), node)
+
+
 def smoke_fs_ext(root, node=None):
-    node = node or shutil.which('node')
+    node = _resolve_node(node or shutil.which('node'))
     if not node:
         raise ArtifactError('node executable not found for fs-ext smoke')
     script = r'''
@@ -630,7 +648,7 @@ def smoke_runner(root, node=None):
     where the runtime reads it) and is rejected: an arbitrary non-zero exit is
     never accepted as capability.
     """
-    node = node or shutil.which('node')
+    node = _resolve_node(node or shutil.which('node'))
     if not node:
         raise ArtifactError('node executable not found for runner smoke')
     runner = (Path(root) / 'dist/queue-runner/crq.js').resolve()

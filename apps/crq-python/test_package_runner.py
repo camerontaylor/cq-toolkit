@@ -103,6 +103,24 @@ class PackageRunnerTests(unittest.TestCase):
         self.assertFalse(output.exists())
         self.assertFalse(Path(str(output) + '.sha256').exists())
 
+    def test_resolve_node_keeps_a_shim_symlink_and_bare_names(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            real = os.path.join(tmp, "mise")
+            open(real, "w").close()
+            shim = os.path.join(tmp, "node")
+            os.symlink(real, shim)
+            self.assertEqual(package_runner._resolve_node(shim), shim)
+            self.assertEqual(package_runner._resolve_node("node"), "node")
+            self.assertIsNone(package_runner._resolve_node(None))
+
+    def test_resolve_node_keeps_dotdot_after_a_symlinked_parent(self):
+        import os
+        self.assertEqual(package_runner._resolve_node("/opt/active/../bin/node"),
+                         "/opt/active/../bin/node")
+        self.assertEqual(package_runner._resolve_node("sub/../bin/node"),
+                         os.path.join(os.getcwd(), "sub/../bin/node"))
+
     def test_accepts_internal_symlink_and_rejects_escaping_relative_link(self):
         (self.stage / 'link').symlink_to('package.json')
         self.assertEqual(next(entry for entry in package_runner.inventory(self.stage)
