@@ -14,18 +14,44 @@
 // has no importer. It stays under `internal/`, so the family scan has no
 // direct-module surface to declare here.
 //
-// The type-only reference below is the family-surface declaration the registry
-// scan checks (test/cli/registry.family-scan.test.ts, the `./<base>` rule):
-// readOnlyStatus.ts is deliberately surface, not an orphan op module.
+// The type-only references below are the family-surface declarations the
+// registry scan checks (test/cli/registry.family-scan.test.ts, the
+// `./<base>` rule): readOnlyStatus.ts and statusWriter.ts are deliberately
+// surface, not orphan op modules.
 import type { OpRegistryEntry } from '../../kernel/types.js';
+import type { runAuthorCapability } from './authorCapability.js';
+import type { BackfillInventoryEffects, BackfillRouteResult } from './backfillInventory.js';
+import type { CoverageRunResult, runCoverageRefresh } from './coverageRefresh.js';
+import type { drainNotifications } from './notifyDrain.js';
 import type { runQueueCapability } from './queueCapability.js';
 import type { CommandResult, ReadOnlyStatusEffects } from './readOnlyStatus.js';
+import type { PublishRunResult } from './publishRun.js';
+import type { runReviewCapability } from './reviewCapability.js';
+import type { PublishUnitOutcome, runPublishMain } from './publishUnit.js';
+import type { ReconcileFixPrEffects, runReconcileFixPrs } from './reconcileFixPrs.js';
+import type {
+  ReconcileMergedEffects,
+  ReconcileRouteResult,
+  runReconcileMerged,
+} from './reconcileMerged.js';
+import type { CrqDocuments, StatusWriterEffects } from './statusWriter.js';
 
 /** The A1 read-only route's callable surface, bound to effects by its adapter. */
 export type CrqReadOnlyRoute = (
   argv: readonly string[],
   effects: ReadOnlyStatusEffects,
 ) => Promise<CommandResult>;
+
+/** The A1 write route's callable surface, bound to effects by its adapter. */
+export type CrqStatusWriterRoute = (
+  effects: StatusWriterEffects,
+  documents: CrqDocuments,
+) => Promise<{
+  readonly markdown: string;
+  readonly status: Record<string, unknown>;
+  readonly summary: Record<string, unknown> | null;
+  readonly publishFailure?: { readonly event: 'summary_failed'; readonly error: string };
+}>;
 
 /**
  * The queue-v1 capability's callable surface. It registers no dispatch name: it
@@ -36,5 +62,66 @@ export type CrqReadOnlyRoute = (
  */
 export type CrqQueueCapability = typeof runQueueCapability;
 
+/**
+ * The review-v1 capability's callable surface. It too is served as an SSH
+ * forced command (`crq review-v1`), never dispatched by name: the adapter
+ * `src/adapters/crq/reviewCapabilityMain.ts` binds its effects.
+ */
+export type CrqReviewCapability = typeof runReviewCapability;
+
+/**
+ * The author-v1 capability's callable surface, served as `crq author-v1` by
+ * `src/adapters/crq/authorCapabilityMain.ts`. No dispatcher name is declared.
+ */
+export type CrqAuthorCapability = typeof runAuthorCapability;
+
 /** No dispatchable ops yet: A1 ships the route plus its file adapter. */
 export const registry: OpRegistryEntry[] = [];
+
+/**
+ * The S3 publish route (`./publishRun.js`) is family surface wired by the
+ * live runner (queue-runner LIVE_UNIT_COMMANDS -> crq.ts -> publishSource),
+ * not a JSON-dispatchable op: the type-only import above declares it so the
+ * family scan does not classify it as an orphan module.
+ *
+ * The same holds for the unit's two daemon phases: `./notifyDrain.js` (the
+ * `review-notify.lock` delivery drain) and `./coverageRefresh.js` (the
+ * off-lock `backfill/coverage.lock` snapshot refresher), composed by
+ * `./publishUnit.js`, which is Python's `backfill_publisher.main`.
+ */
+export type { PublishRunResult };
+
+/** The notification drain's callable surface, bound by publishSource. */
+export type CrqNotifyDrain = typeof drainNotifications;
+
+/** The coverage refresher's callable surface, bound by publishSource. */
+export type CrqCoverageRefresh = typeof runCoverageRefresh;
+
+/** The composed publisher unit's callable surface, bound by publishSource. */
+export type CrqPublishUnitMain = typeof runPublishMain;
+
+/** The composed publisher unit's JSON outcome (Python's `main` result). */
+export type CrqPublishUnitOutcome = PublishUnitOutcome;
+
+/** The coverage refresher's JSON result (`{"head", "targets"}`). */
+export type CrqCoverageRunResult = CoverageRunResult;
+
+/**
+ * The S4 backfill inventory route (`./backfillInventory.js`) is family surface
+ * wired by the live runner (`queue-runner` operator-live `backfill` ->
+ * `crq.ts` -> `adapters/crq/backfillSource`), not a JSON-dispatchable op: the
+ * type-only import above declares it so the family scan does not classify it as
+ * an orphan module.
+ */
+export type { BackfillInventoryEffects, BackfillRouteResult };
+
+/**
+ * The S2 reconcile slice is family surface, not a dispatchable op:
+ * `./reconcileMerged.js` is the operator-live `reconcile-merged` route wired by
+ * `crq.ts`, and `./reconcileFixPrs.js` is the per-run report envelope whose
+ * forge/repair advance effects await the repair slice. The type-only imports
+ * above declare both so the family scan does not classify them as orphans.
+ */
+export type CrqReconcileMerged = typeof runReconcileMerged;
+export type CrqReconcileFixPrs = typeof runReconcileFixPrs;
+export type { ReconcileFixPrEffects, ReconcileMergedEffects, ReconcileRouteResult };

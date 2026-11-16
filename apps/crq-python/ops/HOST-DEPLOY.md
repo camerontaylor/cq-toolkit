@@ -332,6 +332,16 @@ per-unit entry points. Both compose the same production adapter through
 the systemd, journal and identity ports. Neither path has run against a live
 host, and neither enables production use.
 
+Every unit is queue-issuing except `crq-watchdog.service`, which is declared
+non-issuing: it reads the completed-tick heartbeat and sends an alert, and
+never launches or advances queue work. An issuing unit's switch and recovery
+refuse while recorded queue ownership is live or ambiguous, and its preserved
+state asserts byte-identical `queue.json` and heartbeat across the
+transaction. A watchdog transaction is admitted while an unrelated run is
+live, observes no queue surface and never restores one; its own systemd,
+cgroup, activation, snapshot/restore and completion fences are unchanged. A
+future unit is issuing until the declaration is deliberately extended.
+
 `recover --record` consumes one retained `controller-<32hex>.json` unit record
 whose `operation` is `unit_switch`, whose outcome is `pending` or
 `recovery_required`, and whose `snapshot.runtime` equals its recorded
@@ -348,16 +358,21 @@ Exit codes for `recover`:
 
 * 0 — recovery completed. The record is now `outcome: rolled_back` at the
   `restore_activation_pending` phase, and stdout is exactly that persisted
-  record.
+  record. It keeps `failed_phase`, the original `reason` and the observed
+  `fence`, so a target that ran before the failure is not presented as never
+  having run.
 * 2 — refused with no unit or record change: unreadable, malformed,
   unsupported-schema or incoherent record, a record outside `--record-dir`, an
   unfinished checkout or other unit transaction, live/ambiguous queue-owned
-  work, or adapter composition failure. stdout is the usual `error` artifact.
-* 3 — activation ambiguity. A record at `activation_pending` or
-  `restore_activation_pending` is not recovered automatically: the controller
-  still stops and drains the unit's owned work, prints the retained record with
-  `record_path` and `reason` on stdout, and leaves the record bytes unchanged.
-  Inspect runtime evidence before deciding what happened.
+  work for an issuing unit, or adapter composition failure. stdout is the
+  usual `error` artifact.
+* 3 — the fence could not be demonstrated. Recovery re-establishes and
+  observes the fence under the controller lock rather than inferring it from
+  the record's phase: no matching systemd job, no owned process, an inactive
+  service, inactive activators and, for an issuing unit, a drained queue. If
+  any of those cannot be established, the controller prints the retained
+  record with `record_path` and `reason` on stdout and leaves the record bytes
+  unchanged. Inspect runtime evidence before deciding what happened.
 
 `recover` adds no automatic recovery path, boot hook, retry, flag, store or
 lock. Unit records are retained: only the pending intent is replaced by its

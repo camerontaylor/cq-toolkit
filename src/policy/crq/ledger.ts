@@ -45,8 +45,8 @@ export class LedgerIntegrityError extends Error {
   /** The Python exception class the vector differential compares. */
   readonly pythonError: string = 'IntegrityError';
 
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
   }
 }
 
@@ -189,7 +189,7 @@ function arrayField(object: JsonObject, key: string): JsonValue[] {
 }
 
 /** Python truthiness for the JSON domain; `NaN` is truthy, `-0.0` is not. */
-function pythonTruthy(value: JsonValue | undefined): boolean {
+export function pythonTruthy(value: JsonValue | undefined): boolean {
   if (value === null || value === undefined) return false;
   if (typeof value === 'boolean') return value;
   if (typeof value === 'string') return value.length > 0;

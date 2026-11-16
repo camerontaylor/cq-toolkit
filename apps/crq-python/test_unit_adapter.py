@@ -451,6 +451,44 @@ class AdapterFixture(ControllerFixture):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.symlink_to("../" + target)
 
+    def make_declared_dropins(self, unit):
+        """Install the declared production drop-in topology for one unit.
+
+        The watchdog and tick paseo entries are symlinks to the shared
+        messaging environment; slot uses the same content as a regular file.
+        The coderabbit-managed entry is always a regular file.
+        """
+        names = adapter_mod.DECLARED_DROPINS.get(unit)
+        if names is None:
+            raise AssertionError("unit has no declared drop-in topology: "
+                                 + unit)
+        target = self.base / ".local/infra/systemd/crq-messaging.conf"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "# Shared CRQ messaging environment\n"
+            "[Service]\n"
+            "EnvironmentFile=%h/.local/state/paseo/env\n")
+        target.chmod(0o644)
+        dropin = self.unit_dir / (unit + ".d")
+        dropin.mkdir(parents=True, exist_ok=True)
+        linked = {"crq-watchdog.service": {"20-paseo-env.conf"},
+                  "crq-tick.service": {"20-paseo-env.conf"}}
+        for name in sorted(names):
+            entry = dropin / name
+            if name == "20-paseo-env.conf":
+                text = ("# Shared CRQ messaging environment\n"
+                        "[Service]\n"
+                        "EnvironmentFile=%h/.local/state/paseo/env\n")
+            else:
+                text = ("[Service]\n"
+                        "Environment=CODERABBIT_CLI_DISABLE_AUTO_UPDATE=true\n")
+            if name in linked.get(unit, set()):
+                entry.symlink_to(target)
+            else:
+                entry.write_text(text)
+                entry.chmod(0o644)
+        return dropin
+
     def make_adapter(self, **overrides):
         options = {
             "root": self.root,
@@ -492,6 +530,7 @@ class InventoryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="crq-inv-")
         self.addCleanup(self.temp.cleanup)
+
         self.base = Path(self.temp.name)
         self.root = self.base / "deploy"
         runner = self.root / "apps/crq-python"
@@ -504,6 +543,14 @@ class InventoryTests(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-qm", "baseline")
         self.sha = self.git("rev-parse", "HEAD").strip()
+
+    def test_queue_ownership_classification_matches_the_controller(self):
+        self.assertEqual(adapter_mod.NON_QUEUE_ISSUING_UNITS,
+                         dc.QUEUE_NON_ISSUING_UNITS)
+        for unit in dc.UNIT_RUNTIMES:
+            with self.subTest(unit=unit):
+                self.assertEqual(adapter_mod.unit_issues_queue_work(unit),
+                                 dc.unit_issues_queue_work(unit))
 
     def git(self, *args):
         return subprocess.run(["git", "-C", str(self.root), *args],
@@ -539,6 +586,20 @@ class InventoryTests(unittest.TestCase):
             6 * 3600 + 60)
         self.assertEqual(
             inventory["crq-publisher.service"]["timer_bound_seconds"], 65)
+        # Only a repeat-after-state timer bounds the next invocation after the
+        # completed one. Calendar schedules keep the fixed supported maximum.
+        self.assertEqual(
+            inventory["crq-publisher.service"]["timer_repeat_seconds"], 65)
+        self.assertEqual(
+            inventory["crq-watchdog.service"]["timer_repeat_seconds"], 780)
+        self.assertIsNone(
+            inventory["crq-tick.service"]["timer_repeat_seconds"])
+        self.assertIsNone(
+            inventory["crq-slot.service"]["timer_repeat_seconds"])
+        self.assertIsNone(
+            inventory["crq-backfill.service"]["timer_repeat_seconds"])
+        self.assertEqual(
+            inventory["crq-repair.service"]["timer_repeat_seconds"], 660)
         self.assertEqual(inventory["crq-repair.service"]["service_type"],
                          "simple")
         self.assertEqual(
@@ -640,6 +701,63 @@ class AdapterTests(AdapterFixture):
         with self.assertRaisesRegex(dc.Refused,
                                     "exceeds the supported maximum"):
             current.preflight("crq-backfill.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_admits_publisher_declared_bound(self):
+        self.fake.active["crq-publisher.timer"] = "active"
+        current = self.make_adapter(completion_timeout=None,
+                                    max_completion_window=None)
+        before = _tree(self.unit_dir)
+        prior = current.preflight("crq-publisher.service", NODE_RUNTIME)
+        # 45 min service timeout + 65 s repeat cadence + 60 s margin.
+        self.assertEqual(prior["completion_window"], 2825)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_publisher_below_declared_bound(self):
+        self.fake.active["crq-publisher.timer"] = "active"
+        current = self.make_adapter(completion_timeout=1800.0,
+                                    max_completion_window=None)
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "completion deadline .* below the "
+                                    "declared bound"):
+            current.preflight("crq-publisher.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_explicit_maximum_still_caps_repeat_timer(self):
+        self.fake.active["crq-publisher.timer"] = "active"
+        current = self.make_adapter(completion_timeout=None,
+                                    max_completion_window=1800.0)
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "exceeds the supported maximum"):
+            current.preflight("crq-publisher.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_completion_window_rejects_non_finite_values(self):
+        for value in (float("inf"), float("-inf"), float("nan"),
+                      10 ** 400):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(TypeError, "finite positive"):
+                    self.make_adapter(completion_timeout=value)
+                with self.assertRaisesRegex(TypeError, "finite positive"):
+                    self.make_adapter(max_completion_window=value)
+
+    def test_preflight_refuses_overflowing_declared_bound(self):
+        self.fake.active["crq-publisher.timer"] = "active"
+        current = self.make_adapter(completion_timeout=None,
+                                    max_completion_window=None)
+        inventory = current._inventory()
+        inventory["crq-publisher.service"] = dict(
+            inventory["crq-publisher.service"],
+            timer_bound_seconds=10 ** 400,
+            timer_repeat_seconds=10 ** 400)
+        current._inventory = lambda: inventory
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "completion bound exceeds a supported "
+                                    "duration"):
+            current.preflight("crq-publisher.service", NODE_RUNTIME)
         self.assertEqual(_tree(self.unit_dir), before)
 
     def test_preflight_refuses_inactive_timer_completion(self):
@@ -745,6 +863,155 @@ class AdapterTests(AdapterFixture):
         with self.assertRaisesRegex(dc.Refused, "outside the declared inventory"):
             self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
 
+    def test_preflight_accepts_declared_dropin_topology(self):
+        self.fake.active["crq-watchdog.timer"] = "active"
+        for unit in ("crq-watchdog.service", "crq-tick.service",
+                     "crq-slot.service"):
+            with self.subTest(unit=unit):
+                dropin = self.make_declared_dropins(unit)
+                before = _tree(dropin)
+                prior = self.make_adapter().preflight(unit, NODE_RUNTIME)
+                self.assertEqual(prior["runtime"], "python")
+                self.assertEqual(_tree(dropin), before)
+
+    def test_switch_and_rollback_preserve_declared_dropins(self):
+        dropin = self.make_declared_dropins("crq-tick.service")
+        target = self.base / ".local/infra/systemd/crq-messaging.conf"
+        dropin_before = _tree(dropin)
+        target_before = (target.stat().st_mode & 0o7777,
+                         hashlib.sha256(target.read_bytes()).hexdigest())
+
+        def assert_preserved():
+            self.assertEqual(_tree(dropin), dropin_before)
+            self.assertTrue(target.is_file())
+            self.assertEqual(
+                (target.stat().st_mode & 0o7777,
+                 hashlib.sha256(target.read_bytes()).hexdigest()),
+                target_before)
+
+        current, _prior, snapshot = self.switch_ready(
+            "crq-tick.service", NODE_RUNTIME)
+        current.stop_and_drain("crq-tick.service")
+        current.install("crq-tick.service", NODE_RUNTIME)
+        current.start("crq-tick.service")
+        first = current.completion("crq-tick.service", NODE_RUNTIME, 0)
+        current.completion("crq-tick.service", NODE_RUNTIME,
+                           first["sequence"])
+        assert_preserved()
+
+        recovery = self.make_adapter()
+        recovery.validate_snapshot("crq-tick.service", snapshot)
+        recovery.stop_and_drain("crq-tick.service")
+        recovery.restore("crq-tick.service", snapshot)
+        recovery.restore_activation("crq-tick.service", snapshot)
+        assert_preserved()
+
+    def test_preflight_refuses_unknown_declared_dropin_entry(self):
+        dropin = self.make_declared_dropins("crq-tick.service")
+        (dropin / "10-rogue.conf").write_text("[Service]\nEnvironment=X=1\n")
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(
+                dc.Refused,
+                "does not contain exactly the declared entries"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_missing_declared_dropin_entry(self):
+        dropin = self.make_declared_dropins("crq-tick.service")
+        (dropin / "coderabbit-managed.conf").unlink()
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(
+                dc.Refused,
+                "does not contain exactly the declared entries"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_unit_shaping_dropin_override(self):
+        dropin = self.make_declared_dropins("crq-tick.service")
+        entry = dropin / "coderabbit-managed.conf"
+        for key, value in (("Type", "simple"),
+                           ("TimeoutStartSec", "1s"),
+                           ("ExecStart", "/bin/true"),
+                           ("Slice", "system.slice")):
+            with self.subTest(key=key):
+                entry.write_text("[Service]\n" + key + "=" + value + "\n")
+                before = _tree(self.unit_dir)
+                with self.assertRaisesRegex(
+                        dc.Refused, "unsupported service key " + key):
+                    self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+                self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_non_service_dropin_directive(self):
+        dropin = self.make_declared_dropins("crq-tick.service")
+        entry = dropin / "coderabbit-managed.conf"
+        cases = {
+            "non-service section": "[Unit]\nDescription=other\n",
+            "line continuation": "[Service]\nEnvironment=A=1\\\nType=simple\n",
+            "malformed line": "[Service]\nEnvironment\n",
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                entry.write_text(text)
+                before = _tree(self.unit_dir)
+                with self.assertRaises(dc.Refused):
+                    self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+                self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_undeclared_dropin_directory(self):
+        dropin = self.unit_dir / "crq-tick.timer.d"
+        dropin.mkdir()
+        (dropin / "override.conf").write_text("[Timer]\nOnCalendar=hourly\n")
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused, "undeclared drop-in directory"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_symlinked_dropin_directory(self):
+        held = self.unit_dir / "held-dropin"
+        held.mkdir()
+        (held / "20-paseo-env.conf").write_text("[Service]\n")
+        (self.unit_dir / "crq-tick.service.d").symlink_to(held)
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused, "not a real directory"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_unsafe_dropin_symlink_target(self):
+        self.make_declared_dropins("crq-tick.service")
+        target = self.base / ".local/infra/systemd/crq-messaging.conf"
+        target.chmod(0o666)
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused,
+                                    "symlink target is group- or "
+                                    "world-writable"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_special_bits_dropin_symlink_target(self):
+        self.make_declared_dropins("crq-tick.service")
+        target = self.base / ".local/infra/systemd/crq-messaging.conf"
+        for bits in (0o4644, 0o2644, 0o1644):
+            with self.subTest(bits=oct(bits)):
+                target.chmod(bits)
+                before = _tree(self.unit_dir)
+                with self.assertRaisesRegex(
+                        dc.Refused,
+                        "symlink target has unsupported special bits"):
+                    self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+                self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_preflight_refuses_dropin_symlink_inside_unit_dir(self):
+        dropin = self.make_declared_dropins("crq-tick.service")
+        link = dropin / "20-paseo-env.conf"
+        link.unlink()
+        link.symlink_to(self.unit_dir / "crq-tick.timer")
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(
+                dc.Refused,
+                "symlink target resolves inside the unit directory"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
     def test_preflight_refuses_foreign_activator(self):
         self.fake.foreign = ["crq-other.timer"]
         with self.assertRaisesRegex(dc.Refused, "foreign activators"):
@@ -845,6 +1112,33 @@ class AdapterTests(AdapterFixture):
         self.queue = {"drained": False, "blocked": ["pr1"]}
         with self.assertRaisesRegex(dc.Refused, "queue-owned work"):
             current.stop_and_drain("crq-tick.service")
+
+    def test_watchdog_fence_ignores_an_unrelated_live_queue(self):
+        self.fake.active["crq-watchdog.timer"] = "active"
+        probe = mock.Mock(side_effect=AssertionError(
+            "the watchdog fence must not observe unrelated queue work"))
+        current = self.make_adapter(queue_drain=probe)
+        prior = current.preflight("crq-watchdog.service", NODE_RUNTIME)
+        self.assertEqual(prior["runtime"], "python")
+        snapshot = current.snapshot("crq-watchdog.service")
+        current.validate_snapshot("crq-watchdog.service", snapshot)
+        evidence = current.stop_and_drain("crq-watchdog.service")
+        probe.assert_not_called()
+        self.assertIsNone(evidence["queue"])
+        service = self.unit_dir / "crq-watchdog.service"
+        self.assertTrue(service.is_symlink())
+        self.assertEqual(os.readlink(service), "/dev/null")
+        self.assertEqual(self.fake.active["crq-watchdog.timer"], "inactive")
+        # Its own systemd/cgroup fences still ran and settled.
+        self.assertIn(["stop", "crq-watchdog.timer"], self.fake.calls)
+        self.assertTrue(any(call[:1] == ["daemon-reload"]
+                            for call in self.fake.calls))
+
+    def test_watchdog_preflight_needs_no_queue_observation_provider(self):
+        self.fake.active["crq-watchdog.timer"] = "active"
+        current = self.make_adapter(queue_drain=None)
+        prior = current.preflight("crq-watchdog.service", NODE_RUNTIME)
+        self.assertEqual(prior["runtime"], "python")
 
     def test_stop_and_drain_refuses_command_failure(self):
         current, _prior, _snapshot = self.switch_ready(
@@ -1007,6 +1301,26 @@ class AdapterTests(AdapterFixture):
         record = current.completion("crq-tick.service", NODE_RUNTIME, 0)
         self.assertEqual(record["unit"], "crq-tick.service")
         self.assertEqual(self.completion.read_delay, 0)
+
+    def test_publisher_window_covers_a_long_delayed_completion(self):
+        self.fake.active["crq-publisher.timer"] = "active"
+        current = self.make_adapter(completion_timeout=None,
+                                    max_completion_window=None)
+        prior = current.preflight("crq-publisher.service", NODE_RUNTIME)
+        self.assertEqual(prior["completion_window"], 2825)
+        snapshot = current.snapshot("crq-publisher.service")
+        current.validate_snapshot("crq-publisher.service", snapshot)
+        current.stop_and_drain("crq-publisher.service")
+        current.install("crq-publisher.service", NODE_RUNTIME)
+        current.start("crq-publisher.service")
+        # A delay that would exhaust the old fixed 1,800 s deadline still
+        # completes inside the declared 2,825 s publisher bound.
+        self.completion.read_delay = 1800
+        first = current.completion("crq-publisher.service", NODE_RUNTIME, 0)
+        second = current.completion("crq-publisher.service", NODE_RUNTIME,
+                                    first["sequence"])
+        self.assertGreater(second["sequence"], first["sequence"])
+        self.assertNotEqual(first["invocation"], second["invocation"])
 
     def test_completion_refuses_foreign_evidence(self):
         current, _prior, _snapshot = self.switch_ready(
@@ -1233,7 +1547,7 @@ class ControllerIntegrationTests(AdapterFixture):
         self.assertEqual(self.records(), [])
         self.assertEqual(_tree(self.unit_dir), before)
 
-    def test_switch_unit_leaves_safe_mask_on_tampered_staged_file(self):
+    def test_switch_unit_rolls_back_a_tampered_staged_file_after_fencing(self):
         current = self.make_adapter()
         install = current.install
 
@@ -1247,20 +1561,19 @@ class ControllerIntegrationTests(AdapterFixture):
             dc.switch_unit(self.effects, current, "crq-tick.service",
                            NODE_RUNTIME)
         recovery = failure.exception.recovery
-        self.assertEqual(recovery["outcome"], "recovery_required")
+        self.assertEqual(recovery["outcome"], "rolled_back")
+        self.assertEqual(recovery["failed_phase"], "activation_pending")
+        self.assertIn("staged target changed", recovery["reason"])
         path = Path(recovery["record_path"])
         service = self.unit_dir / "crq-tick.service"
-        self.assertTrue(service.is_symlink())
-        self.assertEqual(os.readlink(service), "/dev/null")
-        # The controller refuses to auto-restore from activation_pending; the
-        # durable mask remains the safe recovery anchor rather than an unsafe
-        # installed service.
-        with self.assertRaises(dc.RecoveryRequired) as blocked:
+        self.assertEqual(service.read_bytes(),
+                         self.python_service("crq-tick.service")["bytes"])
+        self.assertEqual(service.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual(self.fake.active["crq-tick.timer"], "active")
+        # The rolled_back record is finished; it is not a recovery request.
+        with self.assertRaisesRegex(dc.Refused, "invalid unit recovery"):
             dc.recover_unit(self.effects, self.make_adapter(), path)
-        self.assertIn("activation may have occurred",
-                      str(blocked.exception))
-        self.assertTrue(service.is_symlink())
-        self.assertEqual(os.readlink(service), "/dev/null")
+        self.assertEqual(json.loads(path.read_text())["outcome"], "rolled_back")
 
     def test_recover_unit_restores_prior_service(self):
         current = self.make_adapter()

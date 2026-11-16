@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest';
+import { changedIntervals } from '../../../src/adapters/crq/reviewVerify.js';
 import {
   JsonObject,
   parseJsonValue,
@@ -491,5 +492,76 @@ describe('publication driver seams', () => {
     );
     expect(calls).toBe(1);
     expect(await outbox.pending()).toHaveLength(1);
+  });
+});
+
+describe('changedIntervals hunk parsing', () => {
+  // A RunGit over a canned patch. GIT_DIFF_OPTS context widening is the
+  // regression: ambient `-U1` reaches the diff (gitEnv passes the process
+  // environment through and Git gives GIT_DIFF_OPTS precedence over
+  // --unified), so the hunk header alone would credit unchanged lines.
+  const patchRunner = (patch: string) => {
+    return async (args: readonly string[], options?: { env?: Record<string, string> }) => {
+      void args;
+      void options?.env;
+      return {
+        args: [...args],
+        code: 0,
+        stdout: new TextEncoder().encode(patch),
+        stderr: '',
+      };
+    };
+  };
+
+  test('unified=0 output credits exactly the added lines', async () => {
+    const patch = [
+      'diff --git a/src/a.ts b/src/a.ts',
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -2 +2 @@',
+      '-old two',
+      '+new two',
+      '@@ -10,1 +10,3 @@',
+      '+inserted ten',
+      ' ten context',
+      '+inserted twelve',
+      '',
+    ].join('\n');
+    const changed = await changedIntervals(patchRunner(patch), 'a'.repeat(40), 'b'.repeat(40));
+    expect(changed.get('src/a.ts')).toEqual(new Set([2, 10, 12]));
+  });
+
+  test('context widened by ambient GIT_DIFF_OPTS credits only + lines', async () => {
+    // What `-U1` would emit for the same change: the header counts context
+    // lines, and only the '+' body line is an addition.
+    const patch = [
+      'diff --git a/src/a.ts b/src/a.ts',
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -1,3 +1,3 @@',
+      ' one',
+      '-two',
+      '+two changed',
+      ' three',
+      '',
+    ].join('\n');
+    const changed = await changedIntervals(patchRunner(patch), 'a'.repeat(40), 'b'.repeat(40));
+    expect(changed.get('src/a.ts')).toEqual(new Set([2]));
+  });
+
+  test('quoted paths fall back to no per-path credit', async () => {
+    const patch = [
+      'diff --git a/src/\"we ird\" b/src/\"we ird\"',
+      '--- a/src/\"we ird\"',
+      '+++ b/src/we ird\t',
+      '@@ -1 +1 @@',
+      '-a',
+      '+b',
+      '',
+    ].join('\n');
+    const changed = await changedIntervals(patchRunner(patch), 'a'.repeat(40), 'b'.repeat(40));
+    // The trailing tab after a spaced name is git's terminator and is
+    // stripped; the '+' credit lands on the stripped name.
+    expect(changed.get('src/we ird')).toEqual(new Set([1]));
   });
 });

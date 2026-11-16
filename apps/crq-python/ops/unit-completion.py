@@ -39,6 +39,25 @@ UNIT_RE = re.compile(r"[A-Za-z0-9_.@:-]+\.service")
 # path, socket and target activators. It cannot read arbitrary unit types.
 READ_UNIT_RE = re.compile(
     r"[A-Za-z0-9_.@:-]+\.(?:service|timer|path|socket|target)")
+# The only journal fields the completion witness consults. ``journalctl``
+# projects each record to these fields, so the full record bound stays well
+# inside the byte bound. Omitted payload fields (``MESSAGE``, ``_CMDLINE``,
+# process metadata) are never read as completion evidence; a projected stream
+# that still exceeds the byte bound refuses exactly as before. The 2026-11-14
+# cutover failure read 346,013 stdout bytes from a 2,735-record user journal
+# and a 256-record tail over the 262,144-byte bound; the ``show`` path was 32
+# bytes. Field projection addresses that volume, not the bound.
+WITNESS_JOURNAL_FIELDS = (
+    "_BOOT_ID",
+    "__MONOTONIC_TIMESTAMP",
+    "_SYSTEMD_USER_UNIT",
+    "_SYSTEMD_INVOCATION_ID",
+    "_SYSTEMD_UNIT",
+    "USER_UNIT",
+    "USER_INVOCATION_ID",
+    "UNIT",
+    "INVOCATION_ID",
+)
 NODE_POINTER_RE = re.compile(
     r"^(?P<root>.+)/dist/queue-runner/crq\.js$")
 
@@ -260,38 +279,59 @@ def parse_show_output(text: str) -> dict[str, str]:
     return result
 
 
-def parse_show_exec_start(text: str) -> list[str]:
-    """Parse the manager's ``ExecStart`` record into effective argv tokens.
+# systemd renders one command as (src/core/service.c, exec_command_dump):
+#   { path=P ; argv[]=A ; ignore_errors=I ; start_time=[..] ; stop_time=[..] ;
+#     pid=N ; code=C ; status=S }
+# ``A`` is the argv joined with single spaces and no escaping, so the argument
+# boundaries are not recoverable from it. The record is therefore anchored on
+# the fixed trailing fields (not split on ``;``) and compared as text against
+# the installed unit's own tokens, which must themselves be representable.
+EXEC_START_RECORD_RE = re.compile(
+    r"\{ path=(?P<path>.*?) ; argv\[\]=(?P<argv>.*) ; "
+    r"ignore_errors=(?:yes|no) ; start_time=\[[^\]]*\] ; "
+    r"stop_time=\[[^\]]*\] ; pid=\d+ ; code=[^;]*; ?status=[^;]* \}\Z",
+    re.DOTALL)
 
-    ``systemctl show`` renders the effective command as a semicolon-separated
-    record such as ``{ path=/usr/bin/env ; argv[]=/usr/bin/env python3 run ;
-    ignore_errors=no ; ... }``. Drop-in files merge after the main unit file
-    and may reset ``ExecStart=``, so this manager record, not the installed
-    fragment bytes, is the command that would run. Anything malformed
+
+def parse_show_exec_start(text: str) -> tuple[str, str]:
+    """Parse the manager's ``ExecStart`` record into ``(path, argv_text)``.
+
+    Drop-in files merge after the main unit file and may reset
+    ``ExecStart=``, so this manager record, not the installed fragment
+    bytes, is the command that would run. ``argv_text`` is systemd's lossy
+    space-joined rendering; callers compare it as text with
+    ``render_argv`` of tokens they already trust. Anything malformed
     refuses.
     """
     record = text.strip()
-    if not (record.startswith("{") and record.endswith("}")):
+    found = EXEC_START_RECORD_RE.fullmatch(record) if record.startswith("{") else None
+    if found is None:
         raise CompletionRefused("effective ExecStart record is malformed")
-    executable = None
-    argv_text = None
-    for field in record[1:-1].split(";"):
-        field = field.strip()
-        if field.startswith("path="):
-            if executable is not None:
-                raise CompletionRefused("effective ExecStart repeats path")
-            executable = field[len("path="):]
-        elif field.startswith("argv[]="):
-            if argv_text is not None:
-                raise CompletionRefused("effective ExecStart repeats argv")
-            argv_text = field[len("argv[]="):]
-    if not executable or argv_text is None:
-        raise CompletionRefused("effective ExecStart record lacks the command")
-    argv = argv_text.split()
-    if not argv or argv[0] != executable:
+    executable = found.group("path")
+    argv_text = found.group("argv")
+    if not executable or not argv_text.startswith(executable) or (
+            len(argv_text) > len(executable)
+            and argv_text[len(executable)] != " "):
         raise CompletionRefused(
             "effective ExecStart argv does not start with its path")
-    return argv
+    return executable, argv_text
+
+
+def render_argv(argv: list[str]) -> str:
+    """Render tokens as systemd does, refusing what the rendering loses.
+
+    An empty argument or one containing whitespace cannot be told apart from
+    several arguments once joined by spaces, so it refuses rather than
+    comparing ambiguous text.
+    """
+    if not argv:
+        raise CompletionRefused("installed unit ExecStart is empty")
+    for token in argv:
+        if token == "" or any(ch.isspace() for ch in token):
+            raise CompletionRefused(
+                "installed ExecStart has an empty or whitespace-bearing "
+                "argument that systemctl show cannot render unambiguously")
+    return " ".join(argv)
 
 
 def parse_journal_json(text: str, *, max_records: int) -> list[dict[str, Any]]:
@@ -402,8 +442,10 @@ class SystemdJournalSource:
     The source is intentionally not constructed by tests. It is the live
     binding used later by a parent-owned factory. Every command is read-only and
     bounded: ``max_bytes`` applies to each of stdout and stderr while both are
-    drained concurrently. The unit name is validated before it reaches a
-    command line.
+    drained concurrently. Journal records are projected to the witness fields
+    the completion provider actually consults, so a realistic 256-record tail
+    of a chatty unit stays inside the bound without truncating evidence. The
+    unit name is validated before it reaches a command line.
     """
 
     def __init__(self, *, user: bool = True,
@@ -478,6 +520,7 @@ class SystemdJournalSource:
         # provider filter by boot, invocation and record bound.
         command += ["--user-unit" if self.user else "--unit", unit,
                     "--output=json", "--no-pager",
+                    "--output-fields=" + ",".join(WITNESS_JOURNAL_FIELDS),
                     "--lines=%d" % self.max_records]
         text = self._run(command)
         return {"boot_id": read_boot_id(),
@@ -574,7 +617,7 @@ class SystemdJournalCompletionPort:
         """
         effective = parse_show_exec_start(show["ExecStart"])
         declared = parse_exec_start_from_unit(self.unit_dir / unit)
-        if effective != declared:
+        if effective != (declared[0] if declared else "", render_argv(declared)):
             raise CompletionRefused(
                 "effective ExecStart does not match the installed unit")
 

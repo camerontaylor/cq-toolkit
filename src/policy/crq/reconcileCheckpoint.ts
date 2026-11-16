@@ -12,7 +12,7 @@
  * `int` (a `1.0` lexeme is refused), digests are receipt-canonical SHA-256, and
  * the interval is the reconciler's frozen `(after, before]` pair.
  */
-import { JsonNumber, JsonObject, type JsonValue } from './jsonValue.js';
+import { JsonNumber, JsonObject, parseJsonValue, type JsonValue } from './jsonValue.js';
 import { receiptJsonDigest } from './pythonJson.js';
 import {
   isJsonBool,
@@ -38,6 +38,10 @@ export const MAX_REPOSITORY_NUMBER = 20000;
 export const NUMBER_WINDOW = 50;
 /** `runtime_target.DISCOVERY_SELECTOR`: the merged-interval base query. */
 export const DISCOVERY_SELECTOR = 'main-or-merge-queue';
+/** `merged_reconcile.freeze_source`'s method: numeric all-slot windows. */
+export const RECONCILE_METHOD_NUMERIC = 'all-number-slots-v1';
+/** `crq.recent_merged_page`'s method: closed/updated keyset windows. */
+export const RECONCILE_METHOD_CLOSED_UPDATED = 'closed-updated-v1';
 
 const TIMESTAMP = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/;
 const SHA = /^[0-9a-f]{40}$/;
@@ -45,8 +49,8 @@ const DIGEST = /^[0-9a-f]{64}$/;
 
 /** `merged_reconcile.ReconcileRefused`: no complete-inventory claim is possible. */
 export class ReconcileRefused extends Error {
-  override readonly name = 'ReconcileRefused';
-  readonly pythonError = 'ReconcileRefused';
+  override readonly name: string = 'ReconcileRefused';
+  readonly pythonError: string = 'ReconcileRefused';
 
   constructor(message: string) {
     super(message);
@@ -95,16 +99,19 @@ export function normalizeInterval(after: unknown, before: unknown): ReconcileInt
 
 /** `merged_reconcile.normalize_page_budget`. */
 export function normalizePageBudget(budget: unknown): number {
-  if (
-    !isJsonInt(budget) ||
-    jsonIntValue(budget) < 1n ||
-    jsonIntValue(budget) > BigInt(MAX_PAGE_BUDGET)
-  ) {
+  // Vectors carry the oracle's JSON int; the argv route carries a JS integer.
+  // Both are Python `int`; a float, boolean or string remains refused.
+  const value = isJsonInt(budget)
+    ? jsonIntValue(budget)
+    : typeof budget === 'number' && Number.isSafeInteger(budget)
+      ? BigInt(budget)
+      : null;
+  if (value === null || value < 1n || value > BigInt(MAX_PAGE_BUDGET)) {
     throw new ReconcileRefused(
       `page budget must be a positive integer capped at ${String(MAX_PAGE_BUDGET)}`,
     );
   }
-  return Number(jsonIntValue(budget));
+  return Number(value);
 }
 
 /** `_cursor`: `None`, or a bounded non-empty string. */
@@ -240,6 +247,26 @@ export function newCheckpoint(
     ['steps', []],
     ['dry_run', false],
   ]);
+}
+
+/**
+ * `crq.reconcile_merged`'s checkpoint path key:
+ * `digest({"repo", "base", "after", "before", "method"?})`.
+ */
+export function reconcileWrapperKey(
+  repo: string,
+  interval: ReconcileInterval,
+  method?: string,
+): string {
+  return checkpointDigest(
+    new JsonObject([
+      ['repo', repo],
+      ['base', DISCOVERY_SELECTOR],
+      ['after', interval.after],
+      ['before', interval.before],
+      ...(method === undefined ? [] : ([['method', method]] as const)),
+    ]),
+  );
 }
 
 /** `merged_reconcile.summarize`: the bounded progress projection. */
@@ -459,17 +486,18 @@ export function readReconcileWrapper(
   interval: ReconcileInterval,
   pageBudget: unknown,
   repo: string,
+  method: string = RECONCILE_METHOD_NUMERIC,
 ): JsonObject {
-  let parsed: unknown;
+  let parsed: JsonValue;
   try {
-    parsed = JSON.parse(text) as unknown;
+    parsed = parseJsonValue(text);
   } catch {
     refuse('wrapper-decode: invalid JSON');
   }
-  if (!(parsed instanceof Object) || Array.isArray(parsed)) {
+  if (!(parsed instanceof JsonObject)) {
     refuse('wrapper-schema: required fields malformed');
   }
-  const wrapper = plainToObject(parsed as Record<string, unknown>);
+  const wrapper = parsed;
   const keys = new Set(wrapper.entries.map(([key]) => key));
   if (keys.size !== WRAPPER_KEYS.size || [...keys].some((key) => !WRAPPER_KEYS.has(key))) {
     refuse('wrapper-schema: required fields malformed');
@@ -487,7 +515,7 @@ export function readReconcileWrapper(
     [...sourceKeys].some((key) => !SOURCE_KEYS.has(key)) ||
     !isJsonInt(version) ||
     jsonIntValue(version) !== 1n ||
-    source.get('method') !== 'all-number-slots-v1' ||
+    source.get('method') !== method ||
     source.get('repo') !== repo ||
     source.get('base') !== DISCOVERY_SELECTOR ||
     !isJsonInt(source.get('window')) ||
@@ -516,20 +544,4 @@ export function readReconcileWrapper(
   return new JsonObject(
     wrapper.entries.map(([key, value]) => [key, key === 'checkpoint' ? validated : value] as const),
   );
-}
-
-function plainToObject(value: Record<string, unknown>): JsonObject {
-  return new JsonObject(Object.keys(value).map((key) => [key, plainToJson(value[key])] as const));
-}
-
-function plainToJson(value: unknown): JsonValue {
-  if (value === null || value === undefined) return null;
-  if (typeof value === 'boolean' || typeof value === 'string') return value;
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) refuse('wrapper-decode: invalid JSON');
-    return Number.isInteger(value) ? JsonNumber.int(value) : JsonNumber.float(value);
-  }
-  if (Array.isArray(value)) return value.map((entry) => plainToJson(entry));
-  if (typeof value === 'object') return plainToObject(value as Record<string, unknown>);
-  refuse('wrapper-decode: invalid JSON');
 }

@@ -11,7 +11,11 @@ The adapter reuses ``prepare-host.render_service`` for source-bound rendering an
 derives its declared unit inventory from the pinned template tree. It does not
 claim exhaustive installed-host activation discovery, root coverage or caller
 coverage. Injected discovery evidence must enumerate the supported topology and
-reject foreign entries. Unknown or failed observations refuse before mutation.
+reject foreign entries. The host's declared environment drop-in directories are
+accepted only by exact entry name, type, ownership, mode and environment-only
+service directives; the adapter never reads an ``EnvironmentFile`` target and
+never writes, removes or renames a drop-in entry. Unknown or failed
+observations refuse before mutation.
 
 The snapshot payload reuses the guest adapter's schema version 1 top-level keys,
 path-state shapes and activator key names. The owned path set and activator key
@@ -25,6 +29,7 @@ import errno
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shlex
@@ -38,6 +43,7 @@ from typing import Protocol
 SCHEMA_VERSION = 1
 TEMPLATE_DIR = "apps/crq-python/ops/systemd/"
 MAX_UNIT_BYTES = 1 << 20
+MAX_DROPIN_BYTES = 1 << 16
 RUNTIME_RE = re.compile(r"node:[0-9a-f]{40}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
@@ -48,8 +54,44 @@ DURATION_RE = re.compile(r"(?P<value>\d+)(?P<unit>ms|s|min|h)?")
 UNIT_FILE_STATES = {"enabled", "disabled", "static", "masked", "alias",
                     "indirect", "generated", "transient", "bad"}
 RESTORABLE_ACTIVE = {"active", "inactive"}
+# Fixed supported maximum for a calendar-scheduled timer. Its next activation
+# is a scheduled point that can be hours away, not a bounded repeat after the
+# completed invocation. A repeat-after-active/inactive timer derives its own
+# finite maximum from the declared topology instead (see
+# ``_supported_completion_window``).
 DEFAULT_COMPLETION_WINDOW = 1800.0
 COMPLETION_MARGIN_SECONDS = 60
+
+# Installed environment drop-ins the production host carries under the CRQ
+# units. The names are exact. The adapter validates each declared directory
+# and entry by type, ownership and mode, reads only the declared drop-in text
+# to reject unit-shaping service keys, and leaves every entry untouched across
+# switch and rollback. A drop-in directory outside this declaration refuses.
+DECLARED_DROPINS = {
+    "crq-watchdog.service": frozenset({"20-paseo-env.conf"}),
+    "crq-tick.service": frozenset({"20-paseo-env.conf",
+                                   "coderabbit-managed.conf"}),
+    "crq-slot.service": frozenset({"20-paseo-env.conf",
+                                   "coderabbit-managed.conf"}),
+}
+# The declared drop-ins only contribute environment. Any other [Service] key
+# could change the service type, start timeout, execution shape or activation
+# identity that preflight has already certified from the main unit template.
+DROPIN_SERVICE_KEYS = frozenset({"Environment", "EnvironmentFile"})
+
+# Units whose execution can create or advance queue work. Every unit is
+# treated as issuing unless it is named here, so a future unit stays
+# fail-closed until someone can show it shares no state with the queue. The
+# watchdog reads the completed-tick heartbeat and sends an alert; it never
+# launches a run, advances queue.json or writes the heartbeat. Only an issuing
+# unit's fence therefore observes queue ownership, and an unrelated live run
+# cannot refuse or roll back a watchdog switch.
+NON_QUEUE_ISSUING_UNITS = frozenset({"crq-watchdog.service"})
+
+
+def unit_issues_queue_work(unit):
+    """Whether this unit's fence must observe recorded queue ownership."""
+    return unit not in NON_QUEUE_ISSUING_UNITS
 
 
 class SystemdPort(Protocol):
@@ -147,6 +189,19 @@ def _valid_runtime(value) -> bool:
         isinstance(value, str) and RUNTIME_RE.fullmatch(value) is not None)
 
 
+def _finite_positive_seconds(value):
+    """Return a finite positive seconds value, or None for refused input."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
 def _valid_template_name(name: str) -> None:
     path = Path(name)
     if path.is_absolute() or ".." in path.parts or not path.parts:
@@ -223,31 +278,44 @@ def _calendar_interval_seconds(text: str) -> int | None:
     return max(gaps) * 60
 
 
-def _timer_bound_seconds(text: str) -> int | None:
-    intervals = []
+def _timer_schedule_seconds(text: str):
+    """Return ``(overall bound, repeat bound)`` for one timer template.
+
+    ``OnUnitActiveSec`` and ``OnUnitInactiveSec`` re-fire relative to the
+    unit's own state, so they bound the gap between the completed invocation
+    and the next one. ``OnCalendar`` fires at scheduled points, which can be
+    arbitrarily far away, so it does not extend the supported completion
+    maximum. ``OnBootSec`` fires once at boot and is not a repeat.
+    """
+    calendar = []
     for value in _section_values(text, "Timer", "OnCalendar"):
         parsed = _calendar_interval_seconds(value)
         if parsed is None:
-            return None
-        intervals.append(parsed)
+            return None, None
+        calendar.append(parsed)
+    repeat = []
     for key in ("OnUnitActiveSec", "OnUnitInactiveSec"):
         for value in _section_values(text, "Timer", key):
             parsed = _duration_seconds(value)
             if parsed is None:
-                return None
-            intervals.append(parsed)
+                return None, None
+            repeat.append(parsed)
     accuracies = []
     for value in _section_values(text, "Timer", "AccuracySec"):
         parsed = _duration_seconds(value)
         if parsed is None:
-            return None
+            return None, None
         accuracies.append(parsed)
     # systemd defaults AccuracySec to 1min when a timer declares none, so a
     # timer without the key can fire up to 60 s after its interval.
     accuracy = max(accuracies, default=60)
+    intervals = calendar + repeat
     if not intervals:
-        return None
-    return max(intervals) + accuracy
+        return None, None
+    overall = max(intervals) + accuracy
+    repeat_bound = (max(repeat) + accuracy
+                    if repeat and not calendar else None)
+    return overall, repeat_bound
 
 
 def _single_value(values: list[str], name: str, default=None):
@@ -321,6 +389,7 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
         timer_wants = None
         path_wants = None
         timer_bound = None
+        timer_repeat = None
         timer_sha256 = None
         blobs = {unit: service_oid}
         declared_templates.add(unit)
@@ -337,7 +406,7 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
                 raise ValueError("timer template names another unit: " + timer)
             timer_wants = wanted[0] + ".wants/" + timer
             _valid_template_name(timer_wants)
-            timer_bound = _timer_bound_seconds(timer_text)
+            timer_bound, timer_repeat = _timer_schedule_seconds(timer_text)
             timer_sha256 = hashlib.sha256(timer_raw).hexdigest()
             blobs[timer] = timer_oid
             declared_templates.add(timer)
@@ -365,6 +434,7 @@ def declared_inventory(root: Path, source_sha: str) -> dict:
             "service_type": service_type,
             "service_timeout_seconds": service_timeout,
             "timer_bound_seconds": timer_bound,
+            "timer_repeat_seconds": timer_repeat,
             "timer_sha256": timer_sha256,
             "blobs": blobs,
         }
@@ -385,8 +455,8 @@ class ProductionUnitAdapter:
     def __init__(self, *, root, source_sha, unit_dir, artifact_root,
                  systemd, identity, capability, completion, queue_drain,
                  error_type=RuntimeError, drain_timeout=30.0,
-                 completion_timeout=DEFAULT_COMPLETION_WINDOW,
-                 max_completion_window=DEFAULT_COMPLETION_WINDOW,
+                 completion_timeout=None,
+                 max_completion_window=None,
                  expected_render=None,
                  clock=time.monotonic, sleep=time.sleep):
         if systemd is None or identity is None or capability is None:
@@ -394,13 +464,17 @@ class ProductionUnitAdapter:
         if expected_render is not None \
                 and not isinstance(expected_render, dict):
             raise TypeError("expected render identity must be an object")
-        if (not isinstance(completion_timeout, (int, float))
-                or isinstance(completion_timeout, bool)
-                or completion_timeout <= 0
-                or not isinstance(max_completion_window, (int, float))
-                or isinstance(max_completion_window, bool)
-                or max_completion_window <= 0):
-            raise TypeError("completion window must be a positive number")
+        if completion_timeout is not None:
+            completion_timeout = _finite_positive_seconds(completion_timeout)
+            if completion_timeout is None:
+                raise TypeError(
+                    "completion window must be a finite positive number")
+        if max_completion_window is not None:
+            max_completion_window = _finite_positive_seconds(
+                max_completion_window)
+            if max_completion_window is None:
+                raise TypeError(
+                    "completion window must be a finite positive number")
         self.root = Path(root)
         self.source_sha = source_sha
         self.unit_dir = Path(unit_dir)
@@ -592,14 +666,175 @@ class ProductionUnitAdapter:
         except ValueError:
             self.refuse("snapshot path parent escapes the unit directory")
 
+    def _declared_dropins(self, unit, inventory):
+        """The declared drop-in directories for one unit's scanned names."""
+        declared = {}
+        for name in (unit, inventory[unit]["timer"], inventory[unit]["path"]):
+            if name is None or name not in DECLARED_DROPINS:
+                continue
+            declared[str(self.unit_dir / (name + ".d"))] = \
+                DECLARED_DROPINS[name]
+        return declared
+
+    def _validate_dropin_dir(self, path, declared):
+        """Validate one declared environment drop-in directory.
+
+        Acceptance is exact: a real directory owned by the adapter identity
+        with no group or world write bits, containing exactly the declared
+        entry names. Entries must be identity-owned regular files, or absolute
+        symlinks to an identity-owned regular file outside the unit directory,
+        with no group or world write bits. Only the declared drop-in text is
+        read, and only to reject unit-shaping service keys.
+        """
+        path = Path(path)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            self.refuse("declared drop-in directory is unreadable: "
+                        + str(exc)[:160])
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            self.refuse("declared drop-in path is not a real directory: "
+                        + str(path))
+        if stat.S_IMODE(info.st_mode) & 0o022:
+            self.refuse("declared drop-in directory is group- or "
+                        "world-writable: " + str(path))
+        if info.st_uid != self.identity.uid or info.st_gid != self.identity.gid:
+            self.refuse("declared drop-in directory ownership is not the "
+                        "adapter identity: " + str(path))
+        try:
+            entries = sorted(path.iterdir())
+        except OSError as exc:
+            self.refuse("declared drop-in directory cannot be listed: "
+                        + str(exc)[:160])
+        if {entry.name for entry in entries} != set(declared):
+            self.refuse("declared drop-in directory does not contain exactly "
+                        "the declared entries: " + str(path))
+        for entry in entries:
+            self._validate_dropin_entry(entry)
+
+    def _validate_dropin_entry(self, path):
+        path = Path(path)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            self.refuse("declared drop-in entry disappeared: " + str(path))
+        except OSError as exc:
+            self.refuse("declared drop-in entry is unreadable: "
+                        + str(exc)[:160])
+        if info.st_uid != self.identity.uid or info.st_gid != self.identity.gid:
+            self.refuse("declared drop-in entry ownership is not the adapter "
+                        "identity: " + str(path))
+        if stat.S_ISLNK(info.st_mode):
+            try:
+                target = os.readlink(path)
+            except OSError as exc:
+                self.refuse("declared drop-in symlink is unreadable: "
+                            + str(exc)[:160])
+            target_path = Path(target)
+            if not target_path.is_absolute():
+                self.refuse("declared drop-in symlink target is not absolute: "
+                            + str(path))
+            try:
+                resolved = target_path.resolve(strict=True)
+                target_info = resolved.stat()
+            except (OSError, RuntimeError) as exc:
+                self.refuse("declared drop-in symlink target is unreadable: "
+                            + str(path) + ": " + str(exc)[:160])
+            if not stat.S_ISREG(target_info.st_mode):
+                self.refuse("declared drop-in symlink target is not a regular "
+                            "file: " + str(path))
+            if (target_info.st_uid != self.identity.uid
+                    or target_info.st_gid != self.identity.gid):
+                self.refuse("declared drop-in symlink target ownership is not "
+                            "the adapter identity: " + str(path))
+            target_mode = stat.S_IMODE(target_info.st_mode)
+            if target_mode & 0o7000:
+                self.refuse("declared drop-in symlink target has unsupported "
+                            "special bits: " + str(path))
+            if target_mode & 0o022:
+                self.refuse("declared drop-in symlink target is group- or "
+                            "world-writable: " + str(path))
+            if target_info.st_size > MAX_DROPIN_BYTES:
+                self.refuse("declared drop-in symlink target exceeds the "
+                            "adapter bound: " + str(path))
+            try:
+                resolved.relative_to(self.unit_dir.resolve())
+            except ValueError:
+                self._validate_dropin_text(path)
+                return
+            self.refuse("declared drop-in symlink target resolves inside the "
+                        "unit directory: " + str(path))
+        if not stat.S_ISREG(info.st_mode):
+            self.refuse("declared drop-in entry is not a regular file or "
+                        "symlink: " + str(path))
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & 0o7000:
+            self.refuse("declared drop-in entry has unsupported special bits: "
+                        + str(path))
+        if mode & 0o022:
+            self.refuse("declared drop-in entry is group- or world-writable: "
+                        + str(path))
+        if info.st_size > MAX_DROPIN_BYTES:
+            self.refuse("declared drop-in entry exceeds the adapter bound: "
+                        + str(path))
+        self._validate_dropin_text(path)
+
+    def _validate_dropin_text(self, path):
+        """Reject drop-in directives outside the declared environment keys.
+
+        The declared drop-ins may only contribute environment entries. Reading
+        the declared drop-in text itself, never an ``EnvironmentFile`` target,
+        keeps a future ``Type=``, ``TimeoutStartSec=`` or execution-shape
+        override from invalidating the completion bound that preflight derives
+        from the main unit template.
+        """
+        path = Path(path)
+        try:
+            with path.open("rb") as handle:
+                data = handle.read(MAX_DROPIN_BYTES + 1)
+        except OSError as exc:
+            self.refuse("declared drop-in entry is unreadable: "
+                        + str(path) + ": " + str(exc)[:160])
+        if len(data) > MAX_DROPIN_BYTES:
+            self.refuse("declared drop-in entry exceeds the adapter bound: "
+                        + str(path))
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            self.refuse("declared drop-in entry is not valid UTF-8: "
+                        + str(path))
+        section = None
+        for number, line in enumerate(text.splitlines(), 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith(("#", ";")):
+                continue
+            if stripped.endswith("\\"):
+                self.refuse("declared drop-in entry uses an unsupported line "
+                            "continuation: " + str(path))
+            if stripped.startswith("[") and stripped.endswith("]"):
+                section = stripped[1:-1].strip()
+                continue
+            if section != "Service" or "=" not in stripped:
+                self.refuse("declared drop-in entry has an unsupported "
+                            "directive at line " + str(number) + ": "
+                            + str(path))
+            key = stripped.split("=", 1)[0].strip()
+            if key not in DROPIN_SERVICE_KEYS:
+                self.refuse("declared drop-in entry sets an unsupported "
+                            "service key " + key + ": " + str(path))
+
     def _installed_entries(self, unit, inventory):
         paths = self._unit_paths(unit, inventory)
         allowed = {str(path) for path in paths.values()}
         prefix = unit.split(".")[0]
+        dropins = self._declared_dropins(unit, inventory)
         unexpected = {}
         for path in sorted(self.unit_dir.glob(prefix + "*")):
-            if str(path) not in allowed:
-                unexpected[str(path)] = "unexpected installed entry"
+            if str(path) in allowed or str(path) in dropins:
+                continue
+            unexpected[str(path)] = "unexpected installed entry"
         for wants in sorted(self.unit_dir.glob("*.wants")):
             if wants.is_symlink() or not wants.is_dir():
                 continue
@@ -610,7 +845,9 @@ class ProductionUnitAdapter:
             if name is None:
                 continue
             dropin = self.unit_dir / (name + ".d")
-            if dropin.exists() or dropin.is_symlink():
+            if str(dropin) in dropins:
+                self._validate_dropin_dir(dropin, dropins[str(dropin)])
+            elif dropin.exists() or dropin.is_symlink():
                 unexpected[str(dropin)] = "undeclared drop-in directory"
         if unexpected:
             self.refuse("installed topology is outside the declared inventory: "
@@ -930,7 +1167,7 @@ class ProductionUnitAdapter:
         if runtime == "python":
             self._check_python_entry(rendered)
         self._rendered[(unit, runtime)] = rendered
-        if self.queue_drain is None:
+        if self.queue_drain is None and unit_issues_queue_work(unit):
             self.refuse("no recorded queue drain observation provider")
         sequence = self.sequence(unit)
         self._requested_runtime = runtime
@@ -956,8 +1193,10 @@ class ProductionUnitAdapter:
         The controller requires two strictly advancing completions after one
         ``start``. The first is produced by the started service; the second is
         produced by the restored timer. An inactive timer cannot produce it
-        without spawning unrecorded work, and a schedule whose worst-case
-        interval exceeds the supported maximum is refused before mutation.
+        without spawning unrecorded work. A calendar schedule whose worst-case
+        interval exceeds the fixed supported maximum is refused before
+        mutation. A repeat-after-active/inactive timer instead derives its
+        finite maximum from its own declared bound.
         """
         timer = inventory[unit]["timer"]
         if timer is None:
@@ -974,19 +1213,46 @@ class ProductionUnitAdapter:
         service_timeout = inventory[unit]["service_timeout_seconds"]
         if type(service_timeout) is not int or service_timeout <= 0:
             self.refuse("declared service start timeout is not bounded")
-        required = float(service_timeout + bound + COMPLETION_MARGIN_SECONDS)
-        if required > self.max_completion_window:
+        try:
+            required = float(
+                service_timeout + bound + COMPLETION_MARGIN_SECONDS)
+        except OverflowError:
+            self.refuse("declared completion bound exceeds a supported "
+                        "duration; no switch was attempted")
+        supported = self._supported_completion_window(inventory[unit],
+                                                      required)
+        if required > supported:
             self.refuse(
                 "declared completion bound %.0fs exceeds the supported "
                 "maximum %.0fs; no switch was attempted"
-                % (required, self.max_completion_window))
-        if self.completion_timeout < required:
+                % (required, supported))
+        if self.completion_timeout is not None \
+                and self.completion_timeout < required:
             self.refuse(
                 "completion deadline %.0fs is below the declared bound %.0fs; "
                 "no switch was attempted"
                 % (self.completion_timeout, required))
-        self._completion_window = required
-        return required
+        self._completion_window = (self.completion_timeout
+                                   if self.completion_timeout is not None
+                                   else required)
+        return self._completion_window
+
+    def _supported_completion_window(self, entry, required):
+        """The unit's own finite maximum, or the fixed calendar maximum.
+
+        An explicit caller cap always wins. Without one, a timer that re-fires
+        ``OnUnitActiveSec``/``OnUnitInactiveSec`` after the unit's own state
+        change bounds the next invocation by its declared interval, so the
+        whole declared completion path is finite and is its own maximum. A
+        calendar timer's next fire is a scheduled point that can be hours
+        away, so it keeps the fixed supported maximum.
+        """
+        if self.max_completion_window is not None:
+            return self.max_completion_window
+        repeat = entry.get("timer_repeat_seconds")
+        if type(repeat) is int and repeat > 0:
+            return required
+        return DEFAULT_COMPLETION_WINDOW
 
     def _service_start_timeout(self, unit, inventory):
         declared = inventory[unit]["service_timeout_seconds"]
@@ -1211,8 +1477,11 @@ class ProductionUnitAdapter:
             self.refuse("service stop did not complete during fence")
         self._run("reset-failed", unit, timeout=60)
         drained = self._wait_drain(unit, inventory)
-        queue = self._observe_queue()
-        if not queue["drained"]:
+        # The watchdog is non-issuing: the queue is not its state, and a live
+        # run owned by another unit must not refuse its fence. Issuing units
+        # keep the fail-closed post-fence ownership observation.
+        queue = self._observe_queue() if unit_issues_queue_work(unit) else None
+        if queue is not None and not queue["drained"]:
             self.refuse("queue-owned work is alive or ambiguous after the "
                         "systemd fence: "
                         + json.dumps(queue["blocked"], sort_keys=True)[:400])
@@ -1254,7 +1523,7 @@ class ProductionUnitAdapter:
         cached = self._rendered.get((unit, runtime))
         if not isinstance(cached, dict):
             self.refuse("install requires a render established by preflight")
-        for key in ("source_sha", "template_blob_oid", "sha256"):
+        for key in ("source_sha", "template_blob_oid", "sha256", "artifact"):
             if rendered[key] != cached[key]:
                 self.refuse("render changed between preflight and install: " + key)
         masked = self._show(unit, ["LoadState", "FragmentPath"])
