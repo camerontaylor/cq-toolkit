@@ -107,20 +107,23 @@ async function checked(run: RunProcess, argv: readonly string[]): Promise<Uint8A
 
 // ---- Path.resolve -------------------------------------------------------
 
-/** `Path(path).resolve()` (non-strict): symlinks of the existing prefix are followed. */
+/**
+ * `Path(path).resolve()` (non-strict): symlinks of the existing prefix are followed
+ * before any `..` that follows them, as the filesystem would; the missing tail is
+ * then joined lexically.
+ */
 export function pyResolve(path: string): string {
-  let current = posix.resolve(path);
-  const rest: string[] = [];
-  for (;;) {
+  const absolute = path.startsWith('/') ? path : `${process.cwd()}/${path}`;
+  const parts = absolute.split('/').filter((part) => part !== '' && part !== '.');
+  for (let keep = parts.length; keep >= 0; keep -= 1) {
     try {
-      const real = realpathSync(current);
-      return rest.length ? posix.join(real, ...rest.reverse()) : real;
+      const real = realpathSync.native(`/${parts.slice(0, keep).join('/')}`);
+      return posix.join(real, ...parts.slice(keep));
     } catch {
-      if (current === '/') return '/';
-      rest.push(posix.basename(current));
-      current = posix.dirname(current);
+      // The prefix does not exist: drop one more component.
     }
   }
+  return '/';
 }
 
 // ---- atomic_bytes -------------------------------------------------------

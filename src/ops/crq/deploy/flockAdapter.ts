@@ -30,6 +30,8 @@ export function flockArgs(path: string): string[] {
   return [
     '-x',
     '-n',
+    // exec the holder directly so the pid release() kills is the lock holder
+    '--no-fork',
     '-E',
     String(BUSY_EXIT),
     path,

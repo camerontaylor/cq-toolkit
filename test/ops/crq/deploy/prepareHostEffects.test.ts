@@ -168,6 +168,14 @@ describe('pyResolve', () => {
     expect(pyResolve(join(dir, 'link/missing/x'))).toBe(join(dir, 'real/missing/x'));
     expect(pyResolve(join(dir, 'real/../real'))).toBe(join(dir, 'real'));
   });
+  test('resolves a symlink before the .. that follows it', () => {
+    const dir = pyResolve(fresh());
+    mkdirSync(join(dir, 'repo/sub'), { recursive: true });
+    mkdirSync(join(dir, 'safe'));
+    symlinkSync(join(dir, 'repo/sub'), join(dir, 'safe/link'));
+    expect(pyResolve(`${dir}/safe/link/../out`)).toBe(join(dir, 'repo/out'));
+    expect(pyResolve(`${dir}/safe/missing/../out`)).toBe(join(dir, 'safe/out'));
+  });
 });
 
 describe('requireOutsideGit', () => {
