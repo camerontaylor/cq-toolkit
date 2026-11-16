@@ -353,12 +353,17 @@ describe('restoreBeforeSwitch', () => {
     await rec(b).restoreBeforeSwitch('why');
     expect(b.log).toEqual([]);
   });
-  test('does not release a hold it no longer owns', async () => {
+  test('losing ownership before the restart fail-stops with the triggers unchanged', async () => {
     const f = fixture();
     f.hold.owned = false;
-    await rec(f).restoreBeforeSwitch('why');
+    const err = await caught(rec(f).restoreBeforeSwitch('why'));
+    expect(err).toBeInstanceOf(RecoveryRequired);
+    expect(err.message).toBe(
+      "pre-switch restore failed after refusal (why): Refused('admission ownership was lost before the pre-switch restart')",
+    );
+    expect(f.log.some((l) => l.startsWith('start:'))).toBe(false);
     expect(f.log).not.toContain('hold.release');
-    expect(f.writes[0]!.value).toMatchObject({ outcome: 'refused' });
+    expect(f.writes[0]!.value).toMatchObject({ outcome: 'recovery_required' });
   });
   test('skips the restart when no original triggers were recorded', async () => {
     const f = fixture({ original: {} });
@@ -417,6 +422,24 @@ describe('restoreBeforeSwitch', () => {
       "the refused record could not be persisted (OSError('ro')) after: why",
     );
     expect(f.log).toContain('hold.release');
+  });
+  test('a refusal record failure after release reacquires admission before the fail-stop', async () => {
+    const f = fixture();
+    const release = f.hold.release.bind(f.hold);
+    f.hold.release = () => {
+      f.hold.owned = false;
+      return release();
+    };
+    f.deps.newHold = () => {
+      const next = new FakeHold(false, f.log);
+      return next;
+    };
+    f.fail.write = new OSError('ro');
+    const err = await caught(rec(f).restoreBeforeSwitch('why'));
+    expect(err).toBeInstanceOf(RecoveryRequired);
+    const log = f.log;
+    expect(log.indexOf('hold.acquire')).toBeGreaterThan(log.indexOf('hold.release'));
+    expect(log.filter((l) => l.startsWith('stop:'))).toEqual(['stop:a.timer,b.timer']);
   });
   test('a non-OSError record failure propagates', async () => {
     const f = fixture();
