@@ -15,6 +15,7 @@ import {
   decodeLedgerBytes,
   ledgerCanonicalBytes,
   ledgerScope,
+  ledgerValueEqual,
   LedgerIntegrityError,
   LedgerJsonDecodeError,
 } from './ledger.js';
@@ -153,7 +154,7 @@ export function findingIntervals(value: JsonObject): Array<[number, number]> {
  * `backfill_history.terminal_scope`: only explicit, terminal path/blob/interval
  * evidence bound to `expectedHead` is scoped completion.
  */
-export function terminalScope(raw: Uint8Array, expectedHead: string): JsonObject[] {
+export function terminalScope(raw: Uint8Array, expectedHead: JsonValue): JsonObject[] {
   const lines = vendorLines(raw);
   const events = lines.map((line) => line.event);
   if (
@@ -167,7 +168,7 @@ export function terminalScope(raw: Uint8Array, expectedHead: string): JsonObject
   const complete = events[events.length - 1] as JsonObject;
   if (complete.get('type') !== 'complete' || complete.get('status') !== 'review_completed')
     throw new LedgerIntegrityError('terminal non-skipped completion absent');
-  if (complete.get('head') !== expectedHead)
+  if (!ledgerValueEqual(complete.get('head') ?? null, expectedHead))
     throw new LedgerIntegrityError('terminal evidence binds wrong/unknown reviewed head');
   // Credit rows come only from the terminal completion. A raw surrogate there
   // is refused as the ledger domain refuses it; other vendor lines stay valid.
