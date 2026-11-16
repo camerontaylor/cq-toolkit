@@ -139,6 +139,7 @@ export async function reserveAndSpawnReview(
       ['last_error', pythonPrefix(`${kind} spawn failed (no retry): ${error.message}`, 300)],
     ]);
     next = replace(next, input.itemIndex, current);
+    await effects.saveQueue(next);
     await effects.event(
       'spawn_failed',
       new JsonObject([
@@ -147,7 +148,6 @@ export async function reserveAndSpawnReview(
         ['error', message],
       ]),
     );
-    await effects.saveQueue(next);
     return { queue: next, runId: input.runId };
   }
   if (!Number.isSafeInteger(pid) || pid <= 0)
