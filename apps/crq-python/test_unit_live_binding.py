@@ -710,6 +710,20 @@ class DiscoveryTests(PortFixture):
                               " ".join(evidence["foreign"]))
                 link.unlink()
 
+    def test_undeclared_alias_of_a_declared_unit_is_unsupported(self):
+        declared = self.declare()
+        # systemd lets a plain name of the same type alias a unit, and the
+        # alias can be used in dependency directives, so an undeclared
+        # top-level symlink that resolves to a declared unit would activate
+        # the verified unit through a name the prefix checks never see.
+        alias = self.link("ingress.service",
+                          self.unit_dir / "crq-tick.service")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("undeclared alias of a declared unit: " + str(alias),
+                      " ".join(evidence["foreign"]))
+
     def test_cotenant_symlink_continuation_hiding_a_dependency_is_unsupported(
             self):
         declared = self.declare()

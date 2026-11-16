@@ -778,6 +778,12 @@ class SubprocessSystemd:
                     "paths": paths, "units": {name: {} for name in sorted(units)},
                     "foreign": foreign, "jobs": []}
         declared_set = {str(path) for path in declared}
+        declared_resolved = set()
+        for path in declared:
+            try:
+                declared_resolved.add(path.resolve())
+            except (OSError, RuntimeError):
+                declared_resolved.add(path)
         prefix = unit.split(".")[0]
         for entry in sorted(entries):
             name = entry.name
@@ -796,6 +802,19 @@ class SubprocessSystemd:
                 if dropin_error is not None:
                     foreign.append(dropin_error)
                 continue
+            # systemd lets a plain name of the same type alias a unit, and an
+            # alias can be used in dependency directives, so an undeclared
+            # top-level symlink that resolves to a declared unit would activate
+            # the verified unit through a name the prefix checks never see.
+            if entry.is_symlink() and str(entry) not in declared_set:
+                try:
+                    alias_target = entry.resolve(strict=False)
+                except (OSError, RuntimeError):
+                    alias_target = None
+                if alias_target in declared_resolved:
+                    foreign.append("undeclared alias of a declared unit: "
+                                   + str(entry))
+                    continue
             if name.startswith(prefix) and str(entry) not in declared_set:
                 foreign.append("unexpected installed entry: " + str(entry))
             is_dir, probe_failure = _directory_probe(entry)
