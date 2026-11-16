@@ -337,6 +337,8 @@ def validate_sequence(values):
             linked = p["review_id"] if p["result"] == "credited" else p["duplicate_id"]
             if linked and linked not in reviews:
                 raise IntegrityError("import references missing review")
+            if p["result"] == "credited" and not creditable(reviews[linked]):
+                raise IntegrityError("credited import references a non-creditable review")
     return ids
 
 
