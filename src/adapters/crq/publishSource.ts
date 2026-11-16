@@ -105,9 +105,11 @@ function gitEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
 /** One hardened git invocation bound to one repository directory. */
 export function runGitIn(repo: string): RunGit {
   return async (args, options) => {
-    if (options?.input !== undefined && options.input.length > 0) {
+    if (options?.input !== undefined) {
       // execFile cannot stream stdin; input-carrying calls (hash-object,
-      // diff-tree, cat-file --batch) run through the piped form.
+      // diff-tree, cat-file --batch) run through the piped form. Empty input
+      // counts: `child.stdin.end(input)` closes stdin, so a stdin-reading git
+      // command (`hash-object --stdin`) sees EOF instead of stalling.
       return pipedGit(repo, args, options.env, options.input);
     }
     const call = await new Promise<{ code: number | null; stdout: Buffer; stderr: Buffer }>(
