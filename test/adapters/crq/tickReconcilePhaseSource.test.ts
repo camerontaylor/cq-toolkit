@@ -31,12 +31,12 @@ const run = async (text: string, state: string | null) => {
         ? { code: 1, stdout: '', stderr: 'boom' }
         : { code: 0, stdout: `{"number":7,"state":"${state}"}`, stderr: '' },
     runGit: async (args) => ({ args, code: 0, stdout: new Uint8Array(), stderr: '' }),
-    fixRun: {
+    fixRun: () => ({
       proveMerge: NEVER,
       recheckRevalidation: NEVER,
       markFixedOutcome: NEVER,
       publishSource: NEVER,
-    },
+    }),
     event: async (kind) => {
       events.push(kind);
     },
@@ -92,12 +92,12 @@ describe('fileReconcilePhaseEffects', () => {
       repo: 'o/r',
       gh: async () => ({ code: 0, stdout: '{"number":7,"state":"OPEN"}', stderr: '' }),
       runGit: async (args) => ({ args, code: 0, stdout: new Uint8Array(), stderr: '' }),
-      fixRun: {
+      fixRun: () => ({
         proveMerge: NEVER,
         recheckRevalidation: NEVER,
         markFixedOutcome: NEVER,
         publishSource: NEVER,
-      },
+      }),
       event: async () => {},
     });
     await writeFile(join(root, 'queue.json'), FIX);
