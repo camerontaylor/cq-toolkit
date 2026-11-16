@@ -458,7 +458,17 @@ export class RunRecovery<E> {
       return 'rolled_back';
     }
     if (s.switchAttempted) {
-      const head = await this.deps.headSha();
+      // A failed observation cannot say which checkout is live: HEAD is not assumed readable
+      // after a switch helper fails, so the unknown state goes to the owner, not a refusal.
+      let head: string | null = null;
+      try {
+        head = await this.deps.headSha();
+      } catch (err) {
+        if (err instanceof RecoveryRequired || err instanceof Interrupted) throw err;
+        await this.failStop(
+          `switch failed and HEAD could not be read (${excRepr(err)}); the checkout state is unknown: ${clip(reason, 200)}`,
+        );
+      }
       if (head === s.target) {
         await this.rollbackOrFailStop(reason);
         return 'rolled_back';
