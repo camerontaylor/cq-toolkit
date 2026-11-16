@@ -1,0 +1,2886 @@
+[
+  {
+    "value": {
+      "type": "finding",
+      "intervals": true
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [1, 2],
+        [2, 7]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[5, 105], 7, [1, 2], []],
+      "startLine": "3"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [2, 102],
+        [999999, 999999]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1000001,
+      "endLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": false,
+      "startLine": 3.0
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": -1,
+      "startLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [10, 10],
+        [10, 11],
+        [5, 2]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 7,
+      "startLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": -1,
+      "startLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [10, 15],
+        [10, 11],
+        [2, 102]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        {
+          "a": 1,
+          "b": 2
+        },
+        [null, 1],
+        [1, 1000001]
+      ],
+      "startLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1, 2, 3], [[1, 2]], [10, 110], [2, 2]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[10, 10], [5, 5], [true, 2], "ab"],
+      "startLine": null
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[null, 1]],
+      "startLine": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [1, 1],
+        [true, 2],
+        [0, 3]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 2,
+      "startLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [],
+      "startLine": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 0
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 0,
+      "endLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[[1, 2]]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1180591620717411303424,
+      "endLine": null
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 7,
+      "endLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[true, 2]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": [],
+      "startLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 3.0,
+      "endLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": "abc"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [5, 105],
+        [999999, 999999],
+        [true, 2],
+        {
+          "a": 1,
+          "b": 2
+        }
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": "3",
+      "startLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1.0, 2], [2, 2], null]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [999999, 1000000],
+        [1, 2, 3],
+        [1, 2],
+        [1, 1]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1,
+      "startLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [999999, 1000099],
+        [2, 2]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1180591620717411303424,
+      "startLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [10, 110],
+        [1, 1000001],
+        [0, 3],
+        [10, 10]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": ""
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1000001,
+      "startLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [],
+      "startLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": 0
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": 1.5
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [],
+      "startLine": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [],
+      "startLine": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [2, 2],
+        [true, 2]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        {
+          "a": 1,
+          "b": 2
+        },
+        [0, 3],
+        [true, 2]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": 1.5,
+      "startLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1180591620717411303424,
+      "endLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 0,
+      "endLine": 0
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": true
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [2, 102],
+        [1, 6],
+        [2, 102]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[], [999999, 1000000]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1000001,
+      "endLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [5, 6],
+        [2, 102]
+      ],
+      "startLine": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[10, 10]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": {
+        "a": 1,
+        "b": 2
+      }
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [1, 2, 3],
+        [1, 1000001],
+        [2, 3]
+      ],
+      "startLine": true
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1,
+      "endLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [1, 1],
+        [10, 15],
+        [null, 1]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1, 2], "xy"]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [7, [1]],
+      "startLine": 3.0
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [null, 1],
+        [1, 1]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [2, 102],
+        [2, 7],
+        [5, 10],
+        [5, 105]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[5, 2]],
+      "startLine": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": ""
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1180591620717411303424,
+      "endLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [10, 11],
+        [10, 15],
+        [1, 101],
+        [10, 10]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1, 6]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": true
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1,
+      "startLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": true,
+      "startLine": 0
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[5, 5]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        {
+          "a": 1,
+          "b": 2
+        },
+        [1, 1000001]
+      ],
+      "startLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1,
+      "endLine": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": 1.5,
+      "startLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [],
+      "startLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [5, 5],
+        [2, 2],
+        [1, 1000001],
+        [999999, 1000004]
+      ],
+      "startLine": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": "abc"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [10, 10],
+        [true, 2]
+      ],
+      "startLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": -1,
+      "startLine": 3.0
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": true,
+      "startLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [10, 10],
+        [2, 3],
+        [1, 101],
+        [2, 3]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1,
+      "startLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 3.0
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [999999, 999999],
+        [999999, 1000099],
+        [2, 3]
+      ],
+      "startLine": 7
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": ["ab", [999999, 1000099], [1, 1], [1]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": true,
+      "startLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": -1,
+      "endLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 2,
+      "endLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": {}
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1,
+      "endLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [10, 10],
+        [10, 11],
+        [2, 7],
+        [999999, 999999]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [],
+      "startLine": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [1, 1180591620717411303424],
+        [5, 105],
+        [5, 6],
+        [5, 10]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 0,
+      "startLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [2, 2],
+        [1.0, 2],
+        [2, 2]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": "3"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": {},
+      "endLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1180591620717411303424,
+      "startLine": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": ""
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[999999, 999999], null]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 2,
+      "endLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1], [5, 6], [2, 3]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [],
+      "startLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [5, 2],
+        [999999, 999999],
+        [2, 2]
+      ],
+      "startLine": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 2,
+      "startLine": 7
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [],
+      "startLine": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": "3",
+      "endLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [5, 105],
+        [0, 3]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 7
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": null
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [true, 2],
+        {
+          "a": 1,
+          "b": 2
+        }
+      ],
+      "startLine": true
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": {
+        "a": 1,
+        "b": 2
+      }
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[]],
+      "startLine": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [],
+      "startLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [10, 110],
+        [5, 2]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 0,
+      "startLine": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": null
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": {
+        "a": 1,
+        "b": 2
+      },
+      "startLine": {}
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [2, 7],
+        [1, 6],
+        [2, 7],
+        [10, 11]
+      ],
+      "startLine": {}
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[10, 10]],
+      "startLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [10, 10],
+        [1, 1]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [1.0, 2],
+        [null, 1],
+        [2, 2]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1000001,
+      "endLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[10, 15]],
+      "startLine": true
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [5, 2],
+        [2, 3],
+        [null, 1],
+        [5, 6]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[999999, 999999]],
+      "startLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": [],
+      "startLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        {
+          "a": 1,
+          "b": 2
+        },
+        "ab",
+        [1.0, 2]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1], [1], []]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": -1,
+      "startLine": true
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1, 6], "ab"]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [0, 3],
+        [1, 1],
+        [2, 102],
+        [10, 10]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": false,
+      "endLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1], [2, 7]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1180591620717411303424,
+      "startLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": true
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 0
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [7, [0, 3], [1, 1]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": 0,
+      "startLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [7, [1, 1180591620717411303424]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": "abc"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[]],
+      "startLine": null
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1000000,
+      "endLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [999999, 1000004],
+        [2, 2],
+        [10, 10],
+        [1, 2]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[999999, 1000004]],
+      "startLine": {}
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1, 2], "xy"],
+      "startLine": {}
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[10, 11], [[1, 2]], "ab"]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [1, 2, 3],
+        [1, 2, 3]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 2,
+      "endLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": "3"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1,
+      "endLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": [],
+      "endLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1,
+      "endLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[5, 10]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": null
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [true, 2],
+        [1, 6]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1180591620717411303424,
+      "endLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [5, 105],
+        [999999, 1000004],
+        {
+          "a": 1,
+          "b": 2
+        },
+        [2, 7]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[999999, 1000000]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": false,
+      "startLine": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": null,
+      "startLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [2, 2],
+        [999999, 999999]
+      ],
+      "startLine": "3"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [true, 2],
+        [999999, 1000004],
+        [999999, 1000000]
+      ],
+      "startLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": {}
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": -1,
+      "startLine": 7
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1, 2], "xy"]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[5, 105]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1000000,
+      "startLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[true, 2]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1180591620717411303424,
+      "startLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1, 1180591620717411303424], [1]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [1, 101],
+        [5, 105]
+      ],
+      "startLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": "ab"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 0,
+      "endLine": 0
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 7
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": false,
+      "startLine": true
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [10, 10],
+        [1.0, 2]
+      ],
+      "startLine": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [999999, 1000000],
+        [2, 7],
+        [2, 3],
+        [10, 15]
+      ],
+      "startLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": "ab"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [],
+      "startLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [],
+      "startLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [999999, 1000004],
+        [1, 1],
+        [2, 2]
+      ],
+      "startLine": 7
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [null, [999999, 999999], [999999, 1000000]],
+      "startLine": 7
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[999999, 999999], [[1, 2]], [1.0, 2]],
+      "startLine": null
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [7],
+      "startLine": "3"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [1, 6],
+        [10, 110]
+      ],
+      "startLine": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [1, 1],
+        [true, 2],
+        [5, 2]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 0
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [2, 7],
+        [null, 1],
+        [1, 2],
+        [10, 15]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": "3",
+      "startLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": false,
+      "startLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": {}
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1180591620717411303424,
+      "startLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[5, 6], null, [5, 5]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [],
+      "startLine": 0
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [5, 10],
+        [10, 10],
+        [2, 2],
+        [10, 11]
+      ],
+      "startLine": null
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1, 2], "xy"],
+      "startLine": null
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 7,
+      "endLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [],
+      "startLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": -1,
+      "startLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1,
+      "startLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[10, 10], [], [10, 10]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1,
+      "startLine": 0
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [0, 3],
+        [10, 10]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [null]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 0
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": null
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [10, 15],
+        [999999, 999999],
+        [5, 105],
+        [999999, 1000099]
+      ],
+      "startLine": {}
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        {
+          "a": 1,
+          "b": 2
+        },
+        [[1, 2]],
+        [1, 1],
+        [2, 7]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": {},
+      "startLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        {
+          "a": 1,
+          "b": 2
+        }
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": "ab"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": {
+        "a": 1,
+        "b": 2
+      }
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [2, 102],
+        [null, 1],
+        [2, 2]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [1, 2],
+        [999999, 999999],
+        [2, 2],
+        [999999, 999999]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[999999, 1000099]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": 0
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [1, 2],
+        [10, 15],
+        [1, 1],
+        [2, 102]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[null, 1], [1, 6], [], [2, 7]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[10, 11], [[1, 2]]],
+      "startLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": "3",
+      "endLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [1, 1180591620717411303424],
+        [1, 6]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[999999, 1000099], [1, 1180591620717411303424], []]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 0,
+      "startLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": {},
+      "endLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[10, 110]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [2, 3],
+        [10, 110]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[999999, 999999]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [1.0, 2],
+        [5, 6],
+        [5, 105]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": 5
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [],
+      "startLine": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [null]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[5, 5], 7],
+      "startLine": -1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1,
+      "startLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": {}
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 2,
+      "startLine": 2
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1, 2], "xy"],
+      "startLine": null
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1.0, 2], [1]],
+      "startLine": "3"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": [],
+      "endLine": 0
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[10, 11], [999999, 999999], [], [999999, 999999]],
+      "startLine": "3"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[5, 10]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": null
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1000001
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [],
+      "startLine": 0
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [999999, 999999],
+        [2, 7],
+        [2, 3],
+        [10, 15]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [10, 110],
+        [0, 3],
+        [10, 15]
+      ],
+      "startLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": 0
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [10, 10],
+        [2, 2]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[1, 1]],
+      "startLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1000000
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [[5, 2]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [999999, 999999],
+        [10, 11],
+        [null, 1],
+        [1, 2, 3]
+      ],
+      "startLine": false
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": 1
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "startLine": -1,
+      "endLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [null],
+      "startLine": []
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "endLine": 1180591620717411303424
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [7, [999999, 1000099]]
+    }
+  },
+  {
+    "value": {
+      "type": "finding"
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": [
+        [999999, 1000000],
+        [5, 105]
+      ]
+    }
+  },
+  {
+    "value": {
+      "type": "finding",
+      "intervals": []
+    }
+  },
+  {
+    "value": {}
+  },
+  {
+    "value": {
+      "intervals": [[1, 1000000]]
+    }
+  }
+]

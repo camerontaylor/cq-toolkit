@@ -9128,7 +9128,7 @@
           "expect": {
             "ok": false,
             "error": "RuntimeError",
-            "message": "gh api --paginate repos/camerontaylor/infra/pulls/77/reviews?per_page=100 \u2026 exit 5: jq: error (at <stdin>:2): Cannot index array with string (\"user\")",
+            "message": "gh api --paginate repos/camerontaylor/infra/pulls/77/reviews?per_page=100 \u2026 exit 5: jq: error (at <stdin>:1): Cannot index array with string (\"user\")",
             "calls": [
               {
                 "argv": [
@@ -9201,7 +9201,7 @@
           "expect": {
             "ok": false,
             "error": "RuntimeError",
-            "message": "gh api --paginate repos/camerontaylor/infra/pulls/77/reviews?per_page=100 \u2026 exit 5: jq: error (at <stdin>:3): Cannot index array with string (\"user\")",
+            "message": "gh api --paginate repos/camerontaylor/infra/pulls/77/reviews?per_page=100 \u2026 exit 5: jq: error (at <stdin>:1): Cannot index array with string (\"user\")",
             "calls": [
               {
                 "argv": [
@@ -9274,7 +9274,7 @@
           "expect": {
             "ok": false,
             "error": "RuntimeError",
-            "message": "gh api --paginate repos/camerontaylor/infra/pulls/77/reviews?per_page=100 \u2026 exit 5: jq: error (at <stdin>:1): Cannot index array with string (\"user\")",
+            "message": "gh api --paginate repos/camerontaylor/infra/pulls/77/reviews?per_page=100 \u2026 exit 5: jq: error (at <stdin>:0): Cannot index array with string (\"user\")",
             "calls": [
               {
                 "argv": [
@@ -9347,7 +9347,7 @@
           "expect": {
             "ok": false,
             "error": "RuntimeError",
-            "message": "gh api --paginate repos/camerontaylor/infra/pulls/77/reviews?per_page=100 \u2026 exit 5: jq: error (at <stdin>:2): Cannot index array with string (\"user\")",
+            "message": "gh api --paginate repos/camerontaylor/infra/pulls/77/reviews?per_page=100 \u2026 exit 5: jq: error (at <stdin>:0): Cannot index array with string (\"user\")",
             "calls": [
               {
                 "argv": [

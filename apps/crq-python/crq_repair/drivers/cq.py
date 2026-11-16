@@ -206,6 +206,7 @@ def invoke(config, role, job, wt, directory):
             env[key] = os.environ[key]
     argv = ['node', config['repair']['cq_bin'], 'review.fixItem', '--json']
     argv += ['--' + k + '=' + json.dumps(v) for k, v in payload.items()]
+    from crq_repair import atomic as _atomic
     before = session_files(sessions_dir)
     try:
         p = command(argv, cwd=wt, env=env,
@@ -215,8 +216,26 @@ def invoke(config, role, job, wt, directory):
         # none): classify truthfully as the runner's budget stop instead of
         # a raw TimeoutExpired, keeping the partial output in driver.log.
         _log_invocation(directory, str(exc.stdout or ''), str(exc.stderr or ''))
+        created = session_files(sessions_dir) - before
+        # The session link (item 2.3) is written here too: a run the wall
+        # clock kills after cq created a session must still leave the link.
+        # Same rule as below — only files THIS invocation created identify
+        # the current session, so a deferred rung that reuses the directory
+        # never claims an earlier run's session (no parsed result survives a
+        # deadline kill to carry a value-level sessionId).
+        try:  # best-effort: the session link never outranks the verdict
+            stored = sorted(f.stem for f in sessions_dir.glob('*.jsonl')) if sessions_dir.is_dir() else []
+            sid = Path(next(iter(created))).stem if len(created) == 1 else None
+            _atomic(Path(directory) / 'session.json', {
+                'harness': 'cq', 'sessionId': sid,
+                'sessionIds': stored,
+                'sessionsDir': str(sessions_dir) if sessions_dir.is_dir() and any(sessions_dir.iterdir()) else None,
+                'workId': os.environ.get('CQ_WORK_ID'),
+            })
+        except OSError:
+            pass
         return {'stop': 'budget', 'changed': False, 'commits': [],
-                'summary': wall_clock_summary(sessions_dir, session_files(sessions_dir) - before)}
+                'summary': wall_clock_summary(sessions_dir, created)}
     created = session_files(sessions_dir) - before
     _log_invocation(directory, p.stdout, p.stderr)
     try:
@@ -245,7 +264,6 @@ def invoke(config, role, job, wt, directory):
     # and the current session is taken from `created` only: a deferred rung
     # that retries in the same directory and then fails before creating a
     # session must not claim an earlier run's session.
-    from crq_repair import atomic as _atomic
     try:  # best-effort: the session link never outranks the verdict
         stored = sorted(f.stem for f in sessions_dir.glob('*.jsonl')) if sessions_dir.is_dir() else []
         sid = result.get('sessionId')

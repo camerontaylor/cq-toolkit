@@ -66,7 +66,7 @@ job is green because it recorded the failures as data; it is not a restart pass.
 Socket startup helpers blocked while setting the manager environment; the cause
 was not established and the initial environment comparison was not fully
 hermetic. [Restart diagnosis](https://github.com/camerontaylor/cq-toolkit/actions/runs/42720216729/job/129511976423).
-No VM reboot or power-loss test has been performed.
+A guest reboot ran in the disposable VM fixture (see VM-FEASIBILITY.md). No power-loss test has been performed.
 
 ## Offline rendering separation and identity binding
 

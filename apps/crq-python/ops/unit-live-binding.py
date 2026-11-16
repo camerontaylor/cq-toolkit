@@ -22,7 +22,10 @@ Discovery is scoped and truthful. ``complete`` is true only when every
 required filesystem and manager observation succeeded. ``supported`` is true
 only when the observed topology is within the declared shapes: no foreign
 prefix entries, enablement links, drop-ins, dependency references, or
-unexpected manager units. The examined scope is the user unit directory plus
+unexpected manager units. Socket activation is scanned too: ``[Socket]
+Service=`` names the unit its incoming traffic starts, so a co-installed
+socket naming the selected unit is a foreign dependency edge. The examined
+scope is the user unit directory plus
 the user manager's installed and loaded lists. A non-CRQ unit that names a CRQ
 unit only in memory, transient or generated state, another namespace, or an
 activation created between the scan and the fence is outside this scope and
@@ -91,8 +94,26 @@ CRQ_NAME_RE = re.compile(r"crq-[A-Za-z0-9_.@:-]+")
 DEPENDENCY_RE = re.compile(
     r"(?P<directive>Wants|Requires|Requisite|BindsTo|PartOf|Conflicts|"
     r"WantedBy|RequiredBy|Also|Upholds|OnFailure|OnSuccess|Triggers|"
-    r"TriggersBy|Unit)\s*=\s*(?P<value>.*)")
+    r"TriggersBy|Unit|Service)\s*=\s*(?P<value>.*)")
 UNIT_SUFFIXES = {".service", ".timer", ".path"}
+
+
+def _expand_instance(path, value):
+    """Substitute ``%i``/``%I`` with the unit's instance name.
+
+    An instance unit such as ``ingress@crq-tick.socket`` can name its target
+    as ``Service=%i.service``; without expansion the CRQ name is invisible to
+    the dependency scan. A drop-in directory carries the instance in its
+    parent name (``ingress@crq-tick.socket.d``).
+    """
+    name = path.name
+    if path.parent.name.endswith(".d"):
+        name = path.parent.name[:-2]
+    found = re.match(r"[^@]*@(?P<instance>[^.]*)\.[^.]+\Z", name)
+    if found is None:
+        return value
+    instance = found.group("instance")
+    return value.replace("%i", instance).replace("%I", instance)
 
 
 class LiveBindingRefused(RuntimeError):
@@ -518,6 +539,33 @@ class SubprocessSystemd:
                         "symlink: " + str(entry))
         return None
 
+    @staticmethod
+    def _inherited_dropin_applies(base, units):
+        """Whether a drop-in directory name also applies to an expected unit.
+
+        Next to the exact ``<unit>.d/`` directory, systemd merges inherited
+        drop-in directories into the selected unit: a dash-prefix
+        ``<prefix>-.<suffix>.d/`` directory applies to every unit whose name
+        begins with ``<prefix>-``, and a type-wide ``<type>.d/`` directory
+        applies to every unit of that type. An applicable inherited drop-in
+        overrides the verified unit's directives without changing its
+        ``FragmentPath``, so discovery must reject it unless declared.
+        """
+        for unit in units:
+            if base == unit:
+                return True
+            if "." not in unit:
+                continue
+            type_name = unit.rsplit(".", 1)[1]
+            if base == type_name:
+                return True
+            suffix = "." + type_name
+            if base.endswith(suffix):
+                stem = base[:-len(suffix)]
+                if stem.endswith("-") and unit.startswith(stem):
+                    return True
+        return False
+
     def _scan_dependencies(self, base, expected, declared, foreign,
                            declared_dropins):
         declared_paths = {str(path) for path in declared}
@@ -619,7 +667,9 @@ class SubprocessSystemd:
                             match = DEPENDENCY_RE.match(stripped)
                             if match is None:
                                 continue
-                            for name in CRQ_NAME_RE.findall(match.group("value")):
+                            value = _expand_instance(path,
+                                                     match.group("value"))
+                            for name in CRQ_NAME_RE.findall(value):
                                 # An undeclared source is foreign only when it
                                 # names an expected unit; a declared source is
                                 # foreign when it names a unit outside the set.
@@ -753,7 +803,13 @@ class SubprocessSystemd:
                     and name.endswith((".d", ".wants", ".requires")):
                 error = error or probe_failure
                 continue
-            if is_dir and name.endswith(".d") and name[:-2] in units:
+            # An inherited type-wide or dash-prefix drop-in directory is
+            # merged into an expected unit even though it is not named after
+            # one, so its overrides would run outside the verified bytes.
+            # The name check also rejects a symlinked or plain entry systemd
+            # would traverse as the drop-in directory.
+            if name.endswith(".d") and self._inherited_dropin_applies(
+                    name[:-2], units):
                 foreign.append("undeclared drop-in directory: " + str(entry))
             if is_dir and name.endswith((".wants", ".requires")):
                 try:
