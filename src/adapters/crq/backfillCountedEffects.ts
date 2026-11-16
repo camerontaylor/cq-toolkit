@@ -6,7 +6,7 @@ import type {
   BackfillCountedHarvestEffects,
 } from '../../ops/crq/internal/backfillHarvestCounted.js';
 import { JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
-import { LedgerIntegrityError } from '../../policy/crq/ledger.js';
+import { LedgerIntegrityError, ledgerLoads } from '../../policy/crq/ledger.js';
 import { atomicWrite } from './atomic.js';
 import { artifactLocation, type ArtifactStore } from './findingStore.js';
 
@@ -76,6 +76,28 @@ export function deferredArtifactStore(input: { durableRoot: string; store: Artif
   };
 }
 
+/**
+ * The `review-event.json` an earlier attempt retained for this run, parsed with
+ * the ledger loader. A missing file is a first attempt, not an error.
+ */
+export function backfillCountedRetainedEventReader(
+  stateRoot: string,
+): (runId: string) => Promise<JsonObject | null> {
+  return async (runId) => {
+    let bytes: Uint8Array;
+    try {
+      bytes = new Uint8Array(await readFile(join(stateRoot, 'runs', runId, 'review-event.json')));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+    const value = ledgerLoads(bytes);
+    if (!(value instanceof JsonObject))
+      throw new LedgerIntegrityError('retained review event must be an object');
+    return value;
+  };
+}
+
 /** Compose the counted-harvest effects from real file seams. Git stays injected. */
 export function backfillCountedEffects(input: {
   stateRoot: string;
@@ -94,6 +116,7 @@ export function backfillCountedEffects(input: {
   const readArtifacts = backfillCountedArtifactReader(input.stateRoot);
   return {
     readArtifacts,
+    readRetainedEvent: backfillCountedRetainedEventReader(input.stateRoot),
     put: (bytes) => deferred.put(bytes),
     repo: input.repo,
     // Retained bytes must exist before anything verifies or names them.
