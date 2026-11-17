@@ -399,7 +399,6 @@ export class PublishRolloutDisabled extends Error {
  * (`./publishUnit.ts`) reports as `disabled`.
  */
 export async function runPublish(effects: PublishRunEffects): Promise<PublishRunResult> {
-  const config = await readRollout(effects);
   await mkdir(join(effects.stateRoot, 'backfill'), { recursive: true });
   const requestPath = join(effects.stateRoot, 'backfill', 'publish-request.json');
   const failurePath = join(effects.stateRoot, 'backfill', 'publication-failure.json');
@@ -407,8 +406,14 @@ export async function runPublish(effects: PublishRunEffects): Promise<PublishRun
   try {
     return await withLock(lockPath, { wait: true }, async () => {
       try {
+        // The rollout read is a publish prerequisite: an invalid document
+        // (including a bad `publisher_spool`) is a failure to persist under
+        // the publisher lock, exactly like Python's `settings()` read inside
+        // the locked block. Only an absent rollout bypasses persistence.
+        const config = await readRollout(effects);
         return await publishUnderLock(effects, config, requestPath, failurePath);
       } catch (error) {
+        if (error instanceof PublishRolloutDisabled) throw error;
         // Python keeps the publisher lock held across failure persistence
         // (backfill_publisher.run: the except block runs inside
         // `with ledger.locked(publisher.lock)`), so a second overlapping
@@ -420,6 +425,7 @@ export async function runPublish(effects: PublishRunEffects): Promise<PublishRun
       }
     });
   } catch (error) {
+    if (error instanceof PublishRolloutDisabled) throw error;
     const key = error instanceof Error ? error : undefined;
     if (key === undefined || !failurePersisted.has(key)) {
       await recordFailure(effects, error, failurePath);
