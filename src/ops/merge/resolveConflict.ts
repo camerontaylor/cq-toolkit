@@ -534,14 +534,23 @@ export function makeResolveConflictOp(
   deps: ResolveConflictDeps = {},
 ): Op<ResolveConflictInput, ConflictResolutionValue> {
   return async (input): Promise<OpResult<ConflictResolutionValue>> => {
+    // The mirror throw is a `config` DispatchError; caught here so the op
+    // keeps its boundary — a public op maps failures to `status: 'failed'`
+    // and never rejects (OpResult's `failed.error` is a string, so the
+    // message is passed, not the error object).
+    let resolvedProtected: string;
+    try {
+      resolvedProtected = assertProtectedBranchMirror(
+        'merge.resolveConflict',
+        input.protectedBranch,
+        deps.cqEnv,
+      );
+    } catch (err) {
+      return { status: 'failed', error: errorMessage(err) };
+    }
     // (a) The registry owns schema validation; the op enforces only the
     // RUNTIME requirement: dispatch without a ModelSpec fails — a vendor
     // default is never fabricated.
-    const resolvedProtected = assertProtectedBranchMirror(
-      'merge.resolveConflict',
-      input.protectedBranch,
-      deps.cqEnv,
-    );
     const { modelSpec } = input;
     if (modelSpec === undefined) {
       return {
