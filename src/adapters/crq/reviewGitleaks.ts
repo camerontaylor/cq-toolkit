@@ -59,7 +59,7 @@ export function fileReviewGitleaks(options: {
         }
         if (bytesRead > maxBytes) throw new Error('gitleaks report too large');
         const parsed: unknown = JSON.parse(
-          new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, bytesRead)) || '[]',
+          new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, bytesRead)),
         );
         if (!Array.isArray(parsed)) throw new Error('invalid gitleaks report');
         const hits = (parsed as unknown[]).map((entry) => {
