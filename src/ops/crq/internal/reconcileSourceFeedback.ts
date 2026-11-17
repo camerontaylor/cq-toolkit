@@ -132,8 +132,24 @@ export interface SourcePublishEffects extends MergeProofEffects {
   resolveSourceThread(firstJob: string, jobId: string, threadId: string): Promise<boolean>;
 }
 
+/** A job bound to a canonical finding row may only publish source feedback while that row
+ * still carries this merge as its current fixed event. `markFixedOutcome` writes nothing
+ * when the row moved to a newer generation (`preserved-newer-generation`), so resolving the
+ * source thread would report a fix the finding ledger does not own. A job without a
+ * canonical finding id keeps the legacy path. */
+async function hasCurrentFixedEvidence(
+  job: JsonObject,
+  merge: string,
+  effects: SourcePublishEffects,
+): Promise<boolean> {
+  const findingId = job.get('canonical_finding_id');
+  if (typeof findingId !== 'string' || !/^[0-9a-f]{64}$/.test(findingId)) return true;
+  return (await effects.canonical.currentFixedEvent(job, merge)) !== null;
+}
+
 /** `publish_source_resolution`: resume source comments and thread resolutions from the
- * journal. Any failure carries the publication as mutated so far. */
+ * journal. Any failure carries the publication as mutated so far. A job whose finding row
+ * carries no current fixed evidence for this merge stays pending instead of resolving. */
 async function publishResolutions(
   record: JsonObject,
   publication: JsonObject,
@@ -160,6 +176,12 @@ async function publishResolutions(
       const job = await effects.readJob(id);
       const pr = job.get('pr') ?? null;
       if (!pyTruthy(pr)) continue; // Threadless source truth is the finding ledger.
+      if (!(await hasCurrentFixedEvidence(job, merge, effects))) {
+        // The finding row kept a newer generation, so no fixed event of ours exists to
+        // publish against: defer feedback instead of resolving a thread we cannot prove.
+        pending = true;
+        continue;
+      }
       const marker = `<!-- crq-repair-source:${id} -->`;
       if (!(await effects.hasSourceComment(pr, marker)))
         await effects.postSourceComment(first, id, pr, marker, merge);
