@@ -1260,6 +1260,17 @@ def stop_owned_process(run: dict, *, purge: bool) -> dict:
     needle = str(run_dir / "overlay.qcow2")
     stopped = True
     stop_rc = None
+    if identity is None:
+        # boot() spawns QEMU before it writes process.json, so a failure or
+        # interruption before that write leaves a live guest with no recorded
+        # identity. The scope unit is derived from the run id, so the stop does
+        # not need the identity file; report stopped only once the unit is
+        # actually inactive, so --purge never moves a live guest's files.
+        derived_unit = "crq-vm-" + run["run_id"] + ".scope"
+        stop_rc = subprocess.run(["systemctl", "--user", "stop", derived_unit],
+                                 capture_output=True, text=True).returncode
+        stopped = subprocess.run(["systemctl", "--user", "is-active", "--quiet",
+                                  derived_unit]).returncode != 0
     if identity is not None:
         alive = pathlib.Path("/proc/%d" % pid).exists()
         if alive:
