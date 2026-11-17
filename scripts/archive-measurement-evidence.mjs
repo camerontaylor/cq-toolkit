@@ -346,6 +346,11 @@ async function resolveStored(bundleDir, entry) {
     return { state: 'unavailable', reason: 'bundle pointer escapes the bundle' };
   let bytes;
   try {
+    // Capture caps stored files at 8 MiB; a swapped-in larger file must be
+    // refused before the read allocates it, not after the checksum rejects it.
+    const { size } = await lstat(real);
+    if (size > MAX_FILE_BYTES)
+      return { state: 'unavailable', reason: 'stored file exceeds the 8 MiB size cap' };
     bytes = await readFile(real);
   } catch (error) {
     return {
