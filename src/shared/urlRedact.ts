@@ -285,11 +285,13 @@ export function stripCredentialText(text: string): string {
       const at = token.lastIndexOf('@', end - 1);
       const authority = token.slice(0, authorityEnd);
       const hostPort = /^(\[[^\]]*\]|[^:@]+):\d+$/.test(authority);
+      // The newline-continuation check applies INDEPENDENTLY of the host:port
+      // exception: a numeric password makes `user:123456` host:port-shaped, yet
+      // the credential still continues on the next line before `@`.
       const incomplete =
         at < 0 &&
-        !hostPort &&
-        ((authority.includes(':') && !/^\[[^\]]*\]$/.test(authority)) ||
-          (newlineCredential && authorityEnd === token.length));
+        ((newlineCredential && authorityEnd === token.length) ||
+          (!hostPort && authority.includes(':') && !/^\[[^\]]*\]$/.test(authority)));
       chunks.push(run.slice(scheme.start, scheme.authority));
       chunks.push(incomplete ? '' : token.slice(at >= 0 ? at + 1 : 0, end));
       chunks.push(freeText(token.slice(tailEnd)));
