@@ -466,8 +466,11 @@ export function mergedCurrent(queue: CrqRecord, readReceipt?: ReceiptReader): Me
       } else {
         throw new StatusSummaryError('terminal state lacks proof');
       }
-      counts[category] += 1;
-      targets.add(requireString(require(requireRecord(capture, 'capture'), 'target'), 'target'));
+      // Validate every path before touching counts, targets or exclusions, so a
+      // malformed capture counts once as `unverified` instead of also counting
+      // as its category/recording a target.
+      const target = requireString(require(requireRecord(capture, 'capture'), 'target'), 'target');
+      const localExclusions: Record<string, number> = {};
       for (const path of requireArray(get(requireRecord(capture, 'capture'), 'paths'), 'paths')) {
         const row = requireRecord(path, 'capture path');
         const disposition = Object.prototype.hasOwnProperty.call(row, 'disposition')
@@ -477,8 +480,13 @@ export function mergedCurrent(queue: CrqRecord, readReceipt?: ReceiptReader): Me
           throw new StatusSummaryError('unhashable path disposition');
         }
         if (disposition !== 'included' && disposition !== 'renamed') {
-          exclusions[disposition] = (exclusions[disposition] ?? 0) + 1;
+          localExclusions[disposition] = (localExclusions[disposition] ?? 0) + 1;
         }
+      }
+      counts[category] += 1;
+      targets.add(target);
+      for (const [disposition, count] of Object.entries(localExclusions)) {
+        exclusions[disposition] = (exclusions[disposition] ?? 0) + count;
       }
     } catch {
       counts.unverified += 1;
