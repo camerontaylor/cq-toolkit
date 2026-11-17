@@ -66,28 +66,41 @@ export function refuseQueue(message: string): never {
 
 /** A verified immutable receipt snapshot: bytes, document and page count. */
 export class ReceiptSnapshot {
-  readonly data: Uint8Array;
+  /** The verified bytes, owned privately: the caller's array is never retained. */
+  readonly #data: Uint8Array;
   readonly document: JsonRecordLike;
   readonly receiptId: string;
   readonly count: number;
 
   constructor(receiptId: string, data: Uint8Array, maxBytes: number = MAX_RECEIPT_BYTES) {
     if (!DIGEST.test(receiptId)) refuseQueue('invalid receipt id');
-    if (data.length > maxBytes) refuseQueue('receipt exceeds supported client capacity');
-    if (sha256Hex(data) !== receiptId) refuseQueue('receipt digest mismatch');
+    // Copy first so the bytes verified below are exactly the bytes retained.
+    const verified = new Uint8Array(data);
+    if (verified.length > maxBytes) refuseQueue('receipt exceeds supported client capacity');
+    if (sha256Hex(verified) !== receiptId) refuseQueue('receipt digest mismatch');
     let parsed: JsonValue;
     try {
-      parsed = parseJsonValue(new TextDecoder('utf-8', { fatal: true }).decode(data), {
+      parsed = parseJsonValue(new TextDecoder('utf-8', { fatal: true }).decode(verified), {
         duplicates: 'error',
       });
     } catch {
       refuseQueue('invalid receipt document');
     }
     if (!(parsed instanceof JsonObject)) refuseQueue('invalid receipt document');
-    this.data = data;
+    this.#data = verified;
     this.document = parsed;
     this.receiptId = receiptId;
-    this.count = Math.max(1, Math.ceil(data.length / RECEIPT_CHUNK_BYTES));
+    this.count = Math.max(1, Math.ceil(verified.length / RECEIPT_CHUNK_BYTES));
+  }
+
+  /** The verified bytes by value: mutating the result cannot reach this snapshot. */
+  get data(): Uint8Array {
+    return new Uint8Array(this.#data);
+  }
+
+  /** The verified byte count, without paying for a defensive copy. */
+  get byteLength(): number {
+    return this.#data.length;
   }
 
   /** `_ReceiptSnapshot.page`: a manifest, or one digest-bound chunk. */
@@ -96,7 +109,7 @@ export class ReceiptSnapshot {
       ['version', JsonNumber.int(RECEIPT_VERSION)],
       ['receipt_id', this.receiptId],
       ['sha256', this.receiptId],
-      ['bytes', JsonNumber.int(this.data.length)],
+      ['bytes', JsonNumber.int(this.#data.length)],
       ['chunks', JsonNumber.int(this.count)],
       ['encoding', 'base64-utf8-json'],
     ];
@@ -109,7 +122,7 @@ export class ReceiptSnapshot {
       refuseQueue('invalid or mixed-snapshot cursor');
     }
     const index = Number(match[1]);
-    const chunk = this.data.subarray(
+    const chunk = this.#data.subarray(
       index * RECEIPT_CHUNK_BYTES,
       (index + 1) * RECEIPT_CHUNK_BYTES,
     );
