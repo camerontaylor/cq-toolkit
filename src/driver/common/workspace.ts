@@ -35,8 +35,12 @@ export function boundWorkspacePath(workspace: WorkspaceBinding, lane: string): s
  * ancestor (the store creates the dir at first write), so a refusal lands
  * BEFORE any session file is written. A relative sessions dir resolves
  * against the process cwd — always outside a bound (absolute, existing)
- * workspace in practice, but compared the same way. Throws a structured
- * 'config' DispatchError naming both paths.
+ * workspace in practice, but compared the same way. Because `realpathSync`
+ * may preserve the caller's spelling and the lexical test is therefore
+ * case-sensitive, the bound workspace is ALSO compared with each existing
+ * ancestor of the sessions dir by device and inode, so a case-insensitive
+ * volume cannot hide an inside-workspace directory behind different casing.
+ * Throws a structured 'config' DispatchError naming both paths.
  */
 export function assertSessionsDirOutsideWorkspace(
   sessionsDir: string,
@@ -45,7 +49,7 @@ export function assertSessionsDirOutsideWorkspace(
 ): void {
   const realWorkspace = realpathSync(boundWorkspace);
   const realSessions = realpathOfExistingOrNearestAncestor(sessionsDir);
-  if (isInsideDir(realSessions, realWorkspace)) {
+  if (isInsideDir(realSessions, realWorkspace) || identityAncestorOf(realSessions, realWorkspace)) {
     throw new DispatchError(
       'config',
       `${lane}: sessionsDir '${sessionsDir}' resolves inside the bound workspace ` +
@@ -75,6 +79,39 @@ function realpathOfExistingOrNearestAncestor(dir: string): string {
       missing.push(relative(parent, current));
       current = parent;
     }
+  }
+}
+
+/**
+ * True when the directory bound at `boundWorkspace` is the same filesystem
+ * object as `candidate` or one of its existing ancestors — judged by device
+ * and inode, so a case-insensitive volume that reports a differently-cased
+ * spelling for the same directory cannot slip past the lexical containment
+ * test. Missing tail segments (the store creates them later) are skipped:
+ * they cannot be the already-existing workspace.
+ */
+function identityAncestorOf(candidate: string, boundWorkspace: string): boolean {
+  let bound: { dev: number; ino: number };
+  try {
+    const stat = statSync(boundWorkspace);
+    bound = { dev: stat.dev, ino: stat.ino };
+  } catch {
+    // Unresolvable bound workspace: nothing to compare against here.
+    return false;
+  }
+  // A filesystem that reports no inode cannot be compared by identity.
+  if (bound.ino === 0) return false;
+  let current = resolve(candidate);
+  for (;;) {
+    try {
+      const stat = statSync(current);
+      if (stat.dev === bound.dev && stat.ino === bound.ino) return true;
+    } catch {
+      // A not-yet-existing tail segment: keep walking up to existing ones.
+    }
+    const parent = dirname(current);
+    if (parent === current) return false;
+    current = parent;
   }
 }
 
