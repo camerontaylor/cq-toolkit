@@ -53,6 +53,16 @@ export function assertJsonLossless(value: unknown): void {
             index <= 2 ** 32 - 2 &&
             String(index) === key
           ) {
+            // An ACCESSOR element (PR: getter re-read divergence) is not data:
+            // `value[i]` below invokes the getter, so a getter that answers
+            // differently per read hands the walk a value JSON.stringify never
+            // saw. Accept only data descriptors.
+            const elementDescriptor = Object.getOwnPropertyDescriptor(value, key);
+            if (elementDescriptor !== undefined && !('value' in elementDescriptor)) {
+              throw new Error(
+                `accessor array element at [${key}] — a getter can return different values per read`,
+              );
+            }
             continue;
           }
           throw new Error(
@@ -88,6 +98,17 @@ export function assertJsonLossless(value: unknown): void {
           throw new Error(`symbol-keyed own member '${key.toString()}' — JSON.stringify drops it`);
         }
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        // An ACCESSOR own member is not data: JSON.stringify invokes the
+        // getter once and `Object.values` below invokes it again, so a getter
+        // that answers differently per read lets the journal record a value
+        // the walk never checked ({ get x() { return n++ === 0 ? NaN : 1 } }
+        // serializes as {"x":null} while the walk reads 1 and accepts it).
+        // Accept only data descriptors.
+        if (descriptor !== undefined && !('value' in descriptor)) {
+          throw new Error(
+            `accessor own member '${key}' — a getter can return different values per read`,
+          );
+        }
         if (descriptor !== undefined && !descriptor.enumerable) {
           throw new Error(
             key === 'toJSON'
