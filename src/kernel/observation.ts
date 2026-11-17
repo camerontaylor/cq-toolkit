@@ -32,8 +32,8 @@
 // Residual: losing a datasync or a directory sync is not detected by any
 // test (a crash-simulation harness cannot observe it without mocking the
 // fs layer); the failure boundary tests cover detectable corruption only.
-import { mkdir, open, readFile, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, open, readFile, readdir, stat } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { assertSafeRunId, openRunLog, syncDir } from './journal.js';
 import { ObservationStreamSchema, ObservationEventSchema } from './schema.js';
@@ -55,6 +55,28 @@ function isEnoent(err: unknown): boolean {
     'code' in err &&
     (err as { code?: unknown }).code === 'ENOENT'
   );
+}
+
+/**
+ * Directories from `dir` upward that do not exist yet, deepest first; the
+ * walk stops at the first existing ancestor (whose own entry it therefore
+ * does not need to sync). Used to learn which directory entries `mkdir -p`
+ * is about to create before it creates them.
+ */
+async function missingDirectories(dir: string): Promise<string[]> {
+  const missing: string[] = [];
+  for (let current = resolve(dir); ; current = dirname(current)) {
+    try {
+      await stat(current);
+      return missing;
+    } catch {
+      // Treated as absent: the worst case is one extra parent sync for a
+      // directory that already exists, and mkdir -p itself is the authority
+      // on whether the tree can be created.
+      missing.push(current);
+    }
+    if (dirname(current) === current) return missing;
+  }
 }
 
 /** Where the writer's validated events land. */
@@ -208,14 +230,22 @@ export async function openObservationWriter(
   if (streamPath !== null) {
     // Exclusive create AT OPEN (P3 ruling): a second writer for the same
     // composition run is refused here, before any event exists.
+    // Which ancestors mkdir -p is about to create: their PARENTS are the
+    // directory entries it cannot make durable from inside the tree, and a
+    // host crash would otherwise drop the topmost new directory (and with it
+    // the stream file this writer reports as durable).
+    const createdDirs = await missingDirectories(streamDir as string);
     await mkdir(streamDir as string, { recursive: true });
     handle = await open(streamPath, 'wx');
     // mkdir -p may have created observations/ and observations/<workId>:
     // make those directory entries durable too (the stream file's whole
-    // directory chain, matching openRunLog's per-creation fsync). A refusal
+    // directory chain, matching openRunLog's per-creation fsync). Each new
+    // directory's PARENT is synced as well, deepest first, so the entries
+    // mkdir -p created outside the chain below are durable too. A refusal
     // here (exotic mount) must not leak the open handle: the stream file
     // exists but the caller sees the error, so close before rethrowing.
     try {
+      for (const dir of createdDirs) await syncDir(dirname(dir));
       await syncDir(streamDir as string);
       await syncDir(join(journalDir as string, 'observations'));
       await syncDir(journalDir as string);
