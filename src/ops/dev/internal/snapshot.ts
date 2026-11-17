@@ -1,6 +1,8 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstat, mkdtemp, readFile, readlink, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import type { Stats } from 'node:fs';
+import { lstat, mkdtemp, open, readlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -301,7 +303,7 @@ export async function captureWorkingTree(repo: string, originalHead: string) {
       }
       const content = trackedLink
         ? Buffer.from(await readlink(join(repo, path)))
-        : await readFile(join(repo, path));
+        : await readRegularFile(join(repo, path), info);
       const mode = trackedLink ? '120000' : info.mode & 0o111 ? '100755' : '100644';
       const digest = createHash('sha1')
         .update(Buffer.from(`blob ${content.length}\0`))
@@ -316,5 +318,19 @@ export async function captureWorkingTree(repo: string, originalHead: string) {
     return { head, tree, stagedTree };
   } finally {
     await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+/** Read exactly the inode the lstat check validated: never follow a swapped-in symlink. */
+async function readRegularFile(file: string, expected: Stats): Promise<Buffer> {
+  if (!constants.O_NOFOLLOW) throw new Error('working-tree snapshot: no-follow unavailable');
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const actual = await handle.stat();
+    if (!actual.isFile() || actual.dev !== expected.dev || actual.ino !== expected.ino)
+      throw new Error(`working-tree snapshot file changed during capture: ${file}`);
+    return await handle.readFile();
+  } finally {
+    await handle.close();
   }
 }
