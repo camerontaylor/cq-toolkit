@@ -1091,6 +1091,23 @@ class PlanTests(unittest.TestCase):
         artifact = json.loads(out.getvalue())
         self.assertEqual(artifact["error"]["kind"], "thrown")
 
+    def test_json_mode_serializes_malformed_report_containers(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as temporary:
+            report = pathlib.Path(temporary) / "report.json"
+            # A non-object report and a report whose containers are lists must
+            # answer with problems, never with an AttributeError traceback.
+            for payload in ([], {"image": []}, {"image": {}, "checks": []}):
+                report.write_text(json.dumps(payload))
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = vm.main(["--json", "verify", str(report)])
+                self.assertEqual(code, 1)
+                self.assertEqual(err.getvalue(), "")
+                artifact = json.loads(out.getvalue())
+                self.assertTrue(artifact["problems"])
+
 
 if __name__ == "__main__":
     unittest.main()
