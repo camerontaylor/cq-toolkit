@@ -1473,6 +1473,28 @@ class AdapterTests(AdapterFixture):
         self.assertEqual(self.fake.active["crq-tick.service"], "active")
         self.assertEqual(self.fake.active["crq-tick.timer"], "active")
 
+    def test_restore_activation_uses_the_saved_service_start_timeout(self):
+        service = self.unit_dir / "crq-tick.service"
+        prior = self.python_service("crq-tick.service")
+        text = prior["bytes"].decode("utf-8")
+        self.assertIn("TimeoutStartSec=10min", text)
+        _write(service, text.replace(
+            "TimeoutStartSec=10min", "TimeoutStartSec=20min").encode(), 0o600)
+        self.fake.active["crq-tick.service"] = "active"
+        current = self.make_adapter()
+        snapshot = current.snapshot("crq-tick.service")
+        recovery = self.make_adapter()
+        recovery.validate_snapshot("crq-tick.service", snapshot)
+        recovery.stop_and_drain("crq-tick.service")
+        recovery.restore("crq-tick.service", snapshot)
+        # 700 s exceeds the pinned 10-minute bound plus the margin (660 s) but
+        # is inside the saved 20-minute bound plus the margin (1,260 s), so the
+        # restore start must be bounded by the saved unit, not the template.
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+        self.assertEqual(self.fake.active["crq-tick.timer"], "active")
+
     def test_forward_and_recovery_for_both_runtimes(self):
         cases = [
             ("crq-tick.service", NODE_RUNTIME, "python", 0o600),

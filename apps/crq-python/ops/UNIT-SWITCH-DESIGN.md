@@ -186,9 +186,12 @@ The installed timer file must hash-match the pinned template before its
 schedule is used, so preflight cannot certify a bound for a timer the
 transaction will not install. Service start commands use the declared
 `TimeoutStartSec` plus the completion margin (`_service_start_timeout`) rather
-than a fixed 60-second command timeout; the same applies to the restore service
-start. A blocking `systemctl start` for a healthy 10-minute oneshot therefore
-does not fail the transaction at 60 seconds.
+than a fixed 60-second command timeout. The restore service start instead uses
+the saved unit's own `TimeoutStartSec` plus the same margin
+(`_restored_service_start_timeout`), because it starts the snapshot file rather
+than the pinned template, so a saved oneshot bound longer than the template's
+does not time out a healthy restore. A blocking `systemctl start` for a healthy
+10-minute oneshot therefore does not fail the transaction at 60 seconds.
 
 Restore applies the saved service active/inactive policy and verifies it before
 releasing any timer or path activator. A timer or path that then starts the

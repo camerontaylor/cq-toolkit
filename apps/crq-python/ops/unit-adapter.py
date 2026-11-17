@@ -1260,6 +1260,35 @@ class ProductionUnitAdapter:
             return declared + COMPLETION_MARGIN_SECONDS
         return 60
 
+    def _restored_service_start_timeout(self, unit, inventory, service_state):
+        """The restored unit's own start bound, not the pinned template's.
+
+        ``restore_activation`` starts the file that came from the snapshot, so
+        the ``start`` command timeout must cover that file's declared
+        ``TimeoutStartSec``. A saved ``Type=oneshot`` service may declare a
+        longer bound than the pinned template; the pinned value would then time
+        out a healthy restore. The saved unit is parsed with the same
+        template-section parser, and a saved unit that declares no explicit
+        bound keeps the pinned-derived default.
+        """
+        try:
+            text = base64.b64decode(
+                service_state["bytes_b64"].encode("ascii"),
+                validate=True).decode("utf-8")
+        except (KeyError, ValueError, UnicodeEncodeError, UnicodeDecodeError):
+            self.refuse("restored service is not readable unit text")
+        declared = _section_values(text, "Service", "TimeoutStartSec")
+        if not declared:
+            return self._service_start_timeout(unit, inventory)
+        if len(declared) > 1:
+            self.refuse("restored service declares multiple TimeoutStartSec "
+                        "values")
+        seconds = _duration_seconds(declared[0])
+        if seconds is None:
+            self.refuse("restored service declares an unsupported "
+                        "TimeoutStartSec: " + declared[0][:60])
+        return seconds + COMPLETION_MARGIN_SECONDS
+
     # -- seam: snapshot and validation ----------------------------------
     def snapshot(self, unit):
         self._validate_unit(unit)
@@ -1843,7 +1872,8 @@ class ProductionUnitAdapter:
         if desired_service == "active":
             self._ok(
                 self._run("start", unit,
-                          timeout=self._service_start_timeout(unit, inventory)),
+                          timeout=self._restored_service_start_timeout(
+                              unit, inventory, service_state)),
                 "restore service activation")
         elif desired_service == "inactive":
             result = self._run("stop", unit, timeout=60)
