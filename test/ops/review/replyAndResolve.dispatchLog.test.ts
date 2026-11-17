@@ -382,6 +382,41 @@ describe('fileDispatchLog', () => {
     }
   });
 
+  test('record() REPAIRS a malformed final line that IS newline-terminated before appending', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
+    try {
+      const path = join(dir, 'dispatch.jsonl');
+      const first: DispatchRecord = {
+        version: 1,
+        actionId: 'r1',
+        kind: 'review_reply',
+        resultRef: '8001',
+        at: NOW,
+      };
+      const second: DispatchRecord = {
+        version: 1,
+        actionId: 'r2',
+        kind: 'issue_comment',
+        resultRef: '8002',
+        at: NOW + 1,
+      };
+      // External corruption (a torn write or a hand edit), not the writer's
+      // own residue: the malformed final line still ends with a newline, so
+      // it is only tolerated by load() while it IS the final line.
+      await writeFile(path, `${JSON.stringify(first)}\n{"actionId":\n`, 'utf8');
+      const log = fileDispatchLog(path);
+      expect(await log.load()).toEqual([first]);
+      await log.record(second);
+      // The malformed line was CUT from its own start, not left mid-file for
+      // the next load() to throw on.
+      expect(await fileDispatchLog(path).load()).toEqual([first, second]);
+      const text = await readFile(path, 'utf8');
+      expect(text.split('\n')).toEqual([JSON.stringify(first), JSON.stringify(second), '']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test('record() PRESERVES a valid UNTERMINATED final record (crash after the closing brace, before the newline) — no repost', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
     try {
