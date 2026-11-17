@@ -702,6 +702,13 @@ def prepare(root, overlay, raw, output, tag):
         with tempfile.TemporaryDirectory(prefix='crq-units-') as temporary:
             paths = render_units(root, Path(temporary), sha)
             run(['systemd-analyze', '--user', 'verify', *paths])
+            # Only the rendered units are installed and recorded, so a leftover
+            # crq-* unit in the output directory stays live but outside the
+            # inventory. Refuse before mutating anything; the owner removes it.
+            rendered = {Path(p).name for p in paths}
+            stale = sorted(p.name for p in output.glob('crq-*') if p.name not in rendered) if output.is_dir() else []
+            if stale:
+                raise ValueError('units output holds crq-* files outside the rendered set: ' + ', '.join(stale))
             record(root, overlay, raw, data, 'prepare', unit_sha256={Path(p).name: digest(Path(p).read_bytes()) for p in paths})
             output.mkdir(parents=True, exist_ok=True)
             for path in paths:
