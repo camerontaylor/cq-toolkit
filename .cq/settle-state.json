@@ -937,6 +937,19 @@
           "by": "self-merge-prs:observe"
         }
       ]
+    },
+    "1986": {
+      "tuple": {
+        "head": "6b494c3aef71a4b06e95f03dd149e82eaba4aa2a",
+        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-17T01:16:10.000Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
     }
   }
 }
