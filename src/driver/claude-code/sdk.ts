@@ -1086,6 +1086,12 @@ export interface SdkRunObservation {
   narration: string[];
   /** Usage folded from assistant frames — the fallback when no result usage. */
   assistantUsage: Usage | undefined;
+  /**
+   * Message ids whose assistant-frame usage was already folded — frames of
+   * one message share the same id AND the same usage, so the fold counts
+   * each message once (the SDK's cost-tracking dedupe-by-id rule).
+   */
+  countedMessageIds: Set<string>;
   /** The terminal result event, when it arrived (defensively read at use sites). */
   result: Record<string, unknown> | undefined;
   /**
@@ -1139,6 +1145,7 @@ function newObservation(): SdkRunObservation {
     transcript: [],
     narration: [],
     assistantUsage: undefined,
+    countedMessageIds: new Set(),
     result: undefined,
     error: undefined,
     caughtCause: undefined,
@@ -1260,7 +1267,14 @@ export function foldMessage(observation: SdkRunObservation, message: unknown): v
       // requested id; the latest response wins.
       observation.servedModel = asString(inner['model']) ?? observation.servedModel;
       const usage = usageFromWire(inner['usage']);
-      if (usage !== undefined) {
+      // Frames of ONE message share its id AND its usage — fold each message's
+      // usage once (the SDK's cost-tracking dedupe-by-id rule), else the
+      // fallback double-counts the tokens and the derived cost.
+      const messageId = asString(inner['id']);
+      const firstFrameForMessage =
+        messageId === undefined || !observation.countedMessageIds.has(messageId);
+      if (usage !== undefined && firstFrameForMessage) {
+        if (messageId !== undefined) observation.countedMessageIds.add(messageId);
         observation.assistantUsage = addUsage(observation.assistantUsage, usage);
       }
       for (const block of asArray(inner['content']) ?? []) {

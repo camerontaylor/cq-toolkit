@@ -295,6 +295,7 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
       transcript: [],
       narration: [],
       assistantUsage: undefined,
+      countedMessageIds: new Set<string>(),
       result: undefined,
       error: undefined,
       caughtCause: undefined,

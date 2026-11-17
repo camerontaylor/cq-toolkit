@@ -254,6 +254,7 @@ describe('claude-code sdk transport specifics (mock sdk)', () => {
       transcript: [] as string[],
       narration: [] as string[],
       assistantUsage: undefined,
+      countedMessageIds: new Set<string>(),
       result: undefined,
       error: undefined as string | undefined,
       caughtCause: undefined as string | undefined,
@@ -297,5 +298,52 @@ describe('claude-code sdk transport specifics (mock sdk)', () => {
     });
     expect(observation.narration).toHaveLength(2); // the string + the unknown subtype
     expect(observation.result?.['subtype']).toBe('success');
+  });
+
+  test('foldMessage counts assistant usage once per message id', () => {
+    const observation: Parameters<typeof foldMessage>[0] = {
+      agentSessionId: undefined,
+      servedModel: undefined,
+      transcript: [],
+      narration: [],
+      assistantUsage: undefined,
+      countedMessageIds: new Set<string>(),
+      result: undefined,
+      error: undefined,
+      caughtCause: undefined,
+      errorKind: undefined,
+      assistantRateLimit: false,
+      deniedToolUseIds: new Set<string>(),
+      denials: [],
+      expectedSurface: undefined,
+      initSeen: false,
+      harnessFailure: undefined,
+      refusalSeen: false,
+    };
+    // Frames of ONE message share its id AND its usage — counted once.
+    foldMessage(observation, {
+      type: 'assistant',
+      message: { id: 'msg-1', content: [], usage: { input_tokens: 1, output_tokens: 2 } },
+    });
+    foldMessage(observation, {
+      type: 'assistant',
+      message: { id: 'msg-1', content: [], usage: { input_tokens: 1, output_tokens: 2 } },
+    });
+    // A distinct message is counted on its own.
+    foldMessage(observation, {
+      type: 'assistant',
+      message: { id: 'msg-2', content: [], usage: { input_tokens: 3, output_tokens: 4 } },
+    });
+    // An id-less frame cannot be deduped — it still folds.
+    foldMessage(observation, {
+      type: 'assistant',
+      message: { content: [], usage: { input_tokens: 5, output_tokens: 6 } },
+    });
+    expect(observation.assistantUsage).toEqual({
+      input: 9,
+      output: 12,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
   });
 });
