@@ -68,7 +68,10 @@ export function parsePlist(source: string): PlistValue {
   const readText = (): string => {
     const end = source.indexOf('<', pos);
     if (end < 0) fail('unterminated element');
-    const text = source.slice(pos, end);
+    // XML 1.0 section 2.11: literal CRLF and lone CR in character data are
+    // normalized to LF before parsing. Normalize the raw text so that the
+    // character reference `&#13;` still decodes to CR afterwards.
+    const text = source.slice(pos, end).replace(/\r\n?/g, '\n');
     pos = end;
     return unescapeXml(text);
   };
