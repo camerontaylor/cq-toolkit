@@ -466,8 +466,15 @@ export function mergedCurrent(queue: CrqRecord, readReceipt?: ReceiptReader): Me
       } else {
         throw new StatusSummaryError('terminal state lacks proof');
       }
-      counts[category] += 1;
-      targets.add(requireString(require(requireRecord(capture, 'capture'), 'target'), 'target'));
+      // Validate the whole receipt into locals first, like Python's
+      // `receipt_exclusions`: a malformed path row must not leave a stray
+      // category count, target or exclusion behind when the row is then
+      // re-counted as `unverified`.
+      const receiptTarget = requireString(
+        require(requireRecord(capture, 'capture'), 'target'),
+        'target',
+      );
+      const receiptExclusions: Record<string, number> = {};
       for (const path of requireArray(get(requireRecord(capture, 'capture'), 'paths'), 'paths')) {
         const row = requireRecord(path, 'capture path');
         const disposition = Object.prototype.hasOwnProperty.call(row, 'disposition')
@@ -477,8 +484,13 @@ export function mergedCurrent(queue: CrqRecord, readReceipt?: ReceiptReader): Me
           throw new StatusSummaryError('unhashable path disposition');
         }
         if (disposition !== 'included' && disposition !== 'renamed') {
-          exclusions[disposition] = (exclusions[disposition] ?? 0) + 1;
+          receiptExclusions[disposition] = (receiptExclusions[disposition] ?? 0) + 1;
         }
+      }
+      counts[category] += 1;
+      targets.add(receiptTarget);
+      for (const [disposition, count] of Object.entries(receiptExclusions)) {
+        exclusions[disposition] = (exclusions[disposition] ?? 0) + count;
       }
     } catch {
       counts.unverified += 1;
