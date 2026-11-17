@@ -562,7 +562,10 @@ export async function projectHistory(
           ['partial', true],
         ]),
       [
-        ['commits_ahead', null],
+        [
+          'commits_ahead',
+          headline.commitsAhead === null ? null : JsonNumber.int(headline.commitsAhead),
+        ],
         ['ancestry', headline.ancestry],
       ],
     );
