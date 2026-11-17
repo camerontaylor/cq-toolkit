@@ -545,27 +545,24 @@ export async function projectHistory(
   const relation =
     headline === null ? 'none' : headline.relationship === 'ancestral' ? 'ancestral' : 'possible';
   let delta = headline === null ? null : headline.delta;
-  if (headline !== null && delta !== null && headline.commitsAhead !== null) {
+  if (headline !== null) {
+    // Commit distance comes from ancestry, not the tree, so build the fallback
+    // delta first and attach whatever distance is known independently of it.
+    const ahead = headline.commitsAhead === null ? null : JsonNumber.int(headline.commitsAhead);
+    delta =
+      delta ??
+      new JsonObject([
+        ['method', 'tree'],
+        ['files', null],
+        ['insertions', null],
+        ['deletions', null],
+        ['binary_files', null],
+        ['partial', true],
+      ]);
     delta = withFields(delta, [
-      ['commits_ahead', JsonNumber.int(headline.commitsAhead)],
+      ['commits_ahead', ahead],
       ['ancestry', headline.ancestry],
     ]);
-  } else if (headline !== null) {
-    delta = withFields(
-      delta ??
-        new JsonObject([
-          ['method', 'tree'],
-          ['files', null],
-          ['insertions', null],
-          ['deletions', null],
-          ['binary_files', null],
-          ['partial', true],
-        ]),
-      [
-        ['commits_ahead', null],
-        ['ancestry', headline.ancestry],
-      ],
-    );
   }
   const scope = input.task !== null ? 'task' : branch !== null ? 'branch' : 'none';
   const page = linked.slice(input.cursor, input.cursor + input.limit);
