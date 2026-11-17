@@ -1080,6 +1080,19 @@
           "by": "self-merge-prs:observe"
         }
       ]
+    },
+    "1997": {
+      "tuple": {
+        "head": "1102268b35e93c1e1a1194ed475a3fbd92c00dd5",
+        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-17T06:23:20.417Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
     }
   }
 }
