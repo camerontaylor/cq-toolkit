@@ -66,13 +66,13 @@ export async function prepareLocalReview(
       !pyTruthy(record.get('profile'))
     )
       return false;
-    const resolved = await effects.resolveFacts(
-      text(pr.get('repo') ?? runnerRepo),
-      text(record.get('base')),
-      text(record.get('head')),
-      obj(record.get('profile')),
-    );
     try {
+      const resolved = await effects.resolveFacts(
+        text(pr.get('repo') ?? runnerRepo),
+        text(record.get('base')),
+        text(record.get('head')),
+        obj(record.get('profile')),
+      );
       effects.validateIdentity(resolved);
       return equivalentIdentityInputs(resolved, wanted);
     } catch {
