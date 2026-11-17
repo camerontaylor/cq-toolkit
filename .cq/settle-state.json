@@ -1119,6 +1119,32 @@
           "by": "self-merge-prs:observe"
         }
       ]
+    },
+    "2000": {
+      "tuple": {
+        "head": "de2eba760489c7789a75e2f61cebeaa3ec6a226b",
+        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-17T07:14:02.784Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "2001": {
+      "tuple": {
+        "head": "c882c840f5e8b73ec1edd830ca6d644a3ddde323",
+        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-17T07:14:02.784Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
     }
   }
 }
