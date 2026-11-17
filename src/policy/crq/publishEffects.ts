@@ -271,8 +271,11 @@ export function repairDigest(
           // `TypeError: unhashable type: 'dict'` (resp. 'list') and the
           // digest refuses; a JS Map lookup happily accepts object keys and
           // counted failed=1 instead (round-6 P2). Every hashable verdict
-          // keeps the bucket semantics, unknown strings included.
-          if (isRecord(verdict)) {
+          // keeps the bucket semantics, unknown strings included — and a
+          // numeric verdict (a lossless JsonNumber, e.g. `0`) is hashable in
+          // Python, so it must reach the `failed` bucket rather than being
+          // mistaken for a dict by the object-shaped `isRecord` probe.
+          if (isRecord(verdict) && !(verdict instanceof JsonNumber)) {
             throw new PublishEffectsError("unhashable type: 'dict'", 'TypeError');
           }
           if (Array.isArray(verdict)) {
