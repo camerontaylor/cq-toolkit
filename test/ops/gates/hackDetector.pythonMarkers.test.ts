@@ -72,6 +72,7 @@ describe('hackDetector: Python skip/xfail markers (#774)', () => {
     [['from pytest import mark'], '@mark.xfail', 'pytest.mark.xfail'],
     [['from pytest import mark as m'], '@m.skipif(True, reason="x")', 'pytest.mark.skipif'],
     [['from pytest import skip'], '    skip("x")', 'pytest.skip'],
+    [['from pytest import skip as s'], '    raise s.Exception("x")', 'pytest.skip'],
     [['from pytest import xfail as xf'], '    xf("x")', 'pytest.xfail'],
     [['import unittest as ut'], '@ut.skipIf(True, "x")', 'unittest.skipIf'],
     [['from unittest import skip'], '@skip("later")', 'unittest.skip'],
