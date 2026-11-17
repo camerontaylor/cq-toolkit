@@ -1223,6 +1223,32 @@
           "by": "self-merge-prs:observe"
         }
       ]
+    },
+    "2008": {
+      "tuple": {
+        "head": "972c5a0648c2172bc4854e0f928950124c79dcda",
+        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-17T09:29:09.918Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "2009": {
+      "tuple": {
+        "head": "cdc72f756b0df8c19c015cea80cf2a0a2e73dc1a",
+        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-11-17T09:29:09.918Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
     }
   }
 }
