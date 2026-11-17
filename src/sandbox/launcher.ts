@@ -2,6 +2,7 @@
 import { spawn } from 'node:child_process';
 import { accessSync, constants, realpathSync } from 'node:fs';
 import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { buildSandboxLauncherEnv } from './index.js';
 import type { SandboxBackend, SandboxNetwork } from './config.js';
 import { currentEntryEnv, type EntryEnv } from '../config/run-env.js';
@@ -99,6 +100,10 @@ export function runChild(
     let errBytes = 0;
     let out = '';
     let err = '';
+    // One decoder per stream so a multibyte character split across two chunks
+    // is retained for the next write instead of decoding to U+FFFD.
+    const outDecoder = new StringDecoder('utf8');
+    const errDecoder = new StringDecoder('utf8');
     let overflowed = false;
     let spawnErrorMessage: string | undefined;
     let spawnErrored = false;
@@ -174,6 +179,10 @@ export function runChild(
       clearTimeout(drainTimer);
       if (overflowed) result.timedOut = true;
       if (spawnErrorMessage !== undefined) result.spawnError = spawnErrorMessage;
+      // Flush any bytes still held back by a decoder (a genuinely truncated
+      // final character) before the captured text is finalized.
+      out += outDecoder.end();
+      err += errDecoder.end();
       result.stdout = out.slice(0, options.maxOutputChars);
       result.stderr = (err !== '' ? err : (spawnErrorMessage ?? '')).slice(
         0,
@@ -181,16 +190,23 @@ export function runChild(
       );
       resolve(result);
     };
-    const capture = (current: string, chunk: Buffer, currentBytes: number): string => {
+    const capture = (
+      current: string,
+      chunk: Buffer,
+      currentBytes: number,
+      decoder: StringDecoder,
+    ): string => {
       if (currentBytes >= captureCap) {
         overflowed = true;
         return current;
       }
       if (currentBytes + chunk.byteLength > captureCap) {
         overflowed = true;
-        return current + chunk.toString('utf8', 0, captureCap - currentBytes);
+        // Truncation cuts whatever bytes fit; a character split by the cap is
+        // simply not emitted (its tail is dropped with the rest of the chunk).
+        return current + decoder.write(chunk.subarray(0, captureCap - currentBytes));
       }
-      return current + chunk.toString('utf8');
+      return current + decoder.write(chunk);
     };
     child.on('error', (error: NodeJS.ErrnoException) => {
       spawnErrored = true;
@@ -199,7 +215,7 @@ export function runChild(
       finish();
     });
     child.stdout?.on('data', (chunk: Buffer) => {
-      out = capture(out, chunk, outBytes);
+      out = capture(out, chunk, outBytes, outDecoder);
       outBytes = Math.min(outBytes + chunk.byteLength, captureCap);
       // Overflow must not be survivable (delta review): kill the group now so
       // a later exit 0 can never be classified ok after the cap was blown.
@@ -211,7 +227,7 @@ export function runChild(
       }
     });
     child.stderr?.on('data', (chunk: Buffer) => {
-      err = capture(err, chunk, errBytes);
+      err = capture(err, chunk, errBytes, errDecoder);
       errBytes = Math.min(errBytes + chunk.byteLength, captureCap);
       if (overflowed && !settled) {
         result.timedOut = true;
