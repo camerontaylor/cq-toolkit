@@ -1086,6 +1086,27 @@ class ProductionUnitAdapter:
             return "node:" + match.group("sha")
         self.refuse("installed unit interpreter is unsupported")
 
+    def _saved_service_type(self, path):
+        """The ``Type=`` the saved service bytes select, or a refusal.
+
+        The post-start check must follow the service file being restored, not
+        the pinned template's declared type. A saved ``Type=simple`` unit whose
+        pinned template is ``oneshot`` would otherwise be admitted by the
+        oneshot branch when it exits cleanly before the observation.
+        """
+        path = Path(path)
+        try:
+            text = path.read_text()
+        except OSError as exc:
+            self.refuse("saved service is unreadable: " + str(exc)[:160])
+        values = _section_values(text, "Service", "Type")
+        if len(values) != 1:
+            self.refuse("saved service must declare exactly one Type")
+        service_type = values[0]
+        if service_type not in {"simple", "oneshot"}:
+            self.refuse("saved service Type is unsupported: " + service_type)
+        return service_type
+
     def _observe_activators(self, unit, inventory):
         paths = self._unit_paths(unit, inventory)
         observed = {}
@@ -1820,6 +1841,10 @@ class ProductionUnitAdapter:
         self._compare_state(staged, service_state)
         if self._runtime_from_unit(staged) != snapshot["runtime"]:
             self.refuse("staged restore runtime changed before activation")
+        # The post-start check follows the service file being restored, not the
+        # pinned template's declared type; a saved simple unit under a pinned
+        # oneshot template must not be admitted by the oneshot branch.
+        saved_type = self._saved_service_type(staged)
         masked = self._show(unit, ["LoadState", "FragmentPath"])
         fenced = self._path_state(service)
         if masked["LoadState"] != "masked" \
@@ -1858,7 +1883,7 @@ class ProductionUnitAdapter:
                 self.refuse("restored service did not remain loaded")
             if service_observed["ActiveState"] == "failed":
                 self.refuse("restored service is failed")
-            if inventory[unit]["service_type"] == "simple":
+            if saved_type == "simple":
                 if service_observed["ActiveState"] != "active":
                     self.refuse("restored simple service is not active: "
                                 + str(service_observed["ActiveState"]))
