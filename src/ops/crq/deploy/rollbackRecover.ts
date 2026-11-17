@@ -397,6 +397,10 @@ export class RunRecovery<E> {
       await this.failStop(
         `automatic rollback is disabled after the rollback drain: ${compatibilityReason(afterDrain)}; the hold is retained (after: ${clip(reason, 200)})`,
       );
+    // Ownership can move during the stop, drain and verification above: switching the checkout
+    // back under a marker this run no longer holds would restore the prior target unguarded, so
+    // that is an owner recovery.
+    require_(await s.hold.owns(), 'admission ownership was lost before the rollback switch');
     await d.switchCheckout(prior);
     s.switched = false;
     require_((await d.headSha()) === prior, 'helper returned but HEAD is not the prior SHA');
@@ -415,6 +419,9 @@ export class RunRecovery<E> {
     );
     // The checkout switch does not restore an external runtime entry: re-verify before start.
     await d.runtimePointerCheck();
+    // Restarting the triggers resumes admission, so the hold must still be this run's at the
+    // moment it happens: the same race the pre-switch restart refuses.
+    require_(await s.hold.owns(), 'admission ownership was lost before the rollback restart');
     await d.units.start(this.active());
     const restarted = await this.observe();
     require_(

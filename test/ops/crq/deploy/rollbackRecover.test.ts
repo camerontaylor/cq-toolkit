@@ -594,6 +594,33 @@ describe('rollbackToPrior', () => {
     expect(err.message).toBe('hold lost before rollback');
     expect(f.log).toEqual([]);
   });
+  test('losing ownership during the drain refuses before the rollback switch', async () => {
+    const f = switched();
+    f.deps.drainQueue = (n) => {
+      f.log.push(`drainQueue:${n}`);
+      f.hold.owned = false;
+      return Promise.resolve();
+    };
+    const err = await caught(rec(f).rollbackToPrior('boom'));
+    expect(err).toBeInstanceOf(Refused);
+    expect(err.message).toBe('admission ownership was lost before the rollback switch');
+    expect(f.log.some((l) => l.startsWith('switch:'))).toBe(false);
+    expect(f.log).not.toContain('hold.release');
+  });
+  test('losing ownership before the restart refuses to start the triggers', async () => {
+    const f = switched();
+    f.deps.runtimePointerCheck = () => {
+      f.log.push('runtime');
+      f.hold.owned = false;
+      return Promise.resolve();
+    };
+    const err = await caught(rec(f).rollbackToPrior('boom'));
+    expect(err).toBeInstanceOf(Refused);
+    expect(err.message).toBe('admission ownership was lost before the rollback restart');
+    expect(f.log.some((l) => l.startsWith('start:'))).toBe(false);
+    expect(f.log).not.toContain('hold.release');
+    expect(f.writes).toEqual([]);
+  });
   test('a trigger stop that does not settle refuses', async () => {
     const f = switched();
     f.deps.units.stop = () => Promise.resolve();
