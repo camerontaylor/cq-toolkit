@@ -248,6 +248,46 @@ describe('no-shell run lifecycle', { timeout: 30_000 }, () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test('a kill settles within a bounded grace despite an escaped pipe-holder', async () => {
+    // The descendant starts its OWN process group and inherits stdout/stderr,
+    // so the group kill cannot reach it and it keeps both pipes open. Without a
+    // bounded finalization the runner waits for a `close` that only the
+    // descendant could produce.
+    const dir = await mkdtemp(join(tmpdir(), 'cq-run-bounded-'));
+    const pidFile = join(dir, 'escaped.pid');
+    try {
+      const script = [
+        "const { spawn } = require('node:child_process');",
+        "const { writeFileSync } = require('node:fs');",
+        'const kid = spawn(process.execPath,',
+        "  ['-e', 'setTimeout(() => {}, 20000)'],",
+        "  { detached: true, stdio: 'inherit' });",
+        `writeFileSync(${JSON.stringify(pidFile)}, String(kid.pid));`,
+        'setInterval(() => {}, 1000);',
+      ].join(' ');
+      const startedAt = Date.now();
+      const outcome = await runArgvCommand(process.execPath, ['-e', script], {
+        cwd: tmpdir(),
+        env: buildChildEnv(process.env),
+        maxBytes: 1_024,
+        timeoutMs: 2_000,
+      });
+      const elapsed = Date.now() - startedAt;
+      expect(outcome).toMatchObject({ kind: 'killed' });
+      expect(elapsed).toBeLessThan(15_000);
+      const pid = Number((await readFile(pidFile, 'utf8').catch(() => '')).trim());
+      if (Number.isInteger(pid) && pid > 0) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('shared run core environment boundary', { timeout: 30_000 }, () => {

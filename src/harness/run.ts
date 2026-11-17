@@ -5,6 +5,14 @@ import { registerProcessSignalCleanup } from '../shared/process-signals.js';
 /** POSIX platforms get per-command process groups (`detached` + group kill). */
 const POSIX = process.platform !== 'win32';
 
+/**
+ * How long `close` may lag a kill of ours before finalization stops waiting.
+ * A group SIGKILL closes the command's own pipes almost immediately; this bound
+ * exists only for a pipe-holder that escaped the group, where `close` may never
+ * arrive at all.
+ */
+const KILL_FINALIZE_GRACE_MS = 1_000;
+
 // ---------------------------------------------------------------------------
 // runShellCommand — one `run` command in its own process group
 // ---------------------------------------------------------------------------
@@ -91,9 +99,19 @@ function spawnAndCollect(
     child.stdout?.on('data', (chunk: Buffer) => retain(out, chunk));
     child.stderr?.on('data', (chunk: Buffer) => retain(err, chunk));
 
+    let settled = false;
+    let finalizeTimer: ReturnType<typeof setTimeout> | undefined;
+    // Armed by a kill of ours: a descendant outside the killed group can hold
+    // the inherited pipes open forever, so waiting for `close` may never end.
+    const armFinalize = (): void => {
+      if (finalizeTimer !== undefined) return;
+      finalizeTimer = setTimeout(() => finalize(null, null), KILL_FINALIZE_GRACE_MS);
+    };
+
     let killedByUs = false;
     const killGroup = (): void => {
       killedByUs = true;
+      armFinalize();
       if (POSIX && child.pid !== undefined) {
         try {
           process.kill(-child.pid, 'SIGKILL');
@@ -128,10 +146,23 @@ function spawnAndCollect(
     child.on('error', (e: unknown) => {
       spawnError ??= e;
     });
-    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+    // Finalization is bounded and runs exactly once: either when `close` says
+    // both pipes are done, or when the post-kill grace expires because a
+    // descendant outside the killed group still holds them. Either way the
+    // capture streams are released, the timer/listeners/cleanup hooks are
+    // removed, and the promise settles — so a timeout or cancellation can
+    // never leave the runner pending.
+    function finalize(code: number | null, signal: NodeJS.Signals | null): void {
+      if (settled) return;
+      settled = true;
+      if (finalizeTimer !== undefined) clearTimeout(finalizeTimer);
       unregisterSignalCleanup();
       if (timer !== undefined) clearTimeout(timer);
       opts.signal?.removeEventListener('abort', killGroup);
+      child.stdout?.removeAllListeners('data');
+      child.stderr?.removeAllListeners('data');
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       const stdout = Buffer.concat(out.chunks).toString('utf8');
       const stderr = Buffer.concat(err.chunks).toString('utf8');
       if (spawnError !== undefined && child.pid === undefined) {
@@ -145,6 +176,9 @@ function spawnAndCollect(
       } else {
         settle({ kind: 'exit', code, stdout, stderr, overflowed });
       }
+    }
+    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+      finalize(code, signal);
     });
   });
 }
