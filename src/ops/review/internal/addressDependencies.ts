@@ -131,6 +131,9 @@ const descriptiveManifestFields = new Set([
   'keywords',
   'funding',
 ]);
+// Opaque binary lockfiles cannot be compared as text: UTF-8 decoding replaces
+// invalid byte sequences with U+FFFD, so distinct files could compare equal.
+const binaryMetadataPaths = new Set(['bun.lockb']);
 const installLifecycleScripts = new Set([
   'preinstall',
   'install',
@@ -150,18 +153,25 @@ export async function assertAddressDependencyMetadata(
   admit: () => void,
   prepared = false,
 ): Promise<void> {
-  const read = async (cwd: string, path: string) => {
+  const readWithin = async <T>(
+    cwd: string,
+    path: string,
+    load: (full: string) => Promise<T>,
+  ): Promise<T | null> => {
     admit();
     try {
       const full = await realpath(resolve(cwd, path));
       if (!within(await realpath(cwd), full))
         throw new Error('dependency metadata escapes checkout');
-      return await readFile(full, 'utf8');
+      return await load(full);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
     }
   };
+  const read = (cwd: string, path: string) =>
+    readWithin(cwd, path, (full) => readFile(full, 'utf8'));
+  const readBytes = (cwd: string, path: string) => readWithin(cwd, path, (full) => readFile(full));
   // Scripts npm actually executes when installation runs: every lifecycle key,
   // plus the scripts those lifecycle commands invoke (`npm run X` / `pnpm run X`)
   // and their implicit pre/post hooks. A change to any of these changes what
@@ -222,8 +232,10 @@ export async function assertAddressDependencyMetadata(
     }
     return selected;
   };
-  const relevant = (text: string | null) => {
+  const relevant = (text: string | Buffer | null) => {
     if (text === null) return text;
+    // Binary lockfiles carry no text fields to narrow; keep the raw bytes.
+    if (typeof text !== 'string') return text;
     const parsed = DependencyManifest.parse(JSON.parse(text) as unknown);
     const fields = Object.fromEntries(
       Object.entries(parsed).filter(([key]) => !descriptiveManifestFields.has(key)),
@@ -238,8 +250,9 @@ export async function assertAddressDependencyMetadata(
     return fields;
   };
   const compare = async (path: string, manifest = false) => {
-    const a = await read(root, path);
-    const b = await read(caller, path);
+    const load = binaryMetadataPaths.has(path) ? readBytes : read;
+    const a = await load(root, path);
+    const b = await load(caller, path);
     if (!isDeepStrictEqual(manifest ? relevant(a) : a, manifest ? relevant(b) : b))
       throw new Error(
         prepared
