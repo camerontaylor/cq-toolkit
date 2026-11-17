@@ -7,7 +7,8 @@
 // panel section states the window, and identical inputs render byte-identical
 // JSON and Markdown. Corrupt panel shapes are refused at render time, never
 // rendered as fabricated figures; untrusted text renders inert (line breaks
-// collapse, pipes escape); identical unknown rows across the two buckets
+// collapse, Markdown metacharacters including the backslash and HTML
+// delimiters escape); identical unknown rows across the two buckets
 // collapse. The window is a caller-declared label: the renderer does not
 // verify the panels fall inside it. The CLI reads one explicit local input
 // artifact and writes the two reports beside it; no provider is called and no
@@ -123,9 +124,20 @@ export function renderMeasurementReport({
       throw new TypeError('renderMeasurementReport: identifiers must be numbers, strings or null');
     return String(value);
   };
-  /** Untrusted text renders inert in Markdown: line breaks collapse, pipes escape. */
+  /**
+   * Untrusted text renders inert in Markdown: line breaks collapse, and every
+   * structural metacharacter — the backslash itself, plus the code-span,
+   * emphasis, link/image, table and HTML delimiters — is backslash-escaped in
+   * one pass. Escaping the backslash in the same pass means an existing
+   * `\*`-style escape is escaped once, never re-read as an escape of its own,
+   * so `![evidence](remote.png)` stays literal text instead of becoming an
+   * image.
+   */
   const md = (text) =>
-    String(text).replaceAll('\r', ' ').replaceAll('\n', ' ').replaceAll('|', '\\|');
+    String(text)
+      .replaceAll('\r', ' ')
+      .replaceAll('\n', ' ')
+      .replace(/[\\`*_[\]()!|<>]/g, '\\$&');
   // A non-known total never renders its stored number: unavailable,
   // not-collected and n-a render unknown; partial keeps an explicitly
   // labelled subtotal.

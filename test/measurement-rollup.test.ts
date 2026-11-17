@@ -873,6 +873,18 @@ describe('M10d failure evidence', () => {
     );
     expect(multiline.markdown).toContain('- bundle:x.json — corrupt: line one line two');
     expect(multiline.markdown).not.toContain('line one\nline two');
+    // Markdown metacharacters are inert too, not just pipes: an accepted
+    // artifact reference spelled like an image link renders as literal text —
+    // its `!`, brackets and parens escaped — never as an image, and an
+    // emphasis/code-span/HTML spelling in a run identifier stays literal.
+    const markup = compose({
+      artifacts: ['![evidence](remote.png)', 'a\\b'],
+      runs: [makeRun({ runId: 'a*b_c`d<e>' })],
+    });
+    expect(markup.markdown).toContain('- \\!\\[evidence\\]\\(remote\\.png\\)');
+    expect(markup.markdown).toContain('- a\\\\b');
+    expect(markup.markdown).not.toContain('![evidence](remote.png)');
+    expect(markup.markdown).toContain(`| ${REPO} | a\\*b\\_c\\\`d\\<e\\> |`);
     // Minimal but valid panels still render.
     expect(() =>
       renderMeasurementReport({
