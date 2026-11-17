@@ -6,7 +6,7 @@ import type {
   BackfillCountedHarvestEffects,
 } from '../../ops/crq/internal/backfillHarvestCounted.js';
 import { JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
-import { LedgerIntegrityError } from '../../policy/crq/ledger.js';
+import { ledgerLoads, LedgerIntegrityError, LedgerTypeError } from '../../policy/crq/ledger.js';
 import { atomicWrite } from './atomic.js';
 import { artifactLocation, type ArtifactStore } from './findingStore.js';
 
@@ -95,6 +95,23 @@ export function backfillCountedEffects(input: {
   return {
     readArtifacts,
     put: (bytes) => deferred.put(bytes),
+    // A retry reuses the event an earlier attempt retained, so a rebuilt
+    // bundle reference cannot mint a second event id for the same run.
+    readRetainedEvent: async (runId) => {
+      let bytes: Uint8Array;
+      try {
+        bytes = new Uint8Array(
+          await readFile(join(input.stateRoot, 'runs', runId, 'review-event.json')),
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw error;
+      }
+      const event = ledgerLoads(bytes);
+      if (!(event instanceof JsonObject))
+        throw new LedgerTypeError('retained review event must be an object');
+      return event;
+    },
     repo: input.repo,
     // Retained bytes must exist before anything verifies or names them.
     writeReviewEvent: async (runId, bytes) => {
