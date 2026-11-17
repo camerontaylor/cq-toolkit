@@ -228,11 +228,11 @@ async function entriesFor(
   git: GitFn,
 ): Promise<LinkedRow[]> {
   const requests = objectOrEmpty(queue.get('review_requests'));
-  const byItem = new Map<string, string>();
+  const byItem = new Map<string, string[]>();
   for (const [requestId, bindingValue] of requests.entries) {
     const binding = asObject(bindingValue);
     const item = binding === null ? null : binding.get('item');
-    if (typeof item === 'string' && !byItem.has(item)) byItem.set(item, requestId);
+    if (typeof item === 'string') byItem.set(item, [...(byItem.get(item) ?? []), requestId]);
   }
   const linked: LinkedRow[] = [];
   for (const entry of arrayOrEmpty(queue.get('items'))) {
@@ -241,7 +241,8 @@ async function entriesFor(
     if (query.excludeItem !== null && itemId(item) === query.excludeItem) continue;
     const inputs = identity(item);
     if (!sameRepo(inputs.get('repo'), query.repo)) continue;
-    const explicit = query.predecessor !== null && byItem.get(itemId(item)) === query.predecessor;
+    const bound = byItem.get(itemId(item)) ?? [];
+    const explicit = query.predecessor !== null && bound.includes(query.predecessor);
     const itemTarget = item.get('target');
     if (itemTarget === null || itemTarget === undefined) {
       if (!explicit) continue;
@@ -258,7 +259,7 @@ async function entriesFor(
     const treeAvailable = treeOf(item) !== null && query.headTree !== null;
     linked.push({
       item: itemId(item),
-      requestId: byItem.get(itemId(item)) ?? null,
+      requestId: explicit ? query.predecessor : (bound[0] ?? null),
       generation:
         item.get('generation') instanceof JsonNumber &&
         (item.get('generation') as JsonNumber).kind === 'int'
