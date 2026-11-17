@@ -6,6 +6,7 @@ import { realTmpDir } from '../../helpers/tmp-dir.js';
 import { expect, test } from 'vitest';
 import {
   assertAddressDependenciesIsolated,
+  assertAddressDependencyMetadata,
   snapshotAddressDependencies,
 } from '../../../src/ops/review/internal/addressDependencies.js';
 
@@ -124,6 +125,32 @@ test.skipIf(process.platform === 'win32')(
       expect(result.stdout.trim()).toBe('installed tool argument with spaces');
       await writeFile(shim, 'candidate replacement');
       expect(await readFile(source, 'utf8')).toBe(content);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each([
+  [0x80, 0x80],
+  [0x80, 0x81],
+] as const)(
+  'binary lockfile bytes 0x%x/0x%x compare by raw bytes',
+  async (installedByte, candidateByte) => {
+    const root = await realTmpDir('cq-dependency-lockb-');
+    try {
+      const installed = join(root, 'caller');
+      const candidate = join(root, 'worker');
+      for (const path of [installed, candidate]) {
+        await mkdir(path, { recursive: true });
+        await writeFile(join(path, 'package.json'), '{}');
+      }
+      // Both bytes decode to the same replacement character under UTF-8.
+      await writeFile(join(installed, 'bun.lockb'), Buffer.from([installedByte]));
+      await writeFile(join(candidate, 'bun.lockb'), Buffer.from([candidateByte]));
+      const compared = assertAddressDependencyMetadata(installed, candidate, () => {});
+      if (installedByte === candidateByte) await expect(compared).resolves.toBeUndefined();
+      else await expect(compared).rejects.toThrow(/manifests\/locks differ/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

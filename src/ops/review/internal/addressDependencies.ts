@@ -156,7 +156,9 @@ export async function assertAddressDependencyMetadata(
       const full = await realpath(resolve(cwd, path));
       if (!within(await realpath(cwd), full))
         throw new Error('dependency metadata escapes checkout');
-      return await readFile(full, 'utf8');
+      // Compare raw bytes: `bun.lockb` is a binary lockfile, and UTF-8 decoding
+      // maps distinct invalid byte sequences onto the same replacement characters.
+      return await readFile(full);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
@@ -222,9 +224,9 @@ export async function assertAddressDependencyMetadata(
     }
     return selected;
   };
-  const relevant = (text: string | null) => {
-    if (text === null) return text;
-    const parsed = DependencyManifest.parse(JSON.parse(text) as unknown);
+  const relevant = (content: Buffer | null) => {
+    if (content === null) return content;
+    const parsed = DependencyManifest.parse(JSON.parse(content.toString('utf8')) as unknown);
     const fields = Object.fromEntries(
       Object.entries(parsed).filter(([key]) => !descriptiveManifestFields.has(key)),
     );
@@ -265,7 +267,7 @@ export async function assertAddressDependencyMetadata(
 
   const patterns: string[] = [];
   const pkg = DependencyManifest.parse(
-    JSON.parse((await read(root, 'package.json')) ?? '{}') as unknown,
+    JSON.parse((await read(root, 'package.json'))?.toString('utf8') ?? '{}') as unknown,
   );
   if (pkg.workspaces)
     patterns.push(
@@ -277,7 +279,7 @@ export async function assertAddressDependencyMetadata(
   if (workspace !== null) {
     const parsed = z
       .object({ packages: z.array(z.string()).optional() })
-      .parse(parseYaml(workspace) as unknown);
+      .parse(parseYaml(workspace.toString('utf8')) as unknown);
     patterns.push(...(parsed.packages ?? []));
   }
   for (const entry of patterns) {
