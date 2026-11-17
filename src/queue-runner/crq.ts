@@ -138,8 +138,11 @@ if (command === 'queue-capability') {
       if (liveCommand === 'reconcile-merged') {
         // Python's `reconcile-merged` takes the tick lock, reads the persisted
         // wrapper under `<state>/reconcile` and stages enrollment in queue.json.
-        const repo = await readRunnerRepo(root);
-        if (repo === null) {
+        // The repository and the state root come from ONE config.json read: two
+        // reads could pair repository A with a state root rewritten in between
+        // (and the second read's default would hide an unreadable file).
+        const targets = await readReconcileTargets(root);
+        if (targets === null) {
           return {
             artifact: {
               status: 'failed' as const,
@@ -149,8 +152,8 @@ if (command === 'queue-capability') {
           };
         }
         return runReconcileMergedUnit(args, {
-          repo,
-          stateRoot: await publisherStateRoot(root),
+          repo: targets.repo,
+          stateRoot: targets.stateRoot,
         });
       }
       if (liveCommand === 'status') {
@@ -231,16 +234,36 @@ export async function publishLiveCommand(
   return runPublishUnit(validated);
 }
 
-/** `crq.REPO`: the runner's configured repository, or null when unusable. */
-async function readRunnerRepo(runnerRoot: string): Promise<string | null> {
+/**
+ * The reconcile route's two targets from ONE config.json read: `crq.REPO` and
+ * the state root the publisher would use. Returns null when the configuration
+ * is unusable (missing, malformed or without a repo) instead of falling back to
+ * a guessed state root, so the route can never pair repository A with a root
+ * derived from a rewritten file, or with `<runner>/state` after a read failure.
+ */
+async function readReconcileTargets(
+  runnerRoot: string,
+): Promise<{ readonly repo: string; readonly stateRoot: string } | null> {
+  let config: unknown;
   try {
-    const config = JSON.parse(await readFile(join(runnerRoot, 'config.json'), 'utf8')) as unknown;
-    if (typeof config !== 'object' || config === null || Array.isArray(config)) return null;
-    const repo = (config as Record<string, unknown>)['repo'];
-    return typeof repo === 'string' && repo !== '' ? repo : null;
+    config = JSON.parse(await readFile(join(runnerRoot, 'config.json'), 'utf8'));
   } catch {
     return null;
   }
+  if (typeof config !== 'object' || config === null || Array.isArray(config)) return null;
+  const record = config as Record<string, unknown>;
+  const repo = record['repo'];
+  if (typeof repo !== 'string' || repo === '') return null;
+  // Same derivation as {@link publisherStateRoot}/{@link readPublisherRoots},
+  // including resolving a relative configured root against the runner root.
+  const configuredStateRoot =
+    typeof record['state_root'] === 'string' && record['state_root'] !== ''
+      ? record['state_root']
+      : join(runnerRoot, 'state');
+  const stateRoot = isAbsolute(configuredStateRoot)
+    ? configuredStateRoot
+    : resolve(runnerRoot, configuredStateRoot);
+  return { repo, stateRoot };
 }
 
 /**
