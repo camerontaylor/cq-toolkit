@@ -83,7 +83,10 @@ export function expectationChangesOf(diff: string): ExpectationChange[] {
   let newLine = 0;
   // Removed lines of the current edit block awaiting their re-additions, in
   // order: a context line (or a hunk/section boundary) ends the block — a
-  // replacement never spans untouched code.
+  // replacement never spans untouched code. A re-added assertion pairs with
+  // the earliest still-unmatched removed assertion of the block, so an
+  // inserted non-assertion line (a new setup statement, say) between a
+  // removed assertion and its rewrite cannot steal the pair.
   let removed: string[] = [];
   const clearBlock = (): void => {
     removed = [];
@@ -122,7 +125,17 @@ export function expectationChangesOf(diff: string): ExpectationChange[] {
     }
     if (line.startsWith('+')) {
       const added = line.slice(1);
-      const before = removed.shift();
+      // Pair by shape: a re-added assertion takes the EARLIEST still-unmatched
+      // removed assertion of the block (not merely the head of the queue), so
+      // an inserted non-assertion line — a new setup statement ahead of the
+      // rewrite — cannot consume the assertion's partner and silence the
+      // observation. A non-assertion addition likewise takes the earliest
+      // unmatched non-assertion removal and reports nothing.
+      const addedIsAssertion = ASSERTION_RE.test(added);
+      const index = removed.findIndex(
+        (candidate) => ASSERTION_RE.test(candidate) === addedIsAssertion,
+      );
+      const before = index === -1 ? undefined : removed.splice(index, 1)[0];
       if (before !== undefined && newPath !== null && isProtectedTestPath(newPath)) {
         const beforeTrim = before.trim();
         const afterTrim = added.trim();
