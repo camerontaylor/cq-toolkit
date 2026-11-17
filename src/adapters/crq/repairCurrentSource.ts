@@ -90,7 +90,14 @@ export function fileCurrentRepairEffects(
       if (!/^[0-9a-f]{40}$/.test(ancestor) || !/^[0-9a-f]{40}$/.test(descendant))
         throw new Error('invalid ancestry operand');
       const call = await git(['merge-base', '--is-ancestor', ancestor, descendant]);
-      return call.code === 0;
+      // Git exits 1 only for "not an ancestor"; any other nonzero status (or a
+      // null code) is a probe failure, not a negative answer, so the caller's
+      // catch counts it as deferred instead of silently skipping the evidence.
+      if (call.code === 0) return true;
+      if (call.code === 1) return false;
+      throw new Error(
+        `git merge-base --is-ancestor failed with status ${call.code === null ? 'signal' : call.code}`,
+      );
     },
   };
 }
