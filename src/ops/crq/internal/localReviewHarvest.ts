@@ -189,7 +189,26 @@ export async function completeLocalReview(
   if (outbox.entries.length > 0 || queue.has('review_notify_outbox'))
     result = withObjectKeys(result, [['review_notify_outbox', outbox]]);
   await effects.saveQueue(result);
-  const published = await effects.republish(result, updated);
+  let published: JsonObject;
+  try {
+    published = await effects.republish(result, updated);
+  } catch (error) {
+    // Python's republish never propagates a publication failure: the completed item
+    // stays locally durable with publication_pending=True and a later pass retries it.
+    // Not throwing here also lets the exit harvester reach its worktree cleanup.
+    const reason = [...(error instanceof Error ? error.message : String(error))]
+      .slice(0, 300)
+      .join('');
+    const pending = withObjectKeys(updated, [
+      ['publication_pending', true],
+      ['publication_reason', reason],
+    ]);
+    const pendingItems = [...items];
+    pendingItems[index] = pending;
+    const pendingQueue = withObjectKeys(result, [['items', pendingItems]]);
+    await effects.saveQueue(pendingQueue);
+    return { queue: pendingQueue, item: pending, receiptId };
+  }
   const publishedItems = published.get('items');
   const publishedItem = Array.isArray(publishedItems) ? publishedItems[index] : undefined;
   if (!(publishedItem instanceof JsonObject)) throw new Error('item missing after publication');
