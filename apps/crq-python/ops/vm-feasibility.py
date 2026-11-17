@@ -489,7 +489,7 @@ def tool(name: str, directory: pathlib.Path | None) -> str:
 
 def download(url: str, destination: pathlib.Path, timeout: float = 120) -> str:
     """Download to a sibling ``.part`` and fsync before replacing."""
-    part = destination.with_name(destination.name + ".part")
+    part = destination.with_name(f"{destination.name}.{uuid.uuid4().hex}.part")
     with urllib.request.urlopen(url, timeout=timeout) as response, \
             part.open("wb") as handle:
         while True:
