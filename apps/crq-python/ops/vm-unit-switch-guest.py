@@ -774,7 +774,18 @@ def completion_baseline(entries):
             "invocations": set(item.get("invocation") for item in entries)}
 
 
-def validate_completed(record, runtime, prior, baseline):
+def completion_logged(item, log_entries):
+    """Journal completion evidence must match a real fixture log entry."""
+    return any(isinstance(entry, dict)
+               and entry.get("sequence") == item.get("sequence")
+               and entry.get("invocation") == item.get("invocation")
+               and entry.get("unit") == UNIT
+               and entry.get("runtime") == item.get("runtime")
+               and entry.get("success") is True
+               for entry in log_entries)
+
+
+def validate_completed(record, runtime, prior, baseline, log_entries):
     require(record["outcome"] == "completed", "switch did not complete")
     require(record["phase"] == "activation_pending",
             "completed record has the wrong phase")
@@ -799,6 +810,8 @@ def validate_completed(record, runtime, prior, baseline):
     require(all(item.get("unit") == UNIT and item.get("runtime") == runtime
                 and item.get("success") is True for item in evidence),
             "completion evidence is not unit/runtime bound")
+    require(all(completion_logged(item, log_entries) for item in evidence),
+            "completion evidence is absent from the fixture completion log")
     return {"sequences": sequences, "invocations": invocations}
 
 
@@ -819,7 +832,8 @@ def switch_phase(runtime):
     require(len(created) == 1, "switch did not create exactly one journal record")
     record_path = created[0]
     record = json.loads(record_path.read_text())
-    evidence = validate_completed(record, runtime, prior, completions_baseline)
+    evidence = validate_completed(record, runtime, prior, completions_baseline,
+                                  completions())
     systemctl("stop", TIMER)
     systemctl("reset-failed", TIMER)
     time.sleep(0.5)
@@ -991,7 +1005,8 @@ def drain_harvest_phase(args):
                 "harvest switch did not create exactly one record")
         node_record = json.loads(node_records[0].read_text())
         node_completions = validate_completed(
-            node_record, NODE_RUNTIME, PYTHON_RUNTIME, node_baseline)
+            node_record, NODE_RUNTIME, PYTHON_RUNTIME, node_baseline,
+            completions())
         # Match switch_phase's post-switch baseline: the proof adapter starts
         # the fixture timer on release, and the timer must not keep triggering
         # a oneshot service into the next phase's snapshot.
@@ -1016,7 +1031,8 @@ def drain_harvest_phase(args):
                 "harvest return switch did not create exactly one record")
         python_record = json.loads(python_records[0].read_text())
         python_completions = validate_completed(
-            python_record, PYTHON_RUNTIME, NODE_RUNTIME, python_baseline)
+            python_record, PYTHON_RUNTIME, NODE_RUNTIME, python_baseline,
+            completions())
         systemctl("stop", TIMER)
         systemctl("reset-failed", TIMER)
         time.sleep(0.5)
