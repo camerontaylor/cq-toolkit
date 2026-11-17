@@ -176,6 +176,11 @@ export async function world(
   }));
   const flag = (args: readonly string[], key: string) =>
     args.find((a) => a.startsWith(`${key}=`))?.slice(key.length + 1) ?? '';
+  // The commit a successful push is expected to publish. The default world
+  // commits the single `fixed` sha; with incrementingCommits every commit gets
+  // its own sha, so the expected published commit is the head the run just
+  // verified rather than a constant no push could ever publish.
+  const expectedPublished = () => (options.incrementingCommits ? head : fixed);
   const gh: GhFn = async (args) => {
     if (args[0] === 'repo') return ok({ nameWithOwner: 'octo/widget' });
     if (args[0] === 'pr')
@@ -190,7 +195,8 @@ export async function world(
       const query = flag(args, 'query');
       if (query.includes('resolveReviewThread')) {
         const id = flag(args, 'threadId');
-        if (remote !== fixed) throw new Error('resolve before verified publication');
+        if (remote !== expectedPublished())
+          throw new Error('resolve before verified publication');
         if (failResolve) {
           failResolve = false;
           actions.push('resolve-failed');
@@ -232,7 +238,8 @@ export async function world(
     if (args.includes('POST')) {
       if (endpoint.endsWith('requested_reviewers')) actions.push('rerequest');
       else {
-        if (remote !== fixed) throw new Error('reply before verified publication');
+        if (remote !== expectedPublished())
+          throw new Error('reply before verified publication');
         actions.push('reply');
         if (options.recoverResolution)
           replies.push({
