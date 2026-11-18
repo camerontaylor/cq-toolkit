@@ -158,19 +158,27 @@ if (command === 'queue-capability') {
         if (!parsed.ok) return usageArtifact('status', parsed.message);
         // The queue-runner binary's stdout is exactly one JSON document for
         // every command; the operator-readable markdown travels in the
-        // artifact's `value` field, not the stdout channel.
+        // artifact's `value` field, not the stdout channel. The writer's
+        // refusal text rides the same artifact (the `error` field), so this
+        // route keeps stderr empty under doctrine I1.
         let statusMarkdown = '';
+        let statusError = '';
         const exitCode = await runStatusWriter(statusRoots(parsed.stateRoot), {
           write: (text) => {
             statusMarkdown = text;
           },
-          error: (text) => process.stderr.write(text),
+          error: (text) => {
+            statusError = text;
+          },
         });
         return {
           artifact:
             exitCode === 0
               ? { status: 'ok' as const, value: { markdown: statusMarkdown } }
-              : { status: 'failed' as const, error: 'status write failed' },
+              : {
+                  status: 'failed' as const,
+                  error: statusError.trimEnd() || 'status write failed',
+                },
           exitCode,
         };
       }
