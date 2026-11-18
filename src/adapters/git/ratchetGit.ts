@@ -62,8 +62,10 @@ const EXEC_TIMEOUT_MS = 120_000;
 
 /**
  * Ambient variables that could redirect git to a different repository,
- * index, object store, namespace or configuration — or run a program. All
- * are deleted from the child env so `-C <repo>` alone decides what is read.
+ * index, object store, namespace or configuration — or reshape the history it
+ * reports (a shallow/graft file makes an arbitrary commit look like a root,
+ * so range and ancestry answers would be wrong) — or run a program. All are
+ * deleted from the child env so `-C <repo>` alone decides what is read.
  */
 const SCRUBBED_ENV = [
   'GIT_DIR',
@@ -72,6 +74,8 @@ const SCRUBBED_ENV = [
   'GIT_COMMON_DIR',
   'GIT_OBJECT_DIRECTORY',
   'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_GRAFT_FILE',
+  'GIT_SHALLOW_FILE',
   'GIT_NAMESPACE',
   'GIT_REPLACE_REF_BASE',
   'GIT_EXTERNAL_DIFF',
