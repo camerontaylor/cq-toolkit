@@ -80,19 +80,6 @@
         }
       ]
     },
-    "1931": {
-      "tuple": {
-        "head": "4e56b260d5afff58ec2e0978cf98d6ed21951825",
-        "base": "563c2d5ee57eff261e9235d3b01f69392e2869ec",
-        "forcePushEpoch": 1
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-18T05:33:23.956Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1934": {
       "tuple": {
         "head": "8630a9cc71ea14a99b07a1c19b50e376fd0058af",
