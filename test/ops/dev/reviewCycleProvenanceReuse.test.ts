@@ -127,14 +127,23 @@ describe('dev.review cycle', () => {
   test('current scan policy refuses reuse of a previously allowed cycle', async () => {
     await seed(repo);
     const effects = repoEffects(repo);
-    const result = await cycleReview(effects, async (components) =>
-      components.map(({ component }) => ({
-        component,
-        hits: [{ ruleId: 'new-policy-rule', lines: [1] }],
-      })),
+    // The managed queue leg counts dispatches: a refusal must not fall through
+    // to a fresh managed cycle that could also end 'needs-human'.
+    const submit = vi.fn(managedTerminal());
+    const result = await cycleReview(
+      effects,
+      async (components) =>
+        components.map(({ component }) => ({
+          component,
+          hits: [{ ruleId: 'new-policy-rule', lines: [1] }],
+        })),
+      undefined,
+      submit,
     )({ repoRoot: repo.root });
     expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('new-policy-rule');
     expect(reviewerCalls(effects)).toHaveLength(0);
+    expect(submit).toHaveBeenCalledTimes(0);
     expect(
       effects
         .openLedger('feature/x')
@@ -360,13 +369,19 @@ describe('dev.review cycle', () => {
         throw new Error('dev-record: ledger unreadable');
       },
     });
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    // The managed queue leg counts dispatches: the refusal must not fall
+    // through to a fresh managed cycle that could also end 'needs-human'.
+    const submit = vi.fn(managedTerminal());
+    const result = await cycleReview(effects, stubScanner(), undefined, submit)({
+      repoRoot: repo.root,
+    });
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') {
       expect(result.reason).toContain('reuse check could not complete');
       expect(result.reason).toContain('ledger unreadable');
     }
     expect(reviewerCalls(effects)).toEqual([]);
+    expect(submit).toHaveBeenCalledTimes(0);
   });
 
   test('drift while the reuse ledger is read refuses before any vendor call or append', async () => {
