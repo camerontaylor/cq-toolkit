@@ -167,6 +167,47 @@ class FetchImageTests(unittest.TestCase):
             self.assertEqual(image["sha256"], digest)
             self.assertEqual((images / vm.IMAGE_NAME).read_bytes(), data)
 
+    def test_recorder_failure_removes_the_downloaded_manifest_part(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            recorder = vm.Recorder(state)
+            with mock.patch.object(
+                    vm, "download",
+                    side_effect=self._download("1" * 64, b"x", [])), \
+                    mock.patch.object(recorder, "append",
+                                      side_effect=OSError("ledger full")):
+                with self.assertRaisesRegex(OSError, "ledger full"):
+                    vm.fetch_sums(images / vm.SUMS_NAME, recorder)
+            self.assertEqual(list(images.glob("*.part")), [])
+
+    def test_cleanup_failure_never_masks_the_original_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            recorder = vm.Recorder(state)
+            with mock.patch.object(
+                    vm, "download",
+                    side_effect=self._download("1" * 64, b"x", [])), \
+                    mock.patch.object(recorder, "append",
+                                      side_effect=OSError("ledger full")), \
+                    mock.patch.object(pathlib.Path, "unlink",
+                                      side_effect=OSError("read-only")):
+                with self.assertRaisesRegex(OSError, "ledger full"):
+                    vm.fetch_sums(images / vm.SUMS_NAME, recorder)
+
+    def test_fetch_holds_an_exclusive_lock_on_the_images_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            with mock.patch.object(vm.fcntl, "flock") as flock, \
+                    mock.patch.object(vm, "_fetch_image_locked",
+                                      return_value={"ok": 1}):
+                self.assertEqual(vm.fetch_image(state, vm.Recorder(state)),
+                                 {"ok": 1})
+            self.assertEqual(flock.call_args.args[1], vm.fcntl.LOCK_EX)
+
     def test_digest_mismatch_removes_the_unverified_partial_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = pathlib.Path(temporary)

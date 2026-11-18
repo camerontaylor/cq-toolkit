@@ -26,6 +26,7 @@ See ``VM-FEASIBILITY.md`` for the recorded evidence and its limits.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -487,6 +488,14 @@ def tool(name: str, directory: pathlib.Path | None) -> str:
 # ------------------------------------------------------------- lifecycle
 
 
+def discard(part: pathlib.Path | str) -> None:
+    """Best-effort removal of a temporary file; never masks the error in flight."""
+    try:
+        pathlib.Path(part).unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"warning: could not remove {part}: {exc}", file=sys.stderr)
+
+
 def download(url: str, destination: pathlib.Path, timeout: float = 120) -> str:
     """Download to a sibling ``.part`` and fsync before replacing."""
     part = destination.with_name(f"{destination.name}.{uuid.uuid4().hex}.part")
@@ -501,7 +510,7 @@ def download(url: str, destination: pathlib.Path, timeout: float = 120) -> str:
             handle.flush()
             os.fsync(handle.fileno())
     except BaseException:
-        part.unlink(missing_ok=True)
+        discard(part)
         raise
     return str(part)
 
@@ -509,15 +518,26 @@ def download(url: str, destination: pathlib.Path, timeout: float = 120) -> str:
 def fetch_sums(sums_path: pathlib.Path, recorder: Recorder) -> None:
     started = time.time()
     part = download(IMAGE_URL + SUMS_NAME, sums_path)
-    recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + SUMS_NAME],
-                     "rc": 0, "bytes": pathlib.Path(part).stat().st_size,
-                     "seconds": round(time.time() - started, 3)})
-    pathlib.Path(part).replace(sums_path)
+    try:
+        recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + SUMS_NAME],
+                         "rc": 0, "bytes": pathlib.Path(part).stat().st_size,
+                         "seconds": round(time.time() - started, 3)})
+        pathlib.Path(part).replace(sums_path)
+    except BaseException:
+        discard(part)
+        raise
 
 
 def fetch_image(state: pathlib.Path, recorder: Recorder) -> dict:
+    """Fetch under an exclusive lock so manifest and image stay one transaction."""
     images = state / "images"
     images.mkdir(parents=True, exist_ok=True)
+    with (images / ".fetch.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return _fetch_image_locked(images, recorder)
+
+
+def _fetch_image_locked(images: pathlib.Path, recorder: Recorder) -> dict:
     sums_path = images / SUMS_NAME
     image_path = images / IMAGE_NAME
     if image_path.exists():
@@ -545,7 +565,7 @@ def fetch_image(state: pathlib.Path, recorder: Recorder) -> dict:
         actual = verify_image(pathlib.Path(part), expected)
         pathlib.Path(part).replace(image_path)
     except BaseException:
-        pathlib.Path(part).unlink(missing_ok=True)
+        discard(part)
         raise
     recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + IMAGE_NAME],
                      "rc": 0, "bytes": image_path.stat().st_size,
