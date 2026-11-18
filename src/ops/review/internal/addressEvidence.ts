@@ -354,6 +354,11 @@ async function terminalGit(
     throw new Error('terminal command/time bound reached');
   if ((options.input?.length ?? 0) > SOURCE_CAP) throw new Error('terminal stdin bound reached');
   const cwd = await realpath(root);
+  // Discovery excluded only the first root; a token shared across checkouts must
+  // never spawn a binary that lies inside the checkout it is about to run in.
+  const binRelation = relative(cwd, session.bin);
+  if (binRelation !== '..' && !binRelation.startsWith(`..${sep}`) && !isAbsolute(binRelation))
+    throw new Error('terminal trusted Git executable inside checkout');
   const checkout = session.checkouts.get(cwd);
   if (checkout) {
     const entry = join(cwd, '.git');
