@@ -139,6 +139,14 @@ describe('the attempt-record free-text stripper', () => {
     expect(stripCredentialText(input)).toBe(expected);
   });
 
+  test('a long letter run before @ on a continuation line stays linear', () => {
+    const input = `http://localhost:8080\n${'a'.repeat(200_000)}@host.test/`;
+    const start = Date.now();
+    const out = stripCredentialText(input);
+    expect(Date.now() - start).toBeLessThan(2_000);
+    expect(out).not.toContain('@');
+  });
+
   test('very long and many-@ inputs are linear (no catastrophic backtracking)', () => {
     const long = `https://${'a@'.repeat(50_000)}host/${'x'.repeat(100_000)}?q=${'y'.repeat(100_000)}`;
     const start = Date.now();

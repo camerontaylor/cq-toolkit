@@ -200,6 +200,21 @@ export function redactUrlUserinfo(text: string): string {
   return out.join('');
 }
 
+// One forward pass: true when a letter-led scheme run is followed by `://`
+// before `end`. A bare `://` does not count. Linear in the prefix length.
+const hasNamedScheme = (token: string, end: number): boolean => {
+  let letterInRun = false;
+  for (let p = 0; p < end; p++) {
+    const c = token[p] ?? '';
+    if (/[A-Za-z]/.test(c)) letterInRun = true;
+    else if (!/[0-9+.-]/.test(c)) {
+      if (c === ':' && letterInRun && token.startsWith('//', p + 1) && p + 3 <= end) return true;
+      letterInRun = false;
+    }
+  }
+  return false;
+};
+
 /**
  * Strip URL userinfo/query/fragment and SCP-style (or bare email-like)
  * `user[:secret]@host` prefixes from a text fragment.
@@ -252,7 +267,7 @@ export function stripCredentialText(text: string): string {
     const newlineCredential =
       text.slice(i, nextStart).includes('\n') &&
       followingAt >= 0 &&
-      !/[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(followingToken.slice(0, followingAt));
+      !hasNamedScheme(followingToken, followingAt);
     // Discover all schemes in one forward pass. Never search the remaining
     // suffix again for each URL (many adjacent URLs must also stay linear).
     const schemes = discoverSchemes(run, false);
