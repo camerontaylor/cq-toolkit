@@ -379,6 +379,18 @@ describe('hackDetector: Python skip/xfail markers (#774)', () => {
     expect(findings.map((f) => f.line)).toEqual([6]);
   });
 
+  test('a short literal continued by an escaped newline keeps its state across lines', async () => {
+    expect(
+      await markersOf(
+        pyDiff(['def test_x():', '    text = "prefix \\', 'suffix"; pytest.skip("x")']),
+      ),
+    ).toEqual(['pytest.skip']);
+    // The continued literal is still string content, so a marker inside it is not code.
+    expect(
+      await markersOf(pyDiff(['msg = "prefix \\', 'pytest.mark.skip is prose"; assert True'])),
+    ).toEqual([]);
+  });
+
   test('a docstring opened on a context line hides an added marker inside it', async () => {
     expect(
       await markersOf(pyDiff(['@pytest.mark.skip prose'], ['def test_a():', '    """Docs'])),
