@@ -129,6 +129,10 @@ describe('the attempt-record free-text stripper', () => {
   test.each([
     ['https://alice:123456\n@host.test/', 'https://\nhost.test/'],
     ['http://localhost:8080\nprose here', 'http://localhost:8080\nprose here'],
+    [
+      'http://localhost:8080\nhttps://user:pw@other.test/',
+      'http://localhost:8080\nhttps://other.test/',
+    ],
   ])('a newline-split credential survives no host:port exception: %j', (input, expected) => {
     expect(stripCredentialText(input)).toBe(expected);
   });

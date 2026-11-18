@@ -245,8 +245,14 @@ export function stripCredentialText(text: string): string {
     while (next < text.length && /\s/.test(text[next] ?? '')) next++;
     const nextStart = next;
     while (next < text.length && !/\s/.test(text[next] ?? '')) next++;
+    // A next token carrying its own scheme before the `@` is a separate URL,
+    // not the continuation of this credential.
+    const followingToken = text.slice(nextStart, next);
+    const followingAt = followingToken.indexOf('@');
     const newlineCredential =
-      text.slice(i, nextStart).includes('\n') && text.slice(nextStart, next).includes('@');
+      text.slice(i, nextStart).includes('\n') &&
+      followingAt >= 0 &&
+      !followingToken.slice(0, followingAt).includes('://');
     // Discover all schemes in one forward pass. Never search the remaining
     // suffix again for each URL (many adjacent URLs must also stay linear).
     const schemes = discoverSchemes(run, false);
