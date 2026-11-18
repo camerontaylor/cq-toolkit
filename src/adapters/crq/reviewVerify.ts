@@ -132,6 +132,9 @@ export async function repositoryEntries(
     } catch {
       name = `git-path-bytes:${Buffer.from(nameBytes).toString('hex')}`;
     }
+    // A literal path spelled like a byte-hex fallback key would silently
+    // overwrite (or be overwritten by) a distinct entry; fail closed instead.
+    if (result.has(name)) throw integrity('ambiguous ls-tree path key');
     result.set(name, { mode, blob });
   }
   return result;
