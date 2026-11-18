@@ -195,7 +195,13 @@ export function makeFileNonceLedger(
     if (isNew) {
       // Flagged only AFTER the fsync returns: a hard failure leaves the flag
       // clear, so the next consume retries the directory sync.
-      syncDirSync(dirname(path));
+      // Independent of whether THIS process created any directory: another
+      // process may have made `/state/new/nonces` without syncing `/state`,
+      // and a prior failed sync is only retried because the flag stayed clear.
+      // Leaf first: the file's own entry, then each ancestor's entry upward.
+      for (let current = path; current !== dirname(current); current = dirname(current)) {
+        syncDirSync(dirname(current));
+      }
       dirSynced = true;
     }
     known.add(nonce);
