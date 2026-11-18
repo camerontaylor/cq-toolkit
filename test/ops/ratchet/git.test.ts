@@ -33,6 +33,7 @@ import {
   gitDiffText,
   gitListPaths,
   gitMergeBase,
+  gitLsRemoteRef,
   gitReadBlob,
   gitRevParse,
 } from '../../../src/adapters/git/ratchetGit.js';
@@ -504,5 +505,28 @@ describe('malformed Git plumbing fails closed', { timeout: 30_000 }, () => {
         error,
       );
     });
+  });
+});
+
+describe('remote transport env', { timeout: 30_000 }, () => {
+  test('an inherited GIT_ALLOW_PROTOCOL cannot re-enable an insteadOf-rewritten ext:: transport', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'cq-ratchet-ext-'));
+    const prior = process.env['GIT_ALLOW_PROTOCOL'];
+    try {
+      const bare = join(base, 'remote.git');
+      mkdirSync(bare);
+      git(bare, ['init', '-q', '--bare']);
+      const work = join(base, 'work');
+      initRepo(work);
+      const marker = join(base, 'ext-ran');
+      git(work, ['config', `url.ext::sh -c touch% ${marker}.insteadOf`, bare]);
+      process.env['GIT_ALLOW_PROTOCOL'] = 'ext:file';
+      await expect(gitLsRemoteRef(work, bare, 'main', 'unused')).rejects.toThrow(/ls-remote/);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      if (prior === undefined) delete process.env['GIT_ALLOW_PROTOCOL'];
+      else process.env['GIT_ALLOW_PROTOCOL'] = prior;
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
