@@ -286,6 +286,8 @@ export async function captureWorkingTree(repo: string, originalHead: string) {
         await git('update-index', '--force-remove', '--', path);
         continue;
       }
+      // An admitted directory is a gitlink. Keep its indexed commit unchanged.
+      if (info.isDirectory()) continue;
       const trackedLink = info.isSymbolicLink() && indexed.has(path);
       if (!info.isFile() && !trackedLink)
         throw new Error(`working-tree snapshot refuses non-regular path: ${path}`);
