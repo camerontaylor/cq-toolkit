@@ -9,7 +9,9 @@
  * JSON semantics: an undefined-valued member of a nested object IS absent
  * data ({a: undefined} and {} are the same JSON record) — required-field
  * positions (the ok variant's `value`) are guarded by the caller.
- * Plain objects: prototype null or Object.prototype only.
+ * Plain objects: prototype null or Object.prototype only. Arrays: prototype
+ * null or Array.prototype only — an inherited `toJSON` or any other prototype
+ * override is invoked by JSON.stringify but invisible to the own-key scan.
  * Requires cycle-freedom — call only after the stringify probe passed.
  */
 export function assertJsonLossless(value: unknown): void {
@@ -30,6 +32,18 @@ export function assertJsonLossless(value: unknown): void {
     case 'object': {
       if (value === null) return;
       if (Array.isArray(value)) {
+        // An array SUBCLASS hides its divergence on the PROTOTYPE, where the
+        // own-key scan below never looks: JSON.stringify invokes an inherited
+        // `toJSON` (`class A extends Array { toJSON() { return []; } }` with
+        // elements 1 and 2 serializes as `[]` — the journal line would
+        // reconstruct nothing the walk accepted). Any other inherited
+        // override is the same class of divergence, so only a plain array —
+        // prototype exactly Array.prototype or null — is accepted.
+        const arrayProto = Object.getPrototypeOf(value) as object | null;
+        if (arrayProto !== Array.prototype && arrayProto !== null) {
+          const name = (value as object).constructor?.name ?? 'unknown';
+          throw new Error(`non-plain array of type '${name}'`);
+        }
         // Arrays carry ONLY their indexed elements and `length`: any other
         // own key — a symbol, a hidden non-enumerable toJSON, an enumerable
         // `extra` property — is dropped by JSON.stringify exactly like the
