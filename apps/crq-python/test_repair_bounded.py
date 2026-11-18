@@ -1,5 +1,7 @@
 """Narrow isolated one-job/preparation/snapshot tests. No models or live state."""
+import contextlib
 import copy
+import io
 import importlib.util
 import json
 from pathlib import Path
@@ -353,6 +355,7 @@ class BoundedRepairTest(unittest.TestCase):
         with mock.patch.object(service, 'ROOT', self.root), \
              mock.patch.object(service, 'git', side_effect=lambda wt, *args: SOURCE if args[0] == 'rev-parse' else ''), \
              mock.patch.object(service, 'retain'), \
+             mock.patch.object(service, 'triage_context_safe', return_value=True), \
              mock.patch.object(bounded, 'command', return_value=SimpleNamespace(returncode=0, stdout='first\nsecond\n')), \
              mock.patch.object(service.cq, 'invoke', return_value=report) as invoke:
             result = service.process(self.config, job, self.root)
@@ -802,10 +805,34 @@ class BoundedRepairTest(unittest.TestCase):
         job_id, job = self.prepare()
         self.config['repair'].update(enabled=True, spend_authorization='offline-test-fixture-only')
         atomic(self.root / 'config.json', self.config)
-        with mock.patch.object(service, 'ROOT', self.root), mock.patch.object(service, 'process_item') as dispatch:
+        out = io.StringIO()
+        with mock.patch.object(service, 'ROOT', self.root), \
+             mock.patch.object(service, 'process_item', return_value=None) as dispatch, \
+             contextlib.redirect_stdout(out):
             service.main(['--job', job_id, '--source-sha', SOURCE,
                           '--finding-sha256', self.evidence['finding_sha256']])
         dispatch.assert_called_once_with(self.config, [job])
+        artifact = json.loads(out.getvalue())
+        self.assertEqual((artifact['status'], artifact['job']), ('no-result', job_id))
+
+    def test_every_cli_exit_emits_exactly_one_json_artifact(self):
+        def artifact(argv):
+            out = io.StringIO()
+            with mock.patch.object(service, 'ROOT', self.root), \
+                 mock.patch.object(service, 'runner_disabled', return_value=False), \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                service.main(argv)
+            return json.loads(out.getvalue())['status']
+        self.config['repair'].update(enabled=False)
+        atomic(self.root / 'config.json', self.config)
+        self.assertEqual(artifact([]), 'disabled')
+        self.assertEqual(artifact(['--job', OLD]), 'disabled')
+        self.config['repair'].update(enabled=True, spend_authorization='offline-test-fixture-only')
+        atomic(self.root / 'config.json', self.config)
+        self.assertEqual(artifact(['--job', OLD]), 'refused')
+        self.assertEqual(artifact(['--recover-job', 'x', '--job', OLD]), 'refused')
+        # A dry run with no triage state writes nothing itself, so it reports that.
+        self.assertEqual(artifact(['--triage-dry-run']), 'no-triage')
 
 
 if __name__ == '__main__':

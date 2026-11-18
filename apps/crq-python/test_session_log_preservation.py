@@ -342,6 +342,7 @@ class RepairCorrelationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp, \
              mock.patch.object(svc, 'source_snapshot', return_value={}), \
+             mock.patch.object(svc, 'triage_context_safe', return_value=True), \
              mock.patch.object(svc.codex, 'invoke', fake_invoke), \
              mock.patch.dict(os.environ, {'CQ_WORK_ID': 'shell-work',
                                           'CQ_PARENT_WORK_ID': 'stale-parent'}):

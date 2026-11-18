@@ -264,3 +264,25 @@ class FixedRevalidationTest(unittest.TestCase):
                 record.assert_not_called()
                 self.c.save_queue.assert_not_called()
                 self.assertEqual({p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}, before)
+
+
+class ChangeUndoneLocationTest(unittest.TestCase):
+    """Containment matches changes by hunk location, not file-wide line text."""
+
+    PUBLISHED = '@@ -3 +3 @@\n-old\n+fix\n'
+
+    def undone(self, published, head):
+        return repair_tick.change_undone(repair_tick.diff_changed_locations(published),
+                                         repair_tick.diff_changed_locations(head))
+
+    def test_same_text_at_another_location_is_not_an_undo(self):
+        # The head removes an identical "fix" line at line 9, not line 3.
+        self.assertEqual(self.undone(self.PUBLISHED, '@@ -9 +8,0 @@\n-fix\n'), [])
+
+    def test_removing_the_published_line_at_its_location_is_an_undo(self):
+        self.assertEqual(self.undone(self.PUBLISHED, '@@ -3 +2,0 @@\n-fix\n'), [(3, 'fix')])
+
+    def test_reinserting_a_published_deletion_at_its_gap_is_an_undo(self):
+        published = '@@ -4 +3,0 @@\n-gone\n'
+        self.assertTrue(self.undone(published, '@@ -3,0 +4 @@\n+gone\n'))
+        self.assertEqual(self.undone(published, '@@ -8,0 +9 @@\n+gone\n'), [])

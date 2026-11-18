@@ -328,8 +328,15 @@ def _dispatch(config, role, job, wt, directory, judge=False):
     if job.get('triage_context') is not None:
         return cq.judge(config, role, job, wt, directory)
     require_canonical_delivery(ROOT, job)
-    job['source_snapshot'] = source_snapshot(config, job)
-    atomic(directory / 'source-snapshot.json', job['source_snapshot'])
+    snapshot = source_snapshot(config, job)
+    # The excerpt leaves the machine for every driver: scan it with the same
+    # policy as triage context, before it is persisted or handed to a provider.
+    import crq as c
+    if not triage_context_safe(c, {'current_path': snapshot.get('path') or 'source-snapshot.txt', 'source': snapshot.get('source', '')},
+                               directory / 'source-snapshot-scan.json'):
+        raise ValueError('source snapshot secret scan rejected; refusing dispatch')
+    job['source_snapshot'] = snapshot
+    atomic(directory / 'source-snapshot.json', snapshot)
     if role['driver'] == 'cq':
         if judge:
             return cq.judge(config, role, job, wt, directory)
@@ -1198,7 +1205,17 @@ def recover_job(config, job_id):
     return recovery.recover(ROOT, config, job_id, scan, judge, prepare)
 
 
-def main(argv=None):
+def explicit_job_result(job, outcome):
+    """The JSON artifact for an explicitly selected job: its recorded result
+    plus the admission outcome, so a caller never has to parse stderr."""
+    path = ROOT / 'state/repair' / job['job'] / 'result.json'
+    result = json.loads(path.read_text()) if path.exists() else None
+    return {'status': outcome or ('finished' if result else 'no-result'), 'job': job['job'], 'result': result}
+
+
+def run(argv=None):
+    """Returns (exit code, result). A None result means the path already wrote its own JSON
+    (the triage dry-run does so only when triage ran; otherwise it reports no-triage)."""
     parser = argparse.ArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
     parser.add_argument('--triage-dry-run', action='store_true')
     parser.add_argument('--job')
@@ -1210,23 +1227,27 @@ def main(argv=None):
     # path (--recover-job, --job): a handed-over host must not write or spend.
     if runner_disabled():
         narrate(RUNNER_DISABLED + ': dispatch refused')
-        return 0
+        return 0, {'status': 'refused', 'reason': 'runner-disabled'}
     config = json.loads((ROOT / 'config.json').read_text())
     repair = config.get('repair', {})
     authorization = repair.get('spend_authorization')
     if repair.get('enabled') is not True or not isinstance(authorization, str) or not authorization.strip():
         narrate('repair dispatch disabled: repair.enabled and a recorded spend_authorization are required')
-        return
+        return 0, {'status': 'disabled', 'reason': 'repair.enabled and a recorded spend_authorization are required'}
     if args.triage_dry_run:
-        triage_phase(config, dry_run=True)
-        return
+        # triage_phase writes its own JSON result only when triage is configured
+        # and has a rollout; otherwise it returns None having written nothing,
+        # so report that explicitly to keep one JSON artifact per exit.
+        if triage_phase(config, dry_run=True) is None:
+            return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
+        return 0, None
     selectors = (args.job, args.source_sha, args.finding_sha256)
     if args.recover_job and (any(selectors) or args.triage_dry_run):
         narrate('repair dispatch refused: recovery selects exactly one job')
-        return 2
+        return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
     if any(selectors) and not all(selectors):
         narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
-        return 2
+        return 2, {'status': 'refused', 'reason': '--job, --source-sha and --finding-sha256 go together'}
     # Validate all configured paid lanes before any A0 spend. Missing hard
     # budget support is an activation prerequisite, never a soft prompt promise.
     drivers = {role['driver'] for role in repair['roles'].values()}
@@ -1234,51 +1255,61 @@ def main(argv=None):
         if driver in drivers and (not repair.get(driver + '_budget_launcher') or
                                   not repair.get(driver + '_budget_launcher_verified')):
             narrate('repair dispatch disabled: verified ' + driver + ' budget launcher required')
-            return
+            return 0, {'status': 'disabled', 'reason': 'verified ' + driver + ' budget launcher required'}
     if 'paseo' in drivers and (not repair.get('paseo_host') or not repair.get('paseo_read_only_mode')):
         narrate('repair dispatch disabled: verified Paseo endpoint and read-only mode required')
-        return
+        return 0, {'status': 'disabled', 'reason': 'verified Paseo endpoint and read-only mode required'}
     # A missing key would otherwise turn every attempt into a FAILED verdict.
     if any(role['driver'] == 'cq' and role['model'].startswith('zai/') for role in repair['roles'].values()) \
             and not os.environ.get('ZAI_API_KEY') and not any(
                 provider_ready(candidate) for role in repair['roles'].values()
                 for candidate in fallback_roles(config, role)[1:]):
         narrate('repair dispatch disabled: ZAI_API_KEY is not in the service environment')
-        return
+        return 0, {'status': 'disabled', 'reason': 'ZAI_API_KEY is not in the service environment'}
     if blocked(repair):
         narrate('repair dispatch paused: GLM peak blackout')
-        return
+        return 0, {'status': 'paused', 'reason': 'GLM peak blackout'}
     directory = ROOT / 'state/repair'
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / 'service.lock').open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return
+            return 0, {'status': 'busy', 'reason': 'service.lock held by another repair pass'}
         if args.recover_job:
             until = dispatch_paused(config)
             if until:
                 narrate('repair recovery paused: provider rate limit until ' + until)
-                return
+                return 0, {'status': 'paused', 'reason': 'provider rate limit until ' + until}
             error = fetch_clone(config)
             if error:
                 narrate('repair recovery deferred: ' + error[:200])
-                return
+                return 0, {'status': 'deferred', 'reason': error[:200]}
             # The marker can be written during the fetch's tick-lock wait or
             # network call: recheck before the recovery judgment spends.
             if runner_disabled():
                 narrate(RUNNER_DISABLED + ': recovery deferred for ' + args.recover_job)
-                return
+                return 0, {'status': 'deferred', 'reason': 'runner-disabled'}
             result = recover_job(config, args.recover_job)
             if result.get('report', {}).get('stop') == 'rate-limit':
                 rate_limit_pause(result['report'], args.recover_job)
-            write_result(result)
-            return
+            return 0, result
         if all(selectors):
             job = select_job(ROOT, config, args.job, args.source_sha, args.finding_sha256)
-            process_item(config, [job])
-            return
+            outcome = process_item(config, [job])
+            return 0, explicit_job_result(job, outcome)
         drain(config)
+        return 0, {'status': 'drained'}
+
+
+
+
+def main(argv=None):
+    """Every CLI path ends in exactly one JSON artifact on stdout."""
+    code, result = run(argv)
+    if result is not None:
+        write_result(result)
+    return code
 
 
 if __name__ == '__main__':

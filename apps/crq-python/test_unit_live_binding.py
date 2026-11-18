@@ -1221,6 +1221,13 @@ class ProductionAdapterTests(FactoryFixture):
         self.assertEqual(selection.source_sha, self.before)
         self.assertEqual(self.calls, [])
 
+    def test_explicit_source_sha_replaces_the_deployment_head(self):
+        retained = "e" * 40
+        self.assertNotEqual(retained, self.before)
+        with mock.patch.object(live.factory, "compose", return_value=("adapter", "selection")) as compose:
+            self.make_live_adapter(source_sha=retained)
+        self.assertEqual(compose.call_args.kwargs["source_sha"], retained)
+
     def test_unsupported_discovery_refuses_before_mutation(self):
         self.write("other.service",
                    "[Unit]\nDescription=Other\nWants=crq-tick.service\n")
