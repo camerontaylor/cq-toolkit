@@ -85,6 +85,29 @@ test('incomplete bound metadata survives a removed checkout; complete metadata m
   }
 });
 
+test('incomplete bound metadata survives a stored path whose parent became a file (ENOTDIR)', async () => {
+  const base = await root();
+  const parent = join(base, 'parent');
+  const checkout = join(parent, 'checkout');
+  const gitDir = join(base, 'admin');
+  await mkdir(checkout, { recursive: true });
+  await mkdir(gitDir);
+  const slot = await acquireSlot(base, 1);
+  try {
+    const bound = { version: 1, state: 'bound', checkoutPath: checkout, checkoutGitDir: gitDir };
+    await slot.writeMetadata({ ...bound, incomplete: false } as SlotMetadata);
+    await rm(parent, { recursive: true });
+    await writeFile(parent, 'now a file');
+    await expect(
+      slot.writeMetadata({ ...bound, incomplete: false } as SlotMetadata),
+    ).rejects.toThrow(/ENOTDIR/);
+    await slot.writeMetadata({ ...bound, incomplete: true } as SlotMetadata);
+    expect(await readSlotMetadata(slot.metadataPath)).toEqual({ ...bound, incomplete: true });
+  } finally {
+    await slot.close();
+  }
+});
+
 test('attachment refuses a path without .lock and preserves exclusion (mutation: omit suffix validation)', async () => {
   const path = join(await root(), 'slot');
   const lock = await acquireFileLock(path);
