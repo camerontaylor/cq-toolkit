@@ -199,13 +199,13 @@
     },
     "1991": {
       "tuple": {
-        "head": "1b192d14daef204067a99aca417fbc1e123880d2",
+        "head": "6a5fda251d4d1c76202dbbf8b907470741d4d2e9",
         "base": "563c2d5ee57eff261e9235d3b01f69392e2869ec",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-18T12:21:43.022Z",
+          "observedAt": "2026-11-18T16:15:05.532Z",
           "by": "self-merge-prs:observe"
         }
       ]
