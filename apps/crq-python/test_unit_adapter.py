@@ -668,6 +668,11 @@ class SavedServiceTypeTests(AdapterFixture):
                 "ExecStart=/usr/bin/env python3 /w.py\n")
         self.assertEqual(self._type(body), "simple")
 
+    def test_comment_inside_a_continuation_does_not_end_it(self):
+        body = ("[Service]\nEnvironment=LABEL=value \\\n# comment\nType=oneshot\n"
+                "ExecStart=/usr/bin/env python3 /w.py\n")
+        self.assertEqual(self._type(body), "simple")
+
     def test_missing_type_with_execstart_defaults_to_simple(self):
         self.assertEqual(self._type("[Service]\nExecStart=/bin/x\n"), "simple")
 
@@ -684,6 +689,16 @@ class AdapterTests(AdapterFixture):
     def test_preflight_refuses_same_runtime(self):
         with self.assertRaisesRegex(dc.Refused, "already selects"):
             self.adapter.preflight("crq-tick.service", "python")
+
+    def test_preflight_refuses_a_saved_type_restore_cannot_follow(self):
+        path = self.unit_dir / "crq-tick.service"
+        text = path.read_text()
+        self.assertIn("Type=oneshot", text)
+        path.write_text(text.replace("Type=oneshot", "Type=exec"))
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused, "Type is unsupported: exec"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
 
     def test_preflight_node_from_python_succeeds(self):
         prior = self.adapter.preflight("crq-tick.service", NODE_RUNTIME)

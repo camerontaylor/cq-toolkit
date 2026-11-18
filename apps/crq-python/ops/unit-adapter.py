@@ -231,6 +231,9 @@ def _logical_lines(text: str) -> list[str]:
     logical = []
     pending = ""
     for line in text.splitlines():
+        if pending and line.lstrip()[:1] in ("#", ";"):
+            # systemd skips comment lines inside a continuation.
+            continue
         if line.endswith("\\"):
             pending += line[:-1] + " "
             continue
@@ -1194,6 +1197,9 @@ class ProductionUnitAdapter:
         prior = self._runtime_from_unit(paths["service"])
         if prior == runtime:
             self.refuse("unit already selects requested runtime")
+        # Restore will need the saved Type; refuse now rather than after the
+        # switch has masked the service and stopped its activators.
+        self._saved_service_type(paths["service"])
         observed = self._observe_activators(unit, inventory)
         completion_window = self._completion_budget(unit, inventory, observed)
         try:
