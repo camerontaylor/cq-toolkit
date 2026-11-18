@@ -407,7 +407,7 @@ describe('M10d nominal evidence', () => {
       ],
     });
     expect(torn.markdown).toContain(
-      '- usage channel cache~read/x: 5 subtotal (partial: observed 1 of 1 usage channel cache~read/x values; measurement inputs were rejected, incomplete or unavailable)',
+      '- usage channel cache\\~read/x: 5 subtotal (partial: observed 1 of 1 usage channel cache\\~read/x values; measurement inputs were rejected, incomplete or unavailable)',
     );
     expect(torn.markdown).toContain('- usage channel input: 100 (known)');
   });
@@ -445,8 +445,8 @@ describe('M10d nominal evidence', () => {
       population: composed.outcome.population,
     });
     expect(rendered.markdown).toContain('## Evidence artifacts');
-    expect(rendered.markdown).toContain('- bundles/run-a');
-    expect(rendered.markdown).toContain('- bundles/run-b');
+    expect(rendered.markdown).toContain('- `bundles/run-a`');
+    expect(rendered.markdown).toContain('- `bundles/run-b`');
     for (const section of ['## Fix panel', '## Cost panel', '## Harm panel', '## Missed panel'])
       expect(rendered.markdown).toContain(section);
     expect(rendered.markdown).toContain('- re-fixes: 1 candidates, 0 explained, 0 unknown');
@@ -462,6 +462,22 @@ describe('M10d nominal evidence', () => {
     expect(rendered.markdown).toContain(
       '- eligible: 2; mature: 1; right-censored: 1; follow-up window: 14 days',
     );
+  });
+
+  test('unknown sources and space-bounded references render as inert literals', () => {
+    const rendered = compose({
+      artifacts: [' bundles/run-a ', '`'.repeat(50_000).replaceAll('`', 'a`')],
+      reader: {
+        ...knownReader(),
+        unknown: [
+          { source: '# evidence', kind: 'unavailable', reason: 'r' },
+          { source: 'https://example.com/x', kind: 'unavailable', reason: 'r' },
+        ],
+      },
+    }).markdown;
+    expect(rendered).toContain('- `# evidence` —');
+    expect(rendered).toContain('- `https://example.com/x` —');
+    expect(rendered).toContain('- `  bundles/run-a  `');
   });
 
   test('no live calls or engine writes', async () => {
@@ -566,7 +582,7 @@ describe('M10d missing evidence', () => {
     expect(rendered.report.unknown).toEqual([
       { source: 'ciRed', kind: 'unavailable', reason: 'no CI coverage declared' },
     ]);
-    expect(rendered.markdown).toContain('- ciRed — unavailable: no CI coverage declared');
+    expect(rendered.markdown).toContain('- `ciRed` — unavailable: no CI coverage declared');
   });
 
   test('no live calls or engine writes', () => {
@@ -852,7 +868,7 @@ describe('M10d failure evidence', () => {
     expect(echoed.report.unknown).toEqual([
       { source: 'ciRed', kind: 'unavailable', reason: 'no CI coverage declared' },
     ]);
-    expect(echoed.markdown.match(/- ciRed — unavailable: no CI coverage declared/g)).toHaveLength(
+    expect(echoed.markdown.match(/- `ciRed` — unavailable: no CI coverage declared/g)).toHaveLength(
       1,
     );
     // Untrusted text renders inert: pipes escape in cells and bullets, and a
@@ -861,7 +877,7 @@ describe('M10d failure evidence', () => {
       artifacts: ['bundles/run|a', 'bundles/run-b'],
       runs: [makeRun({ runId: 'run|1' })],
     });
-    expect(escaped.markdown).toContain('- bundles/run\\|a');
+    expect(escaped.markdown).toContain('- `bundles/run|a`');
     expect(escaped.markdown).toContain(`| ${REPO} | run\\|1 |`);
     const multiline = renderMeasurementReport(
       input({
@@ -871,8 +887,31 @@ describe('M10d failure evidence', () => {
         },
       }),
     );
-    expect(multiline.markdown).toContain('- bundle:x.json — corrupt: line one line two');
+    expect(multiline.markdown).toContain('- `bundle:x.json` — corrupt: line one line two');
     expect(multiline.markdown).not.toContain('line one\nline two');
+    // Markdown metacharacters are inert too, not just pipes: an accepted
+    // artifact reference spelled like an image link renders as literal text —
+    // its `!`, brackets and parens escaped — never as an image, and an
+    // emphasis/code-span/HTML spelling in a run identifier stays literal.
+    const markup = compose({
+      artifacts: ['![evidence](remote.png)', 'a\\b', '~~old~~'],
+      runs: [makeRun({ runId: 'a*b_c`d<e>' })],
+    });
+    expect(markup.markdown).toContain('- `![evidence](remote.png)`');
+    expect(markup.markdown).toContain('- `a\\b`');
+    expect(markup.markdown).toContain('- `~~old~~`');
+    // References are code spans, so autolinks cannot consume escapes, and a
+    // backtick inside widens the fence. Run identifiers escape `&` so a
+    // character reference stays literal.
+    const literal = compose({
+      artifacts: ['https://example.com/a_b', 'x`y', '`edge`'],
+      runs: [makeRun({ runId: 'run&#45;1' })],
+    });
+    expect(literal.markdown).toContain('- `https://example.com/a_b`');
+    expect(literal.markdown).toContain('- ``x`y``');
+    expect(literal.markdown).toContain('- `` `edge` ``');
+    expect(literal.markdown).toContain(`| ${REPO} | run\\&#45;1 |`);
+    expect(markup.markdown).toContain(`| ${REPO} | a\\*b\\_c\\\`d\\<e\\> |`);
     // Minimal but valid panels still render.
     expect(() =>
       renderMeasurementReport({
@@ -1056,7 +1095,7 @@ describe('M4b1 acceptance import composed into the M10d readout', () => {
       { source: missingBaseUrl, kind: 'unavailable', reason: 'reviewed base not recorded' },
     ]);
     expect(rendered.markdown).toContain(
-      `- ${missingBaseUrl} — unavailable: reviewed base not recorded`,
+      `- \`${missingBaseUrl}\` — unavailable: reviewed base not recorded`,
     );
   });
 });
