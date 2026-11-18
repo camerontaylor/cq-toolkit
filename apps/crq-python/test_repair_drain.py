@@ -1920,6 +1920,20 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(result['next_rung'], 0)
         self.assertIn('blackout', result['reason'])
 
+    def test_blackout_reached_during_preparation_defers_before_the_driver_call(self):
+        _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
+        wt = self.worktree()
+        # Admission is clear, but the retention and reset that prepare the
+        # rung outlast the margin that check allowed: the recheck at the last
+        # boundary before the paid call must defer with the rung preserved.
+        with mock.patch.object(service, 'blocked', side_effect=[False, True]), \
+             mock.patch.object(service.cq, 'invoke') as invoke:
+            result = service.process(self.config, dict(job), wt)
+        invoke.assert_not_called()
+        self.assertTrue(result['retry_after'])
+        self.assertEqual(result['next_rung'], 0)
+        self.assertIn('blackout', result['reason'])
+
     def test_drained_snapshot_keeps_pin_while_base_chains(self):
         _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
         job['repair_base'] = 'd' * 40  # predecessor commit of an earlier finding
@@ -2480,8 +2494,9 @@ class RepairDrainTest(unittest.TestCase):
         wt = self.worktree()
         _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
         unchanged = {'stop': 'ok', 'changed': False, 'summary': 'no change warranted', 'commits': []}
-        # First guard (fixer) is clear; the judge guard falls inside the blackout.
-        with mock.patch.object(service, 'blocked', side_effect=[False, True]), \
+        # The fixer admission and pre-call guards are clear; the judge guard
+        # falls inside the blackout.
+        with mock.patch.object(service, 'blocked', side_effect=[False, False, True]), \
              mock.patch.object(service.cq, 'invoke', return_value=unchanged) as invoke, \
              mock.patch.object(service.cq, 'judge') as judge:
             result = service.process(self.config, dict(job), wt)
@@ -2502,6 +2517,23 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(result['verdict'], 'NOT-FIXED')
         self.assertNotIn('pending_judge', result)
         self.assertNotIn('retry_after', result)
+
+    def test_blackout_reached_before_judge_call_preserves_pending_judge(self):
+        self.job('crq-run1-F1', 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')
+        wt = self.worktree()
+        _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
+        unchanged = {'stop': 'ok', 'changed': False, 'summary': 'no change warranted', 'commits': []}
+        # The fixer call completes clear of the window; the blackout opens
+        # while the judge dispatch prepares, so the judge call never starts.
+        with mock.patch.object(service, 'blocked', side_effect=[False, False, False, True]), \
+             mock.patch.object(service.cq, 'invoke', return_value=unchanged) as invoke, \
+             mock.patch.object(service.cq, 'judge') as judge:
+            result = service.process(self.config, dict(job), wt)
+        self.assertEqual(invoke.call_count, 1)
+        judge.assert_not_called()
+        self.assertTrue(result['pending_judge'])
+        self.assertTrue(result['retry_after'])
+        self.assertIn('judge deferred', result['reason'])
 
     def test_pending_judge_with_missing_worktree_fails_closed(self):
         self.job('crq-run1-F1', 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')
