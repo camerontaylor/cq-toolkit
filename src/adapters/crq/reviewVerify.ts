@@ -263,7 +263,10 @@ export async function verifyReview(
       ) {
         throw integrity('synthetic head/target blob mismatch');
       }
-      if (targetEntry.mode !== '100644' && targetEntry.mode !== '100755') {
+      if (
+        (targetEntry.mode !== '100644' && targetEntry.mode !== '100755') ||
+        (headEntry.mode !== '100644' && headEntry.mode !== '100755')
+      ) {
         throw integrity('reviewed non-regular object');
       }
       const blobData = git(await runGit(['cat-file', 'blob', blob]));
