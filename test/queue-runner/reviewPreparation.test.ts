@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { JsonNumber, JsonObject } from '../../src/policy/crq/jsonValue.js';
 import {
   ReviewCheckoutError,
+  ReviewScanRefusal,
   prepareOrdinaryReview,
   prepareAndPersistOrdinaryReview,
   type ReviewPreparationEffects,
@@ -273,6 +274,24 @@ describe('ordinary preparation caller', () => {
     expect(result.queue.get('unknown')).toBe(f.queue.get('unknown'));
     expect((result.queue.get('items') as JsonObject[])[0]?.get('unknown')).toBe(
       (f.queue.get('items') as JsonObject[])[0]?.get('unknown'),
+    );
+  });
+  it('persists a scan refusal as blocked instead of leaving the review pending', async () => {
+    const f = fixture();
+    f.effects.scan = async () => {
+      f.calls.push('scan');
+      throw new ReviewScanRefusal('undecodable review scan path');
+    };
+    const result = await prepareAndPersistOrdinaryReview(
+      f.queue,
+      { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
+      f.effects,
+    );
+    expect(f.calls).toEqual(['allocate', 'scan', 'blocked', 'save']);
+    expect(result.outcome).toBe('blocked');
+    const item = (result.queue.get('items') as JsonObject[])[0]!;
+    expect(item.get('last_error')).toBe(
+      'review scan refused the diff: undecodable review scan path',
     );
   });
   it('persists a checkout failure after its event without reserving or spawning', async () => {

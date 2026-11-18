@@ -2,7 +2,7 @@
 import { parseDenylistPatterns } from '../ops/dev/denylist.js';
 import { pythonSplitlines } from '../policy/crq/repairGates.js';
 import { atomicJsonText } from '../policy/crq/pythonJson.js';
-import type { ReviewScanDecision } from './reviewPreparation.js';
+import { ReviewScanRefusal, type ReviewScanDecision } from './reviewPreparation.js';
 
 const universal = [
   'class:token-ssh-plumbing',
@@ -70,14 +70,14 @@ function decodeGitPath(raw: string): string {
       continue;
     }
     const octal = /^\\([0-7]{3})/.exec(inner.slice(index));
-    if (octal === null) throw new Error('undecodable review scan path');
+    if (octal === null) throw new ReviewScanRefusal('undecodable review scan path');
     bytes.push(parseInt(octal[1] as string, 8));
     index += 4;
   }
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(bytes));
   } catch {
-    throw new Error('undecodable review scan path');
+    throw new ReviewScanRefusal('undecodable review scan path');
   }
 }
 
@@ -150,8 +150,10 @@ export async function scanReviewDiff(
   const candidates: { path: string; text: string; diffLine: number }[] = [];
   let path: string | null = null;
   let header = false;
-  const handle = (line: string, diffLine: number): void => {
-    if (line.startsWith('diff --git')) {
+  const handle = (line: string, diffLine: number, physicalStart = true): void => {
+    // Only a physical patch record can open a file section; a logical fragment
+    // split out of hunk content (after U+2028 and similar) is never a header.
+    if (physicalStart && line.startsWith('diff --git')) {
       path = diffGitPath(line);
       header = true;
       return;
@@ -182,16 +184,23 @@ export async function scanReviewDiff(
   let counted = 0;
   for (const [index, piece] of physical.entries()) {
     const last = index === physical.length - 1;
+    // A piece ending in a logical-only terminator (U+2028, ...) keeps the empty
+    // logical line its physical LF then closes, as Python splitlines does.
+    const gap =
+      last || piece === ''
+        ? 0
+        : pythonSplitlines(`${piece}\n`).length - pythonSplitlines(piece).length;
     if (header || piece.startsWith('diff --git')) {
       handle(piece, counted + 1);
-      counted += piece === '' ? (last ? 0 : 1) : pythonSplitlines(piece).length;
+      counted += (piece === '' ? (last ? 0 : 1) : pythonSplitlines(piece).length) + gap;
     } else if (piece === '') {
       if (!last) counted += 1;
     } else {
-      for (const sub of pythonSplitlines(piece)) {
+      for (const [at, sub] of pythonSplitlines(piece).entries()) {
         counted += 1;
-        handle(sub, counted);
+        handle(sub, counted, at === 0);
       }
+      counted += gap;
     }
   }
   try {

@@ -179,6 +179,37 @@ describe('review scan evidence', () => {
       denylist_hits: [{ file: 'src/with space.txt', diff_line: 5 }],
     });
   });
+  it('counts the empty logical line a trailing U+2028 leaves before its physical LF', async () => {
+    const f = fixture();
+    const text = [
+      'diff --git a/x b/x',
+      '--- a/x',
+      '+++ b/x',
+      '@@ -1 +1 @@',
+      '+one\u2028',
+      '+MARK0 x',
+    ].join('\n');
+    await scanReviewDiff({ ...input, diff: text }, f.effects);
+    // Python splitlines: 4 header lines, '+one', the empty line, then MARK0 on line 7.
+    expect(JSON.parse(f.report())).toMatchObject({
+      denylist_hits: [{ file: 'x', diff_line: 7 }],
+    });
+  });
+  it('never reads a logical fragment of hunk content as a diff header', async () => {
+    const f = fixture();
+    const text = [
+      'diff --git a/x b/x',
+      '--- a/x',
+      '+++ b/x',
+      '@@ -1 +1 @@',
+      '+one\u2028diff --git a/evil b/evil',
+      '+MARK0 x',
+    ].join('\n');
+    await scanReviewDiff({ ...input, diff: text }, f.effects);
+    expect(JSON.parse(f.report())).toMatchObject({
+      denylist_hits: [{ file: 'x', diff_line: 7 }],
+    });
+  });
   it('keeps a literal U+2028 in a header path whole while hunk lines keep Python numbering', async () => {
     let report = '';
     const effects: ReviewScannerEffects = {
