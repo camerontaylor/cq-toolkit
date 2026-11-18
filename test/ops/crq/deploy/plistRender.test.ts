@@ -81,6 +81,7 @@ describe('plist codec', () => {
       '<plist><integer>x</integer></plist>',
       '<plist><dict><string>a</string></dict></plist>',
       '<plist><string>&#0;</string></plist>',
+      '<plist><string>&unknown;</string></plist>',
       '<plist><string><![CDATA[x]]></string></plist>',
     ])
       expect(() => parsePlist(bad)).toThrow();
@@ -91,6 +92,8 @@ describe('plist codec', () => {
       '<integer>1_0</integer>',
     ])
       expect(() => parsePlist(`<plist>${bad}</plist>`)).toThrow('unsupported or malformed plist');
+    // An escaped ampersand before an undeclared name is text, not a reference.
+    expect(parsePlist('<plist><string>&amp;unknown;</string></plist>')).toBe('&unknown;');
     // Python sorts keys by code point, JS default sort by UTF-16 unit: U+FFEE < U+1F600.
     const order = dumpPlist(
       new Map([
