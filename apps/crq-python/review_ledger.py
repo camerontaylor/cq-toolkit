@@ -351,21 +351,23 @@ def fsync_dir(directory):
 
 
 def durable_directory(directory):
-    """Create a directory tree and persist each new entry in its parent."""
+    """Create a directory tree and persist each entry above it in its parent."""
     directory = Path(directory)
-    created = []
+    missing = False
     probe = directory
     while probe.parent != probe and not probe.exists():
-        created.append(probe)
+        missing = True
         probe = probe.parent
-    if created:
+    if missing:
         directory.mkdir(parents=True, exist_ok=True)
-    # Sync every created entry, and the target's own entry even when it
-    # already exists: an earlier call (or another process) may have created it
-    # and stopped before its parent was synced.
-    for entry in created or [directory]:
-        if entry.parent != entry:
-            fsync_dir(entry.parent)
+    # Sync every entry from the target up to the filesystem root, not only the
+    # entries discovered as missing during this call: an earlier call (or
+    # another process) may have created an ancestor and stopped before its own
+    # entry was synced, so a retry must persist that ancestor's entry as well.
+    probe = directory
+    while probe.parent != probe:
+        fsync_dir(probe.parent)
+        probe = probe.parent
 
 
 def atomic(filename, data):

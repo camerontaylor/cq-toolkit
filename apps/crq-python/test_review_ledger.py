@@ -257,11 +257,36 @@ class LedgerTest(unittest.TestCase):
     def test_durable_directory_syncs_existing_target_entry(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            (root / "outbox").mkdir()
+            (root / "base" / "outbox").mkdir(parents=True)
             synced = []
             with mock.patch.object(ledger, "fsync_dir", side_effect=synced.append):
-                ledger.durable_directory(root / "outbox")
-            self.assertEqual(synced, [root])
+                ledger.durable_directory(root / "base" / "outbox")
+            self.assertEqual(synced, list((root / "base" / "outbox").parents))
+
+    def test_durable_directory_retry_persists_ancestor_entries(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "base").mkdir()
+            target = root / "base" / "outbox" / "pending"
+            real = ledger.fsync_dir
+            state = {"fail": True}
+
+            def flaky(directory):
+                # The first sync is the failing one: base's entry (the
+                # outbox) is never persisted by the first call.
+                if state["fail"]:
+                    state["fail"] = False
+                    raise OSError("sync failed")
+                return real(directory)
+
+            with mock.patch.object(ledger, "fsync_dir", side_effect=flaky):
+                with self.assertRaises(OSError):
+                    ledger.durable_directory(target)
+            self.assertTrue(target.is_dir())
+            synced = []
+            with mock.patch.object(ledger, "fsync_dir", side_effect=synced.append):
+                ledger.durable_directory(target)
+            self.assertEqual(synced, list(target.parents))
 
     def test_put_file_removes_staging_file_on_failure(self):
         with tempfile.TemporaryDirectory() as raw:
