@@ -141,6 +141,37 @@ test('clone keeps objects the caller reaches only through GIT_ALTERNATE_OBJECT_D
     await repo.cleanup();
   }
 });
+test('clone stays connected after the alternate vanishes when the target exists only on origin', async () => {
+  const repo = await identityRepo();
+  const alternate = join(dirname(repo.root), 'alternate-objects');
+  try {
+    const head = repo.git('rev-parse', 'HEAD').trim();
+    repo.git('push', '-q', 'origin', `${head}:refs/heads/origin-only`);
+    // Keep the caller from knowing the target: no tracking ref, no local branch.
+    repo.git('update-ref', '-d', 'refs/remotes/origin/origin-only');
+    const objects = join(repo.root, '.git', 'objects');
+    await mkdir(alternate);
+    for (const entry of await readdir(objects))
+      await rename(join(objects, entry), join(alternate, entry));
+    await mkdir(join(objects, 'pack'));
+    await mkdir(join(objects, 'info'));
+    vi.stubEnv('GIT_ALTERNATE_OBJECT_DIRECTORIES', alternate);
+    let root: string;
+    try {
+      root = await isolateAddressMany(repo.root, 7, {
+        cloneRoot: join(dirname(repo.root), 'clones'),
+        target: 'origin-only',
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    await rename(alternate, `${alternate}.removed`);
+    expect(repo.git('-C', root, 'rev-parse', 'origin/origin-only').trim()).toBe(head);
+    expect(() => repo.git('-C', root, 'fsck', '--connectivity-only')).not.toThrow();
+  } finally {
+    await repo.cleanup();
+  }
+});
 
 test('failed isolation removes its partial clone directory', async () => {
   const repo = await identityRepo();
