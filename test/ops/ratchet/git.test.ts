@@ -529,4 +529,22 @@ describe('remote transport env', { timeout: 30_000 }, () => {
       rmSync(base, { recursive: true, force: true });
     }
   });
+
+  test('a caller GIT_ALLOW_PROTOCOL restriction still applies to the remote child', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'cq-ratchet-allow-'));
+    const prior = process.env['GIT_ALLOW_PROTOCOL'];
+    try {
+      const bare = join(base, 'remote.git');
+      mkdirSync(bare);
+      git(bare, ['init', '-q', '--bare']);
+      const work = join(base, 'work');
+      initRepo(work);
+      process.env['GIT_ALLOW_PROTOCOL'] = 'https';
+      await expect(gitLsRemoteRef(work, bare, 'main', 'unused')).rejects.toThrow(/ls-remote/);
+    } finally {
+      if (prior === undefined) delete process.env['GIT_ALLOW_PROTOCOL'];
+      else process.env['GIT_ALLOW_PROTOCOL'] = prior;
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
 });

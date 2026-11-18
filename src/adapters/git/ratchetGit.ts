@@ -83,9 +83,6 @@ const SCRUBBED_ENV = [
   'GIT_SSH_COMMAND',
   'GIT_PROXY_COMMAND',
   'GIT_TRACE_REDACT',
-  // Overrides protocol.<name>.allow, so an inherited list naming `ext` would
-  // defeat the pinned protocol.ext.allow=never.
-  'GIT_ALLOW_PROTOCOL',
 ];
 
 /** The hardened child env: inherited, minus redirections, plus the pinned switches. */
@@ -102,6 +99,15 @@ function gitEnv(): NodeJS.ProcessEnv {
   ) {
     env['GIT_CONFIG_GLOBAL'] = devNull;
   }
+  // GIT_ALLOW_PROTOCOL overrides protocol.<name>.allow, so an inherited list
+  // naming `ext` would defeat the pinned protocol.ext.allow=never. Keep the
+  // caller's restriction but drop `ext` from it.
+  const allow = process.env['GIT_ALLOW_PROTOCOL'];
+  if (allow !== undefined)
+    env['GIT_ALLOW_PROTOCOL'] = allow
+      .split(':')
+      .filter((name) => name.toLowerCase() !== 'ext')
+      .join(':');
   env['GIT_CONFIG_NOSYSTEM'] = '1';
   env['GIT_TERMINAL_PROMPT'] = '0';
   env['GIT_OPTIONAL_LOCKS'] = '0';
