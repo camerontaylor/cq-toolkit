@@ -121,6 +121,29 @@ test('one edit block pairs removals with re-additions in order; a context line e
   ]);
 });
 
+test('an inserted non-assertion line does not steal the assertion pair', () => {
+  const diff = diffOf(
+    'tests/example.test.ts',
+    [
+      '@@ -1,2 +1,3 @@',
+      '-const actual = oldValue();',
+      '-expect(actual).toBe(1);',
+      '+const actual = newValue();',
+      '+const detail = actual.detail;',
+      '+expect(actual).toBe(2);',
+      '',
+    ].join('\n'),
+  );
+  expect(expectationChangesOf(diff)).toEqual([
+    {
+      file: 'tests/example.test.ts',
+      line: 3,
+      before: 'expect(actual).toBe(1);',
+      after: 'expect(actual).toBe(2);',
+    },
+  ]);
+});
+
 test('a malformed non-diff text yields no entry and never throws', () => {
   expect(expectationChangesOf('hello\nworld\n')).toEqual([]);
   expect(expectationChangesOf('')).toEqual([]);
