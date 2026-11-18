@@ -107,6 +107,8 @@ export class CheckoutWriterContext {
           entry.binding = await this.captureBinding(metadata);
         }
       }
+      // Retirement may have happened during the awaits above; refuse before installing.
+      this.assertLive();
       this.slots.set(name, entry);
       return this.methods(entry);
     } catch (error) {
