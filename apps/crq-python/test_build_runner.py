@@ -229,6 +229,17 @@ class BuildRunnerTests(unittest.TestCase):
         self.assertIn('--frozen-lockfile', install)
         self.assertIn('--offline', install)
 
+    def test_build_fails_when_stale_dist_cleanup_fails(self):
+        (self.repo / 'dist').mkdir()
+        run, _ = self.fake(deploy=lambda argv: Result())
+        with mock.patch.object(build_runner.shutil, 'rmtree',
+                               side_effect=PermissionError('denied')):
+            with self.assertRaisesRegex(build_runner.BuildError,
+                                        'cannot remove stale dist/'):
+                build_runner.build(self.repo, SHA, self.base / 'stage',
+                                   self.base / 'out/runner.tar.gz', run=run)
+        self.assertNotIn(['pnpm', 'run', 'build'], run.calls)
+
     def test_build_rejects_staging_inside_checkout(self):
         run, _ = self.fake(deploy=lambda argv: Result())
         with self.assertRaisesRegex(build_runner.BuildError, 'outside the source checkout'):

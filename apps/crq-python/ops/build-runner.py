@@ -272,7 +272,14 @@ def build(repo, sha, staging, output, node='node', pnpm='pnpm',
     compile_runner = [pnpm, 'run', 'build']
     run(install, cwd=checkout['repo'], env=env)
     run(rebuild, cwd=checkout['repo'], env=env)
-    shutil.rmtree(checkout['repo'] / 'dist', ignore_errors=True)
+    stale_dist = checkout['repo'] / 'dist'
+    if stale_dist.exists() or stale_dist.is_symlink():
+        try:
+            shutil.rmtree(stale_dist)
+        except OSError as error:
+            raise BuildError('cannot remove stale dist/: ' + str(error)) from error
+        if stale_dist.exists() or stale_dist.is_symlink():
+            raise BuildError('stale dist/ survived cleanup')
     run(compile_runner, cwd=checkout['repo'], env=env)
     deploy_command = deploy(checkout['repo'], staging, pnpm, env, run=run)
     if not staging.is_dir():
