@@ -638,6 +638,7 @@ describe('#1195 usageSummary on terminal results', () => {
       fakeFactory(
         fakeDriver({
           usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+          usageProvenance: 'measured',
           denials: [],
           stopReason: 'error',
           errorClass: 'output-invalid',
