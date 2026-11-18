@@ -133,17 +133,18 @@ describe('trust mirrors', () => {
     expect(String(err).length).toBeLessThan(400);
   });
 
-  test('resolveConflict: differing protectedBranch throws config before any effect', async () => {
+  test('resolveConflict: differing protectedBranch fails before any effect', async () => {
     const effects = new FakeMergeEffects();
     const op = makeResolveConflictOp({ effects, cqEnv: env() });
-    const err = await op({
+    const res = (await op({
       pr: 1,
       repoRoot: '.',
       headBranch: 'feat/x',
       baseBranch: 'main',
       protectedBranch: 'dev',
-    }).catch((e: unknown) => e);
-    expect(errorClassOf(err)).toBe('config');
+    })) as { status: string; error: string };
+    expect(res.status).toBe('failed');
+    expect(res.error).toMatch(/CQ_MERGE_PROTECTED_BRANCH/);
     expect(effects.calls).toEqual([]);
   });
 
@@ -194,13 +195,14 @@ describe('trust mirrors', () => {
     }).catch((e: unknown) => e);
     expect(errorClassOf(err)).toBe('config');
     expect(effects.calls).toEqual([]);
-    const err2 = await makeResolveConflictOp({ effects, cqEnv })({
+    const res2 = (await makeResolveConflictOp({ effects, cqEnv })({
       pr: 1,
       repoRoot: '.',
       headBranch: 'feat/x',
       baseBranch: 'main',
-    }).catch((e: unknown) => e);
-    expect(errorClassOf(err2)).toBe('config');
+    })) as { status: string; error: string };
+    expect(res2.status).toBe('failed');
+    expect(res2.error).toMatch(/CQ_MERGE_PROTECTED_BRANCH/);
     const badBase = env({ CQ_MERGE_BASE_BRANCH: 'a..b' });
     const err3 = await makeRunMergePrsOp({ effects, cqEnv: badBase })({
       ...runInput,
