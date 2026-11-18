@@ -226,16 +226,35 @@ def _read_template(prepare, root: Path, source_sha: str, name: str):
     return oid, raw, raw.decode("utf-8")
 
 
+def _logical_lines(text: str) -> list[str]:
+    """Physical lines joined across trailing-backslash continuations, as systemd reads them."""
+    logical = []
+    pending = ""
+    for line in text.splitlines():
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        logical.append(pending + line)
+        pending = ""
+    if pending:
+        logical.append(pending)
+    return logical
+
+
 def _section_values(text: str, section: str, key: str) -> list[str]:
     values = []
     current = None
-    for line in text.splitlines():
+    for line in _logical_lines(text):
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             current = stripped[1:-1].strip()
             continue
-        if current == section and stripped.startswith(key + "="):
-            values.append(stripped.split("=", 1)[1].strip())
+        if current != section or "=" not in stripped:
+            continue
+        name, value = stripped.split("=", 1)
+        # systemd ignores whitespace around the key and the equals sign.
+        if name.strip() == key:
+            values.append(value.strip())
     return values
 
 
@@ -1100,9 +1119,17 @@ class ProductionUnitAdapter:
         except OSError as exc:
             self.refuse("saved service is unreadable: " + str(exc)[:160])
         values = _section_values(text, "Service", "Type")
-        if len(values) != 1:
-            self.refuse("saved service must declare exactly one Type")
-        service_type = values[0]
+        if len(values) > 1:
+            self.refuse("saved service must declare at most one Type")
+        if values:
+            service_type = values[0]
+        elif (_section_values(text, "Service", "ExecStart")
+              and not _section_values(text, "Service", "BusName")):
+            # systemd defaults a service with ExecStart and no Type or BusName
+            # to simple, so a prior install without Type= stays restorable.
+            service_type = "simple"
+        else:
+            self.refuse("saved service has no Type and does not default to simple")
         if service_type not in {"simple", "oneshot"}:
             self.refuse("saved service Type is unsupported: " + service_type)
         return service_type

@@ -653,6 +653,33 @@ class InventoryTests(unittest.TestCase):
             adapter_mod.declared_inventory(self.root, "f" * 40)
 
 
+class SavedServiceTypeTests(AdapterFixture):
+    def _type(self, body):
+        path = self.base / "saved.service"
+        path.write_text(body)
+        return self.adapter._saved_service_type(path)
+
+    def test_whitespace_around_equals_counts_as_a_duplicate_type(self):
+        with self.assertRaisesRegex(dc.Refused, "at most one Type"):
+            self._type("[Service]\nType=oneshot\nType = simple\nExecStart=/bin/x\n")
+
+    def test_continuation_swallows_a_type_inside_environment(self):
+        body = ("[Service]\nEnvironment=LABEL=value \\\nType=oneshot\n"
+                "ExecStart=/usr/bin/env python3 /w.py\n")
+        self.assertEqual(self._type(body), "simple")
+
+    def test_missing_type_with_execstart_defaults_to_simple(self):
+        self.assertEqual(self._type("[Service]\nExecStart=/bin/x\n"), "simple")
+
+    def test_missing_type_with_busname_is_refused(self):
+        with self.assertRaisesRegex(dc.Refused, "does not default to simple"):
+            self._type("[Service]\nBusName=a.b\nExecStart=/bin/x\n")
+
+    def test_explicit_oneshot_is_kept(self):
+        self.assertEqual(self._type("[Service]\nType = oneshot\nExecStart=/bin/x\n"),
+                         "oneshot")
+
+
 class AdapterTests(AdapterFixture):
     def test_preflight_refuses_same_runtime(self):
         with self.assertRaisesRegex(dc.Refused, "already selects"):
