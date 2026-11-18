@@ -219,6 +219,26 @@ class RepairDrainTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 os.close(rfd)  # reap_completed closed the read end
 
+    def test_interrupted_reap_untracks_consumed_worker_and_keeps_waiting(self):
+        fds = []
+        active = {}
+        for pid, item in ((100, 'consumed'), (101, 'exited')):
+            rfd, wfd = os.pipe()
+            fds.append((rfd, wfd))
+            active[pid] = (item, rfd)
+        # An interrupt after a waitpid consumed the first worker's status but
+        # before its PID was untracked leaves a stale entry; the next poll must
+        # tolerate it and keep waiting for the remaining owned worker.
+        with mock.patch.object(service.os, 'waitpid', side_effect=[ChildProcessError(), (101, 0)]):
+            failed, reaped = service.reap_completed(active)
+        self.assertTrue(failed)
+        self.assertTrue(reaped)
+        self.assertEqual(active, {})
+        for rfd, wfd in fds:
+            os.close(wfd)
+            with self.assertRaises(OSError):
+                os.close(rfd)  # reap_completed closed the read end
+
     def test_admission_checks_exited_workers_even_below_capacity(self):
         self.config['repair']['max_concurrent_items'] = 10
         with mock.patch.object(service.os, 'fork', return_value=100) as fork, mock.patch.object(service.os, 'waitpid', return_value=(100, 9)), mock.patch.object(service, 'blocked', return_value=False):
