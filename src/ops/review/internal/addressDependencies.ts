@@ -148,7 +148,7 @@ const installLifecycleScripts = new Set([
  * Iterative two-pointer matching: no regex backtracking, so the cost stays
  * O(name x pattern) however many wildcards a lifecycle script spells.
  */
-const matchesScriptPattern = (name: string, pattern: string): boolean => {
+const matchesSegment = (name: string, pattern: string): boolean => {
   let nameIndex = 0;
   let patternIndex = 0;
   let star = -1;
@@ -169,6 +169,21 @@ const matchesScriptPattern = (name: string, pattern: string): boolean => {
   while (pattern[patternIndex] === '*') patternIndex++;
   return patternIndex === pattern.length;
 };
+
+const matchesSegments = (name: string[], pattern: string[]): boolean => {
+  const [head, ...rest] = pattern;
+  if (head === undefined) return name.length === 0;
+  if (head === '**') {
+    for (let take = 1; take <= name.length; take++)
+      if (matchesSegments(name.slice(take), rest)) return true;
+    return false;
+  }
+  const [first, ...others] = name;
+  return first !== undefined && matchesSegment(first, head) && matchesSegments(others, rest);
+};
+
+const matchesScriptPattern = (name: string, pattern: string): boolean =>
+  matchesSegments(name.split(':'), pattern.split(':'));
 
 const MAX_GLOBSTAR_SEGMENTS = 6;
 
@@ -223,9 +238,10 @@ export async function assertAddressDependencyMetadata(
       if (key === undefined || selected.has(key)) continue;
       selected.add(key);
       const command = scripts[key] ?? '';
-      const tokens = (command.match(/"[^"]*"|'[^']*'|[^\s;&|()]+/g) ?? []).map((token) =>
-        token.replace(/^(['"])(.*)\1$/, '$2'),
-      );
+      // Unquoted shell boundaries stay in the stream so a runner's task list ends there.
+      const raw = command.match(/"[^"]*"|'[^']*'|[;&|()]+|[^\s;&|()]+/g) ?? [];
+      const boundary = raw.map((token) => /^[;&|()]+$/.test(token));
+      const tokens = raw.map((token) => token.replace(/^(['"])(.*)\1$/, '$2'));
       const literal = new Set<string>();
       // npm-run-all (run-s/run-p/npm-run-all) selects scripts by name pattern, so a
       // token like `build:*` runs `build:deps` even though the command never spells
@@ -234,6 +250,9 @@ export async function assertAddressDependencyMetadata(
       const patterns = new Set<string>();
       // Dynamic shell expressions and unsupported runner syntax stay conservative:
       // narrowing those to literal names could omit an actual install input.
+      // A runner pattern whose targets cannot be established makes every script a
+      // possible install input.
+      let unresolved = false;
       let ambiguous =
         /[$`\\<>]/.test(command) ||
         tokens.includes('eval') ||
@@ -251,7 +270,10 @@ export async function assertAddressDependencyMetadata(
         // the scripts it names reachable.
         if (['npm-run-all', 'run-s', 'run-p'].includes(runner)) {
           ambiguous = true;
-          for (const argument of tokens.slice(index + 1)) {
+          for (let next = index + 1; next < tokens.length; next++) {
+            const argument = tokens[next] ?? '';
+            // The task list ends at a shell boundary or `--` (forwarded arguments).
+            if (boundary[next] || (argument === '--' && raw[next] === '--')) break;
             if (argument.startsWith('-')) continue;
             // Unsupported matcher syntax (negation, brackets, braces) stays
             // ambiguous; supported `*`/`?` patterns resolve to the scripts they
@@ -259,10 +281,10 @@ export async function assertAddressDependencyMetadata(
             // A quoted argument carries forwarded task arguments after the
             // pattern (`"build:* --mode=production"`): match the task alone.
             const task = argument.trim().split(/\s+/)[0] ?? '';
-            if (/[!\[\]{}()+,|\\]/.test(task)) ambiguous = true;
+            if (/[!\[\]{}()+,|\\]/.test(task)) unresolved = true;
             else if (/[*?]/.test(task)) {
               const variants = globstarVariants(task);
-              if (variants === null) ambiguous = true;
+              if (variants === null) unresolved = true;
               else for (const variant of variants) patterns.add(variant);
             } else if (task in scripts) literal.add(task);
             else ambiguous = true;
@@ -279,12 +301,14 @@ export async function assertAddressDependencyMetadata(
           ambiguous = true;
         else literal.add(name);
       }
+      if (unresolved) ambiguous = true;
       const resolved = [...patterns];
       for (const target of Object.keys(scripts)) {
         if (
           target === key ||
           selected.has(target) ||
           !(
+            unresolved ||
             literal.has(target) ||
             (ambiguous && command.includes(target)) ||
             resolved.some((pattern) => matchesScriptPattern(target, pattern))

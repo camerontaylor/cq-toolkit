@@ -229,6 +229,65 @@ describe('review.address candidate isolation', () => {
       }
     },
   );
+  test.each([
+    [
+      'a shell boundary ends the task list',
+      "run-s build:deps && printf '%s' 'docs:*'",
+      'docs:lint',
+    ],
+    ['-- ends the task list', "run-s build:deps -- 'docs:*'", 'docs:lint'],
+    ['* stays inside one segment', "run-s 'build:*'", 'build:docs:html'],
+  ])(
+    'runner selection: %s reuses dependencies when an unselected script changes',
+    async (_name, postinstall, changed) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        const scripts = {
+          postinstall,
+          'build:deps': 'node deps.mjs',
+          'build:docs:html': 'node html.mjs',
+          'docs:lint': 'node lint.mjs',
+        };
+        await f.repo.write('package.json', JSON.stringify({ scripts }));
+        f.repo.commitAll('runner selection');
+        await writeFile(
+          join(f.dependencyRoot, 'package.json'),
+          JSON.stringify({ scripts: { ...scripts, [changed]: 'node different.mjs' } }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.commit, result.reason).toBeTruthy();
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test.each([
+    ["run-s 'build:[ab]'", 'build:a'],
+    ["run-s 'build:**'", 'build:docs:html'],
+  ])(
+    'runner pattern %s refuses reuse when a script it selects changes',
+    async (postinstall, changed) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        const scripts = {
+          postinstall,
+          'build:a': 'node a.mjs',
+          'build:docs:html': 'node html.mjs',
+        };
+        await f.repo.write('package.json', JSON.stringify({ scripts }));
+        f.repo.commitAll('runner pattern selection');
+        await writeFile(
+          join(f.dependencyRoot, 'package.json'),
+          JSON.stringify({ scripts: { ...scripts, [changed]: 'node different.mjs' } }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.commit).toBeUndefined();
+        expect(result.reason).toContain('manifests/locks differ');
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
   test('a catastrophic-backtracking runner pattern still resolves and compares scripts', async () => {
     const f = await fixture(undefined, '', { installedDependencies: 'matching' });
     try {
