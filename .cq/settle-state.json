@@ -2,45 +2,6 @@
   "version": 1,
   "repo": "camerontaylor/cq-toolkit",
   "prs": {
-    "1914": {
-      "tuple": {
-        "head": "0c89c0deee26dc3b6dc72e5f9132b5dd8f67d971",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T06:05:12.388Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1915": {
-      "tuple": {
-        "head": "06ef9991aad39f5c9b09e0e95cbd154c026886f4",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T06:09:19.656Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1916": {
-      "tuple": {
-        "head": "7f5c23893ff611c3fbdf19609ac141fb0d0d7683",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T06:13:52.814Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1917": {
       "tuple": {
         "head": "0458ae36eeb42ae13f209ff8c58cc50236e7b93d",
@@ -171,19 +132,6 @@
         }
       ]
     },
-    "1935": {
-      "tuple": {
-        "head": "22078c49dd0e951708eceaa9105d9c45377f60fd",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T11:06:19.598Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1936": {
       "tuple": {
         "head": "e17413f1a6c2956bf71151c08a5d46a9b9b62c23",
@@ -210,32 +158,6 @@
         }
       ]
     },
-    "1940": {
-      "tuple": {
-        "head": "8b80a00db547e026d7c1efb3bc56a95518a2e3ee",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T13:50:28.540Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1941": {
-      "tuple": {
-        "head": "dd27fbba7e00294fff360f70669b2d3be65014d1",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T13:50:28.540Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1942": {
       "tuple": {
         "head": "855b03311febf49eecbd8642784b5e757664f3d0",
@@ -245,19 +167,6 @@
       "observations": [
         {
           "observedAt": "2026-11-16T14:51:16.114Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1944": {
-      "tuple": {
-        "head": "c42bf527635996396c619f37cb1d481c9b60bd9f",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T15:02:45.115Z",
           "by": "self-merge-prs:observe"
         }
       ]
@@ -314,19 +223,6 @@
         }
       ]
     },
-    "1951": {
-      "tuple": {
-        "head": "fbb1c8a76eebe4c6307aeccdc807af1929eaadb8",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T18:17:48.195Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1952": {
       "tuple": {
         "head": "9cb54b34fd5243ff9c1a3008065b587debb15ac4",
@@ -336,19 +232,6 @@
       "observations": [
         {
           "observedAt": "2026-11-16T18:22:28.085Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1953": {
-      "tuple": {
-        "head": "322ce664a2d5c320707d3530fdd70fea8bbbb653",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T18:27:23.216Z",
           "by": "self-merge-prs:observe"
         }
       ]
@@ -388,19 +271,6 @@
       "observations": [
         {
           "observedAt": "2026-11-16T19:39:32.918Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1957": {
-      "tuple": {
-        "head": "a8722655c15a0ca1a23aea09e0c62df02389c6a6",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-16T19:47:38.490Z",
           "by": "self-merge-prs:observe"
         }
       ]
