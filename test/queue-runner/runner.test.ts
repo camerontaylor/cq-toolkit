@@ -183,6 +183,15 @@ describe('operator-live command seam (D1)', () => {
     });
   });
 
+  it('maps a budget-exhausted live unit to exit 3, like needs-human', async () => {
+    const result = await run(['watchdog'], {
+      shadowRoot: '/unused',
+      tick: 'x',
+      live: async () => ({ status: 'budget-exhausted' }),
+    });
+    expect(result.exitCode).toBe(3);
+  });
+
   it('maps a publish reconciliation-pending artifact to exit 1 while keeping its value', async () => {
     // Python's publisher unit: reconciliation-pending exits 1 even though the
     // artifact stays an ok result that retains the publication value.
