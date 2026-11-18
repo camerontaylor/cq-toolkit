@@ -11,7 +11,9 @@
 // fix.previewApply.test.ts, fix.ruleOverFiles.test.ts,
 // fix.agentProposal.test.ts, fix.agentProposalRefusal.test.ts,
 // fix.patchTargets.test.ts, fix.schema.test.ts and fix.helpers.ts.
-import { readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { makeAnalyzeFix } from '../../../src/ops/analyze/fix.js';
@@ -46,6 +48,30 @@ describe('analyze.fix — cluster + rule', () => {
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') expect(result.reason).toContain('at least one commit');
     expect(source(dir)).toBe(BAD);
+  });
+
+  test('git runs under the injected entry-time env, not the ambient process.env', async () => {
+    const { dir, clusterId } = await fixture({ commit: false });
+    // A PATH-only shim that logs every call, then defers to the real git.
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    const shimDir = mkdtempSync(join(tmpdir(), 'cq-git-shim-'));
+    const log = join(shimDir, 'calls.log');
+    writeFileSync(
+      join(shimDir, 'git'),
+      `#!/bin/sh\necho "$@" >> '${log}'\nexec '${realGit}' "$@"\n`,
+    );
+    chmodSync(join(shimDir, 'git'), 0o755);
+    try {
+      const result = await makeAnalyzeFix({
+        run: scriptedRunner(),
+        env: { ...process.env, PATH: `${shimDir}:${process.env['PATH'] ?? ''}` },
+      })({ dir, clusterId, rule: RULE, apply: true });
+      expect(result.status).toBe('needs-human');
+      // The HEAD probe is the op's own runGit; the shim saw it only via the injected env.
+      expect(readFileSync(log, 'utf8')).toContain('rev-parse --verify --quiet HEAD');
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+    }
   });
 
   test('--apply without configured checks → failed before writing', async () => {
