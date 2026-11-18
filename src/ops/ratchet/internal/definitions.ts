@@ -257,9 +257,7 @@ function referenceTargets(file: string, config: Record<string, unknown>): string
     if (typeof path !== 'string') continue;
     // Reference paths may use Windows separators; normalize before the repo check.
     const slashPath = path.replace(/\\/g, '/');
-    const target = slashPath.endsWith('.json')
-      ? slashPath
-      : posix.join(slashPath, 'tsconfig.json');
+    const target = slashPath.endsWith('.json') ? slashPath : posix.join(slashPath, 'tsconfig.json');
     // A reference path is always relative to the referencing file's directory.
     const resolved = resolveRelative(file, target);
     if (resolved !== null) out.push(resolved);
