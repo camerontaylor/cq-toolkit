@@ -161,14 +161,35 @@ function parseIsoLike(text: string): bigint | null {
   return localMicros - time.offsetMicros;
 }
 
+/**
+ * Port of CPython's `_find_isoformat_datetime_separator`: the separator sits at
+ * a position fixed by the date's shape (week dates are the ambiguous case),
+ * not at the longest valid date prefix. -1 means date only or malformed.
+ */
 function findDateTimeSeparator(text: string): number {
-  if (parseDate(text) !== null) return -1;
-  // A date can have several valid prefix lengths (especially week dates).
-  // Prefer the longest valid form, then consume one Unicode separator.
-  for (let index = text.length - 1; index > 0; index -= 1) {
-    if (parseDate(text.slice(0, index)) !== null) return index;
+  const length = text.length;
+  if (length <= 7) return -1;
+  const isDigit = (index: number): boolean => text[index]! >= '0' && text[index]! <= '9';
+  let separator: number;
+  if (text[4] === '-') {
+    if (text[5] === 'W') {
+      if (length > 8 && text[8] === '-') {
+        if (length === 9) return -1;
+        separator = length > 10 && isDigit(10) ? 8 : 10;
+      } else {
+        separator = 8;
+      }
+    } else {
+      separator = 10;
+    }
+  } else if (text[4] === 'W') {
+    let index = 7;
+    while (index < length && isDigit(index)) index += 1;
+    separator = index < 9 ? index : index % 2 === 0 ? 7 : 8;
+  } else {
+    separator = 8;
   }
-  return -1;
+  return separator >= length ? -1 : separator;
 }
 
 function parseDate(text: string): { days: number } | null {
