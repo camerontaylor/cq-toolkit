@@ -490,15 +490,19 @@ def tool(name: str, directory: pathlib.Path | None) -> str:
 def download(url: str, destination: pathlib.Path, timeout: float = 120) -> str:
     """Download to a sibling ``.part`` and fsync before replacing."""
     part = destination.with_name(f"{destination.name}.{uuid.uuid4().hex}.part")
-    with urllib.request.urlopen(url, timeout=timeout) as response, \
-            part.open("wb") as handle:
-        while True:
-            chunk = response.read(1 << 20)
-            if not chunk:
-                break
-            handle.write(chunk)
-        handle.flush()
-        os.fsync(handle.fileno())
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response, \
+                part.open("wb") as handle:
+            while True:
+                chunk = response.read(1 << 20)
+                if not chunk:
+                    break
+                handle.write(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
     return str(part)
 
 

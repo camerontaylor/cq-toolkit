@@ -83,6 +83,27 @@ class SumsTests(unittest.TestCase):
                              vm.sha256_file(path))
 
 
+class DownloadTests(unittest.TestCase):
+    def test_failed_transfer_removes_the_partial_file(self):
+        class Broken:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, size):
+                raise OSError("connection reset")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = pathlib.Path(tmp) / "image.img"
+            with mock.patch.object(vm.urllib.request, "urlopen",
+                                   return_value=Broken()):
+                with self.assertRaises(OSError):
+                    vm.download("https://example.invalid/x", destination)
+            self.assertEqual(list(pathlib.Path(tmp).iterdir()), [])
+
+
 class FetchImageTests(unittest.TestCase):
     def _download(self, digest, data, calls, *, fail_image=False):
         def fake(url, destination, timeout=120):
