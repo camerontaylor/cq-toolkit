@@ -335,6 +335,11 @@ def _dispatch(config, role, job, wt, directory, judge=False):
     if not triage_context_safe(c, {'current_path': snapshot.get('path') or 'source-snapshot.txt', 'source': snapshot.get('source', '')},
                                directory / 'source-snapshot-scan.json'):
         raise ValueError('source snapshot secret scan rejected; refusing dispatch')
+    # The review diff rides in the job and is serialized into the judge prompt;
+    # it gets the identical scan before any driver or provider call.
+    if not triage_context_safe(c, {'current_path': 'review-diff.txt', 'source': job.get('review_diff', '')},
+                               directory / 'review-diff-scan.json'):
+        raise ValueError('review diff secret scan rejected; refusing dispatch')
     job['source_snapshot'] = snapshot
     atomic(directory / 'source-snapshot.json', snapshot)
     if role['driver'] == 'cq':
