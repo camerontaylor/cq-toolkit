@@ -96,7 +96,17 @@ function spawnAndCollect(
       settle({ kind: 'spawn-error', error: err });
       return;
     }
-    trackCheckoutWriter(child);
+    // The checkout writer may treat this child as drained only when a `close`
+    // proves the pipes ended on their own. A grace-forced finalize below
+    // destroys the pipes while a descendant outside the killed group may still
+    // hold them, so the `close` that destroy manufactures reconciles nothing:
+    // the drain gate resolves only on a close reached without forced
+    // destruction, keeping `isComplete()`/`complete()` honest.
+    let markDrained!: () => void;
+    const drained = new Promise<void>((done) => {
+      markDrained = done;
+    });
+    trackCheckoutWriter(child, drained);
     const collect = (): { chunks: Buffer[]; bytes: number } => ({ chunks: [], bytes: 0 });
     const out = collect();
     const err = collect();
@@ -171,7 +181,9 @@ function spawnAndCollect(
     // descendant outside the killed group still holds them. Either way the
     // capture streams are released, the timer/listeners/cleanup hooks are
     // removed, and the promise settles — so a timeout or cancellation can
-    // never leave the runner pending.
+    // never leave the runner pending. A grace-forced destroy is not a drain
+    // proof: it must not release the checkout writer's child tracking (the
+    // close handler resolves that gate only when `graceExpired` is false).
     function finalize(code: number | null, signal: NodeJS.Signals | null): void {
       if (settled) return;
       settled = true;
@@ -211,6 +223,10 @@ function spawnAndCollect(
       }
     }
     child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+      // Reconcile the checkout writer before settling: a close arriving after
+      // the grace-forced finalize was manufactured by the pipe destruction, so
+      // it must never count as drained.
+      if (!graceExpired) markDrained();
       finalize(code, signal);
     });
   });
