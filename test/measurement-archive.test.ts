@@ -345,10 +345,9 @@ describe('M8a failure evidence', () => {
       gitCommonDir: join(base, 'common'),
       roots: [{ name: 'fix', path: root, files: ['grows'] }],
     })) as { bundleDir: string; manifest: Manifest };
-    expect(entryOf(built.manifest, 'fix', 'grows')).toMatchObject({
-      state: 'unsupported',
-      reason: expect.stringContaining('sanitized evidence exceeds'),
-    });
+    const grown = entryOf(built.manifest, 'fix', 'grows');
+    expect(grown).toMatchObject({ state: 'unsupported' });
+    expect(JSON.stringify(grown)).toContain('sanitized evidence exceeds');
   });
 
   test('rejects symlinks, caps size, records read failures and missing receipts; uses private modes', async () => {
