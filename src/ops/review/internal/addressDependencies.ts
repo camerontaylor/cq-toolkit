@@ -182,8 +182,11 @@ const matchesSegments = (name: string[], pattern: string[]): boolean => {
   return first !== undefined && matchesSegment(first, head) && matchesSegments(others, rest);
 };
 
+// npm-run-all treats repeated separators as one, so `build::deps` names `build:deps`.
+const collapseColons = (value: string): string => value.replace(/:+/g, ':');
+
 const matchesScriptPattern = (name: string, pattern: string): boolean =>
-  matchesSegments(name.split(':'), pattern.split(':'));
+  matchesSegments(collapseColons(name).split(':'), collapseColons(pattern).split(':'));
 
 const MAX_GLOBSTAR_SEGMENTS = 6;
 
@@ -194,7 +197,7 @@ const MAX_GLOBSTAR_SEGMENTS = 6;
  * the caller must stay conservative.
  */
 const globstarVariants = (pattern: string): string[] | null => {
-  const segments = pattern.split(':');
+  const segments = collapseColons(pattern).split(':');
   const globstars = segments.filter((segment) => segment === '**').length;
   if (globstars > MAX_GLOBSTAR_SEGMENTS) return null;
   let variants: string[][] = [[]];
@@ -239,9 +242,16 @@ export async function assertAddressDependencyMetadata(
       selected.add(key);
       const command = scripts[key] ?? '';
       // Unquoted shell boundaries stay in the stream so a runner's task list ends there.
-      const raw = command.match(/"[^"]*"|'[^']*'|[;&|()]+|[^\s;&|()]+/g) ?? [];
+      // A word is any run of quoted and unquoted segments (`"build":deps`), decoded
+      // together; a stray unmatched quote stays in the word and forces ambiguity.
+      const raw = command.match(/[;&|()]+|(?:"[^"]*"|'[^']*'|[^\s;&|()"']|["'])+/g) ?? [];
       const boundary = raw.map((token) => /^[;&|()]+$/.test(token));
-      const tokens = raw.map((token) => token.replace(/^(['"])(.*)\1$/, '$2'));
+      const tokens = raw.map((token) =>
+        token.replace(
+          /"([^"]*)"|'([^']*)'/g,
+          (_match, double?: string, single?: string) => double ?? single ?? '',
+        ),
+      );
       const literal = new Set<string>();
       // npm-run-all (run-s/run-p/npm-run-all) selects scripts by name pattern, so a
       // token like `build:*` runs `build:deps` even though the command never spells
@@ -273,14 +283,19 @@ export async function assertAddressDependencyMetadata(
           for (let next = index + 1; next < tokens.length; next++) {
             const argument = tokens[next] ?? '';
             // The task list ends at a shell boundary or `--` (forwarded arguments).
-            if (boundary[next] || (argument === '--' && raw[next] === '--')) break;
+            if (boundary[next] || argument === '--') break;
+            // Options that take a separate value consume it so it is not read as a task.
+            if (argument === '--max-parallel' || argument === '--npm-path') {
+              next++;
+              continue;
+            }
             if (argument.startsWith('-')) continue;
             // Unsupported matcher syntax (negation, brackets, braces) stays
             // ambiguous; supported `*`/`?` patterns resolve to the scripts they
             // name so a pattern-selected script is still compared.
             // A quoted argument carries forwarded task arguments after the
             // pattern (`"build:* --mode=production"`): match the task alone.
-            const task = argument.trim().split(/\s+/)[0] ?? '';
+            const task = collapseColons(argument.trim().split(/\s+/)[0] ?? '');
             if (/[!\[\]{}()+,|\\]/.test(task)) unresolved = true;
             else if (/[*?]/.test(task)) {
               const variants = globstarVariants(task);

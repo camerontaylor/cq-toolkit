@@ -208,6 +208,10 @@ describe('review.address candidate isolation', () => {
     'npm-run-all -p "build:*"',
     'run-s build:**:deps',
     'run-s "build:* --mode=production"',
+    'run-s "build":deps',
+    'run-s bu"ild:d"eps',
+    'run-s build::deps',
+    'run-s --max-parallel 2 build:deps',
   ])(
     'run-s pattern selection (%s) compares every script it names before dispatch',
     async (build) => {
@@ -236,6 +240,7 @@ describe('review.address candidate isolation', () => {
       'docs:lint',
     ],
     ['-- ends the task list', "run-s build:deps -- 'docs:*'", 'docs:lint'],
+    ['a quoted -- ends the task list', "run-s build:deps '--' 'docs:*'", 'docs:lint'],
     ['* stays inside one segment', "run-s 'build:*'", 'build:docs:html'],
   ])(
     'runner selection: %s reuses dependencies when an unselected script changes',
