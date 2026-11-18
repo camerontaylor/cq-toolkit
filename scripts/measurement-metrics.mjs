@@ -136,9 +136,12 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
       else if (pointer === '/attempts')
         incomplete.channels = incomplete.wall = incomplete.usd = true;
       else if (pointer === '/usageChannels') incomplete.channels = true;
-      else if (pointer.startsWith('/usageChannels/'))
-        channelTorn.add(pointer.slice(15).replaceAll('~1', '/').replaceAll('~0', '~'));
-      else if (pointer === '/wallMs') incomplete.wall = true;
+      else if (pointer.startsWith('/usageChannels/')) {
+        // A raw slash in the suffix is a nested pointer, not a channel name.
+        const suffix = pointer.slice(15);
+        if (!suffix.includes('/'))
+          channelTorn.add(suffix.replaceAll('~1', '/').replaceAll('~0', '~'));
+      } else if (pointer === '/wallMs') incomplete.wall = true;
       else if (pointer === '/modeledUsd') incomplete.usd = true;
       else if (
         pointer === '/provenance' ||
@@ -209,7 +212,13 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
   const unattestedWhy = unattested ? UNATTESTED : undefined;
   if (channels.size === 0)
     usageAvailability['/usageChannels'] = entry(
-      aggregate([], 'value', 'usage channel', incomplete.channels, unattestedWhy),
+      aggregate(
+        [],
+        'value',
+        'usage channel',
+        incomplete.channels || channelTorn.size > 0,
+        unattestedWhy,
+      ),
     );
   else
     for (const [name, records] of channels) {
@@ -224,6 +233,15 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
       usageAvailability[`/usageChannels/${name.replaceAll('~', '~0').replaceAll('/', '~1')}`] =
         entry(total);
     }
+  // A torn channel that reported no value is still an explicit statement about
+  // that channel: it keeps its own unavailable entry instead of being dropped
+  // behind the umbrella.
+  for (const name of channelTorn) {
+    if (channels.has(name)) continue;
+    usageAvailability[`/usageChannels/${name.replaceAll('~', '~0').replaceAll('/', '~1')}`] = entry(
+      aggregate([], 'value', `usage channel ${name}`, true, unattestedWhy),
+    );
+  }
   const wallTotal = aggregate(
     leaves.map((leaf) => ({ wallMs: leaf.wallMs })),
     'wallMs',

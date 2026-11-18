@@ -265,6 +265,21 @@ describe('M10c nominal evidence', () => {
     expect(scoped.cost.availability['/usageChannels/input']?.state).toBe('partial');
     expect(scoped.cost.availability['/usageChannels/output']?.state).toBe('known');
     expect(scoped.cost.availability['/attemptWallMs']?.state).toBe('known');
+    // A nested pointer under /usageChannels (raw slash in the suffix) names no
+    // channel, so it tears nothing.
+    const nested = attested({
+      runs: [
+        makeRun({
+          attempts: [
+            leaf('inv-5', {
+              usageChannels: { input: 100 },
+              availability: { '/usageChannels/input/detail': avail('unavailable', 'lost') },
+            }),
+          ],
+        }),
+      ],
+    });
+    expect(nested.cost.availability['/usageChannels/input']?.state).toBe('known');
     // A channel name containing the pointer metacharacters is escaped in its
     // availability pointer and torn exactly on its own channel.
     const escaped = attested({

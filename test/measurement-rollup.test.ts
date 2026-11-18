@@ -410,6 +410,39 @@ describe('M10d nominal evidence', () => {
       '- usage channel cache\\~read/x: 5 subtotal (partial: observed 1 of 1 usage channel cache\\~read/x values; measurement inputs were rejected, incomplete or unavailable)',
     );
     expect(torn.markdown).toContain('- usage channel input: 100 (known)');
+    // A torn channel that reported no value has no key in usageChannels, only
+    // its own availability entry: it still gets a row, so the remaining
+    // channels are never presented as complete.
+    const tornNoValue = compose({
+      runs: [
+        makeRun({
+          attempts: [
+            leaf('inv-1', {
+              usageChannels: { input: 100 },
+              availability: { '/usageChannels/cache~0read~1x': avail('unavailable', 'lost') },
+            }),
+          ],
+        }),
+      ],
+    });
+    expect(tornNoValue.markdown).toContain('- usage channel cache\\~read/x: unknown (unavailable:');
+    // Inline CommonMark syntax in a channel name or reason is escaped; the
+    // tilde and slash stay readable.
+    const styled = compose({
+      runs: [
+        makeRun({
+          attempts: [
+            leaf('inv-1', {
+              usageChannels: { input: 100 },
+              availability: { '/usageChannels/a_*b~1c': avail('unavailable', 'see [x]') },
+            }),
+          ],
+        }),
+      ],
+    });
+    expect(styled.markdown).toContain(
+      '- usage channel a\\_\\*b/c: unknown (unavailable: no usage channel a\\_\\*b/c value',
+    );
   });
 
   test('no cross-run success ratio, no causal score', () => {
