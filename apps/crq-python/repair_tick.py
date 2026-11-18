@@ -971,33 +971,51 @@ def diff_changed_locations(patch):
     (new-side line preceding the deletion, text); added_gaps holds (old-side
     line preceding the insertion, text). The gap forms let a deletion in one
     diff be matched to a re-insertion in a diff that starts from its result.
+    'replaced' holds (old_start, old_count, added texts) for each hunk that
+    also removes lines: such a hunk stamps all of its insertions with one
+    gap anchor even though an insertion can really land inside the removed
+    span, so change_undone() matches those hunks by span overlap too.
     """
-    added, removed, added_gaps, removed_gaps = set(), set(), set(), set()
+    added, removed, added_gaps, removed_gaps, replaced = set(), set(), set(), set(), set()
+    hunk_adds = []
     old_no = new_no = old_anchor = new_anchor = 0
+    hunk_start = hunk_count = 0
     in_hunk = False
+
+    def end_hunk():
+        if in_hunk and hunk_adds and hunk_count:
+            replaced.add((hunk_start, hunk_count, frozenset(hunk_adds)))
+        hunk_adds.clear()
+
     for line in patch.splitlines():
         if line.startswith('diff --git '):
+            end_hunk()
             in_hunk = False
         elif line.startswith('@@'):
+            end_hunk()
             match = HUNK_HEADER.match(line)
             in_hunk = match is not None
             if not in_hunk:
                 continue
             old_start, old_count, new_start, new_count = match.groups()
             old_no, new_no = int(old_start), int(new_start)
+            hunk_start = old_no
+            hunk_count = 1 if old_count is None else int(old_count)
             # git names the preceding line for an empty side, else the first.
             old_anchor = old_no if old_count == '0' else old_no - 1
             new_anchor = new_no if new_count == '0' else new_no - 1
         elif in_hunk and line.startswith('+'):
             added.add((new_no, line[1:]))
             added_gaps.add((old_anchor, line[1:]))
+            hunk_adds.append(line[1:])
             new_no += 1
         elif in_hunk and line.startswith('-'):
             removed.add((old_no, line[1:]))
             removed_gaps.add((new_anchor, line[1:]))
             old_no += 1
-    return {'added': added, 'removed': removed,
-            'added_gaps': added_gaps, 'removed_gaps': removed_gaps}
+    end_hunk()
+    return {'added': added, 'removed': removed, 'added_gaps': added_gaps,
+            'removed_gaps': removed_gaps, 'replaced': replaced}
 
 
 def path_diff(c, tmp, name, args):
@@ -1031,10 +1049,17 @@ def change_undone(published, head):
     Both arguments are diff_changed_locations() results. The published diff
     maps parent->published and the head diff maps published->head, so
     published new-line numbers and head old-line numbers share one coordinate
-    system. An identical line elsewhere in the file is not an undo.
+    system. An identical line elsewhere in the file is not an undo. A head
+    replacement hunk that starts before a deletion gap gives the restored
+    line the hunk's earlier gap anchor, so a hunk whose replaced span covers
+    the gap is also matched on its added texts.
     """
-    return (sorted(published['added'] & head['removed']) +
-            sorted(published['removed_gaps'] & head['added_gaps']))
+    undone = set(published['added'] & head['removed'])
+    undone.update(published['removed_gaps'] & head['added_gaps'])
+    for old_start, old_count, adds in head['replaced']:
+        undone.update((gap, text) for gap, text in published['removed_gaps']
+                      if old_start <= gap < old_start + old_count and text in adds)
+    return sorted(undone)
 
 
 def extra_commits(c, published, actual_head):
