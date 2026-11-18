@@ -230,11 +230,14 @@ def _logical_lines(text: str) -> list[str]:
     """Physical lines joined across trailing-backslash continuations, as systemd reads them."""
     logical = []
     pending = ""
-    for line in text.splitlines():
-        if pending and line.lstrip()[:1] in ("#", ";"):
-            # systemd skips comment lines inside a continuation.
+    # A leading UTF-8 BOM is not part of the first line, as systemd reads it.
+    for line in text.removeprefix("\ufeff").splitlines():
+        if line.lstrip()[:1] in ("#", ";"):
+            # systemd skips standalone comments, and comments inside a
+            # continuation, so a comment's trailing backslash never continues.
             continue
-        if line.endswith("\\"):
+        # Only an unescaped final backslash continues: an even run is escaped pairs.
+        if (len(line) - len(line.rstrip("\\"))) % 2:
             pending += line[:-1] + " "
             continue
         logical.append(pending + line)
@@ -1322,6 +1325,9 @@ class ProductionUnitAdapter:
         paths = self._unit_paths(unit, inventory)
         self._installed_entries(unit, inventory)
         self._discover(unit, inventory, paths)
+        # Refuse an unsupported saved Type before the snapshot records it, not
+        # at rollback after the unit is masked.
+        self._saved_service_type(paths["service"])
         self._snapshot_unit = unit
         path_states = {}
         for path in paths.values():

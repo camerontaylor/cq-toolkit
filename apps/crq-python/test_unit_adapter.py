@@ -673,6 +673,18 @@ class SavedServiceTypeTests(AdapterFixture):
                 "ExecStart=/usr/bin/env python3 /w.py\n")
         self.assertEqual(self._type(body), "simple")
 
+    def test_utf8_bom_before_the_first_section_is_ignored(self):
+        self.assertEqual(
+            self._type("\ufeff[Service]\nType=oneshot\nExecStart=/bin/x\n"), "oneshot")
+
+    def test_standalone_comment_ending_in_a_backslash_does_not_continue(self):
+        body = "[Service]\n# note \\\nType=oneshot\nExecStart=/bin/x\n"
+        self.assertEqual(self._type(body), "oneshot")
+
+    def test_even_trailing_backslashes_do_not_continue(self):
+        body = "[Service]\nEnvironment=LABEL=value\\\\\nType=oneshot\nExecStart=/bin/x\n"
+        self.assertEqual(self._type(body), "oneshot")
+
     def test_missing_type_with_execstart_defaults_to_simple(self):
         self.assertEqual(self._type("[Service]\nExecStart=/bin/x\n"), "simple")
 
@@ -699,6 +711,12 @@ class AdapterTests(AdapterFixture):
         with self.assertRaisesRegex(dc.Refused, "Type is unsupported: exec"):
             self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
         self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_snapshot_refuses_a_saved_type_restore_cannot_follow(self):
+        path = self.unit_dir / "crq-tick.service"
+        path.write_text(path.read_text().replace("Type=oneshot", "Type=exec"))
+        with self.assertRaisesRegex(dc.Refused, "Type is unsupported: exec"):
+            self.adapter.snapshot("crq-tick.service")
 
     def test_preflight_node_from_python_succeeds(self):
         prior = self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
