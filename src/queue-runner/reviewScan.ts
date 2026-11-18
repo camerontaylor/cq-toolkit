@@ -53,8 +53,9 @@ function decodeGitPath(raw: string): string {
       // Literal non-ASCII inside the quotes is git's core.quotePath=false
       // form; re-encode it so literal UTF-8 and octal escapes mix losslessly.
       if (code > 0x7f) {
-        for (const b of utf8.encode(ch)) bytes.push(b);
-        index += ch.length;
+        const point = String.fromCodePoint(code);
+        for (const b of utf8.encode(point)) bytes.push(b);
+        index += point.length;
         continue;
       }
       bytes.push(code);

@@ -146,6 +146,39 @@ describe('review scan evidence', () => {
       denylist_hits: [{ rule: 'class:scoped', file: 'src/\tprobe.txt', diff_line: 5 }],
     });
   });
+  it('keeps an astral literal inside a quoted header path as one code point', async () => {
+    let report = '';
+    const effects: ReviewScannerEffects = {
+      match: async ({ rules, lines }) => {
+        const hits: [number, number][] = [];
+        for (const [lineIndex, line] of lines.entries())
+          for (const [ruleIndex, rule] of rules.entries())
+            if (
+              (rule.path === null || new RegExp(rule.path, 'u').test(line.path)) &&
+              line.text.includes(rule.regex)
+            )
+              hits.push([lineIndex, ruleIndex]);
+        return hits;
+      },
+      gitleaks: async () => ({ kind: 'not-run' }),
+      writeReport: async (text) => {
+        report = text;
+      },
+    };
+    const scoped = `rules:\n  - id: 'class:scoped'\n    description: 'fixture'\n    regex: 'MARK'\n    path: '^src/\u{1F600}\\.txt$'\n    sample: 'fixture'\nclean_probes:\n  - 'clean'\n`;
+    const text = [
+      'diff --git "a/src/\u{1F600}.txt" "b/src/\u{1F600}.txt"',
+      '--- "a/src/\u{1F600}.txt"',
+      '+++ "b/src/\u{1F600}.txt"',
+      '@@ -1 +1 @@',
+      '+MARK secret',
+    ].join('\n');
+    const result = await scanReviewDiff({ ...input, patternsText: scoped, diff: text }, effects);
+    expect(result.denylistHits).toBe(1);
+    expect(JSON.parse(report)).toMatchObject({
+      denylist_hits: [{ file: 'src/\u{1F600}.txt' }],
+    });
+  });
   it('uses Python splitlines and the injected Unicode matcher', async () => {
     const f = fixture();
     f.effects.match = async ({ rules, lines }) => {
