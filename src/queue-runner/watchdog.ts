@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { constants, homedir } from 'node:os';
 import { join } from 'node:path';
+import { atomicWrite } from '../adapters/crq/atomic.js';
 import type { OpResult } from '../kernel/types.js';
 
 export interface WatchdogSendResult {
@@ -183,7 +184,7 @@ export async function runWatchdog(options: WatchdogOptions = {}): Promise<OpResu
           recovered_seen_at: clockStamp(),
           last_outage: state.alerted_for,
         };
-        await writeFile(statePath, `${pythonJson(recovered)}\n`);
+        await atomicWrite(statePath, `${pythonJson(recovered)}\n`);
         return ok({
           message: `${clockStamp()} ok: last tick ${lastTickText} (${rounded}m ago)`,
           lastTick: lastTickText,
@@ -237,7 +238,7 @@ export async function runWatchdog(options: WatchdogOptions = {}): Promise<OpResu
       paseo_send: sent.code,
       paseo_err: sent.stderr.trim().slice(0, 200),
     };
-    await writeFile(statePath, `${pythonJson(next)}\n`);
+    await atomicWrite(statePath, `${pythonJson(next)}\n`);
     return ok({
       message:
         `${clockStamp()} ${sent.code === 0 ? 'ALERTED' : 'ALERT FAILED'} stale ${rounded}m ` +

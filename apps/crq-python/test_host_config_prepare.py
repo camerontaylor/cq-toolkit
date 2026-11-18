@@ -62,6 +62,24 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         self.assertIn(['systemctl', '--user', 'daemon-reload'], calls)
         self.assertFalse(any('start' in argv or 'enable' in argv for argv in calls))
 
+    def test_prepare_refuses_stale_units_outside_the_rendered_set_before_install(self):
+        self.command('tag', '-a', 'crq-runner/20261016-8', self.before, '-m', 'owner fixture approval')
+        output = self.base / 'installed'
+        output.mkdir()
+        # A unit the target no longer renders would stay installed, stay
+        # enabled, and stay outside the recorded unit inventory.
+        (output / 'crq-retired.timer').write_text('[Timer]\nOnCalendar=daily\n')
+        def stopped(argv):
+            if argv[0] == 'systemd-analyze':
+                return ''
+            return self.stopped(argv)
+        with mock.patch.object(host, 'run', side_effect=stopped):
+            with self.assertRaisesRegex(ValueError, 'outside the rendered set: crq-retired.timer'):
+                host.prepare(self.root, self.overlay, self.raw, output, 'crq-runner/20261016-8')
+        self.assertEqual(sorted(p.name for p in output.iterdir()), ['crq-retired.timer'])
+        self.assertFalse((self.base / 'records').exists())
+        self.assertFalse((self.runner / 'state/runner-disabled').exists())
+
     def test_prepare_rejects_worktree_drift_before_installing_units(self):
         self.command('checkout', '-q', '--detach', self.target)
         directory = self.runner / 'ops/systemd'

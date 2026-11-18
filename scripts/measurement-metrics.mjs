@@ -245,7 +245,9 @@ export function computeMeasurementPanels({ runs, unknown = [], evidenceAvailabil
   // attempts (USD from different or unstated tables is never a known total).
   const coverages = [...new Set(leaves.map((leaf) => leaf.priceCoverage))];
   const revisions = [...new Set(leaves.map((leaf) => leaf.priceTableRevision))];
-  const uniform = (values) => values.length === 1 && values[0] !== null;
+  // Absent metadata (a leaf that omits the field) is as unknown as an
+  // explicit null: a loose check makes `undefined` count as absent too.
+  const uniform = (values) => values.length === 1 && values[0] != null;
   const coverageIncomplete =
     leaves.some((leaf) => leaf.modeledUsd !== null) && !(uniform(coverages) && uniform(revisions));
   const usdTotal = aggregate(

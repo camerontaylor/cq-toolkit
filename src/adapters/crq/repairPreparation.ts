@@ -201,8 +201,10 @@ function isArgvFlag(value: string): value is ArgvFlag {
  * Strict operator argv: `<job> --source-sha <sha> --revalidation <path>
  * --runner-root <dir> --state-root <dir> [--instructions-file <path>]`.
  * Unknown flags, duplicate flags, missing values and extra positionals are
- * usage errors (exit 2). The job-id grammar and the SHA grammar are checked
- * separately at their own boundaries.
+ * usage errors (exit 2). An empty `--runner-root` or `--state-root` is refused
+ * here, before any filesystem access: `join('', ...)` would silently resolve
+ * against the current directory. The job-id grammar and the SHA grammar are
+ * checked separately at their own boundaries.
  */
 export function parseRepairPrepareArgv(argv: readonly string[]): RepairPrepareArgv {
   const jobId = argv[0];
@@ -231,6 +233,10 @@ export function parseRepairPrepareArgv(argv: readonly string[]): RepairPrepareAr
   const revalidationPath = values['--revalidation'] as string;
   const runnerRoot = values['--runner-root'] as string;
   const stateRoot = values['--state-root'] as string;
+  // An empty root is a usage error, not a working-directory default: the module
+  // contract is that every root is supplied explicitly by the caller.
+  if (runnerRoot === '') return { ok: false, message: 'empty root: --runner-root' };
+  if (stateRoot === '') return { ok: false, message: 'empty root: --state-root' };
   const instructionsPath = values['--instructions-file'];
   return {
     ok: true,

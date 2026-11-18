@@ -251,6 +251,15 @@ describe('gitMutex staleness (the UC row 32 wedge recovery)', () => {
 });
 
 describe('gitMutex config preconditions', () => {
+  test('one lockPath admits one staleMs: a mismatching second config throws, a matching one is fine', () => {
+    const lockPath = join(newDir(), 'stale.lock');
+    makeGitMutex({ lockPath, staleMs: 5_000 });
+    expect(() => makeGitMutex({ lockPath, staleMs: 9_000 })).toThrow(/one staleMs per lockPath/);
+    expect(() => makeGitMutex({ lockPath: `${lockPath}`, staleMs: 5_000 })).not.toThrow();
+    // The default window is a window too: omitting staleMs mismatches a custom one.
+    expect(() => makeGitMutex({ lockPath })).toThrow(/staleMs/);
+  });
+
   test('malformed config throws RangeError at construction — programmer errors, not runtime faults', () => {
     expect(() => makeGitMutex({ lockPath: '' })).toThrow(RangeError);
     expect(() => makeGitMutex({ lockPath: join(newDir(), 'm.lock'), staleMs: 1_999 })).toThrow(

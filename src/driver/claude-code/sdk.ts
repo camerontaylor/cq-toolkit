@@ -740,7 +740,7 @@ export class ClaudeCodeSdkTransport implements Driver {
     // surfaces, and a bare 'error' verdict is exactly the dishonesty this
     // field exists to remove.
     let resultCause: string | undefined;
-    if (observation.error === undefined && resultStatusOf(observation.result) === 'error') {
+    if (resultStatusOf(observation.result) === 'error') {
       const resultFrame = observation.result;
       const rawResult = asString(resultFrame?.['result']);
       const errorEntries = (asArray(resultFrame?.['errors']) ?? []).filter(
@@ -753,8 +753,12 @@ export class ClaudeCodeSdkTransport implements Driver {
           : errorEntries.length > 0
             ? errorEntries.join('; ')
             : `subtype '${subtype ?? 'unknown'}'`;
-      observation.error = `claude-code driver: SDK result status error — ${cause}`;
-      observation.errorKind = 'result-frame';
+      // A dispatch throw after an error frame keeps its own error/kind, but
+      // the frame's cause must still reach classification.
+      if (observation.error === undefined) {
+        observation.error = `claude-code driver: SDK result status error — ${cause}`;
+        observation.errorKind = 'result-frame';
+      }
       resultCause = cause;
     }
 
@@ -859,10 +863,13 @@ export class ClaudeCodeSdkTransport implements Driver {
         error = `claude-code driver: structured output invalid — ${structuredMiss}`;
         errorClass = 'output-invalid';
       } else {
+        // Frame cause first, then any dispatch-catch cause.
         const causeTexts =
-          observation.errorKind === 'result-frame'
-            ? [resultCause ?? '']
-            : [observation.caughtCause ?? ''];
+          resultCause === undefined && observation.caughtCause === undefined
+            ? ['']
+            : [resultCause, observation.caughtCause].filter(
+                (text): text is string => text !== undefined,
+              );
         const classified = classifyFailure({
           kind:
             observation.errorKind === 'result-frame'
@@ -1109,6 +1116,13 @@ export interface SdkRunObservation {
   assistantRateLimit: boolean;
   /** tool_use ids already denied via permission_denials (dedupe). */
   deniedToolUseIds: Set<string>;
+  /**
+   * Assistant `message.id`s whose usage was already folded (dedupe). The SDK
+   * can emit several frames carrying the same message id AND the same usage;
+   * the accounting contract counts that measurement once, so a repeat frame
+   * still contributes content but never a second usage fold.
+   */
+  countedAssistantMessageIds: Set<string>;
   /** The frozen denials, in denial order (execute-boundary + permission-gate). */
   denials: ToolDenial[];
   /** The init surface the SDK must report (fail-closed assertion); undefined = not asserted. */
@@ -1145,6 +1159,7 @@ function newObservation(): SdkRunObservation {
     errorKind: undefined,
     assistantRateLimit: false,
     deniedToolUseIds: new Set(),
+    countedAssistantMessageIds: new Set(),
     denials: [],
     expectedSurface: undefined,
     initSeen: false,
@@ -1259,8 +1274,17 @@ export function foldMessage(observation: SdkRunObservation, message: unknown): v
       // is what the endpoint REPORTS it served) — the observed, never the
       // requested id; the latest response wins.
       observation.servedModel = asString(inner['model']) ?? observation.servedModel;
+      // The SDK can emit SEVERAL assistant frames for the SAME message (same
+      // `message.id`, same usage). The accounting contract counts that
+      // measurement once, so a repeated id still contributes content below but
+      // never a second usage fold.
       const usage = usageFromWire(inner['usage']);
-      if (usage !== undefined) {
+      const messageId = asString(inner['id']) ?? asString(event['id']);
+      if (
+        usage !== undefined &&
+        (messageId === undefined || !observation.countedAssistantMessageIds.has(messageId))
+      ) {
+        if (messageId !== undefined) observation.countedAssistantMessageIds.add(messageId);
         observation.assistantUsage = addUsage(observation.assistantUsage, usage);
       }
       for (const block of asArray(inner['content']) ?? []) {

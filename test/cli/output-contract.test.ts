@@ -67,6 +67,14 @@ describe('lossless parity pin: the CLI walk and the kernel walk reject the same 
         expr: "(() => { const a = [1]; a[Symbol('leak')] = 2; return a; })()",
         pattern: 'symbol-keyed own member',
       },
+      // An INHERITED hook is invisible to the own-key scan: an array subclass
+      // with a prototype `toJSON` serializes as the hook's output while the
+      // walk sees ordinary indices, so a non-plain array prototype is refused.
+      {
+        name: 'lossarrsubclass',
+        expr: '(() => { class A extends Array { toJSON() { return []; } } const a = new A(); a.push(1, 2); return a; })()',
+        pattern: "non-plain array of type 'A'",
+      },
       {
         name: 'losshiddenmember',
         expr: "(() => { const o = { x: 1 }; Object.defineProperty(o, 'hidden', { value: 3, enumerable: false }); return o; })()",

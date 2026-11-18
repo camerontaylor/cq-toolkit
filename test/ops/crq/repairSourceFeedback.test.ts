@@ -255,6 +255,28 @@ describe('proof-gated source feedback', () => {
     if (result.kind === 'pending')
       expect(result.publication.sourceResolutions).toEqual(['crq-job-2']);
   });
+  test('validates every source PR binding even when an earlier job has no terminal event', async () => {
+    const f = fixture();
+    const second = object({
+      job: 'crq-job-2',
+      item: 'item-1',
+      run: 'run-1',
+      pr: 99,
+      finding: { path: 'src/a.ts' },
+    });
+    const input = {
+      ...f.input,
+      jobs: [...f.input.jobs, { id: 'crq-job-2', job: second, sourcePr: 42 }],
+    };
+    const readFirst = f.effects.readJob;
+    f.effects.readJob = async (id) => (id === 'crq-job-2' ? second : readFirst(id));
+    f.effects.currentFixedEvent = async () => null;
+    await expect(publishRepairSourceFeedback(input, f.effects)).rejects.toThrow(
+      'canonical fixed repair job identity mismatch',
+    );
+    expect(f.calls).not.toContain('post');
+    expect(f.calls).not.toContain('write');
+  });
   test('refuses a journal identity change and a merge outside target', async () => {
     const f = fixture();
     f.effects.readJournal = async () => ({

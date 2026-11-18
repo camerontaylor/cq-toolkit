@@ -10,6 +10,8 @@ export interface OpenPr {
   readonly base: string;
   readonly headRef: string;
   readonly head: string;
+  /** True for a head branch that lives in a fork, never in the listed repository. */
+  readonly crossRepository: boolean;
 }
 export interface PrDiscoveryRepo {
   readonly repo: string;
@@ -64,9 +66,12 @@ function chain(pr: OpenPr, opened: readonly OpenPr[], branches: readonly string[
   let current: OpenPr | undefined = pr;
   for (let i = 0; i < 8 && current; i++) {
     if (branches.includes(current.base)) return true;
-    // Forks can have the same head name. Without proven repository identity,
-    // refuse ambiguity instead of letting inventory order pick a parent.
-    const parents = opened.filter((candidate) => candidate.headRef === current?.base);
+    // A fork's head ref names a branch in another repository, so it is never a
+    // parent here; the remaining same-repo heads can still collide by name, and
+    // that ambiguity is refused instead of letting inventory order pick a parent.
+    const parents = opened.filter(
+      (candidate) => !candidate.crossRepository && candidate.headRef === current?.base,
+    );
     current = parents.length === 1 ? parents[0] : undefined;
   }
   return false;

@@ -284,7 +284,7 @@ function processCode(returncode: number): JsonValue {
 
 /** Python `str(subprocess.TimeoutExpired(argv, 60))`. */
 function timeoutDetail(argv: readonly string[]): string {
-  return `Command '['${argv.join("', '")}]' timed out after 60 seconds`;
+  return `Command '['${argv.join("', '")}']' timed out after 60 seconds`;
 }
 
 function inputValue(entry: PrReviewCase, key: string): JsonValue {

@@ -32,8 +32,8 @@
 // Residual: losing a datasync or a directory sync is not detected by any
 // test (a crash-simulation harness cannot observe it without mocking the
 // fs layer); the failure boundary tests cover detectable corruption only.
-import { mkdir, open, readFile, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { lstat, mkdir, open, readFile, readdir } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { assertSafeRunId, openRunLog, syncDir } from './journal.js';
 import { ObservationStreamSchema, ObservationEventSchema } from './schema.js';
@@ -55,6 +55,29 @@ function isEnoent(err: unknown): boolean {
     'code' in err &&
     (err as { code?: unknown }).code === 'ENOENT'
   );
+}
+
+/**
+ * The directories `mkdir(dir, { recursive: true })` would create, DEEPEST
+ * FIRST (the walk stops at the first existing ancestor), so the caller can
+ * make each created directory's own entry durable in its parent. An
+ * unreadable (non-ENOENT) ancestor throws: the chain cannot be established.
+ */
+async function missingDirChain(dir: string): Promise<string[]> {
+  const missing: string[] = [];
+  let current = dir;
+  for (;;) {
+    try {
+      await lstat(current);
+      return missing;
+    } catch (err) {
+      if (!isEnoent(err)) throw err;
+    }
+    missing.push(current);
+    const parent = dirname(current);
+    if (parent === current) return missing; // filesystem root
+    current = parent;
+  }
 }
 
 /** Where the writer's validated events land. */
@@ -206,19 +229,31 @@ export async function openObservationWriter(
   const accepted: ObservationEvent[] = [];
 
   if (streamPath !== null) {
+    // Record which directories this call CREATES (deepest first, up to the
+    // first existing ancestor) before mkdir -p runs: their parent entries are
+    // what the sync sequence below has to make durable.
+    const createdDirs = await missingDirChain(streamDir as string);
     // Exclusive create AT OPEN (P3 ruling): a second writer for the same
     // composition run is refused here, before any event exists.
     await mkdir(streamDir as string, { recursive: true });
     handle = await open(streamPath, 'wx');
-    // mkdir -p may have created observations/ and observations/<workId>:
-    // make those directory entries durable too (the stream file's whole
-    // directory chain, matching openRunLog's per-creation fsync). A refusal
-    // here (exotic mount) must not leak the open handle: the stream file
-    // exists but the caller sees the error, so close before rethrowing.
+    // mkdir -p may have created `observations/`, `observations/<workId>` —
+    // and, when journalDir (or an ancestor of it) did not exist, the whole
+    // chain above them too. A directory's entry is only durable once its
+    // PARENT is fsynced, so sync the parent of every directory this call
+    // created (deepest first) plus the three the stream file itself lives
+    // through; a crash can then never drop a created entry — which would
+    // remove the stream file and every event already appended to it while
+    // the writer still claimed `persistence: 'durable'`. A refusal here
+    // (exotic mount) must not leak the open handle: the stream file exists
+    // but the caller sees the error, so close before rethrowing.
     try {
       await syncDir(streamDir as string);
       await syncDir(join(journalDir as string, 'observations'));
       await syncDir(journalDir as string);
+      for (const dir of createdDirs) {
+        await syncDir(dirname(dir));
+      }
     } catch (err) {
       await handle.close();
       handle = null;

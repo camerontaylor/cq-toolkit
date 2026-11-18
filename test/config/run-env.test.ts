@@ -2,7 +2,12 @@ import { EventEmitter } from 'node:events';
 import { describe, expect, test, vi } from 'vitest';
 import { resolveGhBin } from '../../src/adapters/forge-github/ghBin.js';
 import { readCqEnv } from '../../src/config/env.js';
-import { currentCqEnv, currentEntryEnv, runWithCqEnv } from '../../src/config/run-env.js';
+import {
+  currentCqEnv,
+  currentEntryEnv,
+  runWithCqEnv,
+  type EntryEnv,
+} from '../../src/config/run-env.js';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -130,6 +135,28 @@ describe('currentEntryEnv (the run environment record)', () => {
     // Back outside a run: the live (unfrozen) process environment applies.
     expect(Object.isFrozen(currentEntryEnv())).toBe(false);
     expect(currentEntryEnv()).toBe(process.env);
+  });
+
+  test('a frozen record of accessors is still materialized: values are captured at entry', () => {
+    // A frozen object can still hold a getter that re-reads the ambient env:
+    // freezing captures the property, not its value. The run record must hold
+    // the value read at entry.
+    let ambient = '/entry/bin';
+    const live: EntryEnv = {
+      get PATH(): string {
+        return ambient;
+      },
+    };
+    Object.freeze(live);
+    runWithCqEnv(
+      readCqEnv({}),
+      () => {
+        ambient = '/drifted/bin';
+        expect(currentEntryEnv()['PATH']).toBe('/entry/bin');
+        expect(Object.isFrozen(currentEntryEnv())).toBe(true);
+      },
+      live,
+    );
   });
 
   test('a nested run inherits the enclosing entry record when it supplies none', () => {

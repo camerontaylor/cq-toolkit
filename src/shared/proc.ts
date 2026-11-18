@@ -677,10 +677,15 @@ function defaultDelay(ms: number): Promise<void> {
 /**
  * THE GRACE LADDER (executes an already-made kill decision — header):
  *
- *   already exited → resolve 'terminated' immediately, no rungs (nothing
- *                    was sent — the markers stay honest);
+ *   already exited → SIGKILL the group (a leader can exit while a same-group
+ *                    descendant survives), resolve 'terminated', no rungs,
+ *                    nothing was sent to a live leader — the markers stay
+ *                    honest;
  *   SIGTERM  → mark { rung:'sigterm' }, send SIGTERM, wait `termGraceMs`;
- *              exits in the window → 'terminated';
+ *              the LEADER exits in the window → SIGKILL the group (same
+ *              reason: the kill decision covered the whole group, and a
+ *              descendant that ignores SIGTERM and redirects its stdio
+ *              outlives `child.close`), resolve 'terminated';
  *   SIGKILL  → mark { rung:'sigkill' }, send SIGKILL, wait `killGraceMs`;
  *              exits in the window → 'killed';
  *   still alive after SIGKILL → force-resolve 'killed' (an unstoppable
@@ -711,6 +716,11 @@ export async function terminateGracefully(
     Promise.race([closed(), wait(ms).then(() => false)]);
 
   if (child.exited) {
+    // The leader is gone, but a same-group descendant that ignores SIGTERM
+    // and redirects its stdio outlives it: reap the remnant with a group
+    // SIGKILL. No rung fired and no marker: nothing was delivered to a live
+    // leader, so the rung narration would not be honest about this child.
+    child.kill('SIGKILL');
     return 'terminated'; // nothing to signal — no rungs fired
   }
 
@@ -718,6 +728,13 @@ export async function terminateGracefully(
   fireRung(onRung, 'sigterm');
   child.kill('SIGTERM');
   if (await closesWithin(termGraceMs)) {
+    // The LEADER closed in the window, but the kill decision covers its whole
+    // process group: a same-group descendant that ignores SIGTERM and
+    // redirects its stdio keeps running past `child.close`. Reap it with a
+    // group SIGKILL — a cleanup of the already-decided kill, NOT an escalation
+    // rung: no `sigkill` marker fires (the leader died on SIGTERM, so the
+    // narration stays 'terminated').
+    child.kill('SIGKILL');
     return 'terminated';
   }
 

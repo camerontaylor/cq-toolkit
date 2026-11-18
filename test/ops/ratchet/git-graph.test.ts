@@ -326,6 +326,39 @@ describe('gitPushAtomic', { timeout: 60_000 }, () => {
     expect(remoteRef('main')).toBe(c2);
   });
 
+  test('push.followTags=true cannot publish an unleased annotated tag', async () => {
+    // review crq-backfill-510beeb3: an ambient push.followTags=true would send
+    // annotated tags reachable from the pushed branch. Those tags are not in
+    // `updates`, carry no lease and are outside the validated set, yet --atomic
+    // would send them in the same transaction. --no-follow-tags pins it off.
+    const tag = 'ratchet-followtags-probe';
+    const hasTag = (): boolean => {
+      try {
+        git(remote, ['rev-parse', '--verify', `refs/tags/${tag}`]);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    setRemote(c1, c1);
+    git(work, ['config', 'push.followTags', 'true']);
+    git(work, ['tag', '-a', '-m', 'release', tag, c2]);
+    try {
+      const res = await gitPushAtomic(
+        work,
+        remote,
+        [{ refspec: `${c3}:refs/heads/main`, expected: c1 }],
+        TOKEN,
+      );
+      expect(res.ok).toBe(true);
+      expect(remoteRef('main')).toBe(c3);
+      expect(hasTag()).toBe(false);
+    } finally {
+      git(work, ['config', '--unset', 'push.followTags']);
+      git(work, ['tag', '-d', tag]);
+    }
+  });
+
   test('an https transport failure is ok:false and the token is redacted', async () => {
     const res = await gitPushAtomic(
       work,

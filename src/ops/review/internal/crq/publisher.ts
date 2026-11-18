@@ -113,6 +113,10 @@ export async function publish(
   let lastError: unknown = null;
   return effects.withPublisherLock(async () => {
     for (let attempt = 0; attempt < attempts; attempt++) {
+      // Clear at the start of each attempt, not after a failure: the
+      // exhausted-attempts exception must carry the final push failure as its
+      // cause, which a clear at the end of the last attempt would erase.
+      lastError = null;
       const fetched = await remote.fetch();
       let head = fetched.head;
       let values = fetched.values;
@@ -166,9 +170,6 @@ export async function publish(
       }
 
       if ((await outbox.pending()).length === 0) return { head };
-      // Clear before the next attempt, not after a failure: the exhausted-
-      // attempts exception must carry the last push failure as its cause.
-      lastError = null;
     }
     // Python raises `from last_error` so the exhausted attempts keep the
     // underlying transport/planning cause visible in the report chain.

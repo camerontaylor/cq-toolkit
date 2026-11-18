@@ -99,10 +99,14 @@ jobs:
         # it for octopus merges, so those are scanned against their first parent.
         run: |
           set -euo pipefail
-          gitleaks git --no-banner --redact --config "$GITLEAKS_CONFIG" --log-opts="$RANGE --diff-merges=remerge" .
+          # A scanned revision controls its own .gitattributes: `-diff`/`binary`
+          # would print "Binary files differ" and hide content, and textconv or
+          # an external diff driver would rewrite it. Force raw text diffs.
+          DIFF_OPTS="--text --no-textconv --no-ext-diff"
+          gitleaks git --no-banner --redact --config "$GITLEAKS_CONFIG" --log-opts="$RANGE --diff-merges=remerge $DIFF_OPTS" .
           octopus=$(git rev-list --min-parents=3 "$RANGE")
           for commit in $octopus; do
-            gitleaks git --no-banner --redact --config "$GITLEAKS_CONFIG" --log-opts="-1 $commit --diff-merges=first-parent" .
+            gitleaks git --no-banner --redact --config "$GITLEAKS_CONFIG" --log-opts="-1 $commit --diff-merges=first-parent $DIFF_OPTS" .
           done
       - name: Scan commit messages
         env:

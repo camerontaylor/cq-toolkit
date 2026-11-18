@@ -177,7 +177,7 @@ export function computeOutcomePanels({
       'disposition',
       unknown,
     ),
-    ['', '/fingerprint', '/evidence', '/observedHead', '/observedAt'],
+    ['', '/status', '/fingerprint', '/evidence', '/observedHead', '/observedAt'],
     'disposition',
     unknown,
   );
@@ -189,14 +189,14 @@ export function computeOutcomePanels({
       'review',
       unknown,
     ),
-    // Root and the consumed finding list only: availability gates just the
-    // fields the panels read. The coverage-proof pointers (/delivered,
-    // /completed, /omissions) and /reviewerId mark unconsumed fields —
-    // /reviewerId is not-collected whenever a source has no cycle id and
-    // /omissions on every legacy proof — and covered() already gates
-    // coverage and vendor completion, so a not-collected marker there must
-    // not drop a valid covered range.
-    ['', '/findingFingerprints'],
+    // Root and every consumed field: availability gates just the fields the
+    // panels read — the finding list, and the coverage and vendor completion
+    // values covered() tests. The remaining coverage-proof pointers
+    // (/delivered, /completed, /omissions) and /reviewerId mark unconsumed
+    // fields — /reviewerId is not-collected whenever a source has no cycle id
+    // and /omissions on every legacy proof — so a not-collected marker there
+    // must not drop a valid covered range.
+    ['', '/coverage', '/vendorCompletion', '/findingFingerprints'],
     'review',
     unknown,
   );

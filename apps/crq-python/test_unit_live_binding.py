@@ -628,6 +628,33 @@ class DiscoveryTests(PortFixture):
         self.assertIn("Service names crq-tick.service",
                       " ".join(evidence["foreign"]))
 
+    def test_uninstantiated_socket_expands_an_empty_instance(self):
+        declared = self.declare()
+        # ``ingress.socket`` has no instance, so systemd expands ``%i`` to the
+        # empty string and ``Service=crq%i-tick.service`` names
+        # crq-tick.service. The specifier must be expanded before the scan.
+        self.write("ingress.socket",
+                   "[Socket]\nListenStream=1\nService=crq%i-tick.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Service names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_dotted_instance_socket_service_target_is_unsupported(self):
+        declared = self.declare()
+        # An instance name may itself contain dots. ``Service=%i`` on
+        # ``ingress@crq-tick.service.socket`` expands to crq-tick.service, so
+        # the instance capture must run to the final unit-type suffix instead
+        # of stopping at the first dot and leaving ``%i`` unexpanded.
+        self.write("ingress@crq-tick.service.socket",
+                   "[Socket]\nListenStream=1\nService=%i\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Service names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
     def test_co_installed_socket_service_target_is_unsupported(self):
         declared = self.declare()
         # ``[Socket] Service=`` selects the unit that incoming traffic
@@ -640,6 +667,18 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["complete"], True)
         self.assertEqual(evidence["supported"], False)
         self.assertIn("Service names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_co_installed_slice_unit_dependency_is_unsupported(self):
+        declared = self.declare()
+        # Common ``[Unit]`` dependencies apply to slice units, and the slice
+        # name is outside the selected unit's prefix, so this activation edge
+        # is visible only when every unit type is dependency-scanned.
+        self.write("ingress.slice", "[Unit]\nWants=crq-tick.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Wants names crq-tick.service",
                       " ".join(evidence["foreign"]))
 
     def test_declared_source_may_name_expected_units(self):
@@ -709,6 +748,20 @@ class DiscoveryTests(PortFixture):
                 self.assertIn("%s names crq-tick.service" % directive,
                               " ".join(evidence["foreign"]))
                 link.unlink()
+
+    def test_undeclared_alias_of_a_declared_unit_is_unsupported(self):
+        declared = self.declare()
+        # systemd lets a plain name of the same type alias a unit, and the
+        # alias can be used in dependency directives, so an undeclared
+        # top-level symlink that resolves to a declared unit would activate
+        # the verified unit through a name the prefix checks never see.
+        alias = self.link("ingress.service",
+                          self.unit_dir / "crq-tick.service")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("undeclared alias of a declared unit: " + str(alias),
+                      " ".join(evidence["foreign"]))
 
     def test_cotenant_symlink_continuation_hiding_a_dependency_is_unsupported(
             self):

@@ -23,7 +23,10 @@ const XML_ENTITIES: Readonly<Record<string, string>> = {
 };
 
 function unescapeXml(text: string): string {
-  return text.replace(/&(#x[0-9A-Fa-f]+|#[0-9]+|amp|lt|gt|quot|apos);/g, (_m, name: string) => {
+  // A bare `&` (one that starts no reference in the pattern below) is an
+  // undeclared reference, which XML requires to fail rather than pass through.
+  return text.replace(/&(#x[0-9A-Fa-f]+|#[0-9]+|amp|lt|gt|quot|apos);|&/g, (_m, name?: string) => {
+    if (name === undefined) throw new ValueError('unrecognized entity reference in plist');
     if (name[0] !== '#') return XML_ENTITIES[name] as string;
     const code = name[1] === 'x' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
     if (!(code === 9 || code === 10 || code === 13 || (code >= 0x20 && code <= 0x10ffff)))

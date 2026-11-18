@@ -661,7 +661,20 @@ function makeReviewAddressManyCore(
                       ...(report?.costUSD === undefined ? {} : { costUSD: report.costUSD }),
                     })
                   : undefined;
-                const known = observation?.usage !== undefined && usage !== undefined;
+                // `report.usage` is an ADDITIVE total, so it cannot prove the
+                // leg's provider spend was fully measured: an unmeasured dispatch
+                // folds zero into that total while `report.usageSummary` records
+                // it as an unknown observation. A summary carrying any unknown
+                // observation therefore makes the leg's spend UNKNOWN, so it
+                // settles through the same unknown-usage path below and can never
+                // release its reservation as a known token amount. A report that
+                // predates the summary (absent) makes no unknown claim and keeps
+                // the measurement-only rule.
+                const unknownObservationInReport = (report?.usageSummary?.unknownCount ?? 0) > 0;
+                const known =
+                  observation?.usage !== undefined &&
+                  usage !== undefined &&
+                  !unknownObservationInReport;
                 // Exit spend is recorded EXACTLY ONCE per admitted leg, at its
                 // settlement point: the normalized observation when the settled
                 // report carried a valid measurement, an explicit unknown observation

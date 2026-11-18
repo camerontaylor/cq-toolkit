@@ -185,7 +185,16 @@ export async function runReviewChild(options: {
         child.once('error', reject);
       });
       if (child.pid === undefined) throw new Error('review spawned without pid');
-      await save(pidPath, { ...identity, cli_pid: child.pid });
+      try {
+        await save(pidPath, { ...identity, cli_pid: child.pid });
+      } catch (error) {
+        // A failed identity write must not leave an unrecorded review running: stop the
+        // spawned wrapper itself and wait for it to exit. Never signal the process group;
+        // the wrapper shares the group recorded above, so a group signal also stops us.
+        child.kill('SIGTERM');
+        await finished.catch(() => {});
+        throw error;
+      }
       const exit = await finished;
       await save(join(dir, 'exit.json'), {
         exit,

@@ -1474,7 +1474,9 @@ def main(argv=None, run_factory=Run) -> int:
                                     "message": "interrupted; recovery ran if "
                                                "a deploy was in progress"}},
                          indent=2, sort_keys=True))
-        return 130
+        # An interrupt is a thrown error, so it stays inside the I1 exit-code
+        # contract (0/1/2/3) rather than inventing a signal-style code.
+        return 1
     except (OSError, subprocess.CalledProcessError, ValueError) as exc:
         print(json.dumps({"error": {"kind": "refused",
                                     "operation": args.operation,

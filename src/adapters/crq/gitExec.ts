@@ -124,7 +124,10 @@ export function gitCall(
     child.on('close', (code) => {
       clearTimeout(timer);
       resolve({
-        code,
+        // A kill past the bound may land after Git already exited 0, and the
+        // captured stdout is discarded either way: force a failure status so a
+        // caller reading only `code` cannot accept the truncated result.
+        code: overflow ? (code === 0 ? 1 : code) : code,
         stdout: overflow ? new Uint8Array(0) : new Uint8Array(Buffer.concat(stdout)),
         stderr: overflow ? 'output exceeded bound' : Buffer.concat(stderr).toString('utf8'),
       });

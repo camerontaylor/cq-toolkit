@@ -979,8 +979,22 @@ describe('safeArgs round-1193-r4: the message read and object-presence shapes (P
     expect(gitCalls).toEqual([
       ['-C', '/repo', 'log', '-1', '--encoding=UTF-8', '--format=%B', resolved],
       ['-C', '/repo', 'cat-file', '-e', resolved],
-      ['-C', '/repo', 'fetch', 'origin', 'main'],
+      ['-C', '/repo', 'fetch', '--refmap=', 'origin', 'main'],
     ]);
+  });
+
+  test('fetch admits only the literal --refmap= flag (configured fetch mappings stay off)', () => {
+    expect(safeArgs(['fetch', '--refmap=', 'origin', 'main'])).toEqual([
+      'fetch',
+      '--refmap=',
+      'origin',
+      'main',
+    ]);
+    expect(() => safeArgs(['fetch', '--refmap=x', 'origin', 'main'])).toThrow(/flags and globs/);
+    expect(() => safeArgs(['fetch', '--refmap=', 'origin'])).toThrow(/unknown argv shape/);
+    expect(() => safeArgs(['fetch', '--refmap=', 'origin', '--upload-pack=x'])).toThrow(
+      /flags and globs/,
+    );
   });
 });
 

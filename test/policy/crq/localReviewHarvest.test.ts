@@ -119,6 +119,95 @@ describe('local review completion', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+  it('records a failed attempt when a terminated run has no review stream', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-exit-missing-'));
+    try {
+      const repo = 'camerontaylor/cq-toolkit';
+      const oid = 'a'.repeat(40);
+      const digest = 'b'.repeat(64);
+      const profile = { adapter: 'coderabbit-cli', revision: 'v1', flags: [] };
+      const identity = {
+        v: 1,
+        repo,
+        base_commit: oid,
+        base_tree: oid,
+        head_commit: oid,
+        head_tree: oid,
+        scope: 'full-diff',
+        projection: 'full-diff',
+        config_digest: digest,
+        profile: { adapter: 'coderabbit-cli', revision: 'v1' },
+      };
+      const queue = doc(
+        JSON.stringify({
+          items: [
+            {
+              id: 'local-1',
+              kind: 'local-review',
+              identity: digest,
+              identity_inputs: identity,
+              profile,
+              run: { run_id: 'run-1' },
+              observers: [],
+            },
+          ],
+        }),
+      );
+      const item = (queue.get('items') as JsonObject[])[0]!;
+      const dir = join(root, 'runs', 'run-1');
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, 'exit.json'), '{"exit":0,"ended_at":"2026-11-14T12:00:00Z"}');
+      await writeFile(
+        join(dir, 'meta.json'),
+        JSON.stringify({
+          item_id: 'local-1',
+          label: 'review',
+          run_id: 'run-1',
+          base: oid,
+          head: oid,
+        }),
+      );
+      let saved = queue;
+      const saveQueue = async (q: JsonObject) => {
+        saved = q;
+      };
+      const publication = fileLocalReviewPublishEffects({
+        stateRoot: root,
+        rollout: async () => ({ durableArtifactRoot: join(root, 'artifacts') }),
+        saveQueue,
+      });
+      const harvest = fileLocalHarvestEffects({
+        stateRoot: root,
+        saveQueue,
+        republish: async (q) => republishLocalReview(q, 0, repo, publication),
+      });
+      const effects = fileLocalExitHarvestEffects({
+        stateRoot: root,
+        harvest,
+        cleanup: async () => {},
+        now: () => new Date('2026-11-14T12:00:00Z'),
+      });
+      const result = await harvestLocalReviewExit(queue, item, false, 5, {
+        ...effects,
+        liveness: async () => 'harvest',
+      });
+      expect(result.queue).toBe(saved);
+      const updated = (result.queue.get('items') as JsonObject[])[0]!;
+      expect(updated.get('state')).toBe('failed');
+      expect(updated.get('run')).toBeNull();
+      expect(updated.get('scope_adequate')).toBe(false);
+      const attempts = updated.get('attempts') as JsonObject[];
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]!.get('run_id')).toBe('run-1');
+      const receipt = doc(
+        await readFile(join(root, 'receipts', `${updated.get('receipt_id')}.json`), 'utf8'),
+      );
+      expect(receipt.get('outcome')).toBe('no-verdict');
+      expect(receipt.get('report')).toContain('# CodeRabbit CLI findings');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it('harvests Python-shaped run files through durable receipt and publication stores', async () => {
     const root = await mkdtemp(join(tmpdir(), 'crq-harvest-'));
     try {
@@ -244,6 +333,41 @@ describe('local review completion', () => {
     expect(again.receiptId).toBe(first.receiptId);
     expect(again.item.get('attempts')).toHaveLength(1);
     expect((again.queue.get('review_notify_outbox') as JsonObject).entries).toHaveLength(1);
+  });
+  it('keeps Unicode separators inside a finding string on one NDJSON record', async () => {
+    const queue = doc(
+      '{"items":[{"id":"i","identity":"x","identity_inputs":{},"profile":{},"run":{}}]}',
+    );
+    const item = (queue.get('items') as JsonObject[])[0]!;
+    let receipt: JsonObject | undefined;
+    const result = await completeLocalReview(
+      queue,
+      item,
+      'run',
+      doc('{"counted":true,"outcome":"completed"}'),
+      'now',
+      0,
+      {
+        readReview: async () =>
+          Buffer.from(
+            '{"type":"finding","comment":"a\u2028b\u2029c\u0085d"}\r\n{"type":"complete"}\n',
+            'utf8',
+          ),
+        readReport: async () => null,
+        validateReceipt: () => {},
+        writeReceipt: async (value) => {
+          receipt = value;
+          return receiptJsonDigest(value);
+        },
+        saveQueue: async () => {},
+        republish: async (q) => q,
+      },
+    );
+    expect(receipt?.get('outcome')).toBe('findings');
+    const findings = receipt?.get('findings') as JsonObject[];
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.get('comment')).toBe('a\u2028b\u2029c\u0085d');
+    expect(result.item.get('state')).toBe('done');
   });
   it('does not mutate the queue when receipt publication fails', async () => {
     const queue = doc(

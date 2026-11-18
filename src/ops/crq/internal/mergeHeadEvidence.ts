@@ -104,6 +104,19 @@ export async function mergeHeadEvidence(
   for (const commit of input.commits) {
     if (!sha.test(commit) || !(await ancestor(commit, published)))
       throw new Error('published repair commit lineage unavailable');
+    // `diff-tree` prints no paths for a merge commit without `-m`/`-c`/`--cc`,
+    // so a merge repair commit would hide the paths it repaired. The publication
+    // must name the non-merge commits that contain the repairs.
+    const lineageFields = decoder
+      .decode(await run(['rev-list', '--parents', '-n', '1', commit]))
+      .trim()
+      .split(/\s+/);
+    if (
+      lineageFields[0] !== commit ||
+      lineageFields.length > 2 ||
+      (lineageFields[1] !== undefined && !sha.test(lineageFields[1]))
+    )
+      throw new Error('published repair commits must not include merge commits');
     const paths = decoder.decode(
       await run([
         'diff-tree',

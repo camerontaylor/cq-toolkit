@@ -649,6 +649,32 @@ describe('rollbackToPrior', () => {
     expect(err.message).toBe('shared queue state changed during rollback: a, z');
     expect(f.log.some((l) => l.startsWith('start:'))).toBe(false);
   });
+  test('ownership lost during the rollback drain fail-stops before the switch', async () => {
+    const f = switched();
+    f.deps.drainQueue = (n) => {
+      f.log.push(`drainQueue:${n}`);
+      f.hold.owned = false;
+      return Promise.resolve();
+    };
+    const err = await caught(rec(f).rollbackToPrior('boom'));
+    expect(err).toBeInstanceOf(RecoveryRequired);
+    expect(err.message).toContain('admission ownership was lost before the rollback switch');
+    expect(f.log.some((l) => l.startsWith('switch:'))).toBe(false);
+    expect(f.log.some((l) => l.startsWith('start:'))).toBe(false);
+  });
+  test('ownership lost during checkout verification fail-stops before the restart', async () => {
+    const f = switched();
+    f.deps.runtimePointerCheck = () => {
+      f.log.push('runtime');
+      f.hold.owned = false;
+      return Promise.resolve();
+    };
+    const err = await caught(rec(f).rollbackToPrior('boom'));
+    expect(err).toBeInstanceOf(RecoveryRequired);
+    expect(err.message).toContain('admission ownership was lost before the rollback restart');
+    expect(f.log).toContain(`switch:${PRIOR}`);
+    expect(f.log.some((l) => l.startsWith('start:'))).toBe(false);
+  });
   test('a baseline key missing after the switch counts as changed', async () => {
     const f = switched();
     f.deps.controller.preservedDigests = () => Promise.resolve({ hb: 'h1' });
