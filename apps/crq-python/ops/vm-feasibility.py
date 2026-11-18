@@ -319,6 +319,8 @@ def provenance_problems(report: dict) -> list[str]:
 def verify_report(report: dict, base_dir: pathlib.Path) -> list[str]:
     """Verify a saved report against its raw evidence and retained bytes."""
     problems = report_problems(report, require_evidence=True)
+    if not isinstance(report, dict):
+        return problems
     provenance = report.get("provenance")
     if not isinstance(provenance, dict):
         return problems
@@ -343,17 +345,28 @@ def verify_report(report: dict, base_dir: pathlib.Path) -> list[str]:
 
 def report_problems(report: dict, *, require_evidence: bool = False) -> list[str]:
     """Validate the evidence shape and the claims it is allowed to make."""
+    if not isinstance(report, dict):
+        return ["report must be a JSON object"]
     problems = []
     if report.get("schema_version") != REPORT_SCHEMA:
         problems.append("schema_version must be %d" % REPORT_SCHEMA)
-    image = report.get("image") or {}
+    image = report.get("image")
+    if image is None:
+        image = {}
+    elif not isinstance(image, dict):
+        # A list, string or number carries no image fields to read.
+        image = {}
+        problems.append("image evidence must be a JSON object")
     if not isinstance(image.get("sha256"), str) or len(image["sha256"]) != 64:
         problems.append("image sha256 missing")
     if image.get("sums_verified") is not True:
         problems.append("image checksum not verified")
     if image.get("signature_verified") is not False:
         problems.append("checksum must not be claimed as signed authenticity")
-    checks = report.get("checks") or {}
+    checks = report.get("checks")
+    if not isinstance(checks, dict):
+        checks = {}
+        problems.append("checks must be an object")
     if require_evidence:
         computed, error = recompute_checks(report)
         if error:
