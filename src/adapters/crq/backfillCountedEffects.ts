@@ -102,7 +102,12 @@ export function backfillCountedEffects(input: {
       try {
         // Confine the read to this run's directory: a symlink to another run's
         // event would otherwise be accepted (its id matches its own digest).
-        const dir = await realpath(join(input.stateRoot, 'runs', runId));
+        if (!runId || runId === '.' || runId === '..' || /[/\\\0]/.test(runId))
+          throw new LedgerIntegrityError('invalid run id');
+        const runsRoot = await realpath(join(input.stateRoot, 'runs'));
+        const dir = await realpath(join(runsRoot, runId));
+        if (relative(runsRoot, dir) !== runId)
+          throw new LedgerIntegrityError('run directory escapes its identity');
         const path = await realpath(join(dir, 'review-event.json'));
         if (relative(dir, path) !== 'review-event.json')
           throw new LedgerIntegrityError('retained review event escapes its run directory');

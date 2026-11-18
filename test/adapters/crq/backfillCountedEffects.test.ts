@@ -249,6 +249,11 @@ describe('counted harvest over real file seams', () => {
         join(root, 'state', 'runs', 'r', 'review-event.json'),
       );
       await expect(read('r')).rejects.toThrow('escapes its run directory');
+      // A symlink on the run directory itself must not serve another run's event.
+      await rm(join(root, 'state', 'runs', 'r', 'review-event.json'));
+      await symlink(other, join(root, 'state', 'runs', 'alias'));
+      await expect(read('alias')).rejects.toThrow('escapes its identity');
+      await expect(read('..')).rejects.toThrow('invalid run id');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
