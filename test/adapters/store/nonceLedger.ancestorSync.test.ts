@@ -3,22 +3,31 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
-const opened: string[] = [];
+// Directory fds opened read-only, then the paths whose fsync actually succeeded.
+const openedDirs = new Map<number, string>();
+const synced: string[] = [];
 vi.mock('node:fs', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs')>();
   return {
     ...real,
     openSync: ((path: unknown, flags: unknown, ...rest: unknown[]) => {
-      if (flags === 'r' && typeof path === 'string') opened.push(path);
-      return (real.openSync as (...args: unknown[]) => number)(path, flags, ...rest);
+      const fd = (real.openSync as (...args: unknown[]) => number)(path, flags, ...rest);
+      if (flags === 'r' && typeof path === 'string') openedDirs.set(fd, path);
+      return fd;
     }) as typeof real.openSync,
+    fsyncSync: ((fd: number) => {
+      real.fsyncSync(fd);
+      const path = openedDirs.get(fd);
+      if (path !== undefined) synced.push(path);
+    }) as typeof real.fsyncSync,
   };
 });
 
 const { makeFileNonceLedger } = await import('../../../src/adapters/store/nonceLedger.js');
 
 afterEach(() => {
-  opened.length = 0;
+  openedDirs.clear();
+  synced.length = 0;
 });
 
 describe('nonce ledger ancestor durability', () => {
@@ -29,11 +38,12 @@ describe('nonce ledger ancestor durability', () => {
     mkdirSync(dir, { recursive: true });
     const ledger = makeFileNonceLedger(join(dir, 'approvals.ndjson'));
     expect(await ledger.consume('f'.repeat(32))).toBe('consumed');
-    const synced = new Set(opened);
-    // The file's directory, then each ancestor whose entry holds the next level down.
-    for (let current = dir; current !== dirname(current); current = dirname(current)) {
-      expect(synced.has(current), `${current} was not synced`).toBe(true);
+    const syncedSet = new Set(synced);
+    // The file's directory, then each ancestor up to and including the filesystem
+    // root, whose entry holds the next level down.
+    for (let current = dir; ; current = dirname(current)) {
+      expect(syncedSet.has(current), `${current} was not synced`).toBe(true);
+      if (current === dirname(current)) break;
     }
-    expect(synced.has(dirname(join(root, 'new')))).toBe(true);
   });
 });
