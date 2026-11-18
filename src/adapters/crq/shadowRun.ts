@@ -8,7 +8,7 @@
  * never locked and never written. The pre/post `queue.json` digest is the abort signal.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { JsonValue } from '../../policy/crq/jsonValue.js';
 import { JsonObject, parseJsonValue } from '../../policy/crq/jsonValue.js';
@@ -55,7 +55,14 @@ export function freezeStateRoot(liveRoot: string, scratch: string): FrozenInput 
   for (const dir of [a, b]) {
     mkdirSync(dir, { recursive: true });
     for (const { name, bytes } of captured) {
-      if (bytes !== null) writeFileSync(join(dir, name), bytes);
+      const target = join(dir, name);
+      // Preserve absence: a retained destination file must not survive when the live one is absent,
+      // or the two copies would start from different inputs.
+      if (bytes === null) {
+        if (existsSync(target)) unlinkSync(target);
+        continue;
+      }
+      writeFileSync(target, bytes);
     }
   }
   return { a, b, liveDigest };
