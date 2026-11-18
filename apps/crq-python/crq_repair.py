@@ -670,6 +670,20 @@ def pending(job_id):
     return bool(prior.get('retry_after'))
 
 
+def drain_pending(job_id):
+    """pending() for the drain's pre-handler windows: priority sorting and the
+    per-item admission gate run before any exception isolation exists, so an
+    unreadable result.json is contained here: reported for its job only, and
+    healthy items keep sorting. Damaged is not missing: the job is not counted
+    as pending, so no paid work is repeated on an unreadable result's behalf."""
+    try:
+        return pending(job_id)
+    except (OSError, ValueError, AttributeError) as exc:
+        narrate('repair ' + job_id + ': unreadable result.json; treated as not pending: '
+                + str(exc)[:200])
+        return False
+
+
 def mark_stale(job, reason):
     """Terminal, spend-free verdict for a superseded job; the tick harvests it."""
     directory = ROOT / 'state/repair' / job['job']
@@ -850,7 +864,7 @@ def drain(config):
         for job_id in groups[item]:
             status, job, _ = drain_job(ROOT, config, queue, job_id)
             if (status == 'run' and job and job.get('item') == item
-                    and pending(job_id) and job.get('finding', {}).get('severity') in ('critical', 'major')):
+                    and drain_pending(job_id) and job.get('finding', {}).get('severity') in ('critical', 'major')):
                 return 0
         return 1
     drain_items(config, groups, sorted(groups, key=priority))
@@ -885,7 +899,7 @@ def drain_item(config, item, job_ids):
             jobs.append(job)
         elif reason != 'no queued tick-owned repair run':
             narrate('repair ' + job_id + ': skipped: ' + reason)
-    if not any(pending(job['job']) for job in jobs):
+    if not any(drain_pending(job['job']) for job in jobs):
         return None
     try:
         return process_item(config, jobs)
