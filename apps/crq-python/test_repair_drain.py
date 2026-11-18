@@ -358,21 +358,37 @@ class RepairDrainTest(unittest.TestCase):
             repair_tick.reconcile_fix_prs(c, self.queue)
             self.assertEqual(mark.call_count, 1)
 
-    def test_closed_fix_pr_is_terminal_and_never_polled_again(self):
+    def test_closed_fix_pr_rechecks_on_a_bounded_cadence_and_observes_reopen(self):
         item = self.queue['items'][0]
         record = item['repair_runs']['run1']
         record.update(fix_pr={'number': 99, 'url': 'https://github.com/example/repo/pull/99'},
                       verdicts=[{'job': 'crq-run1-F1', 'verdict': 'FIXED', 'reason': 'verified'}])
-        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: 'now',
+        clock = {'now': dt.datetime.now(dt.timezone.utc)}
+        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: clock['now'].isoformat(),
                             pr_info=mock.Mock(return_value={'state': 'CLOSED'}),
                             git=lambda *args: self.tip, is_ancestor=lambda *args: True)
         repair_tick.reconcile_fix_prs(c, self.queue)
-        self.assertEqual(record['fix_closed'], 'now')
+        self.assertEqual(record['fix_closed'], clock['now'].isoformat())
         self.assertEqual(c.pr_info.call_count, 1)
         self.assertEqual(record['fix_pr']['state'], 'CLOSED')
-        repair_tick.reconcile_fix_prs(c, self.queue)
+        # A fresh closed marker costs no further forge calls...
+        clock['now'] += dt.timedelta(hours=1)
         repair_tick.reconcile_fix_prs(c, self.queue)
         self.assertEqual(c.pr_info.call_count, 1)
+        # ...but it expires on the bounded cadence and is refreshed while the
+        # PR is still closed upstream.
+        clock['now'] += repair_tick.CLOSED_FIX_RECHECK
+        repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertEqual(c.pr_info.call_count, 2)
+        self.assertEqual(record['fix_closed'], clock['now'].isoformat())
+        # A closed PR can reopen upstream: the expired marker is invalidated
+        # instead of hiding the reopened PR from every later tick.
+        c.pr_info.return_value = {'state': 'OPEN'}
+        clock['now'] += repair_tick.CLOSED_FIX_RECHECK
+        repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertEqual(c.pr_info.call_count, 3)
+        self.assertNotIn('fix_closed', record)
+        self.assertEqual(record['fix_pr']['state'], 'OPEN')
         self.assertNotIn('fix_merged', record)
 
     def test_source_failure_is_retained_without_aborting_reconciliation(self):

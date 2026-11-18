@@ -3,10 +3,12 @@ from runtime_target import DEFAULT_BRANCH, DEFAULT_REF
 import repo_registry
 import review_receipt
 import copy
+import datetime as dt
 import deferred_refresh
 import hashlib
 import json
 from pathlib import Path
+import queue_time
 import re
 import tempfile
 from crq_repair import (DetectorUnavailable, atomic, findings, git as wt_git,
@@ -17,6 +19,23 @@ from crq_repair.bounded import JOB_ID, identity, job_path, require_canonical_del
 # The fixer ladder crq_repair.process runs is exactly A0-A2; digest keys its
 # fixed counts on these rungs, so nothing else may be recorded as a fix.
 FIXED_RUNGS = ('A0', 'A1', 'A2')
+
+# A closed fix PR can be reopened upstream and still merge later at the
+# verified head, so neither closed-PR marker below is terminal: each lane
+# rechecks its marker at most once per window, which bounds the forge cost
+# of an abandoned PR without making a reopen invisible.
+CLOSED_FIX_RECHECK = dt.timedelta(hours=24)
+
+
+def closed_marker_due(marker):
+    """True when a closed-PR marker owes its bounded recheck.
+
+    ``marker`` is a fix_closed timestamp or a not_fixed dict with an 'at'
+    stamp. An unreadable stamp is due: the recheck rewrites it, so a corrupt
+    or pre-cadence marker can never silence a record permanently.
+    """
+    stamp = queue_time.parse_utc(marker.get('at') if isinstance(marker, dict) else marker)
+    return stamp is None or dt.datetime.now(dt.timezone.utc) - stamp >= CLOSED_FIX_RECHECK
 
 
 def scan_fix_instructions(c, instructions, source_sha, scan_path):
@@ -758,9 +777,12 @@ def reconcile_current_fix(c, item):
     if item.get('remediation_state') == 'fixed':
         item['remediation_state'] = 'pending-merged-evidence'
     rid = item.get('receipt_id')
+    # A not_fixed marker suppresses its record only until the bounded recheck:
+    # a closed fix PR can reopen upstream and later merge, and this lane must
+    # observe that instead of trusting the marker forever.
     records = [r for r in item.get('repair_runs', {}).values()
                if r.get('receipt_id') == rid and r.get('state') == 'published'
-               and not r.get('not_fixed')]
+               and (not r.get('not_fixed') or closed_marker_due(r['not_fixed']))]
     if not rid or not records:
         return counts
     import hashlib
@@ -795,9 +817,13 @@ def reconcile_current_fix(c, item):
                 continue
         if (info.get('state') == 'CLOSED' or
                 info.get('state') == 'MERGED' and info.get('headRefOid') != publication.get('head')):
+            # Bounded marker, not terminal: 'at' schedules the next recheck,
+            # which sees a reopen and lets a later verified merge be credited.
             record['not_fixed'] = {'pr': pr['number'], 'state': info.get('state'),
-                                   'head': info.get('headRefOid'), 'reason': 'closed-or-head-mismatch'}
+                                   'head': info.get('headRefOid'), 'reason': 'closed-or-head-mismatch',
+                                   'at': c.iso()}
             continue
+        record.pop('not_fixed', None)  # Reopened or re-merged at head: marker is stale.
         if info.get('state') == 'MERGED' and info.get('number') == pr['number']:
             record['merged_fix'] = copy.deepcopy(info)
         selector = item['subject']['target_selector']
@@ -1342,7 +1368,9 @@ def reconcile_fix_prs(c, q):
             continue
         for run, record in item.get('repair_runs', {}).items():
             pr = record.get('fix_pr')
-            if not pr or record.get('fix_merged') or record.get('fix_closed'):
+            if not pr or record.get('fix_merged'):
+                continue
+            if record.get('fix_closed') and not closed_marker_due(record['fix_closed']):
                 continue
             stats['examined'] += 1
             try:
@@ -1353,10 +1381,13 @@ def reconcile_fix_prs(c, q):
                 continue
             pr['state'] = info['state']
             if info['state'] == 'CLOSED':
-                # Terminal marker: an abandoned fix PR must not cost one forge
-                # call per tick forever.
+                # Bounded marker, not terminal: an abandoned fix PR must not
+                # cost one forge call per tick forever, but a closed PR can
+                # reopen upstream, so closed_marker_due rechecks the marker
+                # once per CLOSED_FIX_RECHECK.
                 record['fix_closed'] = c.iso()
                 continue
+            record.pop('fix_closed', None)  # Reopened or merged: the closed marker expired.
             if info['state'] == 'MERGED':
                 merge = (info.get('mergeCommit') or {}).get('oid')
                 if not merge or not c.is_ancestor(merge, c.git('rev-parse', DEFAULT_REF)):
