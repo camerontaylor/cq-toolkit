@@ -433,8 +433,10 @@ export function bodyOf(payload: { body?: unknown }): string {
  *   - comment:           gh pr comment <n> --body-file - (body over stdin)
  *   - getPrReadiness:    gh pr view <n> --json statusCheckRollup,
  *                        reviewDecision,isDraft,state,mergeable,
- *                        mergeStateStatus — ONE subprocess, ONE coherent
- *                        snapshot (fail-closed on an unreadable draft flag)
+ *                        mergeStateStatus,headRefOid — ONE coherent
+ *                        document, then a headRefOid re-read that rejects
+ *                        the snapshot if the head moved mid-read
+ *                        (fail-closed on an unreadable draft flag)
  *   - getPrBody:         gh pr view <n> --json body (the compose protocol's
  *                        read half)
  * The seam carries NO merge effect — the fleet run report is a
@@ -504,30 +506,49 @@ export function makeSubprocessPrEffects(
     comment: async (number, body) => {
       await runGh(['pr', 'comment', String(number), '--body-file', '-'], repoRoot, timeoutMs, body);
     },
-    getPrReadiness: async (number) =>
-      readinessSnapshotOf(
-        parseGhJson<{
-          statusCheckRollup?: unknown;
-          reviewDecision?: unknown;
-          isDraft?: unknown;
-          state?: unknown;
-          mergeable?: unknown;
-          mergeStateStatus?: unknown;
-        }>(
-          await runGh(
-            [
-              'pr',
-              'view',
-              String(number),
-              '--json',
-              'statusCheckRollup,reviewDecision,isDraft,state,mergeable,mergeStateStatus',
-            ],
-            repoRoot,
-            timeoutMs,
-          ),
-          'gh pr view',
+    getPrReadiness: async (number) => {
+      const doc = parseGhJson<{
+        statusCheckRollup?: unknown;
+        reviewDecision?: unknown;
+        isDraft?: unknown;
+        state?: unknown;
+        mergeable?: unknown;
+        mergeStateStatus?: unknown;
+        headRefOid?: unknown;
+      }>(
+        await runGh(
+          [
+            'pr',
+            'view',
+            String(number),
+            '--json',
+            'statusCheckRollup,reviewDecision,isDraft,state,mergeable,mergeStateStatus,headRefOid',
+          ],
+          repoRoot,
+          timeoutMs,
         ),
-      ),
+        'gh pr view',
+      );
+      // The snapshot is one document, but a push can land DURING the read:
+      // re-read the head afterwards and refuse the snapshot if it moved (the
+      // checks and review it carries would describe a superseded head).
+      const head = doc.headRefOid;
+      if (typeof head !== 'string' || head === '') {
+        throw new Error(
+          `gh pr view #${String(number)}: no headRefOid — refusing an unpinned readiness snapshot`,
+        );
+      }
+      const after = parseGhJson<{ headRefOid?: unknown }>(
+        await runGh(['pr', 'view', String(number), '--json', 'headRefOid'], repoRoot, timeoutMs),
+        'gh pr view',
+      );
+      if (after.headRefOid !== head) {
+        throw new Error(
+          `PR #${String(number)} head changed during the readiness read (${head} → ${String(after.headRefOid)}) — refusing a snapshot that mixes two heads`,
+        );
+      }
+      return readinessSnapshotOf(doc);
+    },
     getPrBody: async (number) =>
       bodyOf(
         parseGhJson<{ body?: unknown }>(
