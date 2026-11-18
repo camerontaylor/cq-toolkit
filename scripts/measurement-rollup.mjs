@@ -218,6 +218,18 @@ export function renderMeasurementReport({
           ([name, value]) =>
             `- usage channel ${md(name)}: ${stated(value, cost.availability[`/usageChannels/${escape(name)}`])}`,
         )),
+    // A torn channel with no value has no key in usageChannels, only its own
+    // availability entry; render it so the panel never lists the remaining
+    // channels as if they were complete. Names decode the producer's pointer
+    // escaping (~1 -> /, then ~0 -> ~).
+    ...Object.entries(cost.availability)
+      .filter(([pointer]) => pointer.startsWith('/usageChannels/'))
+      .map(([pointer, record]) => ({
+        name: pointer.slice('/usageChannels/'.length).replaceAll('~1', '/').replaceAll('~0', '~'),
+        record,
+      }))
+      .filter(({ name }) => !Object.hasOwn(cost.usageChannels, name))
+      .map(({ name, record }) => `- usage channel ${md(name)}: ${stated(null, record)}`),
     `- attempt wall (ms): ${stated(cost.attemptWallMs, cost.availability['/attemptWallMs'])}`,
     `- run elapsed (ms): ${stated(cost.runElapsedMs, cost.availability['/runElapsedMs'])}`,
     `- modeled USD: ${stated(cost.modeledUsd, cost.availability['/modeledUsd'])}`,
