@@ -941,8 +941,15 @@ export async function settleAddressTerminalEvidence(
       if (source.stat.size > SOURCE_CAP || session.bytes + source.stat.size > TOTAL_CAP)
         throw new Error('terminal source snapshot/total bound reached');
       session.bytes += source.stat.size;
-      const bytes = await boundedBytes(source.path, source.stat.size);
-      return { source, bytes };
+      try {
+        const bytes = await boundedBytes(source.path, source.stat.size);
+        return { source, bytes };
+      } finally {
+        // This snapshot only serves the attempt that took it: unchanged and
+        // failed attempts must not keep the reservation, or later attempts hit
+        // the total bound although the earlier temporary bytes are gone.
+        session.bytes -= source.stat.size;
+      }
     };
     const { bytes } = await verify();
     if (bytes.equals(attempt.baseline)) continue;
