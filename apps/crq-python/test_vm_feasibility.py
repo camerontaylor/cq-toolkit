@@ -181,6 +181,27 @@ class FetchImageTests(unittest.TestCase):
             self.assertFalse((images / vm.IMAGE_NAME).exists())
             self.assertEqual(list(images.glob("*.part")), [])
 
+    def test_failed_promotion_removes_the_verified_partial_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            data = b"verified bytes"
+            inner = self._download(vm.sha256_bytes(data), data, [])
+
+            def fake(url, destination, timeout=120):
+                part = inner(url, destination, timeout)
+                if url.endswith(vm.IMAGE_NAME):
+                    # The destination becomes a directory mid-download, so the
+                    # promotion rename fails after verification succeeded.
+                    destination.mkdir()
+                return part
+
+            with mock.patch.object(vm, "download", side_effect=fake):
+                with self.assertRaises(OSError):
+                    vm.fetch_image(state, vm.Recorder(state))
+            self.assertEqual(list(images.glob("*.part")), [])
+
     def test_cached_image_is_verified_without_redownloading(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = pathlib.Path(temporary)

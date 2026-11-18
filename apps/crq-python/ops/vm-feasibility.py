@@ -543,10 +543,10 @@ def fetch_image(state: pathlib.Path, recorder: Recorder) -> dict:
     part = download(IMAGE_URL + IMAGE_NAME, image_path, timeout=1800)
     try:
         actual = verify_image(pathlib.Path(part), expected)
+        pathlib.Path(part).replace(image_path)
     except BaseException:
         pathlib.Path(part).unlink(missing_ok=True)
         raise
-    pathlib.Path(part).replace(image_path)
     recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + IMAGE_NAME],
                      "rc": 0, "bytes": image_path.stat().st_size,
                      "seconds": round(time.time() - started, 3)})
