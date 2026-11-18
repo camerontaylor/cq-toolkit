@@ -24,8 +24,12 @@ only when the observed topology is within the declared shapes: no foreign
 prefix entries, enablement links, drop-ins, dependency references, or
 unexpected manager units. Socket activation is scanned too: ``[Socket]
 Service=`` names the unit its incoming traffic starts, so a co-installed
-socket naming the selected unit is a foreign dependency edge. The examined
-scope is the user unit directory plus
+socket naming the selected unit is a foreign dependency edge. Common ``[Unit]``
+dependencies apply to every unit type, so an entry is scanned whenever it
+carries any unit suffix rather than only the declared service/timer/path
+shapes; a co-installed ``ingress.slice`` naming the selected unit is therefore
+foreign even though its name is outside the manager-listing prefix. The
+examined scope is the user unit directory plus
 the user manager's installed and loaded lists. A non-CRQ unit that names a CRQ
 unit only in memory, transient or generated state, another namespace, or an
 activation created between the scan and the fence is outside this scope and
@@ -96,6 +100,16 @@ DEPENDENCY_RE = re.compile(
     r"WantedBy|RequiredBy|Also|Upholds|OnFailure|OnSuccess|Triggers|"
     r"TriggersBy|Unit|Service)\s*=\s*(?P<value>.*)")
 UNIT_SUFFIXES = {".service", ".timer", ".path"}
+# ``[Unit]`` dependency directives apply to every unit type, not only the
+# service/timer/path shapes the selected topology declares. A co-installed
+# ``ingress.slice`` with ``Wants=crq-tick.service`` starts the selected unit
+# even though its name is outside the manager-listing prefix, so the dependency
+# scan reads every loadable unit type as well as drop-in ``.conf`` files.
+# ``.device`` and ``.scope`` units cannot be loaded from a unit file, but
+# reading an entry that carries one of those suffixes is harmless.
+SCANNED_SUFFIXES = {".conf", ".device", ".automount", ".mount",
+                    ".path", ".scope", ".service", ".slice", ".socket",
+                    ".swap", ".target", ".timer"}
 
 
 def _expand_instance(path, value):
@@ -648,8 +662,7 @@ class SubprocessSystemd:
                             continue
                         elif not entry.is_file(follow_symlinks=False):
                             continue
-                        if path.suffix not in {".service", ".timer", ".path",
-                                               ".socket", ".target", ".conf"}:
+                        if path.suffix not in SCANNED_SUFFIXES:
                             continue
                         try:
                             data = _read_file(path, max_bytes=MAX_UNIT_BYTES)

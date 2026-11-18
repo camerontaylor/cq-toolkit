@@ -669,6 +669,18 @@ class DiscoveryTests(PortFixture):
         self.assertIn("Service names crq-tick.service",
                       " ".join(evidence["foreign"]))
 
+    def test_co_installed_slice_unit_dependency_is_unsupported(self):
+        declared = self.declare()
+        # Common ``[Unit]`` dependencies apply to slice units, and the slice
+        # name is outside the selected unit's prefix, so this activation edge
+        # is visible only when every unit type is dependency-scanned.
+        self.write("ingress.slice", "[Unit]\nWants=crq-tick.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Wants names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
     def test_declared_source_may_name_expected_units(self):
         declared = self.declare()
         self.write("crq-tick.timer",
