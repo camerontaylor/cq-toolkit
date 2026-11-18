@@ -324,7 +324,9 @@ export async function captureWorkingTree(repo: string, originalHead: string) {
 /** Read exactly the inode the lstat check validated: never follow a swapped-in symlink. */
 async function readRegularFile(file: string, expected: Stats): Promise<Buffer> {
   if (!constants.O_NOFOLLOW) throw new Error('working-tree snapshot: no-follow unavailable');
-  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  // O_NONBLOCK: a regular file swapped for a FIFO after the lstat must fail the
+  // isFile() check below instead of blocking the open until a writer appears.
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const actual = await handle.stat();
     if (!actual.isFile() || actual.dev !== expected.dev || actual.ino !== expected.ino)
