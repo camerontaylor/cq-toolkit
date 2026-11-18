@@ -459,7 +459,10 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
             await settleAddressTerminalEvidence(terminalToken(this), attempts);
           } finally {
             // Real local ref effects survive a later restore/report failure.
-            for (const participant of open)
+            // Every participant, closed or open: a closed participant's cancelled
+            // attempt can hold a retained reference too. Only open participants
+            // get a terminal report persisted below.
+            for (const participant of this.participants)
               for (const attempt of participant.attempts) {
                 if (
                   attempt.retained &&
