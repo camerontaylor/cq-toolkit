@@ -121,13 +121,13 @@
     },
     "1934": {
       "tuple": {
-        "head": "2fd8e93f58e962eeddb18c6f7705bbc62f1402f0",
+        "head": "8630a9cc71ea14a99b07a1c19b50e376fd0058af",
         "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-16T10:50:01.890Z",
+          "observedAt": "2026-11-18T05:15:27.316Z",
           "by": "self-merge-prs:observe"
         }
       ]
