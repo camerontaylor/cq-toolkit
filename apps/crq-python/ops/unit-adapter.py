@@ -231,6 +231,9 @@ def _logical_lines(text: str) -> list[str]:
     logical = []
     pending = ""
     for line in text.splitlines():
+        if pending and line.lstrip()[:1] in ("#", ";"):
+            # systemd skips comment lines inside a continuation.
+            continue
         if line.endswith("\\"):
             pending += line[:-1] + " "
             continue
@@ -1873,9 +1876,12 @@ class ProductionUnitAdapter:
         if self._runtime_from_unit(staged) != snapshot["runtime"]:
             self.refuse("staged restore runtime changed before activation")
         # Derive the start timeout while the mask and staged file are still in place, so an
-        # unsupported TimeoutStartSec refuses before the service is released.
-        start_timeout = self._restored_service_start_timeout(
-            unit, inventory, service_state)
+        # unsupported TimeoutStartSec refuses before the service is released. Only a restore
+        # that starts the service needs it; an inactive snapshot never does.
+        start_timeout = None
+        if snapshot["activators"]["service_active"] == "active":
+            start_timeout = self._restored_service_start_timeout(
+                unit, inventory, service_state)
         masked = self._show(unit, ["LoadState", "FragmentPath"])
         fenced = self._path_state(service)
         if masked["LoadState"] != "masked" \
