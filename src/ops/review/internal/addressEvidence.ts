@@ -16,7 +16,7 @@ import {
   readdir,
   rmdir,
 } from 'node:fs/promises';
-import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { GIT_HARDEN, HARDENED_DIFF_FLAGS } from '../../../shared/gitHarden.js';
 import {
@@ -235,7 +235,10 @@ async function terminalSession(
         if (!path || !isAbsolute(path)) continue;
         try {
           const candidate = await realpath(join(path, 'git'));
-          if (!relative(canonical, candidate).startsWith('..')) continue;
+          // Only a real parent traversal leaves the checkout; a descendant such
+          // as `<root>/..tools/git` also begins with two dots.
+          const relation = relative(canonical, candidate);
+          if (relation !== '..' && !relation.startsWith(`..${sep}`)) continue;
           await access(candidate, constants.X_OK);
           const stat = await lstat(candidate);
           if (stat.isFile()) {
