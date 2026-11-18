@@ -37,7 +37,7 @@ const modulePath = fileURLToPath(
 );
 async function start(root: string, timeoutBinary = 'timeout', clockStepMs = 0) {
   const moduleUrl = pathToFileURL(modulePath).href;
-  const code = `import {runReviewChild} from ${JSON.stringify(moduleUrl)}; await runReviewChild({stateRoot:${JSON.stringify(root)},runId:'run-1',timeoutMinutes:1,now:(()=>{let t=Date.now();return()=>new Date(t+=${clockStepMs})})(),timeoutBinary:${JSON.stringify(timeoutBinary)},env:{PATH:'/usr/bin:/bin'}});`;
+  const code = `import {runReviewChild} from ${JSON.stringify(moduleUrl)}; await runReviewChild({stateRoot:${JSON.stringify(root)},runId:'run-1',timeoutMinutes:1,monotonicMs:(()=>{let t=0;return()=>t+=${clockStepMs}})(),timeoutBinary:${JSON.stringify(timeoutBinary)},env:{PATH:'/usr/bin:/bin'}});`;
   return spawnReviewWrapper({
     stateRoot: root,
     runId: 'run-1',
@@ -84,7 +84,8 @@ describe('inactive detached review process', () => {
     },
   );
   it.each([
-    ['after the deadline', 61 * 60_000, true],
+    ['after the deadline and grace', 3 * 60_000, true],
+    ['inside the grace period', 90_000, false],
     ['before the deadline', 0, false],
   ])('records a group SIGKILL exit %s with timed_out=%s', async (_label, clockStepMs, timedOut) => {
     const { root, dir } = await setup('open', ['/bin/echo', 'hello']);
