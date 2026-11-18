@@ -202,6 +202,8 @@ export class CheckoutWriterContext {
         await this.methods(entry).writeMetadata({ version: 1, state: 'unbound', incomplete: true });
       }
     }
+    // A slot acquired through find() is owned by an ancestor; unbind it there too.
+    await this.parent?.removed(path);
     await this.hooks?.removed?.(path);
   }
   async isComplete(): Promise<boolean> {
