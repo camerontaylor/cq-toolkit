@@ -403,39 +403,29 @@ export async function runPublish(effects: PublishRunEffects): Promise<PublishRun
   const requestPath = join(effects.stateRoot, 'backfill', 'publish-request.json');
   const failurePath = join(effects.stateRoot, 'backfill', 'publication-failure.json');
   const lockPath = join(effects.stateRoot, 'backfill', 'publisher.lock');
-  try {
-    return await withLock(lockPath, { wait: true }, async () => {
-      try {
-        // The rollout read is a publish prerequisite: an invalid document
-        // (including a bad `publisher_spool`) is a failure to persist under
-        // the publisher lock, exactly like Python's `settings()` read inside
-        // the locked block. Only an absent rollout bypasses persistence.
-        const config = await readRollout(effects);
-        return await publishUnderLock(effects, config, requestPath, failurePath);
-      } catch (error) {
-        if (error instanceof PublishRolloutDisabled) throw error;
-        // Python keeps the publisher lock held across failure persistence
-        // (backfill_publisher.run: the except block runs inside
-        // `with ledger.locked(publisher.lock)`), so a second overlapping
-        // invocation cannot publish-and-reconcile between this invocation's
-        // marker write and its queue halt and leave a stale halt behind.
-        await recordFailure(effects, error, failurePath);
-        failurePersisted.add(error instanceof Error ? error : {});
-        throw error;
-      }
-    });
-  } catch (error) {
-    if (error instanceof PublishRolloutDisabled) throw error;
-    const key = error instanceof Error ? error : undefined;
-    if (key === undefined || !failurePersisted.has(key)) {
+  // A lock-acquisition (or release) failure is not recorded: Python's `with
+  // ledger.locked(...)` lets it propagate, and persisting the marker and queue
+  // halt without the publisher lock would race a concurrent successful run.
+  return await withLock(lockPath, { wait: true }, async () => {
+    try {
+      // The rollout read is a publish prerequisite: an invalid document
+      // (including a bad `publisher_spool`) is a failure to persist under
+      // the publisher lock, exactly like Python's `settings()` read inside
+      // the locked block. Only an absent rollout bypasses persistence.
+      const config = await readRollout(effects);
+      return await publishUnderLock(effects, config, requestPath, failurePath);
+    } catch (error) {
+      if (error instanceof PublishRolloutDisabled) throw error;
+      // Python keeps the publisher lock held across failure persistence
+      // (backfill_publisher.run: the except block runs inside
+      // `with ledger.locked(publisher.lock)`), so a second overlapping
+      // invocation cannot publish-and-reconcile between this invocation's
+      // marker write and its queue halt and leave a stale halt behind.
       await recordFailure(effects, error, failurePath);
+      throw error;
     }
-    throw error;
-  }
+  });
 }
-
-/** Errors whose failure marker was already persisted under the publisher lock. */
-const failurePersisted = new WeakSet<object>();
 
 /**
  * The publish body Python runs inside `with ledger.locked(publisher.lock)`.
