@@ -356,16 +356,20 @@ async function resolveStored(bundleDir, entry) {
     const { size } = await handle.stat();
     if (size > MAX_FILE_BYTES)
       return { state: 'unavailable', reason: 'stored file exceeds the 8 MiB size cap' };
-    const buffer = Buffer.alloc(Math.min(size + 1, MAX_FILE_BYTES + 1));
+    // Read in bounded chunks until EOF or the cap is crossed: a full buffer sized from the
+    // earlier stat() does not establish EOF if the file grew after it.
+    const chunks = [];
     let length = 0;
-    while (length < buffer.length) {
-      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, null);
+    const chunk = Buffer.alloc(64 * 1024);
+    while (length <= MAX_FILE_BYTES) {
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
       if (!bytesRead) break;
+      chunks.push(Buffer.from(chunk.subarray(0, bytesRead)));
       length += bytesRead;
     }
     if (length > MAX_FILE_BYTES)
       return { state: 'unavailable', reason: 'stored file exceeds the 8 MiB size cap' };
-    bytes = buffer.subarray(0, length);
+    bytes = Buffer.concat(chunks, length);
   } catch (error) {
     return {
       state: 'unavailable',
