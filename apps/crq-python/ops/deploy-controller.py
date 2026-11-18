@@ -505,19 +505,75 @@ def read_queue(effects: Effects) -> dict:
     return queue
 
 
+RUNNER_SOURCE_DIR = "apps/crq-python"
+
+
+def _string_constants(source: str) -> set:
+    """Every string constant a module's code uses, EXCLUDING comments (never
+    tokenized into the AST) and bare string statements (docstrings and other
+    expression-statement strings). Raises SyntaxError/ValueError on a module
+    that does not parse; the caller fails closed on it."""
+    tree = ast.parse(source)
+    skipped = {id(node.value) for node in ast.walk(tree)
+               if isinstance(node, ast.Expr)
+               and isinstance(node.value, ast.Constant)}
+    return {node.value for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and id(node) not in skipped}
+
+
+def prior_source_keys(effects: Effects, reader_sha: str, candidates) -> set:
+    """The subset of ``candidates`` (queue state keys) that the runner source
+    AT ``reader_sha`` names: the key is, exactly, a string constant in the
+    parsed code of a non-test top-level runner module committed at that SHA.
+
+    Honest scope: this is evidence the prior code NAMES the key (as a dict
+    key, ``setdefault`` argument, subscript, or any other string value), so a
+    key it creates or reads is covered. It is not proof the prior code parses
+    every value shape, and dead code still counts. Comments and docstrings
+    (bare string statements) never count. The source is read through git at
+    that SHA, never the live checkout, which may already be the new target.
+    Fail closed on ANY uncertainty: a malformed SHA, a git failure, no runner
+    modules listed, an unreadable module, or a module that does not parse
+    yields the empty set, so every candidate stays unproven.
+    """
+    wanted = set(candidates)
+    if not wanted or not SHA_RE.match(reader_sha or ""):
+        return set()
+    try:
+        listing = effects.git("ls-tree", "--name-only", reader_sha,
+                              RUNNER_SOURCE_DIR + "/")
+        modules = [name for name in listing.splitlines()
+                   if name.endswith(".py")
+                   and not name.rsplit("/", 1)[-1].startswith("test_")]
+        if not modules:
+            return set()
+        proven = set()
+        for module in modules:
+            proven |= wanted & _string_constants(
+                effects.git("show", reader_sha + ":" + module))
+        return proven
+    except Exception:  # noqa: BLE001 - any doubt fails closed
+        return set()
+
+
 def compatibility_record(effects: Effects, target_sha: str) -> dict:
-    """Read-only rollback-compatibility evidence for the CURRENT->TARGET move.
+    """Read-only rollback-compatibility evidence for the queue, judged
+    against ``target_sha``: the target that must be able to READ the queue
+    (the PRIOR target on a deploy; the rollback target on a rollback).
 
     The controller cannot execute the prior target's parser, so it records
     observable state-shape facts an owner needs: the queue schema marker and
     the state keys the current queue carries. Any observation the controller
-    cannot prove readable by the recorded prior target (an explicit schema
-    marker, an ``author_*`` state key, an unreadable queue) disables
-    automatic rollback (owner decision, never a silent restore). Receipts
-    under state/runs are append-only artifacts both versions read
-    defensively.
+    cannot prove readable by that target (an explicit schema marker, an
+    ``author_*`` state key its committed source never names, an unreadable
+    queue) disables automatic rollback (owner decision, never a silent
+    restore). ``author_*`` keys the target's source names are recorded in
+    ``schema_observations_proven`` and do not disable it. Receipts under
+    state/runs are append-only artifacts both versions read defensively.
     """
     record = {"checked": True, "schema_observations": [],
+              "schema_observations_proven": [],
               "schema_marker_present": False, "queue_schema": None}
     try:
         # A missing queue or a non-object root is evidence never read: it is
@@ -534,9 +590,11 @@ def compatibility_record(effects: Effects, target_sha: str) -> dict:
             # prior target's reader was never proven against it.
             record["schema_marker_present"] = True
             record["queue_schema"] = queue["schema_version"]
-        for key in sorted(queue):
-            if key.startswith("author_"):
-                record["schema_observations"].append(key)
+        author_keys = [key for key in sorted(queue) if key.startswith("author_")]
+        known = prior_source_keys(effects, target_sha, author_keys)
+        for key in author_keys:
+            record["schema_observations_proven" if key in known
+                   else "schema_observations"].append(key)
     record["target_sha"] = target_sha
     return record
 
@@ -554,12 +612,15 @@ def preflight(effects: Effects, target: str, tag: str) -> dict:
     peeled = effects.git("rev-parse", ref + "^{commit}")
     if peeled != target:
         raise Refused("tag " + tag + " peels to " + peeled + ", not " + target)
+    state = captured_state(effects)
     return {
         "at": now_iso(),
         "target": target,
         "tag": tag,
-        "state": captured_state(effects),
-        "rollback_compatibility": compatibility_record(effects, target),
+        "state": state,
+        # Judged against the PRIOR (live) target, which must read the queue
+        # if the deploy has to roll back.
+        "rollback_compatibility": compatibility_record(effects, state["prior_head"]),
     }
 
 
@@ -1304,8 +1365,9 @@ def _receipt_verdicts(observations) -> dict:
 
 def rollback_compatible(record: dict) -> bool:
     """Automatic rollback is permitted only against a queue with NO explicit
-    schema_version marker and no ``author_*`` state keys: the one shape the
-    recorded prior target is known to read.
+    schema_version marker and no ``author_*`` state keys the prior target's
+    source does not name (those land in ``schema_observations``; proven ones
+    in ``schema_observations_proven`` are ignored here).
 
     The marker's PRESENCE is a boolean recorded by ``compatibility_record``;
     its VALUE is never interpreted (an explicit ``"unmarked"`` string or any
@@ -1445,7 +1507,7 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
             post = preservation_check(effects, pre["state"])
             plan["steps"].append({"step": "preservation", **post})
             tx["phase"] = "compatibility"
-            record = compatibility_record(effects, target)
+            record = compatibility_record(effects, pre["state"]["prior_head"])
             plan["rollback_compatibility_after"] = record
             plan["automatic_rollback_permitted"] = rollback_compatible(
                 {**pre["rollback_compatibility"], **record})

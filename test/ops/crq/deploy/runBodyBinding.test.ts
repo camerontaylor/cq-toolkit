@@ -38,6 +38,7 @@ interface World {
   nextHold: number;
   digests: string[];
   compatible: boolean[];
+  compatShas: string[];
   drained: boolean;
   drainBlockedAfterSwitch: boolean;
   health: Record<string, unknown>;
@@ -55,6 +56,7 @@ function fresh(): World {
     nextHold: 1,
     digests: ['q1'],
     compatible: [],
+    compatShas: [],
     drained: true,
     drainBlockedAfterSwitch: false,
     health: { healthy: true },
@@ -97,7 +99,10 @@ function build(w: World, patch: Partial<RunConfig> = {}) {
       w.events.push(`digests:${value}`);
       return { queue: value };
     },
-    compatibilityRecord: async (_e, sha) => ({ for: sha }),
+    compatibilityRecord: async (_e, sha) => {
+      w.compatShas.push(sha);
+      return { for: sha };
+    },
     rollbackCompatible: () => (w.compatible.length > 0 ? w.compatible.shift()! : true),
     runnerLiveness: async () => 'live',
     drainCheck: async () => ({
@@ -253,6 +258,16 @@ describe('binding: the forward path', () => {
     expect(call[1]).toBe('/live');
     expect(call[3]).toBe(TARGET);
     expect(call[4]).toBe('crq-runner/20261115-1');
+  });
+
+  test('rollback compatibility is judged against the prior sha before and after the drain', async () => {
+    // Pre-hold measure and the post-drain recheck both ask whether the PRIOR
+    // (live) target can read the queue; after the switch it is also the prior.
+    const w = fresh();
+    switchTo(w);
+    await build(w).bound.run();
+    expect(w.compatShas.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(w.compatShas)).toEqual(new Set([PRIOR]));
   });
 
   test('the re-measured baseline replaces the pre-hold one', async () => {

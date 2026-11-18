@@ -711,7 +711,7 @@ class Run:
         self.cq_bin = measure_cq_bin(self.original_config)
         self.preserved = self.controller.preserved_digests(self.effects)
         compatibility = self.controller.compatibility_record(self.effects,
-                                                             self.target)
+                                                             self.prior_sha)
         require(self.controller.rollback_compatible(compatibility),
                 "the live queue disables automatic rollback, so this deploy "
                 "would have no fallback: " + compatibility_reason(compatibility)
@@ -862,7 +862,7 @@ class Run:
                 "nothing was switched")
         self.preserved = self.controller.preserved_digests(self.effects)
         compatibility = self.controller.compatibility_record(self.effects,
-                                                             self.target)
+                                                             self.prior_sha)
         require(self.controller.rollback_compatible(compatibility),
                 "the queue no longer grants automatic rollback after the "
                 "drain: " + compatibility_reason(compatibility)
