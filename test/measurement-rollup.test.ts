@@ -445,8 +445,8 @@ describe('M10d nominal evidence', () => {
       population: composed.outcome.population,
     });
     expect(rendered.markdown).toContain('## Evidence artifacts');
-    expect(rendered.markdown).toContain('- bundles/run-a');
-    expect(rendered.markdown).toContain('- bundles/run-b');
+    expect(rendered.markdown).toContain('- `bundles/run-a`');
+    expect(rendered.markdown).toContain('- `bundles/run-b`');
     for (const section of ['## Fix panel', '## Cost panel', '## Harm panel', '## Missed panel'])
       expect(rendered.markdown).toContain(section);
     expect(rendered.markdown).toContain('- re-fixes: 1 candidates, 0 explained, 0 unknown');
@@ -861,7 +861,7 @@ describe('M10d failure evidence', () => {
       artifacts: ['bundles/run|a', 'bundles/run-b'],
       runs: [makeRun({ runId: 'run|1' })],
     });
-    expect(escaped.markdown).toContain('- bundles/run\\|a');
+    expect(escaped.markdown).toContain('- `bundles/run|a`');
     expect(escaped.markdown).toContain(`| ${REPO} | run\\|1 |`);
     const multiline = renderMeasurementReport(
       input({
@@ -881,10 +881,20 @@ describe('M10d failure evidence', () => {
       artifacts: ['![evidence](remote.png)', 'a\\b', '~~old~~'],
       runs: [makeRun({ runId: 'a*b_c`d<e>' })],
     });
-    expect(markup.markdown).toContain('- \\!\\[evidence\\]\\(remote.png\\)');
-    expect(markup.markdown).toContain('- a\\\\b');
-    expect(markup.markdown).toContain('- \\~\\~old\\~\\~');
-    expect(markup.markdown).not.toContain('![evidence](remote.png)');
+    expect(markup.markdown).toContain('- `![evidence](remote.png)`');
+    expect(markup.markdown).toContain('- `a\\b`');
+    expect(markup.markdown).toContain('- `~~old~~`');
+    // References are code spans, so autolinks cannot consume escapes, and a
+    // backtick inside widens the fence. Run identifiers escape `&` so a
+    // character reference stays literal.
+    const literal = compose({
+      artifacts: ['https://example.com/a_b', 'x`y', '`edge`'],
+      runs: [makeRun({ runId: 'run&#45;1' })],
+    });
+    expect(literal.markdown).toContain('- `https://example.com/a_b`');
+    expect(literal.markdown).toContain('- ``x`y``');
+    expect(literal.markdown).toContain('- `` `edge` ``');
+    expect(literal.markdown).toContain(`| ${REPO} | run\\&#45;1 |`);
     expect(markup.markdown).toContain(`| ${REPO} | a\\*b\\_c\\\`d\\<e\\> |`);
     // Minimal but valid panels still render.
     expect(() =>

@@ -137,7 +137,20 @@ export function renderMeasurementReport({
     String(text)
       .replaceAll('\r', ' ')
       .replaceAll('\n', ' ')
-      .replace(/[\\`*_~[\]()!|<>]/g, '\\$&');
+      .replace(/[\\`*_~[\]()!|<>&]/g, '\\$&');
+  /**
+   * A reference renders as a code span: code spans are literal, so no
+   * autolink can swallow inserted escapes and the text reads back verbatim.
+   * The fence is longer than any backtick run inside, padded when the text
+   * starts or ends with a backtick.
+   */
+  const lit = (text) => {
+    const flat = String(text).replaceAll('\r', ' ').replaceAll('\n', ' ');
+    const runs = flat.match(/`+/g) ?? [];
+    const fence = '`'.repeat(Math.max(0, ...runs.map((r) => r.length)) + 1);
+    const pad = flat.startsWith('`') || flat.endsWith('`') ? ' ' : '';
+    return `${fence}${pad}${flat}${pad}${fence}`;
+  };
   // A non-known total never renders its stored number: unavailable,
   // not-collected and n-a render unknown; partial keeps an explicitly
   // labelled subtotal.
@@ -169,7 +182,7 @@ export function renderMeasurementReport({
     '',
     '## Evidence artifacts',
     '',
-    ...(refs.length === 0 ? ['- (none)'] : refs.map((ref) => `- ${md(ref)}`)),
+    ...(refs.length === 0 ? ['- (none)'] : refs.map((ref) => `- ${lit(ref)}`)),
     '',
     '## Unknown evidence',
     '',
