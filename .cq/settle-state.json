@@ -147,13 +147,13 @@
     },
     "1971": {
       "tuple": {
-        "head": "6077233ce68d8269be25c960fc826946e82cc765",
+        "head": "b955c3b564bb769d7c73e4b9ac4fe3636cfde15c",
         "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-18T11:55:53.874Z",
+          "observedAt": "2026-11-18T15:32:43.190Z",
           "by": "self-merge-prs:observe"
         }
       ]
