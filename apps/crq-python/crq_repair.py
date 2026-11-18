@@ -1241,13 +1241,19 @@ def run(argv=None):
         if triage_phase(config, dry_run=True) is None:
             return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
         return 0, None
+    # Presence selects the mode (--job= is supplied-but-empty, never absent):
+    # an empty selector must be refused, not silently drained as no selector.
     selectors = (args.job, args.source_sha, args.finding_sha256)
-    if args.recover_job and (any(selectors) or args.triage_dry_run):
+    supplied = tuple(selector is not None for selector in selectors)
+    if args.recover_job and (any(supplied) or args.triage_dry_run):
         narrate('repair dispatch refused: recovery selects exactly one job')
         return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
-    if any(selectors) and not all(selectors):
+    if any(supplied) and not all(supplied):
         narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
         return 2, {'status': 'refused', 'reason': '--job, --source-sha and --finding-sha256 go together'}
+    if any(supplied) and not all(selectors):
+        narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 must be nonempty')
+        return 2, {'status': 'refused', 'reason': '--job, --source-sha and --finding-sha256 must be nonempty'}
     # Validate all configured paid lanes before any A0 spend. Missing hard
     # budget support is an activation prerequisite, never a soft prompt promise.
     drivers = {role['driver'] for role in repair['roles'].values()}
