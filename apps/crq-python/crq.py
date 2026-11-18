@@ -2983,14 +2983,8 @@ def ordinary_review_eligible(q):
                for i in live_items(q))
 
 
-def coverage_fallback(q, log, dry, only, ordinary_eligible=None):
-    previous = q.get("backfill_ordinary_exhausted", False)
-    if ordinary_eligible is False:
-        q["backfill_ordinary_exhausted"] = True
-    try:
-        return _coverage_fallback(q, log, dry, only)
-    finally:
-        q["backfill_ordinary_exhausted"] = previous
+def coverage_fallback(q, log, dry, only):
+    return _coverage_fallback(q, log, dry, only)
 
 
 def _coverage_fallback(q, log, dry, only):
@@ -3070,15 +3064,11 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
     turn = not only and background_turn(q) and any(
         i["state"] == "pending" and rank(i) < 2 for i in selection)
     if turn:
-        # Try rank 2–3 plans in order; their ordinary gates establish eligibility.
+        # Try rank 2–3 plans first for fairness; rank-4 backfill is strictly
+        # lowest and never launches ahead of a pending rank 0–3 item.
         selection.sort(key=lambda i: (not bool(i.get("operator_priority")),
             0 if 2 <= rank(i) <= 3 else 1))
     for item in selection:
-        if turn and not item.get("operator_priority") and not 2 <= rank(item) <= 3:
-            turn = False
-            started, has_coverage = coverage_fallback(q, log, dry, only, ordinary_eligible=False)
-            if started or (dry and has_coverage):
-                break
         if only and item["id"] != only:
             continue
         if item["state"] != "pending":
