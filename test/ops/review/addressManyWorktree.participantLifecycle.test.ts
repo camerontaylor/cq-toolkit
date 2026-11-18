@@ -221,3 +221,39 @@ test('a vanished journal directory ends the terminal attempt without quarantine'
     await f.repo.cleanup();
   }
 });
+
+test('a rejected action that deferred a cancelled attempt still settles it before closing', async () => {
+  const f = await fixture();
+  const parent = new AbortController();
+  const report = terminalReport(join(f.root, 'terminal-rejected-report.json'));
+  try {
+    const pending = withAddressOwnership(
+      {
+        repoRoot: f.repo.root,
+        git: f.run,
+        source: 'local',
+        production: false,
+        signal: parent.signal,
+      },
+      async (lease) => {
+        await ownershipModule.bindAddressTerminalReport(lease, report);
+        const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+        const attempt = await ownershipModule.recordAddressTerminalAttempt(
+          binding,
+          terminalInput(f.repo),
+        );
+        await writeFile(join(f.repo.root, 'src/a.ts'), 'RAW CANCELLED PARTIAL\n');
+        parent.abort();
+        expect(ownershipModule.deferAddressTerminalAttempt(binding, attempt)).toBe(true);
+        // The worker throws instead of reaching addressCancelledResult().
+        throw new Error('worker rejected after deferring');
+      },
+    );
+    await expect(pending).rejects.toThrow();
+    expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('export const a = 1;\n');
+    expect(report.failed).toHaveLength(1);
+    expect(f.repo.git('show', `${report.failed[0]!.sha}:src/a.ts`)).toBe('RAW CANCELLED PARTIAL\n');
+  } finally {
+    await f.repo.cleanup();
+  }
+});

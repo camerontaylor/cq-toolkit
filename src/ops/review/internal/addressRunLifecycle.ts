@@ -278,6 +278,19 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
       const result = await action();
       if (this.stopping) await this.arrive(participant);
       return result;
+    } catch (error) {
+      // A rejected action skips arrive(), yet a deferred (cancelled) attempt it
+      // holds is never released: start terminal cleanup before the participant
+      // closes so that attempt is still settled. The rejection itself wins; a
+      // cleanup failure is recorded as the terminal failure by runTerminal.
+      if (this.stopping && participant.attempts.some((attempt) => attempt.cancelled)) {
+        try {
+          await this.arrive(participant);
+        } catch {
+          /* recorded in terminalFailure */
+        }
+      }
+      throw error;
     } finally {
       participant.arrived = true;
       participant.closed = true;
@@ -455,13 +468,14 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const work = (async () => {
+          let persistFailure: { error: unknown } | undefined;
           try {
             await settleAddressTerminalEvidence(terminalToken(this), attempts);
           } finally {
             // Real local ref effects survive a later restore/report failure.
             // Every participant, closed or open: a closed participant's cancelled
-            // attempt can hold a retained reference too. Only open participants
-            // get a terminal report persisted below.
+            // attempt can hold a retained reference too.
+            const gained = new Set<Participant>();
             for (const participant of this.participants)
               for (const attempt of participant.attempts) {
                 if (
@@ -470,13 +484,36 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
                   !participant.report.failed.includes(attempt.retained)
                 ) {
                   participant.report.failed.push(attempt.retained);
+                  gained.add(participant);
                   const row = participant.report.attempts.findLast(
                     (row) => row.finding === attempt.finding && row.invocation === 'edit',
                   );
                   if (row) row.failedAttempt = attempt.retained;
                 }
               }
+            // Make a closed participant's reference operator-visible now, not only
+            // in memory: it has no later write. Open participants keep the
+            // existing contract: the full terminal report below when settlement
+            // succeeds, and no report when it fails (the in-memory report still
+            // carries the reference to the caller).
+            for (const participant of gained) {
+              if (!participant.report || !participant.reportTarget) continue;
+              if (!participant.closed) continue;
+              try {
+                await persistAddressTerminalReport(
+                  terminalToken(this),
+                  participant.reportTarget,
+                  participant.report,
+                  participant.reportDirectory ?? (await lstat(dirname(participant.reportTarget))),
+                );
+              } catch (error) {
+                persistFailure ??= { error };
+              }
+            }
           }
+          // A persistence failure never masks a settlement failure (which already
+          // propagated); after a successful settlement it is surfaced here.
+          if (persistFailure) throw persistFailure.error;
           for (const participant of open)
             if (participant.report) {
               if (!participant.reportDirectory) continue;
