@@ -42,8 +42,11 @@ function markPreviousLinkStale(
   head: string,
 ): JsonObject {
   const linksValue = queue.get('review_pr_links');
+  // null counts as absent here: a null map never held a link, so the queue is unchanged.
   const links =
-    linksValue === undefined ? new JsonObject([]) : object(linksValue, 'review_pr_links');
+    linksValue === undefined || linksValue === null
+      ? new JsonObject([])
+      : object(linksValue, 'review_pr_links');
   const key = `${repo}#${pr}`;
   const previousValue = links.get(key);
   const previous = pyTruthy(previousValue) ? object(previousValue, 'review_pr_link') : undefined;

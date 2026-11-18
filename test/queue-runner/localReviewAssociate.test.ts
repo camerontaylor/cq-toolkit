@@ -68,6 +68,13 @@ describe('associateLocalReview', () => {
     expect(dry.queue).toBe(q);
   });
 
+  it('treats a null review_pr_links as absent when no local-review item remains', async () => {
+    const q = mk({ items: [{ id: 'x', kind: 'fix' }], review_pr_links: null });
+    const r = await associateLocalReview(q, 'o/r', 7, B, H1, false, effects());
+    expect(r.associated).toBe(false);
+    expect(r.queue).toBe(q);
+  });
+
   it('is false when the facts read fails', async () => {
     const r = await run({ items: [item('a', 'pending')] }, false, effects([], null));
     expect(r.associated).toBe(false);
