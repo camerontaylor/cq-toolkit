@@ -213,6 +213,11 @@ export async function switchUnit(
     }
     const snapshot = await adapter.snapshot(unit);
     await adapter.validateSnapshot(unit, snapshot);
+    // `recover_unit` rejects a record whose snapshot runtime is not the prior
+    // runtime, so journaling such a snapshot would strand the transaction.
+    if (!isDict(snapshot) || !jsonEqual(get(snapshot, 'runtime'), prior['runtime'])) {
+      throw new RecordRefused('snapshot runtime does not match prior runtime');
+    }
     let identity: Dict = {
       schema_version: JOURNAL_SCHEMA,
       transaction_id: effects.uuidHex(),
