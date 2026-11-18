@@ -516,6 +516,22 @@ describe('publisher route: fixture replay through the run composition', () => {
     }
   });
 
+  test('a lock-acquisition failure persists no failure marker', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-publish-lockfail-'));
+    try {
+      const effects = await makeEffects(root);
+      // A directory at the lock path makes the open fail before the callback
+      // runs; the marker and queue halt must not be written without the lock.
+      await mkdir(join(effects.stateRoot, 'backfill', 'publisher.lock'), { recursive: true });
+      await expect(runPublish(effects)).rejects.toThrow();
+      await expect(
+        stat(join(effects.stateRoot, 'backfill', 'publication-failure.json')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('disabled rollout reports disabled without touching state', async () => {
     const root = await mkdtemp(join(tmpdir(), 'crq-publish-off-'));
     try {
