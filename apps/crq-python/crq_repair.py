@@ -1242,12 +1242,18 @@ def run(argv=None):
             return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
         return 0, None
     selectors = (args.job, args.source_sha, args.finding_sha256)
-    if args.recover_job and (any(selectors) or args.triage_dry_run):
+    # Presence is separate from validity: an empty string was still supplied,
+    # so it must select a job and refuse, never fall through to the drain.
+    supplied = tuple(selector is not None for selector in selectors)
+    if args.recover_job and (any(supplied) or args.triage_dry_run):
         narrate('repair dispatch refused: recovery selects exactly one job')
         return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
-    if any(selectors) and not all(selectors):
+    if any(supplied) and not all(supplied):
         narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
         return 2, {'status': 'refused', 'reason': '--job, --source-sha and --finding-sha256 go together'}
+    if any(selector is not None and not selector.strip() for selector in selectors):
+        narrate('repair dispatch refused: supplied selector values must not be empty')
+        return 2, {'status': 'refused', 'reason': 'supplied selector values must not be empty'}
     # Validate all configured paid lanes before any A0 spend. Missing hard
     # budget support is an activation prerequisite, never a soft prompt promise.
     drivers = {role['driver'] for role in repair['roles'].values()}
@@ -1294,7 +1300,7 @@ def run(argv=None):
             if result.get('report', {}).get('stop') == 'rate-limit':
                 rate_limit_pause(result['report'], args.recover_job)
             return 0, result
-        if all(selectors):
+        if all(supplied):
             job = select_job(ROOT, config, args.job, args.source_sha, args.finding_sha256)
             outcome = process_item(config, [job])
             return 0, explicit_job_result(job, outcome)
