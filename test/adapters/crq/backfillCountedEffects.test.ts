@@ -235,9 +235,11 @@ describe('counted harvest over real file seams', () => {
         saveQueue: async () => undefined,
         cleanup: async () => undefined,
       });
+      const read = effects.readRetainedEvent;
+      if (read === undefined) throw new Error('readRetainedEvent is not wired');
       // No retained event yet: null, not an error.
-      expect(await effects.readRetainedEvent('r')).toBeNull();
-      expect(await effects.readRetainedEvent('absent')).toBeNull();
+      expect(await read('r')).toBeNull();
+      expect(await read('absent')).toBeNull();
       // Another run's event, reached through a symlink, is refused.
       const other = join(root, 'state', 'runs', 'other');
       await mkdir(other, { recursive: true });
@@ -246,7 +248,7 @@ describe('counted harvest over real file seams', () => {
         join(other, 'review-event.json'),
         join(root, 'state', 'runs', 'r', 'review-event.json'),
       );
-      await expect(effects.readRetainedEvent('r')).rejects.toThrow('escapes its run directory');
+      await expect(read('r')).rejects.toThrow('escapes its run directory');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
