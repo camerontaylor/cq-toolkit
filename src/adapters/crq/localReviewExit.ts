@@ -83,7 +83,6 @@ export function fileLocalExitHarvestEffects(options: {
       );
     },
     complete: async (queue, item, runId, cls, endedAt, exitCode, stream) => {
-      if (stream === null) throw new Error('missing classified artifact');
       return (
         await completeLocalReview(
           queue,
@@ -93,7 +92,11 @@ export function fileLocalExitHarvestEffects(options: {
           endedAt,
           exitCode,
           options.harvest,
-          stream,
+          // A terminated run with no review.ndjson still has to reach the receipt
+          // path: an empty stream is uncounted evidence, so completion records a
+          // failed attempt and releases the run instead of rejecting before the
+          // receipt exists and re-harvesting the same run forever.
+          stream ?? new Uint8Array(0),
         )
       ).queue;
     },
