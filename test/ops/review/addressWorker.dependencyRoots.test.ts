@@ -202,7 +202,13 @@ describe('review.address candidate isolation', () => {
       }
     },
   );
-  test.each(['run-s build:*', 'run-s build:dep?', 'npm-run-all -p "build:*"'])(
+  test.each([
+    'run-s build:*',
+    'run-s build:dep?',
+    'npm-run-all -p "build:*"',
+    'run-s build:**:deps',
+    'run-s "build:* --mode=production"',
+  ])(
     'run-s pattern selection (%s) compares every script it names before dispatch',
     async (build) => {
       const f = await fixture(undefined, '', { installedDependencies: 'matching' });
@@ -223,6 +229,27 @@ describe('review.address candidate isolation', () => {
       }
     },
   );
+  test('a catastrophic-backtracking runner pattern still resolves and compares scripts', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const scripts = {
+        postinstall: 'run-s *a*a*a*a*a*a*a*a*a*a*a*a*b build:deps',
+        ['a'.repeat(64)]: 'node long.mjs',
+        'build:deps': 'node deps.mjs',
+      };
+      await f.repo.write('package.json', JSON.stringify({ scripts }));
+      f.repo.commitAll('pathological runner pattern');
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ scripts: { ...scripts, 'build:deps': 'different installed files' } }),
+      );
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit).toBeUndefined();
+      expect(result.reason).toContain('manifests/locks differ');
+    } finally {
+      await f.cleanup();
+    }
+  }, 10_000);
   test('a --check argument is not an invocation of the check script', async () => {
     const f = await fixture(undefined, '', { installedDependencies: 'matching' });
     try {

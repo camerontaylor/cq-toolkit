@@ -143,15 +143,53 @@ const installLifecycleScripts = new Set([
   'pnpm:devPreinstall',
 ]);
 
-/** npm-run-all script patterns: `*` spans any characters and `?` exactly one. */
+/**
+ * npm-run-all script patterns: `*` spans any characters and `?` exactly one.
+ * Iterative two-pointer matching: no regex backtracking, so the cost stays
+ * O(name x pattern) however many wildcards a lifecycle script spells.
+ */
 const matchesScriptPattern = (name: string, pattern: string): boolean => {
-  let source = '';
-  for (const character of pattern) {
-    if (character === '*') source += '.*';
-    else if (character === '?') source += '.';
-    else source += /[.*+?^${}()|[\]\\]/.test(character) ? `\\${character}` : character;
+  let nameIndex = 0;
+  let patternIndex = 0;
+  let star = -1;
+  let mark = 0;
+  while (nameIndex < name.length) {
+    const token = pattern[patternIndex];
+    if (token === '*') {
+      star = patternIndex++;
+      mark = nameIndex;
+    } else if (patternIndex < pattern.length && (token === '?' || token === name[nameIndex])) {
+      patternIndex++;
+      nameIndex++;
+    } else if (star !== -1) {
+      patternIndex = star + 1;
+      nameIndex = ++mark;
+    } else return false;
   }
-  return new RegExp(`^${source}$`, 's').test(name);
+  while (pattern[patternIndex] === '*') patternIndex++;
+  return patternIndex === pattern.length;
+};
+
+const MAX_GLOBSTAR_SEGMENTS = 6;
+
+/**
+ * npm-run-all splits patterns on `:` and lets a whole-segment `**` consume zero
+ * or more segments, so `build:**:deps` selects `build:deps`. Expand every
+ * collapse combination of those segments; `null` means too many to expand and
+ * the caller must stay conservative.
+ */
+const globstarVariants = (pattern: string): string[] | null => {
+  const segments = pattern.split(':');
+  const globstars = segments.filter((segment) => segment === '**').length;
+  if (globstars > MAX_GLOBSTAR_SEGMENTS) return null;
+  let variants: string[][] = [[]];
+  for (const segment of segments) {
+    variants =
+      segment === '**'
+        ? variants.flatMap((variant) => [variant, [...variant, segment]])
+        : variants.map((variant) => [...variant, segment]);
+  }
+  return [...new Set(variants.map((variant) => variant.join(':')))];
 };
 
 /** Compare installed-tree inputs without exposing package-manager credential bytes. */
@@ -218,9 +256,15 @@ export async function assertAddressDependencyMetadata(
             // Unsupported matcher syntax (negation, brackets, braces) stays
             // ambiguous; supported `*`/`?` patterns resolve to the scripts they
             // name so a pattern-selected script is still compared.
-            if (/[!\[\]{}()+,|\\]/.test(argument)) ambiguous = true;
-            else if (/[*?]/.test(argument)) patterns.add(argument);
-            else if (argument in scripts) literal.add(argument);
+            // A quoted argument carries forwarded task arguments after the
+            // pattern (`"build:* --mode=production"`): match the task alone.
+            const task = argument.trim().split(/\s+/)[0] ?? '';
+            if (/[!\[\]{}()+,|\\]/.test(task)) ambiguous = true;
+            else if (/[*?]/.test(task)) {
+              const variants = globstarVariants(task);
+              if (variants === null) ambiguous = true;
+              else for (const variant of variants) patterns.add(variant);
+            } else if (task in scripts) literal.add(task);
             else ambiguous = true;
           }
         }
