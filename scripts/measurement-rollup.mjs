@@ -137,7 +137,7 @@ export function renderMeasurementReport({
     String(text)
       .replaceAll('\r', ' ')
       .replaceAll('\n', ' ')
-      .replace(/[\\`*_[\]()!|<>]/g, '\\$&');
+      .replace(/[\\`*_~[\]()!|<>]/g, '\\$&');
   // A non-known total never renders its stored number: unavailable,
   // not-collected and n-a render unknown; partial keeps an explicitly
   // labelled subtotal.

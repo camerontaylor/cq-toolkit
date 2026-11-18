@@ -407,7 +407,7 @@ describe('M10d nominal evidence', () => {
       ],
     });
     expect(torn.markdown).toContain(
-      '- usage channel cache~read/x: 5 subtotal (partial: observed 1 of 1 usage channel cache~read/x values; measurement inputs were rejected, incomplete or unavailable)',
+      '- usage channel cache\\~read/x: 5 subtotal (partial: observed 1 of 1 usage channel cache\\~read/x values; measurement inputs were rejected, incomplete or unavailable)',
     );
     expect(torn.markdown).toContain('- usage channel input: 100 (known)');
   });
@@ -878,11 +878,12 @@ describe('M10d failure evidence', () => {
     // its `!`, brackets and parens escaped — never as an image, and an
     // emphasis/code-span/HTML spelling in a run identifier stays literal.
     const markup = compose({
-      artifacts: ['![evidence](remote.png)', 'a\\b'],
+      artifacts: ['![evidence](remote.png)', 'a\\b', '~~old~~'],
       runs: [makeRun({ runId: 'a*b_c`d<e>' })],
     });
-    expect(markup.markdown).toContain('- \\!\\[evidence\\]\\(remote\\.png\\)');
+    expect(markup.markdown).toContain('- \\!\\[evidence\\]\\(remote.png\\)');
     expect(markup.markdown).toContain('- a\\\\b');
+    expect(markup.markdown).toContain('- \\~\\~old\\~\\~');
     expect(markup.markdown).not.toContain('![evidence](remote.png)');
     expect(markup.markdown).toContain(`| ${REPO} | a\\*b\\_c\\\`d\\<e\\> |`);
     // Minimal but valid panels still render.
