@@ -331,6 +331,26 @@ describe('M8a failure evidence', () => {
     expect(((await restoreMeasurementBundle(built.bundleDir)) as Restored).pointers).toEqual({});
   });
 
+  test('refuses sanitized evidence that redaction lengthens past the size cap', async () => {
+    const base = await workspace();
+    const root = join(base, 'root');
+    await mkdir(root);
+    // An eight-character environment secret becomes the ten-byte `[redacted]`.
+    vi.stubEnv('CQ_GROWS_TOKEN', 'abcd1234');
+    const head = 'abcd1234';
+    await writeFile(join(root, 'grows'), head + ' '.repeat(8 * 1024 * 1024 - head.length));
+    const built = (await buildMeasurementBundle({
+      runId: 'grows',
+      bundleRoot: join(base, 'bundles'),
+      gitCommonDir: join(base, 'common'),
+      roots: [{ name: 'fix', path: root, files: ['grows'] }],
+    })) as { bundleDir: string; manifest: Manifest };
+    expect(entryOf(built.manifest, 'fix', 'grows')).toMatchObject({
+      state: 'unsupported',
+      reason: expect.stringContaining('sanitized evidence exceeds'),
+    });
+  });
+
   test('rejects symlinks, caps size, records read failures and missing receipts; uses private modes', async () => {
     const base = await workspace();
     const root = join(base, 'root');
