@@ -673,6 +673,17 @@ class SavedServiceTypeTests(AdapterFixture):
                 "ExecStart=/usr/bin/env python3 /w.py\n")
         self.assertEqual(self._type(body), "simple")
 
+    def test_unicode_line_separator_stays_inside_a_comment(self):
+        body = ("[Service]\n# note\u2028Type=exec\nType=oneshot\n"
+                "ExecStart=/bin/x\n")
+        self.assertEqual(self._type(body), "oneshot")
+
+    def test_implicit_exec_through_credentials_refuses(self):
+        for key in ("SetCredential", "LoadCredential", "ImportCredential"):
+            with self.subTest(key=key), \
+                    self.assertRaisesRegex(dc.Refused, "implies Type=exec"):
+                self._type("[Service]\nExecStart=/bin/x\n" + key + "=a:b\n")
+
     def test_utf8_bom_before_the_first_section_is_ignored(self):
         self.assertEqual(
             self._type("\ufeff[Service]\nType=oneshot\nExecStart=/bin/x\n"), "oneshot")

@@ -231,7 +231,10 @@ def _logical_lines(text: str) -> list[str]:
     logical = []
     pending = ""
     # A leading UTF-8 BOM is not part of the first line, as systemd reads it.
-    for line in text.removeprefix("\ufeff").splitlines():
+    # Physical lines end at \n, \r\n or \r only: str.splitlines() would also
+    # split at Unicode separators, which systemd keeps inside the line.
+    body = text.removeprefix("\ufeff")
+    for line in re.split(r"\r\n|\r|\n", body[:-1] if body.endswith(("\n", "\r")) else body):
         if line.lstrip()[:1] in ("#", ";"):
             # systemd skips standalone comments, and comments inside a
             # continuation, so a comment's trailing backslash never continues.
@@ -1131,6 +1134,11 @@ class ProductionUnitAdapter:
             service_type = values[0]
         elif (_section_values(text, "Service", "ExecStart")
               and not _section_values(text, "Service", "BusName")):
+            for key in ("SetCredential", "SetCredentialEncrypted", "LoadCredential",
+                        "LoadCredentialEncrypted", "ImportCredential"):
+                if _section_values(text, "Service", key):
+                    # systemd selects exec, not simple, when credentials are set.
+                    self.refuse("saved service implies Type=exec through " + key)
             # systemd defaults a service with ExecStart and no Type or BusName
             # to simple, so a prior install without Type= stays restorable.
             service_type = "simple"
