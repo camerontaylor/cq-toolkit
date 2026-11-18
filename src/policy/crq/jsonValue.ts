@@ -140,12 +140,36 @@ export function parseJsonValue(text: string, options: ParseJsonOptions = {}): Js
   return new Parser(text, options).parse();
 }
 
-/** The Python `repr(float)` text, used by `JsonNumber.float` and the serialiser. */
+/**
+ * The Python `repr(float)` text, used by `JsonNumber.float` and the serialiser.
+ *
+ * This is Python's float spelling, not JavaScript's: an integer-valued float
+ * keeps its `.0` (`1` renders as `"1.0"`), and scientific notation uses a
+ * signed, at-least-two-digit exponent (`1e-07`). Python chooses fixed
+ * notation for decimal exponents in [-4, 16) and scientific notation
+ * otherwise, over the shortest round-tripping digits.
+ */
 export function pythonNumberText(value: number): string {
   if (Number.isNaN(value)) return 'nan';
   if (value === Infinity) return 'inf';
   if (value === -Infinity) return '-inf';
-  return Object.is(value, -0) ? '-0.0' : String(value);
+  if (Object.is(value, -0)) return '-0.0';
+  const negative = value < 0;
+  const exponential = Math.abs(value).toExponential();
+  const match = /^(\d)(?:\.(\d+))?e([+-])(\d+)$/.exec(exponential);
+  if (match === null) throw new Error(`unexpected JavaScript exponential form: ${exponential}`);
+  const digits = (match[1] as string) + (match[2] ?? '');
+  const exponent = (match[3] === '-' ? -1 : 1) * Number(match[4] as string);
+  const sign = negative ? '-' : '';
+  if (exponent >= -4 && exponent < 16) {
+    const point = exponent + 1;
+    if (point <= 0) return `${sign}0.${'0'.repeat(-point)}${digits}`;
+    if (point >= digits.length) return `${sign}${digits}${'0'.repeat(point - digits.length)}.0`;
+    return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`;
+  }
+  const mantissa = digits.length === 1 ? digits : `${digits[0]}.${digits.slice(1)}`;
+  const exponentText = String(Math.abs(exponent)).padStart(2, '0');
+  return `${sign}${mantissa}e${exponent < 0 ? '-' : '+'}${exponentText}`;
 }
 
 class Parser {
