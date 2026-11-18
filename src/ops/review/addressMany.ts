@@ -223,6 +223,11 @@ export async function isolateAddressMany(
     // alternate store: without it, pruning that store or removing its reference
     // repository would corrupt a clone holding unpushed fixes.
     await git('git', ['clone', '--no-hardlinks', '--dissociate', '--', repoRoot, root]);
+    // A local clone does not copy objects the source reaches only through the
+    // caller's GIT_ALTERNATE_OBJECT_DIRECTORIES: the clone resolves them while
+    // that variable is set and loses them once the store goes away. Repacking
+    // while it is still visible pulls every reachable object into the clone.
+    await git('git', ['-C', root, 'repack', '-a', '-d', '-q']);
     await git('git', ['-C', root, 'remote', 'set-url', 'origin', origin.stdout.trim()]);
     // Clone-setup calls carry the caller's sshCommand only through this flow's
     // environment; later Git calls in the clone (fetch, addressing, push) run

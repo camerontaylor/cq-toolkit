@@ -1,4 +1,4 @@
-import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { expect, test, vi } from 'vitest';
 import { isolateAddressMany, makeReviewAddressMany } from '../../../src/ops/review/addressMany.js';
@@ -114,6 +114,34 @@ test('clone retains effective author and committer identity configured only in t
     await repo.cleanup();
   }
 });
+test('clone keeps objects the caller reaches only through GIT_ALTERNATE_OBJECT_DIRECTORIES', async () => {
+  const repo = await identityRepo();
+  const alternate = join(dirname(repo.root), 'alternate-objects');
+  try {
+    const objects = join(repo.root, '.git', 'objects');
+    await mkdir(alternate);
+    for (const entry of await readdir(objects))
+      await rename(join(objects, entry), join(alternate, entry));
+    await mkdir(join(objects, 'pack'));
+    await mkdir(join(objects, 'info'));
+    vi.stubEnv('GIT_ALTERNATE_OBJECT_DIRECTORIES', alternate);
+    let root: string;
+    try {
+      root = await isolateAddressMany(repo.root, 7, {
+        cloneRoot: join(dirname(repo.root), 'clones'),
+        target: 'merge-queue',
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    await rename(alternate, `${alternate}.removed`);
+    // fsck exits non-zero (and git throws) when a ref points at a missing object.
+    expect(() => repo.git('-C', root, 'fsck', '--connectivity-only')).not.toThrow();
+  } finally {
+    await repo.cleanup();
+  }
+});
+
 test('failed isolation removes its partial clone directory', async () => {
   const repo = await identityRepo();
   try {
