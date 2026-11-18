@@ -255,23 +255,23 @@ export class CheckoutWriterContext {
       for (const entry of this.slots.values()) {
         const current = await entry.slot.readMetadata();
         if (current?.incomplete && this.begun.has(entry.slot)) continue; // our admitted slot, already begun
-        const admission =
-          entry.absentPath && !entry.binding ? entry.metadata : (current ?? entry.metadata);
+        const preAdmission = current ?? entry.metadata;
+        const admission = entry.absentPath && !entry.binding ? entry.metadata : preAdmission;
         if (admission.state === 'unbound') await this.assertAbsent(entry.absentPath);
-        written.push(entry);
+        written.push({ slot: entry.slot, metadata: preAdmission });
         await entry.slot.writeMetadata({ ...admission, incomplete: true });
         this.begun.add(entry.slot);
       }
     } catch (error) {
       if (this.hasMutated) throw error;
       const failures: Error[] = [];
-      for (const entry of written.reverse()) {
-        this.begun.delete(entry.slot);
+      for (const { slot, metadata } of written.reverse()) {
+        this.begun.delete(slot);
         try {
-          await entry.slot.writeMetadata(entry.metadata);
+          await slot.writeMetadata(metadata);
         } catch (cause) {
           failures.push(
-            new Error(`Incomplete slot restoration failed: ${entry.slot.metadataPath}`, { cause }),
+            new Error(`Incomplete slot restoration failed: ${slot.metadataPath}`, { cause }),
           );
         }
       }
