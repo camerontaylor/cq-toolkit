@@ -100,9 +100,13 @@ export function backfillCountedEffects(input: {
     readRetainedEvent: async (runId) => {
       let bytes: Uint8Array;
       try {
-        bytes = new Uint8Array(
-          await readFile(join(input.stateRoot, 'runs', runId, 'review-event.json')),
-        );
+        // Confine the read to this run's directory: a symlink to another run's
+        // event would otherwise be accepted (its id matches its own digest).
+        const dir = await realpath(join(input.stateRoot, 'runs', runId));
+        const path = await realpath(join(dir, 'review-event.json'));
+        if (relative(dir, path) !== 'review-event.json')
+          throw new LedgerIntegrityError('retained review event escapes its run directory');
+        bytes = new Uint8Array(await readFile(path));
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
         throw error;

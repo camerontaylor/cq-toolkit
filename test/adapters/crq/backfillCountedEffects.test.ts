@@ -219,6 +219,39 @@ describe('deferred artifact store', () => {
 });
 
 describe('counted harvest over real file seams', () => {
+  it('confines the retained-event read to its own run directory', async () => {
+    const root = await scratch();
+    try {
+      await stage(good, root);
+      const store = fileArtifactStore(join(root, 'durable'));
+      const effects = backfillCountedEffects({
+        stateRoot: join(root, 'state'),
+        durableRoot: join(root, 'durable'),
+        store,
+        repo: repoOf(sub(good, 'repo')),
+        publication: { spool: async () => '' },
+        inbox: { ingest: async () => undefined },
+        stateEvent: async (q) => q,
+        saveQueue: async () => undefined,
+        cleanup: async () => undefined,
+      });
+      // No retained event yet: null, not an error.
+      expect(await effects.readRetainedEvent('r')).toBeNull();
+      expect(await effects.readRetainedEvent('absent')).toBeNull();
+      // Another run's event, reached through a symlink, is refused.
+      const other = join(root, 'state', 'runs', 'other');
+      await mkdir(other, { recursive: true });
+      await writeFile(join(other, 'review-event.json'), '{"id":"x"}');
+      await symlink(
+        join(other, 'review-event.json'),
+        join(root, 'state', 'runs', 'r', 'review-event.json'),
+      );
+      await expect(effects.readRetainedEvent('r')).rejects.toThrow('escapes its run directory');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('retains every artifact before the outbox verifies the event', async () => {
     const root = await scratch();
     try {
