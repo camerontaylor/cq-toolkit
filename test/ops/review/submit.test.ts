@@ -615,3 +615,21 @@ test('repeat refuses unsupported runners without sending a mutation', async () =
   expect(JSON.stringify(result)).toContain('repeat-generations-v1');
   expect(mutations).toEqual([]);
 });
+test('capabilities from a newer server (extra keys, operations, features, limits) still validate', async () => {
+  const { makeReviewClient } = await import('../../../src/ops/review/internal/queueClient.js');
+  const newer = {
+    ...caps,
+    extra_top: { a: 1 },
+    operations: [...caps.operations, 'future-op'],
+    features: [...caps.features, 'future-feature-v9'],
+    limits: { ...caps.limits, max_future: 7 },
+  };
+  const client = makeReviewClient(async () => JSON.stringify(newer));
+  await expect(client.capabilities()).resolves.toMatchObject({ command: 'review-v1' });
+});
+test('capabilities missing a field the client relies on is still refused', async () => {
+  const { makeReviewClient } = await import('../../../src/ops/review/internal/queueClient.js');
+  const bad = { ...caps, limits: { ...caps.limits, max_content_bytes: 'x' } };
+  const client = makeReviewClient(async () => JSON.stringify(bad));
+  await expect(client.capabilities()).rejects.toThrow();
+});

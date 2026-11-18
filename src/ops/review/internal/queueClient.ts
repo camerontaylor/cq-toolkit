@@ -1,6 +1,7 @@
 import {
   WireSchema as ReviewWireSchema,
   ResponseSchema as ReviewResponseSchema,
+  ClientCapabilitiesSchema,
 } from './reviewOperation.js';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -465,7 +466,14 @@ export function makeReviewClient(transport: QueueTransport) {
       refuseOnLifetime(options, 'review request');
       const raw = await transport(wire, options);
       if (Buffer.byteLength(raw) > QUEUE_WIRE_BYTES) throw new Error('oversized review response');
-      result = ReviewResponseSchema.parse(JSON.parse(raw));
+      const decoded: unknown = JSON.parse(raw);
+      // A capabilities reply from a newer server may carry additive
+      // operations/features/limits; read it with the tolerant client schema.
+      const tolerant =
+        parsed.op === 'capabilities' ? ClientCapabilitiesSchema.safeParse(decoded) : undefined;
+      result = tolerant?.success
+        ? (tolerant.data as Extract<z.infer<typeof ReviewResponseSchema>, { command: unknown }>)
+        : ReviewResponseSchema.parse(decoded);
       if (!('error' in result)) break;
       const fault = new ReviewRemoteError(result.error);
       if (result.error.code !== 'busy' || !result.error.retryable) throw fault;
