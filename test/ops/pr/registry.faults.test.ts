@@ -83,8 +83,9 @@ describe('makeSubprocessPrEffects spawn env — repoRoot is the only repo select
         join(binDir, 'gh'),
         [
           '#!/bin/sh',
-          `printf '%s' "\${GH_REPO-unset}" > '${ghRepoFile}'`,
-          `printf '%s' "$PWD" > '${cwdFile}'`,
+          // Output paths arrive as data (env), never embedded in the script.
+          `printf '%s' "\${GH_REPO-unset}" > "$CQ_TEST_GHREPO_FILE"`,
+          `printf '%s' "$PWD" > "$CQ_TEST_CWD_FILE"`,
           `echo '{"body":"x"}'`,
           '',
         ].join('\n'),
@@ -95,6 +96,8 @@ describe('makeSubprocessPrEffects spawn env — repoRoot is the only repo select
       const originalGhBin = process.env['CQ_GH_BIN'];
       process.env['PATH'] = `${binDir}:${originalPath ?? ''}`;
       process.env['GH_REPO'] = 'other/repo';
+      process.env['CQ_TEST_GHREPO_FILE'] = ghRepoFile;
+      process.env['CQ_TEST_CWD_FILE'] = cwdFile;
       // An inherited CQ_GH_BIN would bypass the fake gh on PATH.
       delete process.env['CQ_GH_BIN'];
       try {
@@ -110,6 +113,8 @@ describe('makeSubprocessPrEffects spawn env — repoRoot is the only repo select
         else process.env['PATH'] = originalPath;
         if (originalGhRepo === undefined) delete process.env['GH_REPO'];
         else process.env['GH_REPO'] = originalGhRepo;
+        delete process.env['CQ_TEST_GHREPO_FILE'];
+        delete process.env['CQ_TEST_CWD_FILE'];
         if (originalGhBin === undefined) delete process.env['CQ_GH_BIN'];
         else process.env['CQ_GH_BIN'] = originalGhBin;
       }
