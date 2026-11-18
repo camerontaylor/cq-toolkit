@@ -1269,8 +1269,12 @@ def stop_owned_process(run: dict, *, purge: bool) -> dict:
         derived_unit = "crq-vm-" + run["run_id"] + ".scope"
         stop_rc = subprocess.run(["systemctl", "--user", "stop", derived_unit],
                                  capture_output=True, text=True).returncode
+        # is-active exits 3 for an inactive, failed or unknown unit; any other
+        # nonzero status (for example a user-bus connection error) proves
+        # nothing about whether QEMU is still running.
         stopped = subprocess.run(["systemctl", "--user", "is-active", "--quiet",
-                                  derived_unit]).returncode != 0
+                                  derived_unit],
+                                 capture_output=True).returncode == 3
     if identity is not None:
         alive = pathlib.Path("/proc/%d" % pid).exists()
         if alive:

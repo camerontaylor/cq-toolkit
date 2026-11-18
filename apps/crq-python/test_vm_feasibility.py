@@ -83,6 +83,38 @@ class SumsTests(unittest.TestCase):
                              vm.sha256_file(path))
 
 
+class StopOwnedProcessTests(unittest.TestCase):
+    def _stop(self, is_active_rc, *, purge=True):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = pathlib.Path(tmp) / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            (run_dir / "overlay.qcow2").write_text("disk")
+
+            def fake_run(argv, **kwargs):
+                rc = is_active_rc if "is-active" in argv else 0
+                return mock.Mock(returncode=rc, stdout="", stderr="")
+
+            with mock.patch.object(vm.subprocess, "run", side_effect=fake_run):
+                result = vm.stop_owned_process(
+                    {"path": str(run_dir), "run_id": "r1"}, purge=purge)
+            return result, (run_dir / "overlay.qcow2").exists()
+
+    def test_inactive_scope_is_stopped_and_purged(self):
+        result, still_there = self._stop(3)
+        self.assertTrue(result["stopped"])
+        self.assertFalse(still_there)
+
+    def test_failed_scope_query_is_not_proof_of_shutdown(self):
+        result, still_there = self._stop(1)
+        self.assertFalse(result["stopped"])
+        self.assertTrue(still_there)
+
+    def test_active_scope_is_not_stopped(self):
+        result, still_there = self._stop(0)
+        self.assertFalse(result["stopped"])
+        self.assertTrue(still_there)
+
+
 class FetchImageTests(unittest.TestCase):
     def _download(self, digest, data, calls, *, fail_image=False):
         def fake(url, destination, timeout=120):
@@ -338,13 +370,15 @@ class LifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             state, run = self._prepared(temporary)
             (run / "overlay.qcow2").write_text("evidence")
-            payload = vm.stop_owned_process(
-                {"run_id": "r1", "path": str(run)}, purge=True)
-            self.assertTrue(payload["stopped"])
-            self.assertFalse((run / "overlay.qcow2").exists())
-            self.assertTrue(pathlib.Path(payload["trash"]).is_dir())
-            again = vm.stop_owned_process(
-                {"run_id": "r1", "path": str(run)}, purge=True)
+            inactive = mock.Mock(returncode=3, stdout="", stderr="")
+            with mock.patch.object(vm.subprocess, "run", return_value=inactive):
+                payload = vm.stop_owned_process(
+                    {"run_id": "r1", "path": str(run)}, purge=True)
+                self.assertTrue(payload["stopped"])
+                self.assertFalse((run / "overlay.qcow2").exists())
+                self.assertTrue(pathlib.Path(payload["trash"]).is_dir())
+                again = vm.stop_owned_process(
+                    {"run_id": "r1", "path": str(run)}, purge=True)
             self.assertTrue(again["stopped"])
             self.assertIsNone(again["trash"])
 
