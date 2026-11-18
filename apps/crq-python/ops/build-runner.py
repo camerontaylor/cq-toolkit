@@ -275,7 +275,10 @@ def build(repo, sha, staging, output, node='node', pnpm='pnpm',
     stale_dist = checkout['repo'] / 'dist'
     if stale_dist.exists() or stale_dist.is_symlink():
         try:
-            shutil.rmtree(stale_dist)
+            if stale_dist.is_symlink() or not stale_dist.is_dir():
+                stale_dist.unlink()
+            else:
+                shutil.rmtree(stale_dist)
         except OSError as error:
             raise BuildError('cannot remove stale dist/: ' + str(error)) from error
         if stale_dist.exists() or stale_dist.is_symlink():

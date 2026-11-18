@@ -240,6 +240,27 @@ class BuildRunnerTests(unittest.TestCase):
                                    self.base / 'out/runner.tar.gz', run=run)
         self.assertNotIn(['pnpm', 'run', 'build'], run.calls)
 
+    def test_build_unlinks_a_stale_dist_symlink_without_touching_its_target(self):
+        target = self.base / 'elsewhere'
+        target.mkdir()
+        (target / 'keep.txt').write_text('keep')
+        (self.repo / 'dist').symlink_to(target, target_is_directory=True)
+        inner, _ = self.fake(deploy=lambda argv: Result())
+        seen = {}
+
+        def run(argv, cwd=None, env=None, timeout=None):
+            if argv[:3] == ['pnpm', 'run', 'build']:
+                seen['dist_present'] = (self.repo / 'dist').is_symlink() or (
+                    self.repo / 'dist').exists()
+                raise RuntimeError('stop after build')
+            return inner(argv, cwd=cwd, env=env, timeout=timeout)
+
+        with self.assertRaisesRegex(RuntimeError, 'stop after build'):
+            build_runner.build(self.repo, SHA, self.base / 'stage',
+                               self.base / 'out/runner.tar.gz', run=run)
+        self.assertFalse(seen['dist_present'])
+        self.assertEqual((target / 'keep.txt').read_text(), 'keep')
+
     def test_build_rejects_staging_inside_checkout(self):
         run, _ = self.fake(deploy=lambda argv: Result())
         with self.assertRaisesRegex(build_runner.BuildError, 'outside the source checkout'):
