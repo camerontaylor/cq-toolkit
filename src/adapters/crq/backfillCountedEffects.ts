@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readFile, realpath } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, open, readFile, realpath } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import type {
   BackfillCountedArtifacts,
@@ -111,7 +112,24 @@ export function backfillCountedEffects(input: {
         const path = await realpath(join(dir, 'review-event.json'));
         if (relative(dir, path) !== 'review-event.json')
           throw new LedgerIntegrityError('retained review event escapes its run directory');
-        bytes = new Uint8Array(await readFile(path));
+        // Open the checked file without following a final symlink, then prove the
+        // handle is that file and the directory is still the one checked.
+        const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          const opened = await handle.stat();
+          const named = await lstat(path);
+          if (
+            !opened.isFile() ||
+            !named.isFile() ||
+            opened.dev !== named.dev ||
+            opened.ino !== named.ino ||
+            (await realpath(dir)) !== dir
+          )
+            throw new LedgerIntegrityError('retained review event changed while being read');
+          bytes = new Uint8Array(await handle.readFile());
+        } finally {
+          await handle.close();
+        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
         throw error;
