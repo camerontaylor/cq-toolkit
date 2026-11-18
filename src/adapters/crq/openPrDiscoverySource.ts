@@ -9,6 +9,9 @@ import type {
 import type { RunGit } from './ledgerGit.js';
 import { runGitIn } from './publishSource.js';
 
+/** `gh pr list --limit` ceiling. A result that reaches it may hide further open PRs. */
+const PR_LIST_LIMIT = '200';
+
 export interface OpenPrRepository extends PrDiscoveryRepo {
   readonly clone: string;
   readonly defaultBranch: string;
@@ -52,11 +55,18 @@ export function openPrDiscoveryEffects(options: OpenPrSourceOptions): PrDiscover
         '--state',
         'open',
         '--limit',
-        '200',
+        PR_LIST_LIMIT,
         '--json',
         'number,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid',
       ]);
       if (!Array.isArray(value)) throw new Error('invalid PR inventory');
+      // A full page cannot prove it saw every open PR, so refuse it as incomplete
+      // (mirrors the forge adapter's `pr list` limit refusal).
+      if (value.length >= Number(PR_LIST_LIMIT)) {
+        throw new Error(
+          `gh pr list reached its ${PR_LIST_LIMIT}-row limit; inventory may be incomplete`,
+        );
+      }
       return (value as unknown[]).map((v): OpenPr => {
         if (!v || typeof v !== 'object' || Array.isArray(v))
           throw new Error('invalid PR inventory');
