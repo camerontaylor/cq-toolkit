@@ -12,6 +12,9 @@ const MAX_WIRE = 6 * 1024 * 1024;
 /** Operator misconfiguration (not a runtime refusal): surfaces as needs-human, never indeterminate. */
 export class SnapshotConfigError extends Error {}
 
+/** A tracked descendant whose ancestor is now a regular file: the descendant is deleted. */
+class ReplacedAncestorError extends Error {}
+
 /** Private object-only capture: never changes HEAD, the index or working files. */
 export async function captureSnapshot(
   repo: string,
@@ -273,12 +276,17 @@ export async function captureWorkingTree(repo: string, originalHead: string) {
         const parents = path.split('/').slice(0, -1);
         for (let end = 1; end <= parents.length; end++) {
           const parent = await lstat(join(repo, ...parents.slice(0, end)));
+          if (parent.isFile()) throw new ReplacedAncestorError(path);
           if (!parent.isDirectory())
             throw new Error(`working-tree snapshot refuses non-directory ancestor: ${path}`);
         }
         info = await lstat(join(repo, path));
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        if (
+          !(error instanceof ReplacedAncestorError) &&
+          (error as NodeJS.ErrnoException).code !== 'ENOENT'
+        )
+          throw error;
         await git('update-index', '--force-remove', '--', path);
         continue;
       }
