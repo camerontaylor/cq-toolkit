@@ -652,11 +652,42 @@ class SchedulingTests(unittest.TestCase):
         q["items"][0]["attempts"].append(dict(run_id="old-20261108T000002Z"))
         self.assertFalse(crq.background_turn(q))
 
-    def test_turn_fallback_is_scoped(self):
-        q = dict(items=[], backfill_ordinary_exhausted=False)
-        with mock.patch.object(crq, "_coverage_fallback", side_effect=lambda *args: (crq.ordinary_review_eligible(q), True)):
-            self.assertEqual(crq.coverage_fallback(q, [], False, None, ordinary_eligible=False), (False, True))
-        self.assertFalse(q["backfill_ordinary_exhausted"])
+    def test_background_turn_never_launches_backfill_before_pending_interactive(self):
+        """Backfill is strictly lowest: two interactive launches must not let it jump a pending open item."""
+        a = dict(run_id="a-20261108T000000Z", band="interactive", started_at="2026-11-08T00:00:00Z")
+        b = dict(run_id="b-20261108T000001Z", band="interactive", started_at="2026-11-08T00:00:01Z")
+        history = dict(id="h", kind="open", state="done", order=0, attempts=[a, b])
+        opened = dict(id="o", kind="open", state="pending", pr=1, order=1)
+        backfill = dict(id="bf", kind=crq.backfill_jobs.KIND, state="pending", order=2)
+        q = dict(items=[history, opened, backfill])
+        self.assertTrue(crq.background_turn(q))
+        plan = dict(notes=[], base="a", head="b", target="c", label="test")
+        def launch(q, item, plan):
+            item["state"] = "reviewing"
+            return item["id"]
+        with mock.patch.object(crq, "pr_info", return_value=dict(state="OPEN")), \
+             mock.patch.object(crq, "quiet_reason", return_value=None), \
+             mock.patch.object(crq, "plan_open", return_value=plan), \
+             mock.patch.object(crq, "launch", side_effect=launch), \
+             mock.patch.object(crq, "_coverage_fallback", return_value=("backfill-run", True)) as fallback:
+            result = crq.start_one(q, [], False, None, False)[0]
+        self.assertEqual(result, "o")
+        fallback.assert_not_called()
+
+    def test_backfill_reached_only_after_ordinary_items_exhausted(self):
+        a = dict(run_id="a-20261108T000000Z", band="interactive", started_at="2026-11-08T00:00:00Z")
+        b = dict(run_id="b-20261108T000001Z", band="interactive", started_at="2026-11-08T00:00:01Z")
+        q = dict(items=[dict(id="h", kind="open", state="done", order=0, attempts=[a, b]),
+                        dict(id="o", kind="open", state="pending", pr=1, order=1),
+                        dict(id="bf", kind=crq.backfill_jobs.KIND, state="pending", order=2)])
+        with mock.patch.object(crq, "pr_info", return_value=dict(state="OPEN")), \
+             mock.patch.object(crq, "quiet_reason", return_value=None), \
+             mock.patch.object(crq, "plan_open", side_effect=crq.NotReady("busy")), \
+             mock.patch.object(crq, "_coverage_fallback", return_value=(None, False)) as fallback:
+            crq.start_one(q, [], False, None, False)
+        # Only the end-of-loop exhausted path (nothing launchable) may reach backfill.
+        self.assertEqual(fallback.call_count, 1)
+        self.assertTrue(q["backfill_ordinary_exhausted"])
 
     def test_band_turn_background_eligibility_and_operator_priority(self):
         for priority, blocked in ((False, False), (True, False), (False, True)):
