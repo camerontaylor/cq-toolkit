@@ -252,7 +252,7 @@ export function stripCredentialText(text: string): string {
     const newlineCredential =
       text.slice(i, nextStart).includes('\n') &&
       followingAt >= 0 &&
-      !followingToken.slice(0, followingAt).includes('://');
+      !/[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(followingToken.slice(0, followingAt));
     // Discover all schemes in one forward pass. Never search the remaining
     // suffix again for each URL (many adjacent URLs must also stay linear).
     const schemes = discoverSchemes(run, false);

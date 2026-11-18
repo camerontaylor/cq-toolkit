@@ -133,6 +133,8 @@ describe('the attempt-record free-text stripper', () => {
       'http://localhost:8080\nhttps://user:pw@other.test/',
       'http://localhost:8080\nhttps://other.test/',
     ],
+    // `://` with no scheme before it is not a separate URL: the secret goes.
+    ['alice:secret\n://@host.test/', '\nhost.test/'],
   ])('a newline-split credential survives no host:port exception: %j', (input, expected) => {
     expect(stripCredentialText(input)).toBe(expected);
   });
