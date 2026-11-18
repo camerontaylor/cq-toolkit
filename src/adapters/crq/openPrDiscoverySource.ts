@@ -54,7 +54,7 @@ export function openPrDiscoveryEffects(options: OpenPrSourceOptions): PrDiscover
         '--limit',
         '200',
         '--json',
-        'number,isDraft,baseRefName,headRefName,headRefOid',
+        'number,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid',
       ]);
       if (!Array.isArray(value)) throw new Error('invalid PR inventory');
       return (value as unknown[]).map((v): OpenPr => {
@@ -65,6 +65,7 @@ export function openPrDiscoveryEffects(options: OpenPrSourceOptions): PrDiscover
           !Number.isSafeInteger(row.number) ||
           (row.number as number) <= 0 ||
           typeof row.isDraft !== 'boolean' ||
+          typeof row.isCrossRepository !== 'boolean' ||
           typeof row.baseRefName !== 'string' ||
           typeof row.headRefName !== 'string' ||
           typeof row.headRefOid !== 'string' ||
@@ -79,6 +80,7 @@ export function openPrDiscoveryEffects(options: OpenPrSourceOptions): PrDiscover
           base: row.baseRefName,
           headRef: row.headRefName,
           head: row.headRefOid,
+          crossRepository: row.isCrossRepository,
         };
       });
     },
