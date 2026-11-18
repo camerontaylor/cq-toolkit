@@ -239,7 +239,16 @@ export async function captureWorkingTree(repo: string, originalHead: string) {
     await new Promise<void>((resolve, reject) => {
       const child = execFile(
         'git',
-        ['--no-replace-objects', 'update-index', '-z', '--index-info'],
+        [
+          '--no-replace-objects',
+          '-c',
+          'core.hooksPath=/dev/null',
+          '-c',
+          'core.fsmonitor=false',
+          'update-index',
+          '-z',
+          '--index-info',
+        ],
         { cwd: repo, env, timeout: 30_000 },
         (error) => (error ? reject(error) : resolve()),
       );
