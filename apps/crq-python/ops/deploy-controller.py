@@ -508,19 +508,36 @@ def read_queue(effects: Effects) -> dict:
 RUNNER_SOURCE_DIR = "apps/crq-python"
 
 
+def _string_constants(source: str) -> set:
+    """Every string constant a module's code uses, EXCLUDING comments (never
+    tokenized into the AST) and bare string statements (docstrings and other
+    expression-statement strings). Raises SyntaxError/ValueError on a module
+    that does not parse; the caller fails closed on it."""
+    tree = ast.parse(source)
+    skipped = {id(node.value) for node in ast.walk(tree)
+               if isinstance(node, ast.Expr)
+               and isinstance(node.value, ast.Constant)}
+    return {node.value for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and id(node) not in skipped}
+
+
 def prior_source_keys(effects: Effects, reader_sha: str, candidates) -> set:
     """The subset of ``candidates`` (queue state keys) that the runner source
-    AT ``reader_sha`` demonstrably knows: the key appears as a quoted string
-    literal in a non-test top-level runner module committed at that SHA.
+    AT ``reader_sha`` names: the key is, exactly, a string constant in the
+    parsed code of a non-test top-level runner module committed at that SHA.
 
-    This is the one deterministic evidence the controller has about a prior
-    target: its own committed source, read through git (never the live
-    checkout, which may already be the new target). A key the prior code
-    names is a key it creates or reads. Fail closed on ANY uncertainty: a
-    malformed SHA, a git failure, no runner modules listed, or an unreadable
-    module yields the empty set, so every candidate stays unproven.
+    Honest scope: this is evidence the prior code NAMES the key (as a dict
+    key, ``setdefault`` argument, subscript, or any other string value), so a
+    key it creates or reads is covered. It is not proof the prior code parses
+    every value shape, and dead code still counts. Comments and docstrings
+    (bare string statements) never count. The source is read through git at
+    that SHA, never the live checkout, which may already be the new target.
+    Fail closed on ANY uncertainty: a malformed SHA, a git failure, no runner
+    modules listed, an unreadable module, or a module that does not parse
+    yields the empty set, so every candidate stays unproven.
     """
-    wanted = sorted(set(candidates))
+    wanted = set(candidates)
     if not wanted or not SHA_RE.match(reader_sha or ""):
         return set()
     try:
@@ -533,10 +550,8 @@ def prior_source_keys(effects: Effects, reader_sha: str, candidates) -> set:
             return set()
         proven = set()
         for module in modules:
-            text = effects.git("show", reader_sha + ":" + module)
-            for key in wanted:
-                if '"' + key + '"' in text or "'" + key + "'" in text:
-                    proven.add(key)
+            proven |= wanted & _string_constants(
+                effects.git("show", reader_sha + ":" + module))
         return proven
     except Exception:  # noqa: BLE001 - any doubt fails closed
         return set()

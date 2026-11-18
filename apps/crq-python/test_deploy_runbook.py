@@ -220,6 +220,23 @@ class DeployFixture(unittest.TestCase):
 
 
 class DeployTests(DeployFixture, unittest.TestCase):
+    def test_compatibility_is_judged_against_the_prior_sha_throughout(self):
+        # Pre-hold and post-drain checks, and the post-switch check, must ask
+        # about the PRIOR (live) sha, never the deploy target.
+        shas = []
+        real = dc.compatibility_record
+
+        def spy(effects, sha):
+            shas.append(sha)
+            return real(effects, sha)
+
+        with mock.patch.object(dc, "compatibility_record", side_effect=spy):
+            document = self.build().run()
+        self.assertEqual(document["outcome"], "completed")
+        self.assertGreaterEqual(len(shas), 3)
+        self.assertEqual(set(shas), {self.prior})
+        self.assertNotEqual(self.prior, self.target)
+
     def test_deploy_switches_health_checks_and_restarts_only_active(self):
         run = self.build()
         document = run.run()

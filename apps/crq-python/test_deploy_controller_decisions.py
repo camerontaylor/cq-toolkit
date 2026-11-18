@@ -118,6 +118,45 @@ class CompatibilityRecordTests(ControllerFixture):
         self.assertEqual(record["schema_observations"], ["author_requests"])
         self.assertFalse(dc.rollback_compatible(record))
 
+    def test_key_named_only_in_a_comment_or_docstring_is_not_proof(self):
+        prior = self.prior_with_source({
+            "notes.py": '"""Module docs mention "author_requests"."""\n'
+                        '# q["author_requests"] is created elsewhere\n'
+                        'def f():\n'
+                        '    """Reads \'author_requests\'."""\n'
+                        '    return 1\n'})
+        self.write_state("queue.json", {"items": [], "author_requests": {}})
+        record = dc.compatibility_record(self.effects, prior)
+        self.assertEqual(record["schema_observations"], ["author_requests"])
+        self.assertFalse(dc.rollback_compatible(record))
+
+    def test_exact_constant_match_only_not_substrings(self):
+        prior = self.prior_with_source({
+            "x.py": 'NAME = "author_requests_v2"\n'})
+        self.write_state("queue.json", {"items": [], "author_requests": {}})
+        record = dc.compatibility_record(self.effects, prior)
+        self.assertEqual(record["schema_observations"], ["author_requests"])
+
+    def test_module_that_does_not_parse_fails_closed(self):
+        prior = self.prior_with_source({
+            "good.py": 'q.setdefault("author_requests", {})\n',
+            "broken.py": 'def (:\n'})
+        self.write_state("queue.json", {"items": [], "author_requests": {}})
+        record = dc.compatibility_record(self.effects, prior)
+        self.assertEqual(record["schema_observations"], ["author_requests"])
+        self.assertFalse(dc.rollback_compatible(record))
+
+    def test_verdict_follows_the_sha_given_not_the_checkout(self):
+        # Source names the key at ``knows`` only; ``ignorant`` is its parent.
+        ignorant = self.command("rev-parse", "HEAD").strip()
+        knows = self.prior_with_source({
+            "author_quota.py": 'q.setdefault("author_requests", {})\n'})
+        self.write_state("queue.json", {"items": [], "author_requests": {}})
+        self.assertTrue(dc.rollback_compatible(
+            dc.compatibility_record(self.effects, knows)))
+        self.assertFalse(dc.rollback_compatible(
+            dc.compatibility_record(self.effects, ignorant)))
+
     def test_schema_marker_still_refuses_even_when_prior_knows_author_keys(self):
         prior = self.prior_with_source({
             "author_quota.py": 'q.setdefault("author_requests", {})\n'})
