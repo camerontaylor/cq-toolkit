@@ -13,7 +13,7 @@ inherited `RCLONE_*` setting except the connection ones (`RCLONE_CONFIG`,
 `RCLONE_CONFIG_PASS`, `RCLONE_CONFIG_<REMOTE>_<OPTION>`) removed from its
 environment: rclone reads any command-line option from its environment, so an
 ambient `RCLONE_MAX_SIZE`, `RCLONE_EXCLUDE` or `RCLONE_DRY_RUN` would silently
-drop a payload file from the copy *and* from the verification and let a
+drop a payload file from the copy _and_ from the verification and let a
 truncated bundle report `archived`. Every flag the wrapper needs is passed
 explicitly on the command line.
 
