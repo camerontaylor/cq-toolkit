@@ -580,13 +580,15 @@ def matrix_evidence():
 
 
 class CompletionsReadTests(unittest.TestCase):
-    def _read(self, text, writes=()):
+    def _read(self, text, writes=(), on_sleep=None):
         with tempfile.TemporaryDirectory() as tmp:
             log = pathlib.Path(tmp) / "completions.jsonl"
             log.write_text(text)
             pending = list(writes)
 
-            def sleep(_seconds):
+            def sleep(seconds):
+                if on_sleep is not None:
+                    on_sleep(seconds)
                 if pending:
                     log.write_text(pending.pop(0))
 
@@ -604,9 +606,9 @@ class CompletionsReadTests(unittest.TestCase):
             self._read('{"a": 1}\n{"b"')
 
     def test_bad_interior_line_raises_without_retry(self):
-        with mock.patch.object(guest.time, "sleep") as sleep:
-            with self.assertRaisesRegex(RuntimeError, "line 1 is not JSON"):
-                self._read('nope\n{"b": 2}\n')
+        sleep = mock.Mock()
+        with self.assertRaisesRegex(RuntimeError, "line 1 is not JSON"):
+            self._read('nope\n{"b": 2}\n', on_sleep=sleep)
         sleep.assert_not_called()
 
 
