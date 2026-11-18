@@ -241,6 +241,12 @@ test('M7-many unmeasured dispatch settles as unknown, never a partial known tota
     unresolved: ['1'],
     stop: 'unknown-usage',
   });
+  // The public summary must not count the partial leg as fully measured either.
+  expect(result.report?.usageSummary).toEqual({
+    knownCount: 0,
+    unknownCount: 1,
+    unpricedCount: 1,
+  });
 });
 
 test('M7-many post-dispatch exit retains the envelope through a thrown settlement', async () => {

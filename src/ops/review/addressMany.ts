@@ -684,7 +684,7 @@ function makeReviewAddressManyCore(
                 // refusal cannot invent spend. A telemetry failure degrades to
                 // unknown and never replaces the leg's settlement.
                 try {
-                  record(identity.id, observation ?? {});
+                  record(identity.id, known ? (observation ?? {}) : {});
                 } catch {
                   try {
                     record(identity.id, {});
