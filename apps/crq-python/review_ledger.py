@@ -627,7 +627,13 @@ class GitLedger:
                         if value["event_type"] == "finding-event":
                             deps = [p["review_id"], p["previous_event_id"]]
                         elif value["event_type"] == "import-result":
-                            deps = [p["review_id"], p["duplicate_id"]]
+                            # Mirror validate_sequence(): a credited import links
+                            # only its review, so a stray duplicate_id that is
+                            # absent from history cannot block publication.
+                            if p["result"] == "credited":
+                                deps = [p["review_id"]]
+                            else:
+                                deps = [p["review_id"], p["duplicate_id"]]
                         if all(d is None or d in available for d in deps):
                             ready.append(value)
                     if not ready:
