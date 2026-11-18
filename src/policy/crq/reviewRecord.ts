@@ -149,7 +149,11 @@ export function normalizeRecord(
     throw new RecordRefused('claimed scope exceeds the expanded-line budget');
   }
   const declared =
-    submitted.verdict === null ? null : (VERDICT_OUTCOMES[submitted.verdict] ?? 'unverified');
+    submitted.verdict === null
+      ? null
+      : Object.prototype.hasOwnProperty.call(VERDICT_OUTCOMES, submitted.verdict)
+        ? VERDICT_OUTCOMES[submitted.verdict]
+        : 'unverified';
   const completion = completionEvidence(submitted.verdict);
   if (declared === 'completed' && completion === null) {
     throw new RecordRefused('completed record requires completion evidence or unknown outcome');
