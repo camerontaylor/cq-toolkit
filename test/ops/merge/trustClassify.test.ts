@@ -177,8 +177,9 @@ describe('branch normalisation', () => {
             },
           ],
         }),
-      ).replace('refs/heads/main', 'main');
+      );
     expect(await planned('refs/heads/main')).toBe(await planned('main'));
+    expect(await planned('main')).toContain('"baseBranch":"main"');
   });
 
   test('the mirror returns the normalised base (fails if normalisation is removed)', () => {
