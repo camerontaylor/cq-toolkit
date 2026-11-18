@@ -69,13 +69,13 @@
     },
     "1926": {
       "tuple": {
-        "head": "6ee672249a3aebe559bbaf99ca521138ccfe5809",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
+        "head": "4a9d63f3de07595b6f2ca04e2717b373957a053b",
+        "base": "563c2d5ee57eff261e9235d3b01f69392e2869ec",
+        "forcePushEpoch": 1
       },
       "observations": [
         {
-          "observedAt": "2026-11-16T07:50:21.842Z",
+          "observedAt": "2026-11-18T05:08:22.260Z",
           "by": "self-merge-prs:observe"
         }
       ]
