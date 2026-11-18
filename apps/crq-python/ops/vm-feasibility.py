@@ -1110,6 +1110,23 @@ def cmd_prepare(args) -> int:
     return 0
 
 
+def _cleanup_diagnostic(args, prefix: str, cleanup_error: Exception,
+                        exc: BaseException | None = None) -> str:
+    """Return the cleanup diagnostic without breaking machine mode (doctrine I1).
+
+    Machine mode (``--json``) keeps stderr empty, so the text is never narrated
+    there: the caller keeps it in the JSON result, or ``exc`` carries it as a
+    note that ``main`` serializes into the one error artifact. Outside machine
+    mode the same text still goes to stderr.
+    """
+    message = "%s did not complete: %s" % (prefix, cleanup_error)
+    if not getattr(args, "json", False):
+        print(message, file=sys.stderr)
+    elif exc is not None:
+        exc.add_note(message)
+    return message
+
+
 def cmd_boot(args) -> int:
     state = pathlib.Path(args.state_dir).expanduser().resolve()
     run = load_run(state, args.run_id, require_process=False)
@@ -1122,12 +1139,12 @@ def cmd_boot(args) -> int:
         info = boot(run, recorder, args.tools, stamp)
         info["ssh"] = wait_ssh(run, recorder)
         upload_guest_probe(run, recorder)
-    except BaseException:
+    except BaseException as exc:
         try:
             stop_owned_process(run, purge=False)
         except Exception as cleanup_error:
-            print("cleanup after failed boot did not complete: %s"
-                  % cleanup_error, file=sys.stderr)
+            _cleanup_diagnostic(args, "cleanup after failed boot",
+                                cleanup_error, exc)
         raise
     print(json.dumps(info, indent=2, sort_keys=True))
     return 0
@@ -1215,21 +1232,21 @@ def cmd_run(args) -> int:
                               provenance)
         save_json(pathlib.Path(run["path"]) / "report.json", report)
         problems = report_problems(report, require_evidence=True)
-    except BaseException:
+    except BaseException as exc:
         if not args.keep:
             try:
                 stop_owned_process(run, purge=False)
             except Exception as cleanup_error:
-                print("cleanup after failed run did not complete: %s"
-                      % cleanup_error, file=sys.stderr)
+                _cleanup_diagnostic(args, "cleanup after failed run",
+                                    cleanup_error, exc)
         raise
     cleanup = None
     if not args.keep:
         try:
             cleanup = stop_owned_process(run, purge=False)
         except Exception as cleanup_error:
-            print("cleanup after run did not complete: %s" % cleanup_error,
-                  file=sys.stderr)
+            # The diagnostic stays in the JSON result in machine mode (I1).
+            _cleanup_diagnostic(args, "cleanup after run", cleanup_error)
             cleanup = {"stopped": False, "error": str(cleanup_error)}
     print(json.dumps({"run": run["run_id"], "path": run["path"],
                       "problems": problems, "checks": report["checks"],
@@ -1322,6 +1339,15 @@ def _error_artifact(kind, subcommand, message, exit_code) -> dict:
                       "message": message, "exitCode": exit_code}}
 
 
+def _error_message(exc: BaseException) -> str:
+    """The error text, carrying any notes retained instead of stderr prose."""
+    message = str(exc) or type(exc).__name__
+    for note in getattr(exc, "__notes__", ()):
+        if note:
+            message = "%s: %s" % (message, note)
+    return message
+
+
 class _JsonArgumentParser(argparse.ArgumentParser):
     """argparse parser that answers argument failures with the I1 artifact.
 
@@ -1398,7 +1424,7 @@ def main(argv=None) -> int:
         # Refusals and missing arguments (e.g. run without --source-commit)
         # stay usage errors (exit 2) but still write the one JSON artifact to
         # stdout; stderr stays empty in machine mode.
-        message = str(exc) or type(exc).__name__
+        message = _error_message(exc)
         print(json.dumps(_error_artifact("refused", args.command, message, 2),
                          indent=2, sort_keys=True))
         if not parser.json_mode:
@@ -1408,7 +1434,7 @@ def main(argv=None) -> int:
         # A RuntimeError from QEMU or a guest phase, or an OSError from a
         # missing report, a download or the filesystem, is a thrown error
         # (exit 1), never an argument error.
-        message = str(exc) or type(exc).__name__
+        message = _error_message(exc)
         print(json.dumps(_error_artifact("thrown", args.command, message, 1),
                          indent=2, sort_keys=True))
         if not parser.json_mode:

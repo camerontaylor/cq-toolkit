@@ -402,6 +402,35 @@ class LifecycleTests(unittest.TestCase):
                     vm.cmd_boot(args)
                 stop.assert_called_once()
 
+    def test_cmd_boot_cleanup_failure_keeps_stderr_empty_in_machine_mode(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            args = type("Args", (), {"state_dir": str(state), "run_id": "r1",
+                                     "tools": None, "json": True})()
+            err = io.StringIO()
+            with mock.patch.object(vm, "boot", return_value={"pid": 1}), \
+                 mock.patch.object(vm, "wait_ssh",
+                                   side_effect=RuntimeError("SSH never ready")), \
+                 mock.patch.object(vm, "stop_owned_process",
+                                   side_effect=RuntimeError("scope gone")):
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(RuntimeError) as raised:
+                        vm.cmd_boot(args)
+            self.assertEqual(err.getvalue(), "")
+            self.assertIn("scope gone", vm._error_message(raised.exception))
+
+    def test_cleanup_failure_narrates_outside_machine_mode(self):
+        import contextlib
+        import io
+        args = type("Args", (), {"json": False})()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            message = vm._cleanup_diagnostic(args, "cleanup after run",
+                                             RuntimeError("scope gone"))
+        self.assertIn(message, err.getvalue())
+
     def test_destroy_refuses_mismatched_live_process(self):
         with tempfile.TemporaryDirectory() as temporary:
             state, run = self._prepared(temporary)
