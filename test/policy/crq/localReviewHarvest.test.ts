@@ -245,6 +245,41 @@ describe('local review completion', () => {
     expect(again.item.get('attempts')).toHaveLength(1);
     expect((again.queue.get('review_notify_outbox') as JsonObject).entries).toHaveLength(1);
   });
+  it('keeps Unicode separators inside a finding string on one NDJSON record', async () => {
+    const queue = doc(
+      '{"items":[{"id":"i","identity":"x","identity_inputs":{},"profile":{},"run":{}}]}',
+    );
+    const item = (queue.get('items') as JsonObject[])[0]!;
+    let receipt: JsonObject | undefined;
+    const result = await completeLocalReview(
+      queue,
+      item,
+      'run',
+      doc('{"counted":true,"outcome":"completed"}'),
+      'now',
+      0,
+      {
+        readReview: async () =>
+          Buffer.from(
+            '{"type":"finding","comment":"a\u2028b\u2029c\u0085d"}\r\n{"type":"complete"}\n',
+            'utf8',
+          ),
+        readReport: async () => null,
+        validateReceipt: () => {},
+        writeReceipt: async (value) => {
+          receipt = value;
+          return receiptJsonDigest(value);
+        },
+        saveQueue: async () => {},
+        republish: async (q) => q,
+      },
+    );
+    expect(receipt?.get('outcome')).toBe('findings');
+    const findings = receipt?.get('findings') as JsonObject[];
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.get('comment')).toBe('a\u2028b\u2029c\u0085d');
+    expect(result.item.get('state')).toBe('done');
+  });
   it('does not mutate the queue when receipt publication fails', async () => {
     const queue = doc(
       '{"items":[{"id":"i","identity":"x","identity_inputs":{},"profile":{},"run":{"band":null}}]}',

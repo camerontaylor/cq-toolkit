@@ -27,7 +27,9 @@ function required(value: JsonObject, key: string): JsonValue {
   return result;
 }
 function splitLines(text: string): string[] {
-  const separators = [10, 11, 12, 13, 28, 29, 30, 133, 0x2028, 0x2029];
+  // NDJSON records end at LF or CRLF. JSON allows literal U+0085, U+2028 and U+2029
+  // inside strings, so those must not split a record (CR can never be literal there).
+  const separators = [10, 13];
   const lines: string[] = [];
   let start = 0;
   for (let i = 0; i < text.length; i++) {
