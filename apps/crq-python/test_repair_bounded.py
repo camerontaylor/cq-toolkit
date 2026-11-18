@@ -831,6 +831,8 @@ class BoundedRepairTest(unittest.TestCase):
         atomic(self.root / 'config.json', self.config)
         self.assertEqual(artifact(['--job', OLD]), 'refused')
         self.assertEqual(artifact(['--recover-job', 'x', '--job', OLD]), 'refused')
+        # A dry run with no triage state writes nothing itself, so it reports that.
+        self.assertEqual(artifact(['--triage-dry-run']), 'no-triage')
 
 
 if __name__ == '__main__':

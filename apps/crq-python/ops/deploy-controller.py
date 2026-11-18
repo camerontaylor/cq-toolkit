@@ -1533,8 +1533,11 @@ def recover_unit(effects, adapter, path, *, adapter_factory=None):
             # Render the prior runtime at the commit the transaction retained,
             # not at a HEAD that may have advanced past what can render it.
             retained = record["state"].get("prior_head") if isinstance(record.get("state"), dict) else None
-            adapter = adapter_factory(record["unit"], record["prior_runtime"],
-                                      source_sha=retained if _hex(SHA_RE, retained) else None)
+            # A malformed retained head must not silently fall back to the
+            # current HEAD (the very drift this guards against): fail closed.
+            if not _hex(SHA_RE, retained):
+                raise Refused("invalid retained prior head for unit recovery")
+            adapter = adapter_factory(record["unit"], record["prior_runtime"], source_sha=retained)
         if adapter is None:
             raise Refused("no unit recovery adapter")
         adapter.validate_snapshot(record["unit"], record["snapshot"])

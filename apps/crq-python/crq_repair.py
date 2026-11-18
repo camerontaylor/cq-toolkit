@@ -332,7 +332,7 @@ def _dispatch(config, role, job, wt, directory, judge=False):
     # The excerpt leaves the machine for every driver: scan it with the same
     # policy as triage context, before it is persisted or handed to a provider.
     import crq as c
-    if not triage_context_safe(c, {'current_path': snapshot['path'], 'source': snapshot['source']},
+    if not triage_context_safe(c, {'current_path': snapshot.get('path') or 'source-snapshot.txt', 'source': snapshot.get('source', '')},
                                directory / 'source-snapshot-scan.json'):
         raise ValueError('source snapshot secret scan rejected; refusing dispatch')
     job['source_snapshot'] = snapshot
@@ -1214,7 +1214,8 @@ def explicit_job_result(job, outcome):
 
 
 def run(argv=None):
-    """Returns (exit code, result). A None result means the path already wrote its own JSON."""
+    """Returns (exit code, result). A None result means the path already wrote its own JSON
+    (the triage dry-run does so only when triage ran; otherwise it reports no-triage)."""
     parser = argparse.ArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
     parser.add_argument('--triage-dry-run', action='store_true')
     parser.add_argument('--job')
@@ -1234,7 +1235,11 @@ def run(argv=None):
         narrate('repair dispatch disabled: repair.enabled and a recorded spend_authorization are required')
         return 0, {'status': 'disabled', 'reason': 'repair.enabled and a recorded spend_authorization are required'}
     if args.triage_dry_run:
-        triage_phase(config, dry_run=True)  # writes its own JSON result
+        # triage_phase writes its own JSON result only when triage is configured
+        # and has a rollout; otherwise it returns None having written nothing,
+        # so report that explicitly to keep one JSON artifact per exit.
+        if triage_phase(config, dry_run=True) is None:
+            return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
         return 0, None
     selectors = (args.job, args.source_sha, args.finding_sha256)
     if args.recover_job and (any(selectors) or args.triage_dry_run):

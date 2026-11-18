@@ -806,6 +806,18 @@ class RecoverFactoryTests(ControllerFixture):
         dc.recover_unit(self.effects, None, path, adapter_factory=factory)
         self.assertEqual(seen, [retained])
 
+    def test_recover_refuses_a_malformed_retained_head_without_building_an_adapter(self):
+        path = self.pending_record()
+        record = json.loads(path.read_text())
+        record["state"]["prior_head"] = "not-a-sha"
+        path.write_text(json.dumps(record))
+        before = path.read_bytes()
+        factory = self.refusing_factory()
+        with self.assertRaisesRegex(dc.Refused, "invalid retained prior head"):
+            dc.recover_unit(self.effects, None, path, adapter_factory=factory)
+        factory.assert_not_called()
+        self.assertEqual(path.read_bytes(), before)
+
     def test_recover_factory_runs_under_the_controller_lock(self):
         path = self.pending_record()
         lock = self.runner / "state" / dc.LOCK_NAME
