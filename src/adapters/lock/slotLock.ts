@@ -206,10 +206,14 @@ export function attachSlotMetadata(lock: Awaited<ReturnType<typeof acquireFileLo
               checkoutPath: await realpath(metadata.checkoutPath),
             }
           : metadata;
+      // Reject what the bounded reader would refuse, before the temporary file exists,
+      // so an oversized document never replaces the metadata on disk.
+      const text = `${JSON.stringify(canonical)}\n`;
+      if (Buffer.byteLength(text, 'utf8') > 16_384) throw new Error('Oversized slot metadata');
       const temporary = `${metadataPath}.${randomUUID()}.tmp`;
       const output = await open(temporary, 'wx', 0o600);
       try {
-        await output.writeFile(`${JSON.stringify(canonical)}\n`);
+        await output.writeFile(text);
         await output.sync();
         await output.close();
         await lock.assertIdentity();
