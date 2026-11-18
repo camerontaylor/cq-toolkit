@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test, vi } from 'vitest';
@@ -57,7 +57,8 @@ test('preflight refuses a root once the cached session binary no longer matches 
     vi.stubEnv('PATH', bin);
     const token = {};
     await expect(assertAddressTerminalRoot(token, root)).resolves.toBeUndefined();
-    await rm(git);
+    // Keep the original inode allocated so the replacement cannot reuse it.
+    await rename(git, `${git}.original`);
     await writeFile(git, '#!/bin/sh\nexit 1\n');
     await chmod(git, 0o755);
     await expect(assertAddressTerminalRoot(token, root)).rejects.toThrow(
