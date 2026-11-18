@@ -22,6 +22,8 @@ records; a self-consistent manifest can be rewritten with the archive. This
 route does not switch a production unit or authorize a cutover.
 """
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -33,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 
 EXPECTED_NODE_MAJOR = 24
 EXPECTED_PLATFORM = 'linux'
@@ -243,8 +246,36 @@ def _check_unchanged(checkout, lockfile_sha, run=run_command):
         raise BuildError('build changed the lockfile')
 
 
+@contextlib.contextmanager
+def _exclusive_checkout(repo):
+    """Hold an exclusive advisory lock on one checkout for a whole build.
+
+    The lock file lives outside the checkout (keyed on its resolved path), so it
+    never shows up in the tracked-tree check. A second build of the same
+    checkout fails fast instead of racing install, dist cleanup and compile.
+    """
+    key = hashlib.sha256(str(Path(repo).resolve()).encode()).hexdigest()[:32]
+    lock_path = Path(tempfile.gettempdir()) / ('crq-build-' + key + '.lock')
+    with open(lock_path, 'a') as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise BuildError('another build owns checkout ' + str(repo)) from error
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def build(repo, sha, staging, output, node='node', pnpm='pnpm',
           run=run_command, keep_staging=False):
+    with _exclusive_checkout(repo):
+        return _build_locked(repo, sha, staging, output, node=node, pnpm=pnpm,
+                             run=run, keep_staging=keep_staging)
+
+
+def _build_locked(repo, sha, staging, output, node='node', pnpm='pnpm',
+                  run=run_command, keep_staging=False):
     checkout = validate_checkout(repo, sha, run=run)
     env = build_env(node=node, pnpm=pnpm)
     versions = tool_versions(checkout['repo'], node=node, pnpm=pnpm, env=env, run=run)

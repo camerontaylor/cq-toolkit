@@ -189,6 +189,17 @@ class BuildRunnerTests(unittest.TestCase):
             build_runner.deploy(self.repo, staging, 'pnpm', {}, run=run)
         self.assertFalse(any('--legacy' in call for call in run.calls))
 
+    def test_build_refuses_a_checkout_another_build_owns(self):
+        run, _ = self.fake()
+        with build_runner._exclusive_checkout(self.repo):
+            with self.assertRaisesRegex(build_runner.BuildError, 'another build owns'):
+                build_runner.build(self.repo, SHA, self.base / 'stage',
+                                   self.base / 'out/runner.tar.gz', run=run)
+        self.assertEqual(run.calls, [])
+        # The lock is released on exit, so the checkout can be owned again.
+        with build_runner._exclusive_checkout(self.repo):
+            pass
+
     def test_build_rejects_pnpm_pin_mismatch(self):
         run, _ = self.fake(pnpm_version='12.18.0')
         with self.assertRaisesRegex(build_runner.BuildError, 'packageManager pin'):
