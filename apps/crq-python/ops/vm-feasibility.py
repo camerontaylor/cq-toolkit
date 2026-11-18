@@ -26,6 +26,8 @@ See ``VM-FEASIBILITY.md`` for the recorded evidence and its limits.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -1064,6 +1066,8 @@ def load_run(state: pathlib.Path, run_id: str | None, *,
     if run_id is not None and (not RUN_ID_RE.fullmatch(run_id) or ".." in run_id):
         raise ValueError("invalid run id: " + run_id)
     run = runs[-1] if run_id is None else state / "runs" / run_id
+    if not run.is_dir():
+        raise ValueError("no such run: " + str(run))
     if require_process and not (run / "process.json").exists():
         raise ValueError("run has no retained process identity: " + str(run))
     meta = {}
@@ -1124,7 +1128,8 @@ def cmd_boot(args) -> int:
     recorder = Recorder(pathlib.Path(run["path"]))
     stamp = host_stamp()
     try:
-        info = boot(run, recorder, args.tools, stamp)
+        with run_lock(pathlib.Path(run["path"])):
+            info = boot(run, recorder, args.tools, stamp)
         info["ssh"] = wait_ssh(run, recorder)
         upload_guest_probe(run, recorder)
     except BaseException:
@@ -1198,7 +1203,8 @@ def cmd_run(args) -> int:
         }
         recorder = Recorder(pathlib.Path(run["path"]))
         stamp = host_stamp()
-        boot_info = boot(run, recorder, args.tools, stamp)
+        with run_lock(pathlib.Path(run["path"])):
+            boot_info = boot(run, recorder, args.tools, stamp)
         boot_info["ssh"] = wait_ssh(run, recorder)
         upload = upload_guest_probe(run, recorder, source=guest_bytes)
         provenance["guest_script"].update(upload)
@@ -1245,7 +1251,54 @@ def cmd_run(args) -> int:
     return 0 if not problems else 1
 
 
+def _show_scope(unit: str) -> tuple[int, dict]:
+    shown = subprocess.run(["systemctl", "--user", "show", "-p", "ActiveState",
+                            "-p", "LoadState", "-p", "ControlGroup", unit],
+                           capture_output=True, text=True)
+    props = dict(line.split("=", 1) for line in (shown.stdout or "").splitlines()
+                 if "=" in line)
+    return shown.returncode, props
+
+
+def _cgroup_pids(control_group: str | None,
+                 root: pathlib.Path = pathlib.Path("/sys/fs/cgroup")) -> list[int] | None:
+    """PIDs still in a scope's cgroup; [] when it has none or is gone, None
+    when that cannot be determined."""
+    if not control_group:
+        return []
+    try:
+        text = (root / control_group.lstrip("/") / "cgroup.procs").read_text()
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return None
+    try:
+        return [int(line) for line in text.split()]
+    except ValueError:
+        return None
+
+
+@contextlib.contextmanager
+def run_lock(run_dir: pathlib.Path):
+    """Exclusive per-run lock so boot and destroy never interleave."""
+    handle = open(run_dir / "run.lock", "a")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise RuntimeError("run is busy: another boot or destroy holds "
+                               + str(run_dir / "run.lock")) from exc
+        yield
+    finally:
+        handle.close()
+
+
 def stop_owned_process(run: dict, *, purge: bool) -> dict:
+    with run_lock(pathlib.Path(run["path"])):
+        return _stop_owned_process(run, purge=purge)
+
+
+def _stop_owned_process(run: dict, *, purge: bool) -> dict:
     run_dir = pathlib.Path(run["path"])
     identity_path = run_dir / "process.json"
     identity = None
@@ -1274,20 +1327,37 @@ def stop_owned_process(run: dict, *, purge: bool) -> dict:
         if not RUN_ID_RE.fullmatch(str(run["run_id"])):
             raise RuntimeError("invalid run id: " + str(run["run_id"]))
         derived_unit = "crq-vm-" + run["run_id"] + ".scope"
+        # The unit name is derived from the run id alone, so prove the scope
+        # holds this run's QEMU before stopping it: another workspace under the
+        # same user manager can own a scope with the same name.
+        before_rc, before = _show_scope(derived_unit)
+        if before_rc == 0 and before.get("LoadState") != "not-found":
+            members = _cgroup_pids(before.get("ControlGroup"))
+            if members is None and before.get("ActiveState") not in ("inactive", "failed"):
+                raise RuntimeError("cannot verify scope ownership: " + derived_unit)
+            if members:
+                def owns(pid: int) -> bool:
+                    try:
+                        command = pathlib.Path("/proc/%d/cmdline" % pid).read_bytes()
+                    except OSError:
+                        return False
+                    return needle.encode() in command
+                if not any(owns(pid) for pid in members):
+                    raise RuntimeError("refusing to stop a scope this run does not own: "
+                                       + derived_unit)
         stop_rc = subprocess.run(["systemctl", "--user", "stop", derived_unit],
                                  capture_output=True, text=True).returncode
         # Only a successful stop (or a unit that is not loaded at all) plus an
         # ActiveState of inactive or failed proves QEMU is gone. A scope that
         # is deactivating is not active yet still holds the guest, and a
-        # failed query (for example a user-bus error) proves nothing.
-        shown = subprocess.run(["systemctl", "--user", "show", "-p", "ActiveState",
-                                "-p", "LoadState", derived_unit],
-                               capture_output=True, text=True)
-        props = dict(line.split("=", 1) for line in (shown.stdout or "").splitlines()
-                     if "=" in line)
-        stopped = (shown.returncode == 0
+        # failed query (for example a user-bus error) proves nothing. A scope
+        # can also enter failed while QEMU is still in its cgroup, so the
+        # cgroup must be confirmed empty too.
+        shown_rc, props = _show_scope(derived_unit)
+        stopped = (shown_rc == 0
                    and props.get("ActiveState") in ("inactive", "failed")
-                   and (stop_rc == 0 or props.get("LoadState") == "not-found"))
+                   and (stop_rc == 0 or props.get("LoadState") == "not-found")
+                   and _cgroup_pids(props.get("ControlGroup")) == [])
     if identity is not None:
         alive = pathlib.Path("/proc/%d" % pid).exists()
         if alive:
