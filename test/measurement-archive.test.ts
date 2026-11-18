@@ -491,12 +491,14 @@ describe('M8a failure evidence', () => {
     const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
     // stat() sees the small file, then every read keeps returning data: filling a buffer
     // sized from stat does not prove EOF, so the reader must keep going to the cap.
+    let bytesServed = 0;
     vi.mocked(fs.open).mockImplementationOnce(async (path, flags, mode) => {
       const real = await actual.open(path, flags, mode);
       return {
         stat: () => real.stat(),
         close: () => real.close(),
         read: (buffer: Buffer, offset: number, length: number) => {
+          bytesServed += length;
           buffer.fill(1, offset, offset + length);
           return Promise.resolve({ bytesRead: length, buffer });
         },
@@ -508,6 +510,36 @@ describe('M8a failure evidence', () => {
       state: 'unavailable',
       reason: 'stored file exceeds the 8 MiB size cap',
     });
+    // Reads stop at the cap plus one byte, never a whole extra chunk.
+    expect(bytesServed).toBe(8 * 1024 * 1024 + 1);
+  });
+
+  test('a rejected close of one stored file does not abort the restore', async () => {
+    const base = await workspace();
+    const root = join(base, 'root');
+    await mkdir(root);
+    await writeFile(join(root, 'a'), 'first');
+    await writeFile(join(root, 'b'), 'second');
+    const built = (await buildMeasurementBundle({
+      runId: 'close-rejects',
+      bundleRoot: join(base, 'bundles'),
+      roots: [{ name: 'fix', path: root, files: ['a', 'b'] }],
+    })) as { bundleDir: string; manifest: Manifest };
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    vi.mocked(fs.open).mockImplementationOnce(async (path, flags, mode) => {
+      const real = await actual.open(path, flags, mode);
+      return {
+        stat: () => real.stat(),
+        read: (...args: Parameters<typeof real.read>) => real.read(...args),
+        close: async () => {
+          await real.close();
+          throw new Error('close failed');
+        },
+      } as unknown as Awaited<ReturnType<typeof actual.open>>;
+    });
+    const restored = (await restoreMeasurementBundle(built.bundleDir)) as Restored;
+    expect(Object.keys(restored.pointers).length).toBe(2);
+    expect(restored.unavailable).toEqual([]);
   });
 
   test('canonicalizes explicit root aliases but rejects symlinks below them', async () => {

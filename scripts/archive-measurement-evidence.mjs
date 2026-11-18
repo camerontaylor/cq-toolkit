@@ -362,7 +362,9 @@ async function resolveStored(bundleDir, entry) {
     let length = 0;
     const chunk = Buffer.alloc(64 * 1024);
     while (length <= MAX_FILE_BYTES) {
-      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+      // One byte past the cap is enough to detect growth; never read further.
+      const readLength = Math.min(chunk.length, MAX_FILE_BYTES + 1 - length);
+      const { bytesRead } = await handle.read(chunk, 0, readLength, null);
       if (!bytesRead) break;
       chunks.push(Buffer.from(chunk.subarray(0, bytesRead)));
       length += bytesRead;
@@ -379,7 +381,9 @@ async function resolveStored(bundleDir, entry) {
           : `the bundle pointer could not be read: ${reasonOf(error)}`,
     };
   } finally {
-    await handle?.close();
+    // A failed close must not discard the computed result or abort the restore; the
+    // checksum below still decides whether the bytes read are trusted.
+    await handle?.close().catch(() => undefined);
   }
   if (sha256(bytes) !== entry.sha256)
     return { state: 'unavailable', reason: 'stored checksum does not match the manifest' };
