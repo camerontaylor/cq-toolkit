@@ -652,19 +652,6 @@
         }
       ]
     },
-    "1986": {
-      "tuple": {
-        "head": "6b494c3aef71a4b06e95f03dd149e82eaba4aa2a",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T01:16:10.000Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1987": {
       "tuple": {
         "head": "6eb00bba4f6d5892eb316797fe97f93ce310e884",
@@ -730,19 +717,6 @@
         }
       ]
     },
-    "1992": {
-      "tuple": {
-        "head": "5e941d38ccb0a5d3b643918ed1987a783ce1fd12",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T04:28:05.761Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1993": {
       "tuple": {
         "head": "1ec9030cfeda9074405b896aa6708d3aeded9b1c",
@@ -795,32 +769,6 @@
         }
       ]
     },
-    "1997": {
-      "tuple": {
-        "head": "1102268b35e93c1e1a1194ed475a3fbd92c00dd5",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T06:23:20.417Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1998": {
-      "tuple": {
-        "head": "dddfa5d9ca8c4bb950bfa5849f2bd96356d80997",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T06:41:10.379Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1999": {
       "tuple": {
         "head": "f40c0069629a373f2c02e31900662328523af252",
@@ -847,32 +795,6 @@
         }
       ]
     },
-    "2001": {
-      "tuple": {
-        "head": "c882c840f5e8b73ec1edd830ca6d644a3ddde323",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T07:14:02.784Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2002": {
-      "tuple": {
-        "head": "734598d66de7b0084ef8172aff77ff20dbc23ce1",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T07:21:21.538Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "2003": {
       "tuple": {
         "head": "caf8ba6b30e7d7c4e6f5ecf972428867af0d52e9",
@@ -882,19 +804,6 @@
       "observations": [
         {
           "observedAt": "2026-11-17T07:59:29.656Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2004": {
-      "tuple": {
-        "head": "f85b0c54c7e4eb61de34c39a1a5a373e813f6557",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T08:17:03.001Z",
           "by": "self-merge-prs:observe"
         }
       ]
@@ -977,45 +886,6 @@
         }
       ]
     },
-    "2011": {
-      "tuple": {
-        "head": "21f33445d8272bab45721d685f90b3eab41a602d",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T10:41:17.101Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2012": {
-      "tuple": {
-        "head": "2e9e00217f4b18e3eb18e4f0dedde7f5b53c6625",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T10:41:17.101Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2013": {
-      "tuple": {
-        "head": "f561c81c72293f9ce1b0b1f11c818a6d8a3b94ad",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T10:41:17.101Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "2014": {
       "tuple": {
         "head": "3ef1a4f2a023d119a09faf2582509e82d7c4c1d5",
@@ -1055,48 +925,9 @@
         }
       ]
     },
-    "2017": {
-      "tuple": {
-        "head": "0318186b58d16e75e9f00dd9471c20d6394b5358",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T10:42:52.911Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2018": {
-      "tuple": {
-        "head": "f2e50201963194674c4607bb880681539a0ffaab",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T10:42:52.911Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "2019": {
       "tuple": {
         "head": "bf1af6d44eb8f7a836ce726a53fef439a55c9dcc",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T10:51:02.755Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2020": {
-      "tuple": {
-        "head": "d7bdf1215e6173c6761894ece404f82acdc70c5b",
         "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
         "forcePushEpoch": 0
       },
@@ -1120,19 +951,6 @@
         }
       ]
     },
-    "2022": {
-      "tuple": {
-        "head": "671ba1261c40120ab910f6e920fad5c6e18eef93",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T11:27:32.709Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "2023": {
       "tuple": {
         "head": "6cae6e41ecaba9059ddabc438070df630fec9796",
@@ -1142,45 +960,6 @@
       "observations": [
         {
           "observedAt": "2026-11-17T11:51:22.180Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2024": {
-      "tuple": {
-        "head": "0377951309d5023bf9d197a1dc588def6fb39838",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T11:51:22.180Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2025": {
-      "tuple": {
-        "head": "4d873433e98fe9f5588f8219e7d8e836d6f0bdc3",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T12:04:00.981Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2026": {
-      "tuple": {
-        "head": "4deacdc4075b6bc7f5f1062d53abb2abe6ac78b9",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T12:13:50.346Z",
           "by": "self-merge-prs:observe"
         }
       ]
@@ -1201,19 +980,6 @@
     "2028": {
       "tuple": {
         "head": "e4f91e898116089af88453f8321c3459cd35928d",
-        "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-17T13:23:42.282Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2029": {
-      "tuple": {
-        "head": "163dcbfc74c379535562da0791337fa623dcb4ff",
         "base": "33ff78cef8138f7ae362d9ad03dc5ca60a7cc2c9",
         "forcePushEpoch": 0
       },
