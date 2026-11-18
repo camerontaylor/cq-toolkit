@@ -212,6 +212,22 @@ async function validateEvidenceAuthority(token: object, terminal: boolean) {
   return context;
 }
 
+function assertBinaryOutside(cwd: string, bin: string): void {
+  const relation = relative(cwd, bin);
+  if (relation !== '..' && !relation.startsWith(`..${sep}`) && !isAbsolute(relation))
+    throw new Error('terminal trusted Git executable inside checkout');
+}
+
+/**
+ * Refuse a root whose terminal session binary lies inside it, before anything
+ * is created there that the same session could not later remove.
+ */
+export async function assertAddressTerminalRoot(token: object, root: string): Promise<void> {
+  const canonical = await realpath(root);
+  const session = await terminalSession(token, canonical, false, true);
+  assertBinaryOutside(canonical, session.bin);
+}
+
 async function terminalSession(
   token: object,
   root: string,
@@ -356,9 +372,7 @@ async function terminalGit(
   const cwd = await realpath(root);
   // Discovery excluded only the first root; a token shared across checkouts must
   // never spawn a binary that lies inside the checkout it is about to run in.
-  const binRelation = relative(cwd, session.bin);
-  if (binRelation !== '..' && !binRelation.startsWith(`..${sep}`) && !isAbsolute(binRelation))
-    throw new Error('terminal trusted Git executable inside checkout');
+  assertBinaryOutside(cwd, session.bin);
   const checkout = session.checkouts.get(cwd);
   if (checkout) {
     const entry = join(cwd, '.git');

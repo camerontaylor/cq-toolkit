@@ -3,6 +3,7 @@ import {
   releaseAddressTerminalAttempt,
   checkpointAddressTerminalWorker,
   addressTerminalCandidate,
+  addressTerminalPreflight,
   deferAddressTerminalAttempt,
 } from './internal/addressRunLifecycle.js';
 import { randomUUID } from 'node:crypto';
@@ -1316,6 +1317,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             if (!dispatch) throw new Error('failed attempt has no dispatch identity');
             const content = await readFile(await safeFile(root, file));
             const candidate = resolve(deps.journalDir, `failed-candidate-${randomUUID()}`);
+            if (deps.terminalBinding) await addressTerminalPreflight(deps.terminalBinding, root);
             await git(root, ['worktree', 'add', '--detach', candidate, head]);
             if (deps.terminalBinding)
               await addressTerminalCandidate(deps.terminalBinding, root, candidate, false);
@@ -1437,6 +1439,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             if (!verifiedHeads.has(baselineHead))
               throw new AddressRefusal('unexpected baseline head outside engine', true);
             const candidate = resolve(deps.journalDir, `baseline-${randomUUID()}`);
+            if (deps.terminalBinding) await addressTerminalPreflight(deps.terminalBinding, root);
             await git(root, ['worktree', 'add', '--detach', candidate, baselineHead]);
             if (deps.terminalBinding)
               await addressTerminalCandidate(deps.terminalBinding, root, candidate, false);

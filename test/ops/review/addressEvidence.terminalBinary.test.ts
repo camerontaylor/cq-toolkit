@@ -12,8 +12,11 @@ vi.mock('../../../src/ops/review/internal/addressRunLifecycle.js', () => ({
   trackAddressTerminalProcess: () => undefined,
 }));
 
-const { checkpointAddressTerminalEvidence, noteAddressTerminalBookkeeping } =
-  await import('../../../src/ops/review/internal/addressEvidence.js');
+const {
+  assertAddressTerminalRoot,
+  checkpointAddressTerminalEvidence,
+  noteAddressTerminalBookkeeping,
+} = await import('../../../src/ops/review/internal/addressEvidence.js');
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -34,6 +37,29 @@ test('a trusted Git binary found for one checkout is refused inside a different 
     const token = {};
     await noteAddressTerminalBookkeeping(token, first, new Map());
     await expect(checkpointAddressTerminalEvidence(token, second)).rejects.toThrow(
+      /trusted Git executable inside checkout/,
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('a root that holds the session binary is refused before a candidate can be created there', async () => {
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'terminal-preflight-')));
+  try {
+    authority.commonDir = join(base, 'common');
+    const first = join(base, 'first');
+    const second = join(base, 'second');
+    for (const dir of [authority.commonDir, first, join(second, 'bin')]) {
+      await mkdir(dir, { recursive: true });
+    }
+    const planted = join(second, 'bin', 'git');
+    await writeFile(planted, '#!/bin/sh\nexit 0\n');
+    await chmod(planted, 0o755);
+    vi.stubEnv('PATH', join(second, 'bin'));
+    const token = {};
+    await expect(assertAddressTerminalRoot(token, first)).resolves.toBeUndefined();
+    await expect(assertAddressTerminalRoot(token, second)).rejects.toThrow(
       /trusted Git executable inside checkout/,
     );
   } finally {
