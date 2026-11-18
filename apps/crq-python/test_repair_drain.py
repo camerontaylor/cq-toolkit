@@ -75,7 +75,8 @@ class RepairDrainTest(unittest.TestCase):
         self.git('fetch', '-q', 'origin')
         self.config = {'clone': str(self.clone), 'worktree_root': str(self.root / 'wt'),
                        'repair': {'enabled': True, 'spend_authorization': 'offline-test-fixture-only',
-                                  'max_rounds_per_pin': 2, 'blackout': BLACKOUT, 'roles': ROLES,
+                                  'max_rounds_per_pin': 2, # Wall-clock-independent: blackout tests pass BLACKOUT or mock `blocked` explicitly.
+                                  'blackout': {**BLACKOUT, 'enabled': False}, 'roles': ROLES,
                                   'budget': {'wall_clock_min': 20, 'max_tokens': 400000,
                                              'max_output_tokens': 500000, 'max_context_tokens': 200000}}}
         self.queue = {'items': [

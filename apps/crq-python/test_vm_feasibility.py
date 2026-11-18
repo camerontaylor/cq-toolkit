@@ -1125,17 +1125,22 @@ class PlanTests(unittest.TestCase):
         import io
         with tempfile.TemporaryDirectory() as temporary:
             report = pathlib.Path(temporary) / "report.json"
-            # A non-object report and a report whose containers are lists must
-            # answer with problems, never with an AttributeError traceback.
-            for payload in ([], {"image": []}, {"image": {}, "checks": []}):
+            # A non-object report is refused (exit 2) as a structured error; a
+            # report whose containers are lists answers with problems (exit 1).
+            # Neither may produce an AttributeError traceback.
+            for payload, expected in (([], 2), ({"image": []}, 1),
+                                      ({"image": {}, "checks": []}, 1)):
                 report.write_text(json.dumps(payload))
                 out, err = io.StringIO(), io.StringIO()
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     code = vm.main(["--json", "verify", str(report)])
-                self.assertEqual(code, 1)
+                self.assertEqual(code, expected)
                 self.assertEqual(err.getvalue(), "")
                 artifact = json.loads(out.getvalue())
-                self.assertTrue(artifact["problems"])
+                if expected == 2:
+                    self.assertEqual(artifact["error"]["kind"], "refused")
+                else:
+                    self.assertTrue(artifact["problems"])
 
 
 if __name__ == "__main__":
