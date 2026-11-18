@@ -86,22 +86,24 @@ describe('classify trust inputs', () => {
 
   test('plan dispatch route: a plan job carrying trust fields fails config, run-plan does not run it', async () => {
     const entry = entryOf('merge.classifyPrs');
+    // A schema-valid dispatch input (the classify twin is strict: no
+    // headRefName/baseRefName/state — the schema test's shape at line 574), so
+    // the job reaches TRUST validation instead of failing at schema parsing.
+    const { headRefName: _h, baseRefName: _b, state: _s, ...plain } = candidate;
+    const input = { candidate: plain, nowMs: NOW_MS, config: { trustedBots: ['evil[bot]'] } };
+    expect(entry.inputSchema.safeParse(input).success).toBe(true);
     const report = await runPlan(
       {
         id: 'trust-classify',
-        jobs: [
-          {
-            id: 'c',
-            op: entry.name,
-            input: { candidate, nowMs: NOW_MS, config: { trustedBots: ['evil[bot]'] } },
-          },
-        ],
+        jobs: [{ id: 'c', op: entry.name, input }],
       },
       { concurrency: 1, stopOnError: false, cqEnv: env() },
       { get: () => entry as unknown as OpRegistryEntry<never, never> },
     );
-    expect(report.jobs[0]?.result.status).not.toBe('ok');
-    expect(JSON.stringify(report.jobs[0]?.result)).not.toContain('evil');
+    const result = report.jobs[0]?.result;
+    expect(result?.status).toBe('failed');
+    expect(JSON.stringify(result)).toContain('config.trustedBots');
+    expect(JSON.stringify(result)).not.toContain('evil');
   });
 
   test('self-host entry: the input builder carries only resolved trust, a differing cfg fails at the op', async () => {
