@@ -223,7 +223,7 @@ def validate(value):
             intervals(finding["intervals"])
             if finding["anchor_status"] == "verified" and (not finding["path"] or not finding["blob"] or not finding["intervals"]):
                 raise IntegrityError("verified finding requires exact anchor")
-        if p["outcome"] == "completed" and not creditable(value):
+        if p["outcome"] == "completed" and not report_producer(value) and not creditable(value):
             raise IntegrityError("completed review lacks authenticated scoped completion")
     elif value["event_type"] == "finding-event":
         evidence = p["evidence"]
