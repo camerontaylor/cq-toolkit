@@ -33,7 +33,8 @@
 //   - decorators `@skip`, `@skipIf`, `@skipUnless`, `@expectedFailure`,
 //     bare or through any attribute path (`@ut.skip`, `@unittest.case.skip`);
 //   - `raise SkipTest` through any attribute path, and
-//     `raise <x>.skip.Exception`;
+//     `raise <x>.skip.Exception` (plus `raise <alias>.Exception` for a
+//     visible `from pytest import skip as <alias>`);
 //   - `<x>.skipTest(...)`, any `xfail(...)` call, `pytest.skip(...)`, and a
 //     `<x>.skip(...)` statement whose first argument is a string literal or
 //     `reason=`/`msg=`/`allow_module_level=`.
@@ -252,6 +253,17 @@ export class PythonSectionScanner {
       } else if (canonical.startsWith('unittest.')) {
         rules.push({
           re: new RegExp(`@\\s*${name}${POST}|${PRE}${name}\\s*\\(`, 'g'),
+          marker: () => canonical,
+        });
+      } else if (canonical === 'pytest.skip') {
+        // `from pytest import skip as s` keeps the skip exception, so an added
+        // `raise s.Exception(...)` is the same `pytest.skip.Exception` the
+        // fallback recognizes for the literal name `skip`.
+        rules.push({
+          re: new RegExp(
+            `\\braise\\s+${name}\\s*\\.\\s*Exception${POST}|${PRE}${name}\\s*\\(`,
+            'g',
+          ),
           marker: () => canonical,
         });
       } else {
