@@ -199,8 +199,17 @@ export function makeFileNonceLedger(
       // process may have made `/state/new/nonces` without syncing `/state`,
       // and a prior failed sync is only retried because the flag stayed clear.
       // Leaf first: the file's own entry, then each ancestor's entry upward.
-      for (let current = path; current !== dirname(current); current = dirname(current)) {
-        syncDirSync(dirname(current));
+      try {
+        for (let current = path; current !== dirname(current); current = dirname(current)) {
+          syncDirSync(dirname(current));
+        }
+      } catch (err) {
+        // The record is already appended and fsynced, so a failed directory sync
+        // is the same INDETERMINATE outcome as a failed write.
+        throw new Error(
+          `approval ledger: append persistence is INDETERMINATE after the record was written — ${err instanceof Error ? err.message : String(err)}; inspect the ledger before re-approving`,
+          { cause: err },
+        );
       }
       dirSynced = true;
     }
