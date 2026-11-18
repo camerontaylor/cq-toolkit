@@ -86,7 +86,16 @@ export function backfillCountedRetainedEventReader(
   return async (runId) => {
     let bytes: Uint8Array;
     try {
-      bytes = new Uint8Array(await readFile(join(stateRoot, 'runs', runId, 'review-event.json')));
+      // Same containment rule as the artifact reader: a symlinked event must
+      // not pull in another run's self-consistent event.
+      const root = await realpath(join(stateRoot, 'runs'));
+      const dir = await realpath(join(root, runId));
+      if (relative(root, dir) !== runId)
+        throw new LedgerIntegrityError('run directory escapes its identity');
+      const path = await realpath(join(dir, 'review-event.json'));
+      if (relative(dir, path) !== 'review-event.json')
+        throw new LedgerIntegrityError('retained review event escapes run directory');
+      bytes = new Uint8Array(await readFile(path));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;

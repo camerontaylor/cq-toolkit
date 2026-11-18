@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
   backfillCountedArtifactReader,
   backfillCountedEffects,
+  backfillCountedRetainedEventReader,
   deferredArtifactStore,
 } from '../../../src/adapters/crq/backfillCountedEffects.js';
 import {
@@ -175,6 +176,27 @@ describe('counted backfill artifact reader', () => {
       await expect(read('link')).rejects.toThrow('escapes');
       await rm(join(dir, 'exit.json'));
       await expect(read('r')).rejects.toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('counted backfill retained event reader', () => {
+  it('reads a retained event, treats a missing one as a first attempt and refuses a symlinked one', async () => {
+    const root = await scratch();
+    try {
+      const dir = await stage(good, root);
+      const other = join(root, 'state', 'runs', 'other');
+      await mkdir(other, { recursive: true });
+      const read = backfillCountedRetainedEventReader(join(root, 'state'));
+      expect(await read('r')).toBeNull();
+      await writeFile(join(other, 'review-event.json'), '{"id":"x"}');
+      await writeFile(join(dir, 'review-event.json'), '{"id":"y"}');
+      expect(await read('r')).toBeInstanceOf(JsonObject);
+      await rm(join(dir, 'review-event.json'));
+      await symlink(join(other, 'review-event.json'), join(dir, 'review-event.json'));
+      await expect(read('r')).rejects.toThrow('escapes run directory');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
