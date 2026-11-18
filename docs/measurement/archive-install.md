@@ -10,11 +10,14 @@ Install on **triton first**, then on each producing host.
 It is a transport: it never reads or writes a verdict and never changes the
 M8a bundle. Each rclone call runs with a five-minute timeout and with every
 inherited `RCLONE_*` setting except the connection ones (`RCLONE_CONFIG`,
-`RCLONE_CONFIG_PASS`, `RCLONE_CONFIG_<REMOTE>_<OPTION>`) removed from its
-environment: rclone reads any command-line option from its environment, so an
-ambient `RCLONE_MAX_SIZE`, `RCLONE_EXCLUDE` or `RCLONE_DRY_RUN` would silently
-drop a payload file from the copy _and_ from the verification and let a
-truncated bundle report `archived`. Every flag the wrapper needs is passed
+`RCLONE_CONFIG_PASS`, `RCLONE_PASSWORD_COMMAND`, `RCLONE_CONFIG_<REMOTE>_<OPTION>`;
+the source-narrowing `RCLONE_CONFIG_<REMOTE>_ONE_FILE_SYSTEM` is dropped) removed
+from its environment: rclone reads any command-line option from its environment,
+so an ambient `RCLONE_MAX_SIZE` or `RCLONE_EXCLUDE` would silently drop a payload
+file from the copy _and_ from the verification and let a truncated bundle report
+`archived`. An ambient `RCLONE_DRY_RUN` is different: it suppresses the copy's
+writes, so the payload is missing from the destination and the following check
+reports it. Every flag the wrapper needs is passed
 explicitly on the command line.
 
 1. Validate the target (a named remote plus a non-empty relative path, e.g.

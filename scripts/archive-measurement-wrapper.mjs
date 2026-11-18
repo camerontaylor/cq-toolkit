@@ -88,14 +88,19 @@ export function mapRcloneFailure(error, args) {
  * payload file from the copy and from the verification alike, so the marker
  * check could pass and a bundle missing evidence would report `archived`.
  * Pass the child only the variables that select and authenticate the remote —
- * `RCLONE_CONFIG`, `RCLONE_CONFIG_PASS`, `RCLONE_CONFIG_<REMOTE>_<OPTION>` —
- * and drop every other inherited rclone setting; every flag this wrapper needs
- * is passed explicitly on the command line.
+ * `RCLONE_CONFIG`, `RCLONE_CONFIG_PASS`, `RCLONE_PASSWORD_COMMAND`,
+ * `RCLONE_CONFIG_<REMOTE>_<OPTION>` — and drop every other inherited rclone
+ * setting; every flag this wrapper needs is passed explicitly on the command
+ * line. A named-remote option that narrows what a local source reads (for the
+ * `local` remote, `RCLONE_CONFIG_LOCAL_ONE_FILE_SYSTEM` skips other mounts) is
+ * dropped too.
  */
-const RCLONE_CONNECTION_ENV = /^RCLONE_CONFIG(_|$)/i;
+const RCLONE_CONNECTION_ENV = /^RCLONE_(CONFIG(_|$)|PASSWORD_COMMAND$)/i;
+const RCLONE_SOURCE_NARROWING_ENV = /^RCLONE_CONFIG_.*_ONE_FILE_SYSTEM$/i;
 function rcloneEnvironment(env = process.env) {
   const isolated = {};
   for (const [name, value] of Object.entries(env)) {
+    if (RCLONE_SOURCE_NARROWING_ENV.test(name)) continue;
     if (!/^RCLONE_/i.test(name) || RCLONE_CONNECTION_ENV.test(name)) isolated[name] = value;
   }
   return isolated;

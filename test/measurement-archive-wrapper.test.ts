@@ -622,17 +622,21 @@ describe('M8b failure evidence', () => {
     // connection setting does not, so 'archived' here means the child got
     // exactly the connection environment.
     vi.stubEnv('RCLONE_CONFIG', config);
+    vi.stubEnv('EXPECTED_RCLONE_CONFIG', config);
+    vi.stubEnv('RCLONE_PASSWORD_COMMAND', 'echo secret');
+    vi.stubEnv('RCLONE_CONFIG_LOCAL_ONE_FILE_SYSTEM', 'true');
     vi.stubEnv('RCLONE_MAX_SIZE', '1M');
     vi.stubEnv('RCLONE_EXCLUDE', '/files/**');
     vi.stubEnv('RCLONE_DRY_RUN', 'true');
     await writeFile(
       join(bin, 'rclone'),
       `#!/bin/sh
-if [ -n "$RCLONE_MAX_SIZE" ] || [ -n "$RCLONE_EXCLUDE" ] || [ -n "$RCLONE_DRY_RUN" ]; then
+if [ -n "$RCLONE_MAX_SIZE" ] || [ -n "$RCLONE_EXCLUDE" ] || [ -n "$RCLONE_DRY_RUN" ] \\
+  || [ -n "$RCLONE_CONFIG_LOCAL_ONE_FILE_SYSTEM" ]; then
   echo "ERROR : inherited rclone selection setting" >&2
   exit 7
 fi
-if [ "$RCLONE_CONFIG" != "${config}" ]; then
+if [ "$RCLONE_CONFIG" != "$EXPECTED_RCLONE_CONFIG" ] || [ "$RCLONE_PASSWORD_COMMAND" != "echo secret" ]; then
   echo "ERROR : connection setting lost" >&2
   exit 8
 fi
