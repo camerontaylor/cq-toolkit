@@ -101,7 +101,7 @@ export async function prepareOrdinaryReview(
     // Nor may it pick the review scope (uncommitted/untracked/committed/all).
     if (
       (profile.get('flags') as string[]).some((flag) =>
-        /^(?:--(?:uncommitted|committed|all|type|untracked|include-untracked)(?:=|$)|-t(?:=|$))/.test(
+        /^(?:--(?:uncommitted|committed|all|type|untracked|include-untracked|dir)(?:=|$)|-t(?:=|$))/.test(
           flag,
         ),
       )

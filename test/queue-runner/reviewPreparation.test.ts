@@ -142,6 +142,8 @@ describe('inactive ordinary review preparation', () => {
     ['-t'],
     ['--untracked'],
     ['--include-untracked'],
+    ['--dir'],
+    ['--dir=src'],
   ])(
     'refuses a profile flag %s that would select the review scope before effects',
     async (flag) => {
