@@ -613,8 +613,12 @@ def partial_activation_observe(args):
     require(before["partial_metadata"]
             == (boundary.get("after") or {}).get("partial_metadata"),
             "activation observe file metadata changed across the boundary")
-    new = before["repair_completions"][
-        len((boundary.get("after") or {}).get("repair_completions") or []):]
+    boundary_entries = (
+        (boundary.get("after") or {}).get("repair_completions") or [])
+    require(before["repair_completions"][:len(boundary_entries)]
+            == boundary_entries,
+            "activation observe completion log is not append-only")
+    new = before["repair_completions"][len(boundary_entries):]
     require(all(item.get("runtime") == spec["runtime"] for item in new),
             "activation observe saw a non-requested runtime completion")
     recovery = partial_cli("recover", directory, ["--record", record["path"]])
