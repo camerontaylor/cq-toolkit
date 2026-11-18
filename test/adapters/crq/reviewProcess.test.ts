@@ -68,18 +68,21 @@ describe('inactive detached review process', () => {
     expect(await readFile(join(dir, 'review.ndjson'), 'utf8')).toBe('hello');
     expect(await readFile(join(dir, 'stderr.log'), 'utf8')).toBe('problem');
   });
-  it.each([124, 137])('passes group-signalling timeout arguments and records exit %i', async (exit) => {
-    const { root, dir } = await setup('open', ['/bin/echo', 'hello']);
-    const timeout = join(root, 'fake-timeout');
-    await writeFile(timeout, `#!/bin/sh\nprintf '%s\\n' "$@"\nexit ${exit}\n`);
-    await chmod(timeout, 0o700);
-    await start(root, timeout);
-    const result: unknown = JSON.parse(await waitFor(join(dir, 'exit.json')));
-    expect(result).toMatchObject({ exit, timed_out: true });
-    expect(await readFile(join(dir, 'review.ndjson'), 'utf8')).toBe(
-      '--kill-after=60\n1m\n/bin/echo\nhello\n',
-    );
-  });
+  it.each([124, 137])(
+    'passes group-signalling timeout arguments and records exit %i',
+    async (exit) => {
+      const { root, dir } = await setup('open', ['/bin/echo', 'hello']);
+      const timeout = join(root, 'fake-timeout');
+      await writeFile(timeout, `#!/bin/sh\nprintf '%s\\n' "$@"\nexit ${exit}\n`);
+      await chmod(timeout, 0o700);
+      await start(root, timeout);
+      const result: unknown = JSON.parse(await waitFor(join(dir, 'exit.json')));
+      expect(result).toMatchObject({ exit, timed_out: true });
+      expect(await readFile(join(dir, 'review.ndjson'), 'utf8')).toBe(
+        '--kill-after=60\n1m\n/bin/echo\nhello\n',
+      );
+    },
+  );
   it('refuses backfill before invoking any command', async () => {
     const { root, dir } = await setup('backfill', ['/bin/false']);
     await writeFile(
