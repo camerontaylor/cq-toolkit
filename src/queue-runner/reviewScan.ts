@@ -96,9 +96,9 @@ function withoutDiffPrefix(value: string): string {
  */
 function diffGitPath(line: string): string | null {
   const rest = line.slice('diff --git '.length);
-  const quoted = /^.* ("(?:[^"\\]|\\.)*")$/.exec(rest);
+  const quoted = /^.* ("(?:[^"\\]|\\.)*")$/s.exec(rest);
   if (quoted !== null) return withoutDiffPrefix(decodeGitPath(quoted[1] as string));
-  return /^a\/(.*) b\/(.*)$/.exec(rest)?.[2] ?? null;
+  return /^a\/(.*) b\/(.*)$/s.exec(rest)?.[2] ?? null;
 }
 
 export interface ReviewScannerEffects {
@@ -150,28 +150,49 @@ export async function scanReviewDiff(
   const candidates: { path: string; text: string; diffLine: number }[] = [];
   let path: string | null = null;
   let header = false;
-  const lines = pythonSplitlines(input.diff);
-  for (const [index, line] of lines.entries()) {
+  const handle = (line: string, diffLine: number): void => {
     if (line.startsWith('diff --git')) {
       path = diffGitPath(line);
       header = true;
-      continue;
+      return;
     }
     if (line.startsWith('@@')) {
       header = false;
-      continue;
+      return;
     }
     if (header) {
       if (line.startsWith('+++ ') || line.startsWith('--- ')) {
-        const next = line.slice(4);
+        // Git appends one literal tab to an unquoted label that holds a space;
+        // drop only that, never a filename's own spaces or escaped tabs.
+        const raw = line.slice(4);
+        const next = raw.endsWith('\t') ? raw.slice(0, -1) : raw;
         if (next !== '/dev/null') path = withoutDiffPrefix(decodeGitPath(next));
       }
-      continue;
+      return;
     }
-    if (!line || (line[0] !== '+' && line[0] !== '-') || path === null) continue;
+    if (!line || (line[0] !== '+' && line[0] !== '-') || path === null) return;
     const currentPath = path;
-    if (allow.some((p) => p.test(currentPath))) continue;
-    candidates.push({ path, text: line.slice(1), diffLine: index + 1 });
+    if (allow.some((p) => p.test(currentPath))) return;
+    candidates.push({ path, text: line.slice(1), diffLine });
+  };
+  // Headers and file labels split on physical patch lines only, so a literal
+  // U+2028 in a filename survives until the path is decoded and matched.
+  // Hunk content keeps Python splitlines and its line numbering.
+  const physical = input.diff.split(/\r\n|\n|\r/);
+  let counted = 0;
+  for (const [index, piece] of physical.entries()) {
+    const last = index === physical.length - 1;
+    if (header || piece.startsWith('diff --git')) {
+      handle(piece, counted + 1);
+      counted += piece === '' ? (last ? 0 : 1) : pythonSplitlines(piece).length;
+    } else if (piece === '') {
+      if (!last) counted += 1;
+    } else {
+      for (const sub of pythonSplitlines(piece)) {
+        counted += 1;
+        handle(sub, counted);
+      }
+    }
   }
   try {
     const matches = await effects.match({ rules, lines: candidates });
