@@ -167,6 +167,20 @@ class FetchImageTests(unittest.TestCase):
             self.assertEqual(image["sha256"], digest)
             self.assertEqual((images / vm.IMAGE_NAME).read_bytes(), data)
 
+    def test_digest_mismatch_removes_the_unverified_partial_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            calls = []
+            with mock.patch.object(
+                    vm, "download",
+                    side_effect=self._download("1" * 64, b"wrong bytes", calls)):
+                with self.assertRaises(ValueError):
+                    vm.fetch_image(state, vm.Recorder(state))
+            self.assertFalse((images / vm.IMAGE_NAME).exists())
+            self.assertEqual(list(images.glob("*.part")), [])
+
     def test_cached_image_is_verified_without_redownloading(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = pathlib.Path(temporary)
