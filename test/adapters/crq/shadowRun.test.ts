@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -37,6 +37,20 @@ describe('freezeStateRoot', () => {
     expect(frozen.liveDigest).toMatch(/^[0-9a-f]{64}$/);
     expect(liveUnchanged(live, frozen)).toBe(true);
     expect(readFileSync(join(live, 'queue.json'), 'utf8')).toBe('{"items":[]}');
+  });
+
+  it('preserves absence when the destination scratch root retains a stale file', () => {
+    const live = root({ 'queue.json': '{"items":[]}' });
+    const stale = scratch();
+    for (const side of ['a', 'b']) {
+      mkdirSync(join(stale, side), { recursive: true });
+      writeFileSync(join(stale, side, 'runner-disabled'), 'stale\n');
+    }
+    const frozen = freezeStateRoot(live, stale);
+    for (const dir of [frozen.a, frozen.b]) {
+      expect(existsSync(join(dir, 'runner-disabled'))).toBe(false);
+      expect(readFileSync(join(dir, 'queue.json'), 'utf8')).toBe('{"items":[]}');
+    }
   });
 
   it('notices a live queue change and treats an absent queue as stable', () => {

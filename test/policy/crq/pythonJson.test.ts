@@ -20,6 +20,7 @@ import {
   ledgerJsonText,
   pythonFloatRepr,
   pythonJsonText,
+  pythonNumberText,
   receiptJsonBytes,
   receiptJsonDigest,
   receiptJsonText,
@@ -163,6 +164,30 @@ describe('pythonFloatRepr', () => {
     [-Infinity, '-Infinity'],
   ])('%s -> %s', (value, expected) => {
     expect(pythonFloatRepr(value)).toBe(expected);
+  });
+});
+
+describe('pythonNumberText (the default `JsonNumber.float` raw)', () => {
+  test.each([
+    [1, '1.0'],
+    [-1, '-1.0'],
+    [0, '0.0'],
+    [-0, '-0.0'],
+    [0.1, '0.1'],
+    [1e20, '1e+20'],
+    [1e-7, '1e-07'],
+    [1e-4, '0.0001'],
+    [NaN, 'nan'],
+    [Infinity, 'inf'],
+    [-Infinity, '-inf'],
+  ])('%s -> %s', (value, expected) => {
+    expect(pythonNumberText(value)).toBe(expected);
+  });
+
+  test('a defaulted raw float re-parses as a Python float, not an int', () => {
+    const reparsed = parseJsonValue(JsonNumber.float(1).raw) as JsonNumber;
+    expect(reparsed.kind).toBe('float');
+    expect(reparsed.float).toBe(1);
   });
 });
 

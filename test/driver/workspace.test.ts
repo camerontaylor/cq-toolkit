@@ -1,7 +1,7 @@
-import { realpathSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import * as win32 from 'node:path/win32';
 import { describe, expect, test } from 'vitest';
 import {
@@ -14,6 +14,24 @@ import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import { SessionStore } from '../../src/harness/session.js';
 
 const LANES = ['acp driver', 'ai-sdk driver', 'claude-code driver'];
+
+/**
+ * True when the temp volume folds case (so one directory has many spellings).
+ * Only such a volume can alias an inside-workspace sessions dir by casing; on
+ * a case-sensitive volume the same spelling is a genuinely missing directory.
+ */
+async function caseInsensitiveTmp(): Promise<boolean> {
+  const dir = await mkdtemp(join(tmpdir(), 'cq-casefold-probe-'));
+  try {
+    const self = statSync(dir);
+    const upper = statSync(join(dirname(dir), basename(dir).toUpperCase()));
+    return self.dev === upper.dev && self.ino === upper.ino;
+  } catch {
+    return false;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
 
 describe('shared driver workspace binding', () => {
   test.each(LANES)('%s resumes a legacy record through a directory alias', async (lane) => {
@@ -86,6 +104,32 @@ describe('shared driver workspace binding', () => {
         }
       } finally {
         await rm(outsideDir, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test('a case-folded spelling of the workspace dir is still refused (file identity, not spelling)', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-sessions-case-'));
+    try {
+      const workspace = join(scratch, 'Repo');
+      await mkdir(workspace);
+      // The same directory spelled with different casing (and a not-yet-created
+      // `sessions` tail beneath it): lexical containment alone misses this.
+      const folded = join(scratch, 'repo');
+      const bound = realpathSync(workspace);
+      const folds = await caseInsensitiveTmp();
+      for (const sessions of [folded, join(folded, 'sessions')]) {
+        if (folds) {
+          expect(() => assertSessionsDirOutsideWorkspace(sessions, bound, 'test lane')).toThrow(
+            DispatchError,
+          );
+        } else {
+          // Case-sensitive volume: `repo` is a distinct, missing (never-created)
+          // sibling directory, so nothing inside the workspace is reachable.
+          assertSessionsDirOutsideWorkspace(sessions, bound, 'test lane');
+        }
       }
     } finally {
       await rm(scratch, { recursive: true, force: true });

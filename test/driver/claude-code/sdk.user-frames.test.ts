@@ -260,6 +260,7 @@ describe('claude-code sdk transport specifics (mock sdk)', () => {
       errorKind: undefined as 'dispatch-threw' | 'result-frame' | undefined,
       assistantRateLimit: false,
       deniedToolUseIds: new Set<string>(),
+      countedAssistantMessageIds: new Set<string>(),
       denials: [],
       expectedSurface: undefined,
       initSeen: false,
@@ -297,5 +298,60 @@ describe('claude-code sdk transport specifics (mock sdk)', () => {
     });
     expect(observation.narration).toHaveLength(2); // the string + the unknown subtype
     expect(observation.result?.['subtype']).toBe('success');
+  });
+
+  test('foldMessage counts assistant usage once per message.id but keeps every frame content', () => {
+    const observation = {
+      agentSessionId: undefined as string | undefined,
+      servedModel: undefined as string | undefined,
+      transcript: [] as string[],
+      narration: [] as string[],
+      assistantUsage: undefined,
+      result: undefined,
+      error: undefined as string | undefined,
+      caughtCause: undefined as string | undefined,
+      errorKind: undefined as 'dispatch-threw' | 'result-frame' | undefined,
+      assistantRateLimit: false,
+      deniedToolUseIds: new Set<string>(),
+      countedAssistantMessageIds: new Set<string>(),
+      denials: [],
+      expectedSurface: undefined,
+      initSeen: false,
+      harnessFailure: undefined,
+      refusalSeen: false,
+    };
+    const frame = {
+      type: 'assistant',
+      session_id: 's1',
+      message: {
+        id: 'msg-1',
+        model: 'm-1',
+        content: [{ type: 'text', text: 'hi' }],
+        usage: { input_tokens: 100 },
+      },
+    };
+    foldMessage(observation, frame);
+    // The same message re-emitted: its usage is NOT folded twice...
+    foldMessage(observation, frame);
+    expect(observation.assistantUsage).toEqual({
+      input: 100,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+    // ...but its content still arrives.
+    expect(observation.transcript).toEqual(['hi', 'hi']);
+    // A DIFFERENT message id is a distinct measurement.
+    foldMessage(observation, {
+      type: 'assistant',
+      session_id: 's1',
+      message: { id: 'msg-2', content: [], usage: { input_tokens: 5 } },
+    });
+    expect(observation.assistantUsage).toEqual({
+      input: 105,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
   });
 });

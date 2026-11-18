@@ -63,7 +63,10 @@ export interface MergedAuthorPlanEffects {
   objectPresent(sha: string): Promise<boolean>;
   /** `fetch()`: refresh the primary clone. */
   fetch(): Promise<void>;
-  /** `git diff --name-only base head` is non-empty; false when git fails (check=False). */
+  /**
+   * `git diff --name-only base head` is non-empty; false only for a successful empty diff,
+   * throws when git fails (check=False) so a Git error is not read as an empty range.
+   */
   diffHasPaths(base: string, head: string): Promise<boolean>;
 }
 
@@ -143,6 +146,8 @@ export async function planAuthor(
       };
     }
   }
+  // `false` is a successful empty range only; a git failure throws out of
+  // `diffHasPaths` and propagates, so a Git error is never reported as empty.
   if (!(await effects.diffHasPaths(plan.base, plan.head))) {
     return { outcome: 'nothing-to-review', reason: 'author binding has an empty diff' };
   }

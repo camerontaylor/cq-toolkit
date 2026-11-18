@@ -48,6 +48,7 @@ export function spawnNotifySend(destination: JsonObject, text: string): Promise<
   const result = spawnSync('paseo', argv, {
     encoding: 'utf8',
     timeout: hasHost ? HOST_TIMEOUT_MS : LOCAL_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   });
   if (result.error) {
     return Promise.resolve({ paseo_send: `error: ${diagnostic(String(result.error))}` });

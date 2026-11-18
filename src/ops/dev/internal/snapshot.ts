@@ -12,6 +12,9 @@ const MAX_WIRE = 6 * 1024 * 1024;
 /** Operator misconfiguration (not a runtime refusal): surfaces as needs-human, never indeterminate. */
 export class SnapshotConfigError extends Error {}
 
+/** A tracked descendant whose ancestor is now a regular file: the descendant is deleted. */
+class ReplacedAncestorError extends Error {}
+
 /** Private object-only capture: never changes HEAD, the index or working files. */
 export async function captureSnapshot(
   repo: string,
@@ -236,7 +239,16 @@ export async function captureWorkingTree(repo: string, originalHead: string) {
     await new Promise<void>((resolve, reject) => {
       const child = execFile(
         'git',
-        ['--no-replace-objects', 'update-index', '-z', '--index-info'],
+        [
+          '--no-replace-objects',
+          '-c',
+          'core.hooksPath=/dev/null',
+          '-c',
+          'core.fsmonitor=false',
+          'update-index',
+          '-z',
+          '--index-info',
+        ],
         { cwd: repo, env, timeout: 30_000 },
         (error) => (error ? reject(error) : resolve()),
       );
@@ -273,12 +285,17 @@ export async function captureWorkingTree(repo: string, originalHead: string) {
         const parents = path.split('/').slice(0, -1);
         for (let end = 1; end <= parents.length; end++) {
           const parent = await lstat(join(repo, ...parents.slice(0, end)));
+          if (parent.isFile()) throw new ReplacedAncestorError(path);
           if (!parent.isDirectory())
             throw new Error(`working-tree snapshot refuses non-directory ancestor: ${path}`);
         }
         info = await lstat(join(repo, path));
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        if (
+          !(error instanceof ReplacedAncestorError) &&
+          (error as NodeJS.ErrnoException).code !== 'ENOENT'
+        )
+          throw error;
         await git('update-index', '--force-remove', '--', path);
         continue;
       }
@@ -286,6 +303,8 @@ export async function captureWorkingTree(repo: string, originalHead: string) {
         await git('update-index', '--force-remove', '--', path);
         continue;
       }
+      // An admitted directory is a gitlink. Keep its indexed commit unchanged.
+      if (info.isDirectory()) continue;
       const trackedLink = info.isSymbolicLink() && indexed.has(path);
       if (!info.isFile() && !trackedLink)
         throw new Error(`working-tree snapshot refuses non-regular path: ${path}`);

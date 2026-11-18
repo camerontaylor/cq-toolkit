@@ -96,7 +96,9 @@ export function parseIso(value: unknown): UtcInstant | null {
   if (value === null || value === undefined || value === '') return null;
   if (typeof value !== 'string') throw new UtcParseError('timestamp is not a string');
   const transformed = value.replaceAll('.000', '').slice(0, 20).replace(/Z+$/, '') + 'Z';
-  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})T(\d{1,2}):(\d{1,2}):(\d{1,2})Z$/.exec(transformed);
+  // `_strptime` compiles the format with `re.IGNORECASE`, so the literal `T`
+  // and `Z` of `%Y-%m-%dT%H:%M:%SZ` also match `t`/`z` (the `i` flag).
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})T(\d{1,2}):(\d{1,2}):(\d{1,2})Z$/i.exec(transformed);
   if (match === null) throw new UtcParseError(`time data '${transformed}' does not match format`);
   const year = Number(match[1]);
   const month = Number(match[2]);

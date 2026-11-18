@@ -225,6 +225,43 @@ describe('safe local review worktree cleanup', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+  it('accepts a bare clone main record without a HEAD line', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-cleanup-'));
+    try {
+      const f = fixture(root);
+      await mkdir(f.path);
+      const calls: string[][] = [];
+      const git = async (_cwd: string, args: readonly string[]) => {
+        calls.push([...args]);
+        return ok(`worktree ${join(root, 'clone')}\0bare\0\0${listing(f.path)}`);
+      };
+      await cleanupLocalReviewWorktree(f.options, f.item, f.meta, git);
+      expect(calls).toEqual([
+        ['worktree', 'list', '--porcelain', '-z'],
+        ['worktree', 'remove', '--', f.path],
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('refuses a non-bare record without a HEAD line', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'crq-cleanup-'));
+    try {
+      const f = fixture(root);
+      await mkdir(f.path);
+      const calls: string[][] = [];
+      const git = async (_cwd: string, args: readonly string[]) => {
+        calls.push([...args]);
+        return ok(`worktree ${f.path}\0branch refs/heads/${branch}\0\0`);
+      };
+      await expect(cleanupLocalReviewWorktree(f.options, f.item, f.meta, git)).rejects.toThrow(
+        'invalid worktree registry',
+      );
+      expect(calls).toEqual([['worktree', 'list', '--porcelain', '-z']]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it('refuses mismatched run, branch, path and repository before git', async () => {
     const root = await mkdtemp(join(tmpdir(), 'crq-cleanup-'));
     try {
