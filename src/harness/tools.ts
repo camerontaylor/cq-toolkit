@@ -2951,7 +2951,7 @@ export function buildTools(
         exitCode,
         killed,
         output: capped.output,
-        truncated: capped.truncated || outcome.overflowed,
+        truncated: capped.truncated || outcome.overflowed || outcome.incomplete === true,
       };
     };
     tools.push({

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { buildChildEnv } from '../../src/shared/proc.js';
-import { defaultHarnessConfig } from '../../src/harness/config.js';
+import { BashToolConfigSchema, defaultHarnessConfig } from '../../src/harness/config.js';
 import type { HarnessConfig } from '../../src/harness/config.js';
 import { runArgvCommand } from '../../src/harness/run.js';
 import { buildTools } from '../../src/harness/tools.js';
@@ -278,6 +278,10 @@ describe('no-shell run lifecycle', { timeout: 30_000 }, () => {
       const elapsed = Date.now() - startedAt;
       expect(outcome).toMatchObject({ kind: 'killed' });
       expect(elapsed).toBeLessThan(15_000);
+      // The pipe-holder must have really started, or this test proves nothing.
+      expect(Number((await readFile(pidFile, 'utf8').catch(() => '')).trim())).toBeGreaterThan(0);
+      expect(outcome).toMatchObject({ incomplete: true });
+    } finally {
       const pid = Number((await readFile(pidFile, 'utf8').catch(() => '')).trim());
       if (Number.isInteger(pid) && pid > 0) {
         try {
@@ -286,9 +290,32 @@ describe('no-shell run lifecycle', { timeout: 30_000 }, () => {
           // already gone
         }
       }
-    } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('kill grace bounds and truncation', { timeout: 30_000 }, () => {
+  test('killGraceMs above the timer ceiling is rejected', () => {
+    const base = { enabled: true, commandPatterns: [] };
+    expect(BashToolConfigSchema.safeParse({ ...base, killGraceMs: 2_147_483_647 }).success).toBe(
+      true,
+    );
+    expect(BashToolConfigSchema.safeParse({ ...base, killGraceMs: 2_147_483_648 }).success).toBe(
+      false,
+    );
+  });
+
+  test('a grace-expired kill marks the bash result truncated', async () => {
+    // `setsid` moves the sleeper out of the killed group while it keeps the pipes.
+    await withGitShim('setsid sleep 3 &\nsleep 30', async (workspace) => {
+      const cfg = config(300);
+      const result = await run(workspace, {
+        ...cfg,
+        tools: { ...cfg.tools, bash: { ...cfg.tools.bash!, killGraceMs: 100 } },
+      }).execute({ command: 'git diff' });
+      expect(result).toMatchObject({ ok: true, killed: true, truncated: true });
+    });
   });
 });
 

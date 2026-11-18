@@ -53,6 +53,9 @@ export const FileToolConfigSchema = z
   })
   .strict();
 
+/** Largest delay `setTimeout` accepts (2^31-1 ms); a larger grace would fire immediately. */
+export const MAX_KILL_GRACE_MS = 2_147_483_647;
+
 /**
  * Config for the `bash` tool (the canonical shell tool): on/off, the
  * command-pattern allowlist (an EMPTY array denies every command — the
@@ -73,7 +76,7 @@ export const BashToolConfigSchema = z
      * How long finalization waits for `close` after a kill of ours before it
      * stops waiting (a pipe-holder that escaped the group may never close).
      */
-    killGraceMs: z.number().int().positive().optional(),
+    killGraceMs: z.number().int().positive().max(MAX_KILL_GRACE_MS).optional(),
     maxOutputChars: z.number().int().positive().optional(),
   })
   .strict();

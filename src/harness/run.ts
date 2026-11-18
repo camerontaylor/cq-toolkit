@@ -1,7 +1,7 @@
 import { checkoutWriterStdio, trackCheckoutWriter } from '../shared/checkoutWriterContext.js';
 import { spawn } from 'node:child_process';
 import { registerProcessSignalCleanup } from '../shared/process-signals.js';
-import { DEFAULT_KILL_GRACE_MS } from './config.js';
+import { DEFAULT_KILL_GRACE_MS, MAX_KILL_GRACE_MS } from './config.js';
 
 /** POSIX platforms get per-command process groups (`detached` + group kill). */
 const POSIX = process.platform !== 'win32';
@@ -12,8 +12,23 @@ const POSIX = process.platform !== 'win32';
 
 /** How one shell command ended: a normal exit, a kill, or a failed spawn. */
 export type RunOutcome =
-  | { kind: 'exit'; code: number; stdout: string; stderr: string; overflowed: boolean }
-  | { kind: 'killed'; stdout: string; stderr: string; overflowed: boolean }
+  | {
+      kind: 'exit';
+      code: number;
+      stdout: string;
+      stderr: string;
+      overflowed: boolean;
+      /** The post-kill grace closed the pipes before `close`: output may be cut short. */
+      incomplete?: boolean;
+    }
+  | {
+      kind: 'killed';
+      stdout: string;
+      stderr: string;
+      overflowed: boolean;
+      /** The post-kill grace closed the pipes before `close`: output may be cut short. */
+      incomplete?: boolean;
+    }
   | { kind: 'spawn-error'; error: unknown };
 
 /** Inputs to one shell command execution — plain data plus the cancellation signal. */
@@ -98,14 +113,18 @@ function spawnAndCollect(
     child.stderr?.on('data', (chunk: Buffer) => retain(err, chunk));
 
     let settled = false;
+    let graceExpired = false;
     let finalizeTimer: ReturnType<typeof setTimeout> | undefined;
     // Armed by a kill of ours: a descendant outside the killed group can hold
     // the inherited pipes open forever, so waiting for `close` may never end.
     const armFinalize = (): void => {
       if (finalizeTimer !== undefined) return;
       finalizeTimer = setTimeout(
-        () => finalize(null, null),
-        opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
+        () => {
+          graceExpired = true;
+          finalize(null, null);
+        },
+        Math.min(opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS, MAX_KILL_GRACE_MS),
       );
     };
 
@@ -171,9 +190,22 @@ function spawnAndCollect(
       } else if (exitedCleanly !== undefined) {
         // The command finished on its own before any kill of ours: its exit is
         // the truth, whatever the (possibly late) close reports.
-        settle({ kind: 'exit', code: exitedCleanly, stdout, stderr, overflowed });
+        settle({
+          kind: 'exit',
+          code: exitedCleanly,
+          stdout,
+          stderr,
+          overflowed,
+          ...(graceExpired ? { incomplete: true } : {}),
+        });
       } else if (killedByUs || signal !== null || code === null) {
-        settle({ kind: 'killed', stdout, stderr, overflowed });
+        settle({
+          kind: 'killed',
+          stdout,
+          stderr,
+          overflowed,
+          ...(graceExpired ? { incomplete: true } : {}),
+        });
       } else {
         settle({ kind: 'exit', code, stdout, stderr, overflowed });
       }

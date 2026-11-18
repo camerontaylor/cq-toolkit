@@ -140,11 +140,6 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                 "enabled": {
                   "type": "boolean"
                 },
-                "killGraceMs": {
-                  "exclusiveMinimum": 0,
-                  "maximum": 9007199254740991,
-                  "type": "integer"
-                },
                 "maxOutputChars": {
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991,
@@ -225,11 +220,6 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                 },
                 "enabled": {
                   "type": "boolean"
-                },
-                "killGraceMs": {
-                  "exclusiveMinimum": 0,
-                  "maximum": 9007199254740991,
-                  "type": "integer"
                 },
                 "maxOutputChars": {
                   "exclusiveMinimum": 0,
