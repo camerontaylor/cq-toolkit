@@ -38,11 +38,16 @@ export function redactEnvSecrets(text: string): string {
     const secret = isSecretEnvName(classified);
     const shown = !secret && isUrlEnvName(classified) ? showUrl(value) : undefined;
     if (secret || (shown !== undefined && shown !== value)) {
-      const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      out = out.replace(
-        new RegExp(`(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`, 'g'),
-        () => shown ?? '[redacted]',
-      );
+      // Also match the JSON-escaped spelling: a value holding `"`, `\\` or a
+      // control character appears escaped once its carrier object is stringified.
+      const jsonEscaped = JSON.stringify(value).slice(1, -1);
+      for (const form of jsonEscaped === value ? [value] : [value, jsonEscaped]) {
+        const escaped = form.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        out = out.replace(
+          new RegExp(`(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`, 'g'),
+          () => shown ?? '[redacted]',
+        );
+      }
     }
   }
   return out;

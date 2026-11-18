@@ -102,4 +102,18 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
       else process.env.metrics_url = prior;
     }
   });
+
+  test('boundedErrorText redacts the JSON-escaped spelling of a secret value', () => {
+    const prior = process.env.CQ_TEST_TOKEN;
+    const secret = 'tok"en\\sec\nret';
+    process.env.CQ_TEST_TOKEN = secret;
+    try {
+      const out = boundedErrorText(`got ${JSON.stringify({ decision: secret })} and ${secret}`);
+      expect(out).not.toContain('sec');
+      expect(out).toContain('[redacted]');
+    } finally {
+      if (prior === undefined) delete process.env.CQ_TEST_TOKEN;
+      else process.env.CQ_TEST_TOKEN = prior;
+    }
+  });
 });
