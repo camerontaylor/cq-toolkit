@@ -170,16 +170,33 @@ const matchesSegment = (name: string, pattern: string): boolean => {
   return patternIndex === pattern.length;
 };
 
+/**
+ * Whole-segment matching with `**` consuming one or more segments. Memoized on
+ * (name index, pattern index), so any number of globstars costs at most
+ * O(name^2 x pattern) instead of the exponential partition search.
+ */
 const matchesSegments = (name: string[], pattern: string[]): boolean => {
-  const [head, ...rest] = pattern;
-  if (head === undefined) return name.length === 0;
-  if (head === '**') {
-    for (let take = 1; take <= name.length; take++)
-      if (matchesSegments(name.slice(take), rest)) return true;
-    return false;
-  }
-  const [first, ...others] = name;
-  return first !== undefined && matchesSegment(first, head) && matchesSegments(others, rest);
+  const memo = new Map<number, boolean>();
+  const walk = (nameIndex: number, patternIndex: number): boolean => {
+    const key = nameIndex * (pattern.length + 1) + patternIndex;
+    const cached = memo.get(key);
+    if (cached !== undefined) return cached;
+    const head = pattern[patternIndex];
+    let result: boolean;
+    if (head === undefined) result = nameIndex === name.length;
+    else if (head === '**') {
+      result = false;
+      for (let take = 1; nameIndex + take <= name.length && !result; take++)
+        result = walk(nameIndex + take, patternIndex + 1);
+    } else {
+      const first = name[nameIndex];
+      result =
+        first !== undefined && matchesSegment(first, head) && walk(nameIndex + 1, patternIndex + 1);
+    }
+    memo.set(key, result);
+    return result;
+  };
+  return walk(0, 0);
 };
 
 // npm-run-all treats repeated separators as one, so `build::deps` names `build:deps`.
@@ -290,13 +307,13 @@ export async function assertAddressDependencyMetadata(
               continue;
             }
             if (argument.startsWith('-')) continue;
-            // Unsupported matcher syntax (negation, brackets, braces) stays
+            // Unsupported matcher syntax (negation, brackets, braces, shell expansion) stays
             // ambiguous; supported `*`/`?` patterns resolve to the scripts they
             // name so a pattern-selected script is still compared.
             // A quoted argument carries forwarded task arguments after the
             // pattern (`"build:* --mode=production"`): match the task alone.
             const task = collapseColons(argument.trim().split(/\s+/)[0] ?? '');
-            if (/[!\[\]{}()+,|\\]/.test(task)) unresolved = true;
+            if (/[!\[\]{}()+,|\\$`]/.test(task)) unresolved = true;
             else if (/[*?]/.test(task)) {
               const variants = globstarVariants(task);
               if (variants === null) unresolved = true;

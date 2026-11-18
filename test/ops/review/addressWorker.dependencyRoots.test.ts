@@ -314,6 +314,51 @@ describe('review.address candidate isolation', () => {
       await f.cleanup();
     }
   }, 10_000);
+  test('shell-expanded run-s tasks stay unresolved so every script is compared', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const scripts = {
+        postinstall: 'pnpm run build',
+        build: 'run-s build:$TASK*',
+        'build:deps': 'node deps.mjs',
+      };
+      await f.repo.write('package.json', JSON.stringify({ scripts }));
+      f.repo.commitAll('shell-expanded install task');
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ scripts: { ...scripts, 'build:deps': 'different deps' } }),
+      );
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit).toBeUndefined();
+      expect(result.reason).toContain('manifests/locks differ');
+      expect(f.calls()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('many globstars against a long nonmatching script name finish promptly', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const longName = `${'a:'.repeat(60)}x`;
+      const scripts = {
+        postinstall: 'pnpm run build',
+        build: 'run-s "**:**:**:**:**:**:b"',
+        [longName]: 'node long.mjs',
+      };
+      await f.repo.write('package.json', JSON.stringify({ scripts }));
+      f.repo.commitAll('many globstars');
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ scripts: { ...scripts, [longName]: 'different long' } }),
+      );
+      const started = Date.now();
+      const result = await f.engine.fix(finding(), 1);
+      expect(Date.now() - started).toBeLessThan(5000);
+      expect(result.commit, result.reason).toBeTruthy();
+    } finally {
+      await f.cleanup();
+    }
+  });
   test('a --check argument is not an invocation of the check script', async () => {
     const f = await fixture(undefined, '', { installedDependencies: 'matching' });
     try {
