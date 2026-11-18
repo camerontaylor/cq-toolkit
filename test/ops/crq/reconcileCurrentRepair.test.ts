@@ -182,7 +182,8 @@ describe('current repair reconciliation', () => {
     expect(result.deferred).toBe(1);
     expect(result.item.get('remediation_state')).toBe('fixed');
   });
-  test('binding refuses exhausted budgets and treats all nonzero ancestry exits as false', async () => {
+  test('binding refuses exhausted budgets and treats only exit 1 as "not an ancestor"', async () => {
+    let code: number | null = 1;
     const options = {
       stateRoot: '/unused',
       clone: '/unused',
@@ -192,7 +193,7 @@ describe('current repair reconciliation', () => {
       },
       runGit: async (args: readonly string[]) => ({
         args,
-        code: 128,
+        code,
         stdout: Buffer.alloc(0),
         stderr: 'bad commit',
       }),
@@ -203,6 +204,14 @@ describe('current repair reconciliation', () => {
     });
     await expect(effects.prInfo(JsonNumber.int(7))).rejects.toBeInstanceOf(RefreshExhausted);
     expect(await effects.isAncestor(sha('a'), sha('b'))).toBe(false);
+    for (const failure of [128, null]) {
+      code = failure;
+      await expect(effects.isAncestor(sha('a'), sha('b'))).rejects.toThrow(
+        'git merge-base --is-ancestor failed',
+      );
+    }
+    code = 0;
+    expect(await effects.isAncestor(sha('a'), sha('b'))).toBe(true);
   });
   test('production file binding reads the receipt and uses bounded forge and git seams', async () => {
     const { item, data, receiptId, info } = fixture();

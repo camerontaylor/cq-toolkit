@@ -507,15 +507,23 @@ export function ledgerPath(value: JsonValue | undefined): string {
   return value;
 }
 
+/** One validated 1-based inclusive line range, kept compact. */
+type LedgerRange = readonly [number, number];
+
+/** The validated ranges of one interval list, one entry per input pair. */
+type LedgerRanges = readonly LedgerRange[];
+
 /**
- * `review_ledger.intervals`: disjoint, ascending 1-based inclusive ranges.
- * The total and the largest line are bounded so a hostile record cannot make
- * validation allocate unbounded memory.
+ * `review_ledger.intervals` before expansion: the same disjoint, ascending,
+ * bounded ranges, retained as `[first, last]` pairs. Rows are bounded but a
+ * payload may carry many of them, so validation compares these ranges instead
+ * of materialising one `Set` entry per line.
  */
-export function ledgerIntervals(rows: JsonValue): Set<number> {
+function ledgerIntervalRanges(rows: JsonValue): LedgerRanges {
   if (!Array.isArray(rows)) fail('invalid or overlapping intervals');
-  const result = new Set<number>();
+  const result: LedgerRange[] = [];
   let last = 0n;
+  let total = 0n;
   for (const pair of rows) {
     if (!Array.isArray(pair) || pair.length !== 2) fail('invalid or overlapping intervals');
     const start = pair[0];
@@ -534,27 +542,44 @@ export function ledgerIntervals(rows: JsonValue): Set<number> {
       first <= last ||
       final < first ||
       final > MAX_INTERVAL_LINE ||
-      BigInt(result.size) + (final - first) + 1n > MAX_INTERVAL_LINE
+      total + (final - first) + 1n > MAX_INTERVAL_LINE
     ) {
       fail('invalid or overlapping intervals');
     }
-    for (let line = Number(first); line <= Number(final); line += 1) result.add(line);
+    total += final - first + 1n;
+    result.push([Number(first), Number(final)]);
     last = final;
   }
   return result;
 }
 
-/** `review_ledger.scope`: keyed by path and blob, rejecting duplicates. */
-export function ledgerScope(rows: JsonValue): LedgerScope {
+/**
+ * `review_ledger.intervals`: disjoint, ascending 1-based inclusive ranges.
+ * The total and the largest line are bounded so a hostile record cannot make
+ * validation allocate unbounded memory.
+ */
+export function ledgerIntervals(rows: JsonValue): Set<number> {
+  const result = new Set<number>();
+  for (const [first, final] of ledgerIntervalRanges(rows)) {
+    for (let line = first; line <= final; line += 1) result.add(line);
+  }
+  return result;
+}
+
+/** `review_ledger.scope` with a chosen interval representation. */
+function ledgerScopeOf<T>(
+  rows: JsonValue,
+  intervals: (value: JsonValue) => T,
+): Map<string, Map<string, T>> {
   if (!Array.isArray(rows)) fail('scope must be an array');
-  const result: LedgerScope = new Map();
+  const result: Map<string, Map<string, T>> = new Map();
   for (const row of rows) {
     const object = requireObject(row, 'scope row');
     const name = ledgerPath(field(object, 'path'));
     const blob = stringField(object, 'blob');
     const byBlob = result.get(name);
     if (byBlob !== undefined && byBlob.has(blob)) fail('duplicate scope path/blob');
-    const lines = ledgerIntervals(field(object, 'intervals'));
+    const lines = intervals(field(object, 'intervals'));
     if (byBlob === undefined) {
       result.set(name, new Map([[blob, lines]]));
     } else {
@@ -562,6 +587,11 @@ export function ledgerScope(rows: JsonValue): LedgerScope {
     }
   }
   return result;
+}
+
+/** `review_ledger.scope`: keyed by path and blob, rejecting duplicates. */
+export function ledgerScope(rows: JsonValue): LedgerScope {
+  return ledgerScopeOf(rows, ledgerIntervals);
 }
 
 /**
@@ -663,17 +693,20 @@ function validateReview(record: JsonObject, payload: JsonObject): void {
   }
 
   const requestedRows = arrayField(payload, 'requested_scope');
-  const requested = ledgerScope(requestedRows);
-  const input = ledgerScope(arrayField(payload, 'input_scope'));
-  const reviewed = ledgerScope(arrayField(payload, 'reviewed_scope'));
+  // Validation only compares these three scopes, and a schema-valid record may
+  // hold many bounded rows per scope. Keep them as ranges so the whole payload
+  // stays compact instead of expanding to one entry per credited line.
+  const requested = ledgerScopeOf(requestedRows, ledgerIntervalRanges);
+  const input = ledgerScopeOf(arrayField(payload, 'input_scope'), ledgerIntervalRanges);
+  const reviewed = ledgerScopeOf(arrayField(payload, 'reviewed_scope'), ledgerIntervalRanges);
   if (digestOf(requestedRows) !== stringField(payload, 'scope_digest')) {
     fail('scope digest mismatch');
   }
   for (const [name, blobs] of reviewed) {
     for (const [blob, lines] of blobs) {
       if (
-        !isSubset(lines, requested.get(name)?.get(blob)) ||
-        !isSubset(lines, input.get(name)?.get(blob))
+        !rangesSubset(lines, requested.get(name)?.get(blob)) ||
+        !rangesSubset(lines, input.get(name)?.get(blob))
       ) {
         fail('mapped review scope exceeds requested/input scope');
       }
@@ -705,12 +738,12 @@ function validateReview(record: JsonObject, payload: JsonObject): void {
     const finding = requireObject(row, 'finding');
     const path = field(finding, 'path');
     if (path !== null) ledgerPath(path);
-    const intervals = ledgerIntervals(field(finding, 'intervals'));
+    const intervals = ledgerIntervalRanges(field(finding, 'intervals'));
     if (finding.get('anchor_status') === 'verified') {
       if (
         !pythonTruthy(finding.get('path')) ||
         !pythonTruthy(finding.get('blob')) ||
-        intervals.size === 0
+        intervals.length === 0
       ) {
         fail('verified finding requires exact anchor');
       }
@@ -722,9 +755,25 @@ function validateReview(record: JsonObject, payload: JsonObject): void {
   }
 }
 
-function isSubset(subset: ReadonlySet<number>, superset: ReadonlySet<number> | undefined): boolean {
-  if (superset === undefined) return subset.size === 0;
-  for (const line of subset) if (!superset.has(line)) return false;
+/**
+ * `lines <= scope.get(key, set())` over compact ranges. Both sides are
+ * ascending and disjoint, so a single merge walk decides coverage without
+ * materialising either set.
+ */
+function rangesSubset(subset: LedgerRanges, superset: LedgerRanges | undefined): boolean {
+  if (superset === undefined) return subset.length === 0;
+  let index = 0;
+  for (const [first, final] of subset) {
+    let start = first;
+    while (start <= final) {
+      while (index < superset.length && (superset[index]?.[1] ?? -1) < start) index += 1;
+      const range = superset[index];
+      if (range === undefined || range[0] > start) return false;
+      // A superset range may cover this and the next subset range; the pointer
+      // stays put so the next range can reuse it.
+      start = range[1] + 1;
+    }
+  }
   return true;
 }
 

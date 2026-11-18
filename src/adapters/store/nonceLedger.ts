@@ -63,8 +63,10 @@ export function makeInMemoryNonceLedger(): InspectableNonceLedger {
  * DURABILITY, matched to the journal's own idiom (src/kernel/journal.ts,
  * `durable: true`) rather than to a hand-rolled idea: the line is written
  * through an append-mode handle and `fdatasync`ed BEFORE `consume` resolves,
- * and the ledger's DIRECTORY is fsync'd once, when this process creates the
- * file, so the directory entry is durable too. A plain `appendFileSync` was
+ * and the ledger's DIRECTORY is fsync'd on the first consumption of every
+ * instance — never skipped just because the file already exists — so the
+ * directory entry is durable too even when an earlier instance created the
+ * file and crashed before its own directory sync. A plain `appendFileSync` was
  * the first version here and it was NOT durable in the sense the ADR's crash
  * analysis needs: it returns once the bytes are in the OS page cache, so a
  * machine crash could lose a spent nonce and leave the token REPLAYABLE —
@@ -117,9 +119,18 @@ export function makeFileNonceLedger(
   const path = realpathOrSelf(ledgerPath);
   const write = config.write ?? defaultWrite;
   const known = new Set<string>();
-  // The directory entry is durable once the FILE is created; later appends
-  // to a known file skip the dir fsync entirely (the journal's own rule).
-  let dirSynced = existsSync(path);
+  // FILE EXISTENCE DOES NOT PROVE DIRECTORY DURABILITY, so this starts FALSE
+  // even when the ledger file is already there. An earlier instance may have
+  // created the file and failed before its directory fsync; its error path
+  // removes the append lock but cannot remove the file. A new instance that
+  // trusted existence would append and report `consumed` with the directory
+  // entry still unflushed, and a system crash could then drop that entry —
+  // losing the record and permitting replay, since the file's own fsync says
+  // nothing about its parent directory. So the first successful consumption
+  // in EACH instance syncs the directory; later appends in the same instance
+  // skip it (the journal's own rule, applied per instance rather than per
+  // file existence).
+  let dirSynced = false;
   const absorb = (): void => {
     // Fresh read every time: the in-process set is a CACHE of a file another
     // process may have appended since. A missing file is an empty ledger
@@ -174,7 +185,7 @@ export function makeFileNonceLedger(
     // Synchronous on purpose: the append must be COMPLETE before this
     // promise resolves, or the exercise would report "consumed" for a
     // nonce that is still only a promise of a byte on disk.
-    const isNew = !dirSynced;
+    const needsDirSync = !dirSynced;
     const line = Buffer.from(`${nonce}\n`, 'utf8');
     const handle = openSync(path, 'a');
     try {
@@ -192,7 +203,7 @@ export function makeFileNonceLedger(
     } finally {
       closeSync(handle);
     }
-    if (isNew) {
+    if (needsDirSync) {
       // Flagged only AFTER the fsync returns: a hard failure leaves the flag
       // clear, so the next consume retries the directory sync.
       syncDirSync(dirname(path));

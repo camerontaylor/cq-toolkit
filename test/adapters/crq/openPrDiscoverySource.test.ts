@@ -42,6 +42,7 @@ describe('open PR discovery source', () => {
         base: 'parent',
         headRef: 'child',
         head,
+        crossRepository: false,
       }),
     ).toBe(base);
     expect(calls[0]).toEqual(['fetch', '--prune', '--quiet', 'origin']);
@@ -64,6 +65,7 @@ describe('open PR discovery source', () => {
             {
               number: 7,
               isDraft: false,
+              isCrossRepository: false,
               baseRefName: 'main',
               headRefName: 'feature',
               headRefOid: head,
@@ -83,6 +85,7 @@ describe('open PR discovery source', () => {
       },
     });
     const prs = await effects.list(repo);
+    expect(prs[0]!.crossRepository).toBe(false);
     await effects.fetchDefault(repo);
     expect(await effects.rangeBase(repo, prs[0]!)).toBe(base);
     expect(calls[0]).toContain('200');
@@ -99,6 +102,27 @@ describe('open PR discovery source', () => {
       '+refs/pull/7/head:refs/remotes/pr/7',
     ]);
     expect(calls).toContainEqual(['merge-base', 'origin/main', head]);
+  });
+  it('refuses an inventory page that reaches the listing limit', async () => {
+    const row = {
+      number: 7,
+      isDraft: false,
+      baseRefName: 'main',
+      headRefName: 'feature',
+      headRefOid: head,
+    };
+    const effects = openPrDiscoveryEffects({
+      repos: [repo],
+      associate: async (queue) => ({ queue, associated: false }),
+      ownRange: async () => false,
+      event: async () => {},
+      gh: async () => ({
+        code: 0,
+        stdout: JSON.stringify(Array.from({ length: 200 }, () => row)),
+        stderr: '',
+      }),
+    });
+    await expect(effects.list(repo)).rejects.toThrow('200-row limit');
   });
   it('refuses malformed inventory and unconfigured repository objects', async () => {
     const effects = openPrDiscoveryEffects({

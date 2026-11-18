@@ -119,7 +119,10 @@ export function fileStatusWriterEffects(
       const at = new Date(now() * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
       await writeFile(
         join(roots.stateRoot, 'events.jsonl'),
-        `${JSON.stringify({ at, event: event.event, error: event.error })}\n`,
+        `${pythonJsonText(
+          { at, event: event.event, error: event.error },
+          { asciiOnly: true, sortKeys: false, keyOrder: 'insertion', spacedSeparators: true },
+        )}\n`,
         { flag: 'a' },
       );
     },
@@ -248,9 +251,11 @@ export interface StatusWriterCliIo {
 
 /**
  * Assemble the full effect set for one invocation (composer seams resolved
- * from the state root) and run the write route. The status.md text is
- * printed to stdout; refusals surface as
- * `status-writer: <python class>: <message>` on stderr with exit 1.
+ * from the state root) and run the write route. The status.md text is handed
+ * to `io.write`; refusals surface as
+ * `status-writer: <python class>: <message>` through `io.error` with exit 1.
+ * The caller owns that channel: the `crq status` route captures it into its
+ * JSON artifact's `error` field so machine-mode stderr stays empty (I1).
  * Returns the chosen exit code.
  */
 export async function runStatusWriter(

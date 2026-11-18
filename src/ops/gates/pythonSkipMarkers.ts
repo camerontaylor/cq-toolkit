@@ -7,8 +7,9 @@
 // (context and added lines; removed lines belong to the old file and never
 // feed this state). Per line it:
 //   - blanks string-literal contents and `#` comments, carrying
-//     triple-quoted string state across lines, so a marker named in a
-//     docstring, string or comment does not flag;
+//     triple-quoted string state and short-literal state continued by an
+//     escaped newline across lines, so a marker named in a docstring, string
+//     or comment does not flag;
 //   - records import aliases (`import pytest as pt`, `from pytest import
 //     mark`, `from unittest.case import skip as s`, …) from every visible
 //     line;
@@ -33,7 +34,8 @@
 //   - decorators `@skip`, `@skipIf`, `@skipUnless`, `@expectedFailure`,
 //     bare or through any attribute path (`@ut.skip`, `@unittest.case.skip`);
 //   - `raise SkipTest` through any attribute path, and
-//     `raise <x>.skip.Exception`;
+//     `raise <x>.skip.Exception` (plus `raise <alias>.Exception` for a
+//     visible `from pytest import skip as <alias>`);
 //   - `<x>.skipTest(...)`, any `xfail(...)` call, `pytest.skip(...)`, and a
 //     `<x>.skip(...)` statement whose first argument is a string literal or
 //     `reason=`/`msg=`/`allow_module_level=`.
@@ -48,8 +50,12 @@
 // marker flags wherever it is added in the file, including module-level
 // `pytestmark` and `pytest.skip(..., allow_module_level=True)`.
 
-/** Triple-quoted string state: outside (`null`) or inside `"""` / `'''`. */
-type StringState = null | '"""' | "'''";
+/**
+ * String state: outside (`null`), inside a triple-quoted `"""` / `'''`, or
+ * inside a short `"` / `'` literal whose opening line ends in a backslash that
+ * escapes the newline.
+ */
+type StringState = null | '"' | "'" | '"""' | "'''";
 
 /** One added line awaiting evaluation at the end of its section. */
 interface Candidate {
@@ -254,6 +260,17 @@ export class PythonSectionScanner {
           re: new RegExp(`@\\s*${name}${POST}|${PRE}${name}\\s*\\(`, 'g'),
           marker: () => canonical,
         });
+      } else if (canonical === 'pytest.skip') {
+        // `from pytest import skip as s` keeps the skip exception, so an added
+        // `raise s.Exception(...)` is the same `pytest.skip.Exception` the
+        // fallback recognizes for the literal name `skip`.
+        rules.push({
+          re: new RegExp(
+            `\\braise\\s+${name}\\s*\\.\\s*Exception${POST}|${PRE}${name}\\s*\\(`,
+            'g',
+          ),
+          marker: () => canonical,
+        });
       } else {
         rules.push({
           re: new RegExp(`${PRE}${name}\\s*\\(`, 'g'),
@@ -361,7 +378,7 @@ function markerOf(code: string, inTestBody: boolean, rules: readonly Rule[]): st
 /**
  * One line lexed under a starting string state: string contents (all but
  * each literal's opening quote character) and `#` comments become spaces.
- * Returns the code and the triple-quote state at the end of the line.
+ * Returns the code and the string state at the end of the line.
  */
 function lex(content: string, start: StringState): { code: string; end: StringState } {
   let state = start;
@@ -370,9 +387,18 @@ function lex(content: string, start: StringState): { code: string; end: StringSt
   while (i < content.length) {
     if (state !== null) {
       const close = findClose(content, i, state);
-      if (close === -1) return { code: out, end: state };
-      out += ' '.repeat(close + 3 - i);
-      i = close + 3;
+      if (close === -1) {
+        // A triple-quoted literal always continues onto the next line. A short
+        // literal does so only when this line ends in an unescaped backslash,
+        // which escapes the newline; otherwise it is a syntax error, so no
+        // later text on this line is code.
+        if (state.length === 3) return { code: out, end: state };
+        out += ' '.repeat(content.length - i);
+        return { code: out, end: endsWithContinuation(content) ? state : null };
+      }
+      const width = state.length;
+      out += ' '.repeat(close + width - i);
+      i = close + width;
       state = null;
       continue;
     }
@@ -386,10 +412,16 @@ function lex(content: string, start: StringState): { code: string; end: StringSt
         i += 3;
         continue;
       }
-      const close = findClose(content, i + 1, ch);
-      const end = close === -1 ? content.length : close + 1;
-      out += ch + ' '.repeat(end - i - 1);
-      i = end;
+      const quote: '"' | "'" = ch === '"' ? '"' : "'";
+      const close = findClose(content, i + 1, quote);
+      if (close === -1) {
+        // Unterminated: either the line's trailing backslash escapes the
+        // newline and the short literal continues, or it is a syntax error.
+        out += ch + ' '.repeat(content.length - i - 1);
+        return { code: out, end: endsWithContinuation(content) ? quote : null };
+      }
+      out += ch + ' '.repeat(close - i);
+      i = close + 1;
       continue;
     }
     out += ch;
@@ -414,6 +446,13 @@ function importedNames(list: string): [string, string][] {
     if (m) pairs.push([m[1]!, m[2] ?? m[1]!]);
   }
   return pairs;
+}
+
+/** True when the line ends in an odd run of backslashes: the newline is escaped. */
+function endsWithContinuation(content: string): boolean {
+  let run = 0;
+  while (run < content.length && content[content.length - 1 - run] === '\\') run++;
+  return run % 2 === 1;
 }
 
 /** Index of the next unescaped `quote` at or after `from`, or -1. */

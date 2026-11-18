@@ -127,6 +127,14 @@ export async function world(
   let pushFault: (() => string) | undefined;
   let pushOrdinal = 0;
   let commitSeq = 0;
+  // The committed candidate's sha — what a publication-dependent forge action
+  // must find on the remote. In the default world every commit is `fixed`, so
+  // this starts (and stays) at the legacy sha; with incrementingCommits each
+  // commit gets its own sha, so the reply/resolve guards compare the remote
+  // against the candidate actually committed rather than against `fixed`,
+  // which no push could ever publish. A failed push leaves the remote behind
+  // the candidate, so those guards still refuse the action.
+  let candidate = fixed;
   const editWrites = new Map<string, number>();
   const files = ['src/a.ts', 'src/b.ts'];
   await mkdir(join(worktree, 'src'), { recursive: true });
@@ -190,7 +198,7 @@ export async function world(
       const query = flag(args, 'query');
       if (query.includes('resolveReviewThread')) {
         const id = flag(args, 'threadId');
-        if (remote !== fixed) throw new Error('resolve before verified publication');
+        if (remote !== candidate) throw new Error('resolve before verified publication');
         if (failResolve) {
           failResolve = false;
           actions.push('resolve-failed');
@@ -232,7 +240,7 @@ export async function world(
     if (args.includes('POST')) {
       if (endpoint.endsWith('requested_reviewers')) actions.push('rerequest');
       else {
-        if (remote !== fixed) throw new Error('reply before verified publication');
+        if (remote !== candidate) throw new Error('reply before verified publication');
         actions.push('reply');
         if (options.recoverResolution)
           replies.push({
@@ -382,6 +390,10 @@ export async function world(
       // run can prove per-range publication truth (A out, B local).
       commitSeq += 1;
       const sha = options.incrementingCommits ? `c${String(commitSeq).padStart(39, '0')}` : fixed;
+      // Every commit re-targets the candidate the publication guards compare
+      // the remote against: a later round's commit is a new candidate, and
+      // until a push lands it the remote is behind it.
+      candidate = sha;
       commits.set(sha, { parent: localHead, message: a[2]!, tree: treeHash(index) });
       trees.set(sha, new Map(index));
       heads.set(cwd, sha);

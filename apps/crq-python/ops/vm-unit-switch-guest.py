@@ -1272,7 +1272,37 @@ def recovery_repeat(record_path, record_dir, label):
     return payload
 
 
+FENCE_PROPS = ("LoadState", "ActiveState", "UnitFileState", "FragmentPath")
+
+
+def _activation_fence():
+    """Observable preactivation fence that a refusal must leave untouched."""
+    return {
+        "service": file_state(SERVICE),
+        "staged": file_state(STAGED_SERVICE),
+        "units": {name: show(name, list(FENCE_PROPS))
+                  for name in (UNIT, TIMER)},
+        "completions": file_state(COMPLETIONS),
+    }
+
+
+def _require_fence_retained(label, before, after):
+    """A preactivation refusal must not release or alter any fence element."""
+    require(after["service"] == before["service"],
+            label + " refusal changed the service unit path")
+    require(after["service"]["type"] == "symlink"
+            and after["service"].get("target") == "/dev/null",
+            label + " refusal released the durable service mask")
+    require(after["staged"] == before["staged"],
+            label + " refusal changed the staged service")
+    require(after["units"] == before["units"],
+            label + " refusal changed service or timer activation state")
+    require(after["completions"] == before["completions"],
+            label + " refusal released completion work")
+
+
 def recovery_refuse(record_path, record_dir, label):
+    fence_before = _activation_fence()
     payload = recover_phase(type("Args", (), {"record": str(record_path)})(),
                             record_dir=record_dir, label=label)
     require(payload["cli"]["rc"] == 3,
@@ -1282,6 +1312,7 @@ def recovery_refuse(record_path, record_dir, label):
     require(payload["record_after"]["outcome"] == "pending"
             and payload["record_after"]["phase"] == "activation_pending",
             "ambiguous activation recovery did not retain the pending intent")
+    _require_fence_retained(label, fence_before, _activation_fence())
     return payload
 
 
@@ -1467,12 +1498,15 @@ def fence_phase(args):
     require(len(after["completions"]) == len(before["completions"]),
             "fence probe target ran behind the durable mask")
     record_before = record_summary(record_path)
+    fence_before = _activation_fence()
     recovered = cli("recover", ["--record", str(record_path)])
     require(recovered["rc"] == 3,
             "ambiguous fence recovery did not require investigation")
     record_after = record_summary(record_path)
     require(record_after["sha256"] == record_before["sha256"],
             "refused ambiguous recovery changed the retained record")
+    fence_after = _activation_fence()
+    _require_fence_retained("fence", fence_before, fence_after)
     return {"cli": result, "record_path": str(record_path),
             "record": record_before, "record_after_refusal": record_after,
             "recovery": recovered, "direct_start": direct,

@@ -79,7 +79,8 @@ async function runPersistedCase(
     const resolvedThreads = new Set<string>();
     const actions: string[] = [];
     const replies: Array<{ id: number; in_reply_to_id: number; body: string }> = [];
-    const reRequested = new Set<string>();
+    // Successful reviewer-request payloads only; failed attempts are not recorded.
+    const reRequested: string[][] = [];
     // Run 1's re-review works; only the reviewer-request API fails.
     let failReRequest = mode === 'rerequest';
     let failSnapshot = mode === 'snapshot';
@@ -131,12 +132,11 @@ async function runPersistedCase(
       }
       if (args.includes('POST')) {
         if (args.some((arg) => arg.endsWith('requested_reviewers'))) {
-          for (const [index, value] of args.entries())
-            if (value === 'reviewers[]=octocat') reRequested.add(`run${index}`);
           if (failReRequest) {
             actions.push('rerequest-failed');
             return { code: 1, stdout: '', stderr: 'service unavailable' };
           }
+          reRequested.push(args.filter((arg) => arg.startsWith('reviewers[]=')));
           actions.push('rerequest');
         } else {
           actions.push('reply');
@@ -313,7 +313,9 @@ async function runPersistedCase(
     const second = await invoke();
     expect(second.status, JSON.stringify(second.report?.reasons)).toBe('ok');
     expect(actions).toEqual([...firstActions, 'rerequest']);
-    expect(reRequested.size).toBeGreaterThanOrEqual(1);
+    // The successful recovery request must carry the human reviewer; the run-1
+    // failure is not recorded, so this cannot pass on run 1's payload.
+    expect(reRequested).toEqual([['reviewers[]=octocat']]);
     await expect(readFile(pendingPath)).rejects.toMatchObject({ code: 'ENOENT' });
   } finally {
     await repo.cleanup();

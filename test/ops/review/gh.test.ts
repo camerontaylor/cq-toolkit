@@ -9,7 +9,7 @@
 // fixtures) and run through the real makeGhRunner seam.
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join, relative } from 'node:path';
+import { delimiter, dirname, join, relative, sep } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { makeGhRunner, ghJson } from '../../../src/adapters/forge-github/gh.js';
 import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
@@ -199,11 +199,11 @@ describe('makeGhRunner', () => {
       '/caller',
       (candidate) => {
         seen.push(candidate);
-        return candidate === '/trusted/gh.exe';
+        return candidate === `/trusted${sep}gh.exe`;
       },
     );
-    expect(result).toBe('/trusted/gh.exe');
-    expect(seen.every((candidate) => !candidate.startsWith('/caller/'))).toBe(true);
+    expect(result).toBe(`/trusted${sep}gh.exe`);
+    expect(seen.every((candidate) => !candidate.startsWith(`/caller${sep}`))).toBe(true);
   });
 
   test.skipIf(process.platform === 'win32')(

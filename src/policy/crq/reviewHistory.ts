@@ -228,11 +228,17 @@ async function entriesFor(
   git: GitFn,
 ): Promise<LinkedRow[]> {
   const requests = objectOrEmpty(queue.get('review_requests'));
-  const byItem = new Map<string, string>();
+  // Several requests can be bound to one item (a later non-repeat request
+  // joins the existing item), so keep every request id in binding order: the
+  // first is the default label, and any of them can be an explicit predecessor.
+  const byItem = new Map<string, string[]>();
   for (const [requestId, bindingValue] of requests.entries) {
     const binding = asObject(bindingValue);
     const item = binding === null ? null : binding.get('item');
-    if (typeof item === 'string' && !byItem.has(item)) byItem.set(item, requestId);
+    if (typeof item !== 'string') continue;
+    const bound = byItem.get(item);
+    if (bound === undefined) byItem.set(item, [requestId]);
+    else bound.push(requestId);
   }
   const linked: LinkedRow[] = [];
   for (const entry of arrayOrEmpty(queue.get('items'))) {
@@ -241,7 +247,13 @@ async function entriesFor(
     if (query.excludeItem !== null && itemId(item) === query.excludeItem) continue;
     const inputs = identity(item);
     if (!sameRepo(inputs.get('repo'), query.repo)) continue;
-    const explicit = query.predecessor !== null && byItem.get(itemId(item)) === query.predecessor;
+    const bound = byItem.get(itemId(item)) ?? [];
+    // The expected predecessor may be any request bound to the item, and the
+    // linked row then carries it so the client observation and the repeat
+    // check apply to the request that actually asked.
+    const matched =
+      query.predecessor !== null && bound.includes(query.predecessor) ? query.predecessor : null;
+    const explicit = matched !== null;
     const itemTarget = item.get('target');
     if (itemTarget === null || itemTarget === undefined) {
       if (!explicit) continue;
@@ -258,7 +270,7 @@ async function entriesFor(
     const treeAvailable = treeOf(item) !== null && query.headTree !== null;
     linked.push({
       item: itemId(item),
-      requestId: byItem.get(itemId(item)) ?? null,
+      requestId: matched ?? bound[0] ?? null,
       generation:
         item.get('generation') instanceof JsonNumber &&
         (item.get('generation') as JsonNumber).kind === 'int'
@@ -562,7 +574,10 @@ export async function projectHistory(
           ['partial', true],
         ]),
       [
-        ['commits_ahead', null],
+        [
+          'commits_ahead',
+          headline.commitsAhead === null ? null : JsonNumber.int(headline.commitsAhead),
+        ],
         ['ancestry', headline.ancestry],
       ],
     );

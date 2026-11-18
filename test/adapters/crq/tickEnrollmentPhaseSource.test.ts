@@ -42,7 +42,14 @@ function build(extra: Partial<Parameters<typeof fileEnrollmentPhaseEffects>[0]> 
         code: 0,
         stderr: '',
         stdout: JSON.stringify([
-          { number: 7, isDraft: false, baseRefName: 'main', headRefName: 'f', headRefOid: HEAD },
+          {
+            number: 7,
+            isDraft: false,
+            isCrossRepository: false,
+            baseRefName: 'main',
+            headRefName: 'f',
+            headRefOid: HEAD,
+          },
         ]),
       };
     },

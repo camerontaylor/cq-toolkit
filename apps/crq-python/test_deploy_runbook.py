@@ -753,7 +753,7 @@ class DeployTests(DeployFixture, unittest.TestCase):
                  "--overlay", str(self.overlay_path),
                  "--record-dir", str(self.record_dir)],
                 run_factory=Interrupted)
-        self.assertEqual(code, 130)
+        self.assertEqual(code, 1)
         document = json.loads(output.getvalue())
         self.assertEqual(document["error"]["kind"], "interrupted")
 

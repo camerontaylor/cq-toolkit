@@ -383,7 +383,8 @@ export function mergedCurrent(queue: CrqRecord, readReceipt?: ReceiptReader): Me
     partial_scope: 0,
     unsupported: 0,
   };
-  const exclusions: Record<string, number> = {};
+  // Rebinding (never mutating) so a rejected receipt cannot leak half its rows.
+  let exclusions: Record<string, number> = {};
   // Python's `targets` is a set: duplicate captures collapse before the bound.
   const targets = new Set<string>();
   const items = requireArray(get(queue, 'items'), 'queue.items').map((item) =>
@@ -466,9 +467,12 @@ export function mergedCurrent(queue: CrqRecord, readReceipt?: ReceiptReader): Me
       } else {
         throw new StatusSummaryError('terminal state lacks proof');
       }
-      counts[category] += 1;
-      targets.add(requireString(require(requireRecord(capture, 'capture'), 'target'), 'target'));
-      for (const path of requireArray(get(requireRecord(capture, 'capture'), 'paths'), 'paths')) {
+      // Stage the receipt's rows before touching the shared counters: a rejected
+      // path row must not leave a proven count, a captured target or partial
+      // exclusions behind (the per-item catch below only adds `unverified`).
+      const captureRecord = requireRecord(capture, 'capture');
+      const stagedExclusions: Record<string, number> = { ...exclusions };
+      for (const path of requireArray(get(captureRecord, 'paths'), 'paths')) {
         const row = requireRecord(path, 'capture path');
         const disposition = Object.prototype.hasOwnProperty.call(row, 'disposition')
           ? row.disposition
@@ -477,9 +481,12 @@ export function mergedCurrent(queue: CrqRecord, readReceipt?: ReceiptReader): Me
           throw new StatusSummaryError('unhashable path disposition');
         }
         if (disposition !== 'included' && disposition !== 'renamed') {
-          exclusions[disposition] = (exclusions[disposition] ?? 0) + 1;
+          stagedExclusions[disposition] = (stagedExclusions[disposition] ?? 0) + 1;
         }
       }
+      counts[category] += 1;
+      targets.add(requireString(require(captureRecord, 'target'), 'target'));
+      exclusions = stagedExclusions;
     } catch {
       counts.unverified += 1;
     }

@@ -771,6 +771,12 @@ describe('T31 failure boundary', () => {
           initialRecord: f.record,
           review: f.review,
           observationWriter: writer,
+          // Record every bound worker's deps so the header-failure assertion
+          // below is non-vacuous: without this factory nothing is captured.
+          workerFactory: (deps) => {
+            f.boundDeps.push(deps);
+            return makeAddressWorker(deps);
+          },
         })({
           repoRoot: f.repo.root,
           source: 'local' as const,
@@ -795,6 +801,8 @@ describe('T31 failure boundary', () => {
           // no kernel-run link may follow, and no bound worker may receive the
           // writer - the surface only streams once the header has landed.
           expect(appendSpy).toHaveBeenCalledTimes(1);
+          // A worker WAS bound, so the writer check below is not vacuous.
+          expect(f.boundDeps.length).toBeGreaterThan(0);
           expect(f.boundDeps.every((deps) => deps.observationWriter === undefined)).toBe(true);
         }
         const persisted = JSON.parse(

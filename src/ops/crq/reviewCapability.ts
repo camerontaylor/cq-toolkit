@@ -271,7 +271,12 @@ async function handle(
       result = await notifyUpdate(queue, request, principal, effects);
       return encode(validateResult('response', result));
     case 'cancel': {
-      const cancelled = cancelRequest(queue, stringRequired(request, 'request_id'), withdrawNotify);
+      const requestId = stringRequired(request, 'request_id');
+      const binding = readRequest(queue, requestId);
+      if (binding === null || binding.get('principal') !== principal) {
+        throw new ValueError('cancel request owner denied');
+      }
+      const cancelled = cancelRequest(queue, requestId, withdrawNotify);
       await effects.saveQueue(cancelled.queue);
       return encode(validateResult('response', cancelled.result));
     }
