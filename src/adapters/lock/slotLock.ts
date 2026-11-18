@@ -198,12 +198,24 @@ export function attachSlotMetadata(lock: Awaited<ReturnType<typeof acquireFileLo
     async writeMetadata(metadata: SlotMetadata): Promise<void> {
       await lock.assertIdentity();
       parseMetadata(JSON.stringify(metadata));
+      // An incomplete record only invalidates reuse, so a checkout that has
+      // since been removed keeps its stored (already canonical) path rather
+      // than blocking recovery; a complete record must still resolve.
+      const resolveStored = async (path: string): Promise<string> => {
+        try {
+          return await realpath(path);
+        } catch (error) {
+          if (metadata.incomplete && (error as NodeJS.ErrnoException).code === 'ENOENT')
+            return path;
+          throw error;
+        }
+      };
       const canonical =
         metadata.state === 'bound'
           ? {
               ...metadata,
-              checkoutGitDir: await realpath(metadata.checkoutGitDir),
-              checkoutPath: await realpath(metadata.checkoutPath),
+              checkoutGitDir: await resolveStored(metadata.checkoutGitDir),
+              checkoutPath: await resolveStored(metadata.checkoutPath),
             }
           : metadata;
       const temporary = `${metadataPath}.${randomUUID()}.tmp`;

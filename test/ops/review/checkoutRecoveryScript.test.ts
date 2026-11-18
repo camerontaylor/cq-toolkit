@@ -163,6 +163,27 @@ test('removed recovery accepts a missing checkout parent while holding the origi
   expect(await f.read(f.paths[0]!)).toEqual({ version: 1, state: 'unbound', incomplete: false });
 });
 
+test('removed recovery of a complete bound record whose checkout is already gone reaches reconciliation', async () => {
+  const f = await recoveryFixture();
+  const parent = join(dirname(dirname(dirname(f.paths[0]!))), 'gone-parent');
+  const checkout = join(parent, 'checkout');
+  const gitDir = join(parent, 'admin');
+  await mkdir(checkout, { recursive: true });
+  await mkdir(gitDir);
+  const slot = attachSlotMetadata(await acquireFileLock(f.paths[0]!));
+  await slot.writeMetadata({
+    version: 1,
+    state: 'bound',
+    incomplete: false,
+    checkoutPath: checkout,
+    checkoutGitDir: gitDir,
+  });
+  await slot.close();
+  await rename(parent, `${parent}-saved`);
+  await recoverReviewCheckout({ ...f.env, CQ_RECOVERY_CHECKOUT: checkout }, f.io);
+  expect(await f.read(f.paths[0]!)).toEqual({ version: 1, state: 'unbound', incomplete: false });
+});
+
 test('missing acknowledgement preserves incomplete metadata', async () => {
   const f = await recoveryFixture();
   await expect(

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'vitest';
-import { mkdtemp, rm, writeFile, readFile, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, rm, writeFile, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -7,6 +7,7 @@ import {
   acquireFileLock,
   attachSlotMetadata,
   readSlotMetadata,
+  type SlotMetadata,
 } from '../../../src/adapters/lock/slotLock.js';
 const roots: string[] = [];
 afterEach(async () => {
@@ -59,6 +60,28 @@ test('existing lock attachment uses persistent metadata sibling (mutation: attac
     });
   } finally {
     await recovered.close();
+  }
+});
+
+test('incomplete bound metadata survives a removed checkout; complete metadata must still resolve', async () => {
+  const base = await root();
+  const checkout = join(base, 'checkout');
+  const gitDir = join(base, 'admin');
+  await mkdir(checkout);
+  await mkdir(gitDir);
+  const slot = await acquireSlot(base, 1);
+  try {
+    const bound = { version: 1, state: 'bound', checkoutPath: checkout, checkoutGitDir: gitDir };
+    await slot.writeMetadata({ ...bound, incomplete: false } as SlotMetadata);
+    await rename(checkout, `${checkout}-gone`);
+    await rename(gitDir, `${gitDir}-gone`);
+    await expect(
+      slot.writeMetadata({ ...bound, incomplete: false } as SlotMetadata),
+    ).rejects.toThrow(/ENOENT/);
+    await slot.writeMetadata({ ...bound, incomplete: true } as SlotMetadata);
+    expect(await readSlotMetadata(slot.metadataPath)).toEqual({ ...bound, incomplete: true });
+  } finally {
+    await slot.close();
   }
 });
 
