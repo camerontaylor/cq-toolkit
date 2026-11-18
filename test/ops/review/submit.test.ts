@@ -627,7 +627,7 @@ test('capabilities from a newer server (extra keys, operations, features, limits
   const client = makeReviewClient(async () => JSON.stringify(newer));
   await expect(client.capabilities()).resolves.toMatchObject({ command: 'review-v1' });
 });
-test('capabilities missing a field the client relies on is still refused', async () => {
+test('capabilities with a wrong-typed limit the client relies on is still refused', async () => {
   const { makeReviewClient } = await import('../../../src/ops/review/internal/queueClient.js');
   const bad = { ...caps, limits: { ...caps.limits, max_content_bytes: 'x' } };
   const client = makeReviewClient(async () => JSON.stringify(bad));
