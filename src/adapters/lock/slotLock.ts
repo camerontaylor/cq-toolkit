@@ -198,17 +198,11 @@ export function attachSlotMetadata(lock: Awaited<ReturnType<typeof acquireFileLo
     async writeMetadata(metadata: SlotMetadata): Promise<void> {
       await lock.assertIdentity();
       parseMetadata(JSON.stringify(metadata));
-      // An incomplete record only invalidates reuse, so a checkout that is
-      // gone or no longer resolvable (ENOENT, ENOTDIR, ...) keeps its stored
-      // path rather than blocking recovery; a complete record must still resolve.
-      const resolveStored = async (path: string): Promise<string> => {
-        try {
-          return await realpath(path);
-        } catch (error) {
-          if (metadata.incomplete) return path;
-          throw error;
-        }
-      };
+      // An incomplete record only invalidates reuse, so it keeps its stored
+      // paths verbatim (a gone or unresolvable checkout must not block
+      // recovery); a complete record must still resolve and is canonicalized.
+      const resolveStored = async (path: string): Promise<string> =>
+        metadata.incomplete ? path : await realpath(path);
       const canonical =
         metadata.state === 'bound'
           ? {

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'vitest';
-import { mkdir, mkdtemp, rename, rm, writeFile, readFile, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, rm, writeFile, readFile, realpath, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -14,7 +14,7 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 async function root() {
-  const path = await mkdtemp(join(tmpdir(), 'cq-metadata-'));
+  const path = await realpath(await mkdtemp(join(tmpdir(), 'cq-metadata-')));
   roots.push(path);
   return path;
 }
