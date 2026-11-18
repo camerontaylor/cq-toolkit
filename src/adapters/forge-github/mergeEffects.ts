@@ -786,13 +786,23 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     // numbers collide. The spawn cwd fixes that without touching argv
     // shapes (safeArgs unaffected); GH_REPO is stripped from the inherited
     // env because gh's resolution precedence (-R > GH_REPO > cwd) would
-    // otherwise defeat the cwd. The git runner keeps -C argv scoping.
+    // otherwise defeat the cwd. The git runner keeps -C argv scoping (and
+    // strips the GIT_* selectors that would override -C; see below).
     cwd: repoRoot,
     unsetEnv: ['GH_REPO'],
   };
   const gitRunnerOpts = {
     ...(opts.gitBin !== undefined ? { bin: opts.gitBin } : {}),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    // Scope git to repoRoot too (review P1, backfill finding fc7ec07): the
+    // `-C <repoRoot>` argv scoping does not choose the repository on its
+    // own — git uses an inherited GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR IN
+    // PLACE of discovery, so a caller whose environment selects another
+    // repository (or worktree) would have validateRef/isAncestor reads and
+    // fetchRef/pushRef writes land THERE. Stripping the inherited names
+    // makes -C authoritative, the same way the gh runner above strips
+    // GH_REPO to make its cwd authoritative.
+    unsetEnv: ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR'],
     // OBJECT-GRAPH HARDENING (review P1 p528, PR #1641): every gate read
     // — validate/parents/diff/message/ancestry/presence — and the push
     // must see the TRUE objects, never attacker-chosen refs/replace
