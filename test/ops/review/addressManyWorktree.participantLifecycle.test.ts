@@ -249,7 +249,7 @@ test('a rejected action that deferred a cancelled attempt still settles it befor
         throw new Error('worker rejected after deferring');
       },
     );
-    await expect(pending).rejects.toThrow();
+    await expect(pending).rejects.toThrow('worker rejected after deferring');
     expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('export const a = 1;\n');
     expect(report.failed).toHaveLength(1);
     expect(f.repo.git('show', `${report.failed[0]!.sha}:src/a.ts`)).toBe('RAW CANCELLED PARTIAL\n');

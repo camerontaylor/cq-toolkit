@@ -85,6 +85,8 @@ const participantLeases = new WeakMap<AddressRunLease, Participant>();
 export interface Participant {
   lease: AddressRunLease;
   closed: boolean;
+  /** The action rejected: the caller never receives this participant's in-memory report. */
+  rejected?: boolean;
   arrived: boolean;
   report?: ReviewAddressReport;
   reportTarget?: string;
@@ -283,6 +285,7 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
       // holds is never released: start terminal cleanup before the participant
       // closes so that attempt is still settled. The rejection itself wins; a
       // cleanup failure is recorded as the terminal failure by runTerminal.
+      participant.rejected = true;
       if (this.stopping && participant.attempts.some((attempt) => attempt.cancelled)) {
         try {
           await this.arrive(participant);
@@ -491,14 +494,16 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
                   if (row) row.failedAttempt = attempt.retained;
                 }
               }
-            // Make a closed participant's reference operator-visible now, not only
-            // in memory: it has no later write. Open participants keep the
-            // existing contract: the full terminal report below when settlement
-            // succeeds, and no report when it fails (the in-memory report still
-            // carries the reference to the caller).
+            // Make a closed or rejected participant's reference operator-visible
+            // now, not only in memory: a closed one has no later write, and a
+            // rejected one's caller receives the error, never the in-memory
+            // report. Other open participants keep the existing contract: the
+            // full terminal report below when settlement succeeds, and no report
+            // when it fails (the in-memory report still carries the reference to
+            // the caller).
             for (const participant of gained) {
               if (!participant.report || !participant.reportTarget) continue;
-              if (!participant.closed) continue;
+              if (!participant.closed && !participant.rejected) continue;
               try {
                 await persistAddressTerminalReport(
                   terminalToken(this),
@@ -511,9 +516,6 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
               }
             }
           }
-          // A persistence failure never masks a settlement failure (which already
-          // propagated); after a successful settlement it is surfaced here.
-          if (persistFailure) throw persistFailure.error;
           for (const participant of open)
             if (participant.report) {
               if (!participant.reportDirectory) continue;
@@ -538,6 +540,10 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
                 participant.reportDirectory!,
               );
             }
+          // A persistence failure never masks a settlement failure (which already
+          // propagated); after a successful settlement it is surfaced here, once
+          // the open participants' reports have been written.
+          if (persistFailure) throw persistFailure.error;
           if (this.terminalProcesses.size)
             throw new Error('address terminal: subprocess close unobserved');
         })();
