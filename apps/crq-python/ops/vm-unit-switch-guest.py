@@ -552,18 +552,40 @@ def check_preserved_expected(expected_state, label):
             "record_count": len(records())}
 
 
+COMPLETIONS_READ_ATTEMPTS = 5
+COMPLETIONS_RETRY_SECONDS = 0.2
+
+
 def completions():
+    """Parse the completion log; retry while an unterminated final line may still be appending.
+
+    A line that fails to parse is only retried when it is the final line and the file lacks a
+    trailing newline (a write in flight). Anything else, or a persistent partial line, raises:
+    a partial line is never accepted as complete evidence.
+    """
     if not COMPLETIONS.exists():
         return []
-    entries = []
-    for number, line in enumerate(COMPLETIONS.read_text().splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            entries.append(json.loads(line))
-        except ValueError as exc:
-            raise RuntimeError("completion log line %d is not JSON" % number) from exc
-    return entries
+    for attempt in range(COMPLETIONS_READ_ATTEMPTS):
+        text = COMPLETIONS.read_text()
+        lines = text.splitlines()
+        entries = []
+        partial_tail = False
+        for number, line in enumerate(lines, 1):
+            if not line.strip():
+                continue
+            try:
+                entries.append(json.loads(line))
+            except ValueError as exc:
+                if number == len(lines) and not text.endswith("\n"):
+                    partial_tail = True
+                    break
+                raise RuntimeError(
+                    "completion log line %d is not JSON" % number) from exc
+        if not partial_tail:
+            return entries
+        if attempt + 1 < COMPLETIONS_READ_ATTEMPTS:
+            time.sleep(COMPLETIONS_RETRY_SECONDS)
+    raise RuntimeError("completion log line %d is not JSON" % len(lines))
 
 
 def metadata_state():
