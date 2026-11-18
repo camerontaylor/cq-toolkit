@@ -98,6 +98,15 @@ export async function prepareOrdinaryReview(
     // The runner owns the review range; a profile flag must not pick another base.
     if ((profile.get('flags') as string[]).some((flag) => /^--base(?:-commit)?(?:=|$)/.test(flag)))
       throw new Error('review profile must not set a base selector');
+    // Nor may it pick the review scope (uncommitted/untracked/committed/all).
+    if (
+      (profile.get('flags') as string[]).some((flag) =>
+        /^(?:--(?:uncommitted|committed|all|type|untracked|include-untracked)(?:=|$)|-t(?:=|$))/.test(
+          flag,
+        ),
+      )
+    )
+      throw new Error('review profile must not set a review scope');
     cmd = ['coderabbit', 'review', ...(profile.get('flags') as JsonValue[]), ...rangeArgs];
   }
   const runId = await effects.allocate(id);

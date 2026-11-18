@@ -133,6 +133,34 @@ describe('inactive ordinary review preparation', () => {
       expect(f.calls).toEqual([]);
     },
   );
+  it.each([
+    ['--uncommitted'],
+    ['--committed'],
+    ['--all'],
+    ['--type'],
+    ['--type=uncommitted'],
+    ['-t'],
+    ['--untracked'],
+    ['--include-untracked'],
+  ])(
+    'refuses a profile flag %s that would select the review scope before effects',
+    async (flag) => {
+      const f = fixture();
+      const plan = new JsonObject([
+        ...f.plan.entries,
+        ['profile', new JsonObject([['flags', ['--agent', flag]]])],
+        ['config_digest', 'digest'],
+      ]);
+      await expect(
+        prepareOrdinaryReview(
+          f.queue,
+          { itemIndex: 0, plan, repo: 'o/r', band: 'background' },
+          f.effects,
+        ),
+      ).rejects.toThrow('review scope');
+      expect(f.calls).toEqual([]);
+    },
+  );
   it.each(['author', 'current', 'push', 'backfill', 'coverage', 'local-review'])(
     'refuses unsupported %s before effects',
     async (kind) => {
