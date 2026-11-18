@@ -605,6 +605,15 @@ class CompletionsReadTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "line 2 is not JSON"):
             self._read('{"a": 1}\n{"b"')
 
+    def test_unterminated_valid_json_is_retried_until_newline(self):
+        self.assertEqual(
+            self._read('{"a": 1}\n{"b": 2}', writes=['{"a": 1}\n{"b": 2}\n']),
+            [{"a": 1}, {"b": 2}])
+
+    def test_persistent_unterminated_valid_json_is_never_accepted(self):
+        with self.assertRaisesRegex(RuntimeError, "not JSON"):
+            self._read('{"a": 1}\n{"b": 2}')
+
     def test_completion_evidence_requires_an_integer_sequence(self):
         item = {"sequence": 1, "invocation": "a" * 32, "runtime": "python"}
         entry = dict(item, unit=guest.UNIT, success=True)

@@ -581,11 +581,26 @@ def completions():
                     break
                 raise RuntimeError(
                     "completion log line %d is not JSON" % number) from exc
+        if entries and text.strip() and not text.endswith("\n"):
+            # Valid JSON without its newline is still an unfinished append.
+            partial_tail = True
         if not partial_tail:
             return entries
         if attempt + 1 < COMPLETIONS_READ_ATTEMPTS:
             time.sleep(COMPLETIONS_RETRY_SECONDS)
     raise RuntimeError("completion log line %d is not JSON" % len(lines))
+
+
+def wait_unit_exited(timeout=30):
+    """Wait until no fixture invocation is running, so the completion log is final."""
+    deadline = time.monotonic() + timeout
+    while True:
+        state = show(UNIT, ["ActiveState"]).get("ActiveState", "")
+        if state not in ("active", "activating", "deactivating", "reloading"):
+            return
+        require(time.monotonic() < deadline,
+                "fixture unit still running after %ds" % timeout)
+        time.sleep(0.2)
 
 
 def metadata_state():
@@ -858,6 +873,7 @@ def switch_phase(runtime):
     systemctl("stop", TIMER)
     systemctl("reset-failed", TIMER)
     time.sleep(0.5)
+    wait_unit_exited()
     evidence = validate_completed(record, runtime, prior, completions_baseline,
                                   completions())
     after = snapshot()
@@ -1033,6 +1049,7 @@ def drain_harvest_phase(args):
         systemctl("stop", TIMER)
         systemctl("reset-failed", TIMER)
         time.sleep(0.5)
+        wait_unit_exited()
         node_completions = validate_completed(
             node_record, NODE_RUNTIME, PYTHON_RUNTIME, node_baseline,
             completions())
@@ -1056,6 +1073,7 @@ def drain_harvest_phase(args):
         systemctl("stop", TIMER)
         systemctl("reset-failed", TIMER)
         time.sleep(0.5)
+        wait_unit_exited()
         python_completions = validate_completed(
             python_record, PYTHON_RUNTIME, NODE_RUNTIME, python_baseline,
             completions())
