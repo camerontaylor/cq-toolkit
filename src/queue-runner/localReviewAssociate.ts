@@ -42,14 +42,18 @@ function markPreviousLinkStale(
   head: string,
 ): JsonObject {
   const linksValue = queue.get('review_pr_links');
-  const links = linksValue === undefined ? new JsonObject([]) : object(linksValue, 'review_pr_links');
+  const links =
+    linksValue === undefined ? new JsonObject([]) : object(linksValue, 'review_pr_links');
   const key = `${repo}#${pr}`;
   const previousValue = links.get(key);
   const previous = pyTruthy(previousValue) ? object(previousValue, 'review_pr_link') : undefined;
   if (previous === undefined) return queue;
   if (previous.get('head') === head && previous.get('base') === base) return queue;
   return withObjectKeys(queue, [
-    ['review_pr_links', withObjectKeys(links, [[key, withObjectKeys(previous, [['stale', true]])]])],
+    [
+      'review_pr_links',
+      withObjectKeys(links, [[key, withObjectKeys(previous, [['stale', true]])]]),
+    ],
   ]);
 }
 
