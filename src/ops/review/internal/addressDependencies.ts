@@ -131,6 +131,17 @@ const descriptiveManifestFields = new Set([
   'keywords',
   'funding',
 ]);
+/** Lockfiles select dependency versions. A member lockfile can select a different
+ * graph than the root lockfile when the shared workspace lockfile is disabled, so
+ * every level of the workspace tree must be compared, not just the root. */
+const dependencyLockfiles = [
+  'pnpm-lock.yaml',
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'yarn.lock',
+  'bun.lock',
+  'bun.lockb',
+];
 const installLifecycleScripts = new Set([
   'preinstall',
   'install',
@@ -259,13 +270,8 @@ export async function assertAddressDependencyMetadata(
   };
   await compare('package.json', true);
   for (const path of [
-    'pnpm-lock.yaml',
+    ...dependencyLockfiles,
     'pnpm-workspace.yaml',
-    'package-lock.json',
-    'npm-shrinkwrap.json',
-    'yarn.lock',
-    'bun.lock',
-    'bun.lockb',
     '.npmrc',
     '.yarnrc',
     '.yarnrc.yml',
@@ -313,7 +319,9 @@ export async function assertAddressDependencyMetadata(
     }
   for (const path of [...members].sort()) {
     await compare(path, true);
-    for (const config of ['.npmrc', '.yarnrc.yml', 'bunfig.toml'])
+    // A member lockfile (pnpm without a shared workspace lockfile, or a nested
+    // project) selects versions this checkout's installed tree may not match.
+    for (const config of [...dependencyLockfiles, '.npmrc', '.yarnrc.yml', 'bunfig.toml'])
       await compare(`${dirname(path)}/${config}`);
   }
 }
