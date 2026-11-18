@@ -114,6 +114,25 @@ describe('inactive ordinary review preparation', () => {
     );
     expect(f.saved()).toBe(result.queue);
   });
+  it.each([['--base'], ['--base=main'], ['--base-commit'], ['--base-commit=abc']])(
+    'refuses a profile flag %s that would override the runner base before effects',
+    async (flag) => {
+      const f = fixture();
+      const plan = new JsonObject([
+        ...f.plan.entries,
+        ['profile', new JsonObject([['flags', ['--agent', flag]]])],
+        ['config_digest', 'digest'],
+      ]);
+      await expect(
+        prepareOrdinaryReview(
+          f.queue,
+          { itemIndex: 0, plan, repo: 'o/r', band: 'background' },
+          f.effects,
+        ),
+      ).rejects.toThrow('base selector');
+      expect(f.calls).toEqual([]);
+    },
+  );
   it.each(['author', 'current', 'push', 'backfill', 'coverage', 'local-review'])(
     'refuses unsupported %s before effects',
     async (kind) => {

@@ -95,6 +95,9 @@ export async function prepareOrdinaryReview(
       input.plan.get('config_digest') === undefined
     )
       throw new Error('invalid review profile');
+    // The runner owns the review range; a profile flag must not pick another base.
+    if ((profile.get('flags') as string[]).some((flag) => /^--base(?:-commit)?(?:=|$)/.test(flag)))
+      throw new Error('review profile must not set a base selector');
     cmd = ['coderabbit', 'review', ...(profile.get('flags') as JsonValue[]), ...rangeArgs];
   }
   const runId = await effects.allocate(id);
