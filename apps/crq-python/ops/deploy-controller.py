@@ -1872,6 +1872,11 @@ def switch_unit(effects, adapter, unit, runtime):
             raise Refused("unit already selects requested runtime")
         snapshot = adapter.snapshot(unit)
         adapter.validate_snapshot(unit, snapshot)
+        # recover_unit rejects a record whose snapshot runtime is not the prior
+        # runtime, so journaling such a snapshot would strand the transaction.
+        if (not isinstance(snapshot, dict)
+                or snapshot.get("runtime") != prior["runtime"]):
+            raise Refused("snapshot runtime does not match prior runtime")
         identity = {"schema_version": JOURNAL_SCHEMA, "transaction_id": uuid.uuid4().hex,
                     "operation": "unit_switch", "unit": unit, "runtime": runtime,
                     "prior_runtime": prior["runtime"], "outcome": "pending", "at": now_iso(),
