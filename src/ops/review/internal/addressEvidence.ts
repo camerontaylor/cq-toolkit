@@ -226,6 +226,8 @@ export async function assertAddressTerminalRoot(token: object, root: string): Pr
   const canonical = await realpath(root);
   const session = await terminalSession(token, canonical, false, true);
   assertBinaryOutside(canonical, session.bin);
+  if (!sameFile(await lstat(session.bin), session.binary))
+    throw new Error('terminal Git binary changed');
 }
 
 async function terminalSession(

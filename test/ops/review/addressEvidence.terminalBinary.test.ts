@@ -44,6 +44,29 @@ test('a trusted Git binary found for one checkout is refused inside a different 
   }
 });
 
+test('preflight refuses a root once the cached session binary no longer matches its recorded identity', async () => {
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'terminal-preflight-')));
+  try {
+    authority.commonDir = join(base, 'common');
+    const root = join(base, 'root');
+    const bin = join(base, 'bin');
+    for (const dir of [authority.commonDir, root, bin]) await mkdir(dir, { recursive: true });
+    const git = join(bin, 'git');
+    await writeFile(git, '#!/bin/sh\nexit 0\n');
+    await chmod(git, 0o755);
+    vi.stubEnv('PATH', bin);
+    const token = {};
+    await expect(assertAddressTerminalRoot(token, root)).resolves.toBeUndefined();
+    await rm(git);
+    await writeFile(git, '#!/bin/sh\nexit 1\n');
+    await chmod(git, 0o755);
+    await expect(assertAddressTerminalRoot(token, root)).rejects.toThrow(
+      /terminal Git binary changed/,
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
 test('a root that holds the session binary is refused before a candidate can be created there', async () => {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'terminal-preflight-')));
   try {
