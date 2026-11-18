@@ -372,7 +372,12 @@ describe('dev.review cycle', () => {
     // The managed queue leg counts dispatches: the refusal must not fall
     // through to a fresh managed cycle that could also end 'needs-human'.
     const submit = vi.fn(managedTerminal());
-    const result = await cycleReview(effects, stubScanner(), undefined, submit)({
+    const result = await cycleReview(
+      effects,
+      stubScanner(),
+      undefined,
+      submit,
+    )({
       repoRoot: repo.root,
     });
     expect(result.status).toBe('needs-human');
