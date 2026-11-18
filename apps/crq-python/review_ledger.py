@@ -23,6 +23,11 @@ SCHEMA = Path(__file__).resolve().parents[2] / "policy/review-ledger.schema.json
 
 IMPORT_BATCH_LIMIT = 64
 IMPORT_BATCH_BYTES = 4 * 1024 * 1024
+# Per-record bound enforced identically when publishing and when reading; the
+# reader checks each object's type and size with --batch-check before any blob
+# body is buffered.
+RECORD_BYTES = 1024 * 1024
+READ_GROUP_BYTES = 4 * 1024 * 1024
 
 
 def independent_import(value):
@@ -543,10 +548,33 @@ class GitLedger:
             entries.append((commit, changes[i].decode(), fields[3].decode()))
             i += 1
         batches = {}
-        # Bound each plumbing response to a small group of records. Objects are
-        # addressed by immutable IDs from the raw diff, never caller path syntax.
-        for offset in range(0, len(entries), 64):
-            group = entries[offset:offset + 64]
+        # Objects are addressed by immutable IDs from the raw diff, never caller
+        # path syntax. Check each object's type and size without its body first,
+        # so an oversized record is rejected before any payload is buffered; then
+        # request bodies in groups bounded by record count and by total bytes.
+        sizes = {}
+        if entries:
+            check = self.git("cat-file", "--batch-check",
+                             input=("\n".join(e[2] for e in entries) + "\n").encode()).split(b"\n")
+            if len(check) != len(entries) + 1 or check[-1] != b"":
+                raise IntegrityError("unexpected ledger blob response")
+            for entry, row in zip(entries, check):
+                oid = entry[2]
+                fields = row.split()
+                if len(fields) != 3 or fields[:2] != [oid.encode(), b"blob"] or not fields[2].isdigit():
+                    raise IntegrityError("malformed ledger blob response")
+                size = int(fields[2])
+                if size > RECORD_BYTES:
+                    raise IntegrityError("ledger record exceeds validation bound")
+                sizes[oid] = size
+        offset = 0
+        while offset < len(entries):
+            group, total = [], 0
+            while offset < len(entries) and len(group) < 64:
+                size = sizes[entries[offset][2]]
+                if group and total + size > READ_GROUP_BYTES:
+                    break
+                group.append(entries[offset]); total += size; offset += 1
             raw = self.git("cat-file", "--batch", input=("\n".join(e[2] for e in group) + "\n").encode())
             cursor = 0
             for commit, filename, oid in group:
@@ -555,6 +583,8 @@ class GitLedger:
                 if end < 0 or len(fields) != 3 or fields[:2] != [oid.encode(), b"blob"] or not fields[2].isdigit():
                     raise IntegrityError("malformed ledger blob response")
                 size = int(fields[2]); cursor = end + 1
+                if size != sizes[oid]:
+                    raise IntegrityError("ledger blob size mismatch")
                 payload = raw[cursor:cursor + size]
                 cursor += size
                 if len(payload) != size or raw[cursor:cursor + 1] != b"\n":
@@ -641,7 +671,7 @@ class GitLedger:
                         outbox.acknowledge(value, ids)
                         continue
                     size = len(canonical(value))
-                    if size > 1024 * 1024:
+                    if size > RECORD_BYTES:
                         raise IntegrityError("ledger record exceeds validation bound")
                     kind = "import" if independent_import(value) else None
                     if initial_inventory_enrollment(value) and value["payload"]["job_id"] not in seen_jobs:
