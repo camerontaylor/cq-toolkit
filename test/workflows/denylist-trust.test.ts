@@ -4,7 +4,8 @@
 // its own findings in a required check. The head is scanned as data only.
 // Pinned over the template and its instantiation: they are rendered, but the
 // trust direction is the point of the workflow, so it is asserted directly.
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +46,13 @@ describe.each(PATHS)('%s scans with a trusted scanner policy', (path) => {
       expect(line, line).toContain('--config "$GITLEAKS_CONFIG"');
       expect(line, line).not.toContain('--config .gitleaks.toml');
     }
+  });
+
+  it('forces raw text diffs so .gitattributes cannot hide scanned content', () => {
+    const git = gitleaksLines(text).filter((line) => /\bgitleaks\s+git\b/.test(line));
+    expect(git.length).toBeGreaterThanOrEqual(2);
+    for (const line of git) expect(line, line).toContain('$DIFF_OPTS');
+    expect(text).toContain('DIFF_OPTS="--text --no-textconv --no-ext-diff"');
   });
 
   it('keeps the trusted policy available when both scans run', () => {
@@ -92,5 +100,29 @@ gitleaks() { :; }
 ${block[0]}
 exit 0`;
     expect(spawnSync('bash', ['-c', shell]).status, path).toBe(42);
+  }
+});
+
+// Behavioral pin: a head-controlled `-diff` attribute turns a patch into
+// "Binary files differ"; the scan's diff options must still surface it.
+it('shows patch content despite a -diff .gitattributes', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'denylist-attr-'));
+  const run = (...args: string[]) =>
+    spawnSync('git', args, {
+      cwd: dir,
+      encoding: 'utf8',
+      env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' },
+    });
+  try {
+    run('init', '-q');
+    writeFileSync(join(dir, '.gitattributes'), '* -diff\n');
+    writeFileSync(join(dir, 'secret.txt'), 'hidden-token-value\n');
+    run('add', '-A');
+    run('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', 'x');
+    expect(run('log', '-p', '--format=').stdout).not.toContain('hidden-token-value');
+    const forced = run('log', '-p', '--format=', '--text', '--no-textconv', '--no-ext-diff');
+    expect(forced.stdout).toContain('hidden-token-value');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

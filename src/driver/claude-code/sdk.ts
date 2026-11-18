@@ -740,7 +740,7 @@ export class ClaudeCodeSdkTransport implements Driver {
     // surfaces, and a bare 'error' verdict is exactly the dishonesty this
     // field exists to remove.
     let resultCause: string | undefined;
-    if (observation.error === undefined && resultStatusOf(observation.result) === 'error') {
+    if (resultStatusOf(observation.result) === 'error') {
       const resultFrame = observation.result;
       const rawResult = asString(resultFrame?.['result']);
       const errorEntries = (asArray(resultFrame?.['errors']) ?? []).filter(
@@ -753,8 +753,12 @@ export class ClaudeCodeSdkTransport implements Driver {
           : errorEntries.length > 0
             ? errorEntries.join('; ')
             : `subtype '${subtype ?? 'unknown'}'`;
-      observation.error = `claude-code driver: SDK result status error — ${cause}`;
-      observation.errorKind = 'result-frame';
+      // A dispatch throw after an error frame keeps its own error/kind, but
+      // the frame's cause must still reach classification.
+      if (observation.error === undefined) {
+        observation.error = `claude-code driver: SDK result status error — ${cause}`;
+        observation.errorKind = 'result-frame';
+      }
       resultCause = cause;
     }
 
@@ -859,10 +863,13 @@ export class ClaudeCodeSdkTransport implements Driver {
         error = `claude-code driver: structured output invalid — ${structuredMiss}`;
         errorClass = 'output-invalid';
       } else {
+        // Frame cause first, then any dispatch-catch cause.
         const causeTexts =
-          observation.errorKind === 'result-frame'
-            ? [resultCause ?? '']
-            : [observation.caughtCause ?? ''];
+          resultCause === undefined && observation.caughtCause === undefined
+            ? ['']
+            : [resultCause, observation.caughtCause].filter(
+                (text): text is string => text !== undefined,
+              );
         const classified = classifyFailure({
           kind:
             observation.errorKind === 'result-frame'
