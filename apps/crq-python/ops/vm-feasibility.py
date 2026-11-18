@@ -74,6 +74,9 @@ SCOPE_MEMORY = "3G"
 SSH_KEY = "id_ed25519"
 REPORT_SCHEMA = 2
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+# A run id becomes a path component and part of a systemd unit name, where
+# `systemctl stop` expands glob characters; accept only a plain name.
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 LIMITATIONS = [
@@ -1058,6 +1061,8 @@ def load_run(state: pathlib.Path, run_id: str | None, *,
     runs = sorted((state / "runs").glob("*")) if (state / "runs").is_dir() else []
     if not runs:
         raise ValueError("no runs under " + str(state / "runs"))
+    if run_id is not None and (not RUN_ID_RE.fullmatch(run_id) or ".." in run_id):
+        raise ValueError("invalid run id: " + run_id)
     run = runs[-1] if run_id is None else state / "runs" / run_id
     if require_process and not (run / "process.json").exists():
         raise ValueError("run has no retained process identity: " + str(run))
@@ -1266,15 +1271,23 @@ def stop_owned_process(run: dict, *, purge: bool) -> dict:
         # identity. The scope unit is derived from the run id, so the stop does
         # not need the identity file; report stopped only once the unit is
         # actually inactive, so --purge never moves a live guest's files.
+        if not RUN_ID_RE.fullmatch(str(run["run_id"])):
+            raise RuntimeError("invalid run id: " + str(run["run_id"]))
         derived_unit = "crq-vm-" + run["run_id"] + ".scope"
         stop_rc = subprocess.run(["systemctl", "--user", "stop", derived_unit],
                                  capture_output=True, text=True).returncode
-        # is-active exits 3 for an inactive, failed or unknown unit; any other
-        # nonzero status (for example a user-bus connection error) proves
-        # nothing about whether QEMU is still running.
-        stopped = subprocess.run(["systemctl", "--user", "is-active", "--quiet",
-                                  derived_unit],
-                                 capture_output=True).returncode == 3
+        # Only a successful stop (or a unit that is not loaded at all) plus an
+        # ActiveState of inactive or failed proves QEMU is gone. A scope that
+        # is deactivating is not active yet still holds the guest, and a
+        # failed query (for example a user-bus error) proves nothing.
+        shown = subprocess.run(["systemctl", "--user", "show", "-p", "ActiveState",
+                                "-p", "LoadState", derived_unit],
+                               capture_output=True, text=True)
+        props = dict(line.split("=", 1) for line in (shown.stdout or "").splitlines()
+                     if "=" in line)
+        stopped = (shown.returncode == 0
+                   and props.get("ActiveState") in ("inactive", "failed")
+                   and (stop_rc == 0 or props.get("LoadState") == "not-found"))
     if identity is not None:
         alive = pathlib.Path("/proc/%d" % pid).exists()
         if alive:

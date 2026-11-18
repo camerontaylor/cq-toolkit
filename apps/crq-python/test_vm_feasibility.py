@@ -84,35 +84,67 @@ class SumsTests(unittest.TestCase):
 
 
 class StopOwnedProcessTests(unittest.TestCase):
-    def _stop(self, is_active_rc, *, purge=True):
+    def _stop(self, active_state, *, purge=True, stop_rc=0, show_rc=0,
+              load_state="loaded", run_id="r1"):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = pathlib.Path(tmp) / "runs" / "r1"
             run_dir.mkdir(parents=True)
             (run_dir / "overlay.qcow2").write_text("disk")
 
             def fake_run(argv, **kwargs):
-                rc = is_active_rc if "is-active" in argv else 0
-                return mock.Mock(returncode=rc, stdout="", stderr="")
+                if "show" in argv:
+                    out = "ActiveState=%s\nLoadState=%s\n" % (active_state, load_state)
+                    return mock.Mock(returncode=show_rc, stdout=out, stderr="")
+                return mock.Mock(returncode=stop_rc, stdout="", stderr="")
 
             with mock.patch.object(vm.subprocess, "run", side_effect=fake_run):
                 result = vm.stop_owned_process(
-                    {"path": str(run_dir), "run_id": "r1"}, purge=purge)
+                    {"path": str(run_dir), "run_id": run_id}, purge=purge)
             return result, (run_dir / "overlay.qcow2").exists()
 
     def test_inactive_scope_is_stopped_and_purged(self):
-        result, still_there = self._stop(3)
+        result, still_there = self._stop("inactive")
         self.assertTrue(result["stopped"])
         self.assertFalse(still_there)
 
+    def test_failed_scope_is_stopped(self):
+        result, _ = self._stop("failed")
+        self.assertTrue(result["stopped"])
+
+    def test_unloaded_unit_counts_as_stopped_even_if_stop_fails(self):
+        result, _ = self._stop("inactive", stop_rc=5, load_state="not-found")
+        self.assertTrue(result["stopped"])
+
     def test_failed_scope_query_is_not_proof_of_shutdown(self):
-        result, still_there = self._stop(1)
+        result, still_there = self._stop("", show_rc=1)
+        self.assertFalse(result["stopped"])
+        self.assertTrue(still_there)
+
+    def test_deactivating_scope_is_not_stopped(self):
+        result, still_there = self._stop("deactivating", stop_rc=1)
+        self.assertFalse(result["stopped"])
+        self.assertTrue(still_there)
+
+    def test_failed_stop_command_blocks_purge_even_when_inactive(self):
+        result, still_there = self._stop("inactive", stop_rc=1)
         self.assertFalse(result["stopped"])
         self.assertTrue(still_there)
 
     def test_active_scope_is_not_stopped(self):
-        result, still_there = self._stop(0)
+        result, still_there = self._stop("active")
         self.assertFalse(result["stopped"])
         self.assertTrue(still_there)
+
+    def test_glob_run_id_never_reaches_systemctl(self):
+        with self.assertRaises(RuntimeError):
+            self._stop("inactive", run_id="*")
+
+    def test_load_run_rejects_unsafe_run_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (pathlib.Path(tmp) / "runs" / "r1").mkdir(parents=True)
+            for bad in ("*", "..", "a/b", "", "-x"):
+                with self.assertRaises(ValueError):
+                    vm.load_run(pathlib.Path(tmp), bad, require_process=False)
 
 
 class FetchImageTests(unittest.TestCase):
@@ -370,7 +402,9 @@ class LifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             state, run = self._prepared(temporary)
             (run / "overlay.qcow2").write_text("evidence")
-            inactive = mock.Mock(returncode=3, stdout="", stderr="")
+            inactive = mock.Mock(returncode=0,
+                                 stdout="ActiveState=inactive\nLoadState=loaded\n",
+                                 stderr="")
             with mock.patch.object(vm.subprocess, "run", return_value=inactive):
                 payload = vm.stop_owned_process(
                     {"run_id": "r1", "path": str(run)}, purge=True)
