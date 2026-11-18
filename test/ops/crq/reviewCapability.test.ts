@@ -330,6 +330,20 @@ describe('review-v1 pure handler', () => {
     expect(h.state.saves).toBeGreaterThan(1);
   });
 
+  test('cancel requires the recorded principal', async () => {
+    const h = harness();
+    await h.call(frame());
+    await expect(
+      h.call(
+        { v: 1, op: 'cancel', request_id: 'req-1' },
+        { principal: 'client-b', policy: policy({ write: [PRINCIPAL, 'client-b'] }) },
+      ),
+    ).rejects.toMatchObject({
+      name: 'ValueError',
+      message: 'cancel request owner denied',
+    });
+  });
+
   test('notify-update requires the recorded principal', async () => {
     const h = harness();
     await h.call(frame());
