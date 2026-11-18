@@ -196,6 +196,16 @@ describe('backfill inventory route', () => {
     expect(recorder.writes.size).toBe(0);
   });
 
+  test('a floating-point triage row is an integrity refusal (exit 3), not an effect failure', async () => {
+    const recorder = memoryEffects({
+      rollout: ROLLOUT,
+      triage: [{ file: 'f1.json', value: { score: 1.5 } }],
+    });
+    const result = await runBackfillInventory(['--report-only'], recorder.effects);
+    expect(result.exitCode).toBe(3);
+    expect(recorder.writes.size).toBe(0);
+  });
+
   test('the report counts a readable triage row', async () => {
     const recorder = memoryEffects({
       rollout: ROLLOUT,
