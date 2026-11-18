@@ -605,6 +605,13 @@ class CompletionsReadTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "line 2 is not JSON"):
             self._read('{"a": 1}\n{"b"')
 
+    def test_completion_evidence_requires_an_integer_sequence(self):
+        item = {"sequence": 1, "invocation": "a" * 32, "runtime": "python"}
+        entry = dict(item, unit=guest.UNIT, success=True)
+        self.assertTrue(guest.completion_logged(item, [entry]))
+        for bogus in (True, 1.0):
+            self.assertFalse(guest.completion_logged(item, [dict(entry, sequence=bogus)]))
+
     def test_bad_interior_line_raises_without_retry(self):
         sleep = mock.Mock()
         with self.assertRaisesRegex(RuntimeError, "line 1 is not JSON"):

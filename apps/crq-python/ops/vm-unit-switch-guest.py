@@ -799,6 +799,7 @@ def completion_baseline(entries):
 def completion_logged(item, log_entries):
     """Journal completion evidence must match a real fixture log entry."""
     return any(isinstance(entry, dict)
+               and type(entry.get("sequence")) is int
                and entry.get("sequence") == item.get("sequence")
                and entry.get("invocation") == item.get("invocation")
                and entry.get("unit") == UNIT
@@ -854,11 +855,11 @@ def switch_phase(runtime):
     require(len(created) == 1, "switch did not create exactly one journal record")
     record_path = created[0]
     record = json.loads(record_path.read_text())
-    evidence = validate_completed(record, runtime, prior, completions_baseline,
-                                  completions())
     systemctl("stop", TIMER)
     systemctl("reset-failed", TIMER)
     time.sleep(0.5)
+    evidence = validate_completed(record, runtime, prior, completions_baseline,
+                                  completions())
     after = snapshot()
     check_preserved("switch")
     installed = load_adapter().GuestFixtureAdapter(
@@ -1026,15 +1027,15 @@ def drain_harvest_phase(args):
         require(len(node_records) == 1,
                 "harvest switch did not create exactly one record")
         node_record = json.loads(node_records[0].read_text())
-        node_completions = validate_completed(
-            node_record, NODE_RUNTIME, PYTHON_RUNTIME, node_baseline,
-            completions())
         # Match switch_phase's post-switch baseline: the proof adapter starts
         # the fixture timer on release, and the timer must not keep triggering
         # a oneshot service into the next phase's snapshot.
         systemctl("stop", TIMER)
         systemctl("reset-failed", TIMER)
         time.sleep(0.5)
+        node_completions = validate_completed(
+            node_record, NODE_RUNTIME, PYTHON_RUNTIME, node_baseline,
+            completions())
         require(sha256_file(STATE / "queue.json") == seeded_sha,
                 "harvest switch changed the seeded queue bytes")
         require(process_state(unrelated.pid)["alive"],
@@ -1052,12 +1053,12 @@ def drain_harvest_phase(args):
         require(len(python_records) == 1,
                 "harvest return switch did not create exactly one record")
         python_record = json.loads(python_records[0].read_text())
-        python_completions = validate_completed(
-            python_record, PYTHON_RUNTIME, NODE_RUNTIME, python_baseline,
-            completions())
         systemctl("stop", TIMER)
         systemctl("reset-failed", TIMER)
         time.sleep(0.5)
+        python_completions = validate_completed(
+            python_record, PYTHON_RUNTIME, NODE_RUNTIME, python_baseline,
+            completions())
         require(sha256_file(STATE / "queue.json") == seeded_sha,
                 "harvest return switch changed the seeded queue bytes")
         require(process_state(unrelated.pid)["alive"],
