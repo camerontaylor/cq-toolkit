@@ -147,8 +147,17 @@ export function renderMeasurementReport({
   const lit = (text) => {
     const flat = String(text).replaceAll('\r', ' ').replaceAll('\n', ' ');
     const runs = flat.match(/`+/g) ?? [];
-    const fence = '`'.repeat(Math.max(0, ...runs.map((r) => r.length)) + 1);
-    const pad = flat.startsWith('`') || flat.endsWith('`') ? ' ' : '';
+    const longest = runs.reduce((max, run) => Math.max(max, run.length), 0);
+    const fence = '`'.repeat(longest + 1);
+    // CommonMark strips one space from each end of a code span, so pad when
+    // the text starts or ends with a backtick, and compensate when it is
+    // space-bounded (and not all spaces) so the stripped text reads back.
+    const pad =
+      flat.startsWith('`') ||
+      flat.endsWith('`') ||
+      (flat.startsWith(' ') && flat.endsWith(' ') && flat.trim() !== '')
+        ? ' '
+        : '';
     return `${fence}${pad}${flat}${pad}${fence}`;
   };
   // A non-known total never renders its stored number: unavailable,
@@ -188,7 +197,7 @@ export function renderMeasurementReport({
     '',
     ...(unknown.length === 0
       ? ['- (none)']
-      : unknown.map((row) => `- ${md(row.source)} — ${md(row.kind)}: ${md(row.reason)}`)),
+      : unknown.map((row) => `- ${lit(row.source)} — ${md(row.kind)}: ${md(row.reason)}`)),
     '',
     `## Fix panel — window ${span}`,
     '',

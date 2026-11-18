@@ -464,6 +464,22 @@ describe('M10d nominal evidence', () => {
     );
   });
 
+  test('unknown sources and space-bounded references render as inert literals', () => {
+    const rendered = compose({
+      artifacts: [' bundles/run-a ', '`'.repeat(50_000).replaceAll('`', 'a`')],
+      reader: {
+        ...knownReader(),
+        unknown: [
+          { source: '# evidence', kind: 'unavailable', reason: 'r' },
+          { source: 'https://example.com/x', kind: 'unavailable', reason: 'r' },
+        ],
+      },
+    }).markdown;
+    expect(rendered).toContain('- `# evidence` —');
+    expect(rendered).toContain('- `https://example.com/x` —');
+    expect(rendered).toContain('- `  bundles/run-a  `');
+  });
+
   test('no live calls or engine writes', async () => {
     const source = await readFile('scripts/measurement-rollup.mjs', 'utf8');
     const imports = [...source.matchAll(/from '([^']+)'/g)].map((match) => match[1]);
@@ -566,7 +582,7 @@ describe('M10d missing evidence', () => {
     expect(rendered.report.unknown).toEqual([
       { source: 'ciRed', kind: 'unavailable', reason: 'no CI coverage declared' },
     ]);
-    expect(rendered.markdown).toContain('- ciRed — unavailable: no CI coverage declared');
+    expect(rendered.markdown).toContain('- `ciRed` — unavailable: no CI coverage declared');
   });
 
   test('no live calls or engine writes', () => {
@@ -852,7 +868,7 @@ describe('M10d failure evidence', () => {
     expect(echoed.report.unknown).toEqual([
       { source: 'ciRed', kind: 'unavailable', reason: 'no CI coverage declared' },
     ]);
-    expect(echoed.markdown.match(/- ciRed — unavailable: no CI coverage declared/g)).toHaveLength(
+    expect(echoed.markdown.match(/- `ciRed` — unavailable: no CI coverage declared/g)).toHaveLength(
       1,
     );
     // Untrusted text renders inert: pipes escape in cells and bullets, and a
@@ -871,7 +887,7 @@ describe('M10d failure evidence', () => {
         },
       }),
     );
-    expect(multiline.markdown).toContain('- bundle:x.json — corrupt: line one line two');
+    expect(multiline.markdown).toContain('- `bundle:x.json` — corrupt: line one line two');
     expect(multiline.markdown).not.toContain('line one\nline two');
     // Markdown metacharacters are inert too, not just pipes: an accepted
     // artifact reference spelled like an image link renders as literal text —
@@ -1079,7 +1095,7 @@ describe('M4b1 acceptance import composed into the M10d readout', () => {
       { source: missingBaseUrl, kind: 'unavailable', reason: 'reviewed base not recorded' },
     ]);
     expect(rendered.markdown).toContain(
-      `- ${missingBaseUrl} — unavailable: reviewed base not recorded`,
+      `- \`${missingBaseUrl}\` — unavailable: reviewed base not recorded`,
     );
   });
 });
