@@ -50,7 +50,8 @@ HEX64_RE = re.compile(r"[0-9a-f]{64}")
 NODE_SCRIPT_RE = re.compile(
     r"(?P<root>.*/\.local/opt/crq-(?P<sha>[0-9a-f]{40}))"
     r"/dist/queue-runner/crq\.js")
-DURATION_RE = re.compile(r"(?P<value>\d+)(?P<unit>ms|s|min|h)?")
+MAX_SAVED_START_TIMEOUT_SECONDS = 7 * 24 * 3600
+DURATION_RE = re.compile(r"(?P<value>\d+)(?P<unit>ms|s|min|m|h)?")
 UNIT_FILE_STATES = {"enabled", "disabled", "static", "masked", "alias",
                     "indirect", "generated", "transient", "bad"}
 RESTORABLE_ACTIVE = {"active", "inactive"}
@@ -230,11 +231,14 @@ def _logical_lines(text: str) -> list[str]:
     """Physical lines joined across trailing-backslash continuations, as systemd reads them."""
     logical = []
     pending = ""
-    for line in text.splitlines():
-        if pending and line.lstrip()[:1] in ("#", ";"):
-            # systemd skips comment lines inside a continuation.
+    # A leading UTF-8 BOM is not part of the first line, as systemd reads it.
+    for line in text.removeprefix("\ufeff").splitlines():
+        if line.lstrip()[:1] in ("#", ";"):
+            # systemd skips standalone comments, and comments inside a
+            # continuation, so a comment's trailing backslash never continues.
             continue
-        if line.endswith("\\"):
+        # Only an unescaped final backslash continues: an even run is escaped pairs.
+        if (len(line) - len(line.rstrip("\\"))) % 2:
             pending += line[:-1] + " "
             continue
         logical.append(pending + line)
@@ -261,6 +265,23 @@ def _section_values(text: str, section: str, key: str) -> list[str]:
     return values
 
 
+def _section_assignments(text: str, section: str, keys: tuple[str, ...]) -> list[tuple[str, str]]:
+    """Ordered (key, value) assignments of ``keys`` in ``section``, as systemd applies them."""
+    found = []
+    current = None
+    for line in _logical_lines(text):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current = stripped[1:-1].strip()
+            continue
+        if current != section or "=" not in stripped:
+            continue
+        name, value = stripped.split("=", 1)
+        if name.strip() in keys:
+            found.append((name.strip(), value.strip()))
+    return found
+
+
 def _duration_seconds(text: str) -> int | None:
     # systemd time spans may join several components with whitespace ("5min 20s").
     pieces = text.split()
@@ -271,9 +292,12 @@ def _duration_seconds(text: str) -> int | None:
         match = DURATION_RE.fullmatch(piece)
         if match is None:
             return None
-        factor = {"ms": 0.001, "s": 1, "min": 60, "h": 3600}[match.group("unit") or "s"]
-        seconds += int(match.group("value")) * factor
-    if seconds <= 0:
+        factor = {"ms": 0.001, "s": 1, "min": 60, "m": 60, "h": 3600}[match.group("unit") or "s"]
+        try:
+            seconds += int(match.group("value")) * factor
+        except OverflowError:
+            return None
+    if seconds <= 0 or seconds == float("inf"):
         return None
     return int(seconds) if seconds >= 1 else 1
 
@@ -1303,16 +1327,17 @@ class ProductionUnitAdapter:
                 validate=True).decode("utf-8")
         except (KeyError, ValueError, UnicodeEncodeError, UnicodeDecodeError):
             self.refuse("restored service is not readable unit text")
-        declared = _section_values(text, "Service", "TimeoutStartSec")
-        if not declared:
+        # systemd applies TimeoutStartSec= and TimeoutSec= in file order and the
+        # last assignment wins; an empty or unsupported value (``infinity``,
+        # garbage) keeps the pinned-derived default so a restore stays
+        # recoverable instead of refusing after the mask is already durable.
+        assignments = _section_assignments(
+            text, "Service", ("TimeoutStartSec", "TimeoutSec"))
+        if not assignments:
             return self._service_start_timeout(unit, inventory)
-        if len(declared) > 1:
-            self.refuse("restored service declares multiple TimeoutStartSec "
-                        "values")
-        seconds = _duration_seconds(declared[0])
-        if seconds is None:
-            self.refuse("restored service declares an unsupported "
-                        "TimeoutStartSec: " + declared[0][:60])
+        seconds = _duration_seconds(assignments[-1][1])
+        if seconds is None or seconds > MAX_SAVED_START_TIMEOUT_SECONDS:
+            return self._service_start_timeout(unit, inventory)
         return seconds + COMPLETION_MARGIN_SECONDS
 
     # -- seam: snapshot and validation ----------------------------------

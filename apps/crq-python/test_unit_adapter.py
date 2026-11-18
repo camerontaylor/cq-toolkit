@@ -1514,14 +1514,30 @@ class AdapterTests(AdapterFixture):
         recovery.restore_activation("crq-tick.service", snapshot)
         self.assertEqual(self.fake.active["crq-tick.service"], "active")
 
-    def test_unsupported_saved_timeout_refuses_before_the_mask_is_released(self):
-        recovery, snapshot = self._recovery_with_timeout_line("TimeoutStartSec=bogus")
-        service = self.unit_dir / "crq-tick.service"
-        before = _tree(self.unit_dir)
-        with self.assertRaisesRegex(dc.Refused, "unsupported TimeoutStartSec"):
-            recovery.restore_activation("crq-tick.service", snapshot)
-        self.assertEqual(_tree(self.unit_dir), before)
-        self.assertTrue(service.is_symlink())
+    def test_unsupported_saved_timeout_falls_back_to_the_pinned_bound(self):
+        for line in ("TimeoutStartSec=bogus", "TimeoutStartSec=infinity",
+                     "TimeoutStartSec=" + "9" * 309 + "s"):
+            with self.subTest(line=line):
+                self.setUp()
+                recovery, snapshot = self._recovery_with_timeout_line(line)
+                self.fake.service_start_delay = 120
+                recovery.restore_activation("crq-tick.service", snapshot)
+                self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_last_timeout_assignment_wins_across_both_keys(self):
+        for lines in ("TimeoutStartSec=5min\nTimeoutStartSec=20min",
+                      "TimeoutStartSec=1min\nTimeoutSec=20min",
+                      "# c \\\nTimeoutStartSec=20min"):
+            with self.subTest(lines=lines):
+                self.setUp()
+                recovery, snapshot = self._recovery_with_timeout_line(lines)
+                self.fake.service_start_delay = 700
+                recovery.restore_activation("crq-tick.service", snapshot)
+                self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_minute_unit_m_is_accepted(self):
+        self.assertEqual(adapter_mod._duration_seconds("5m"), 300)
+        self.assertIsNone(adapter_mod._duration_seconds("9" * 309 + "s"))
 
     def test_comment_inside_a_timeout_continuation_is_ignored(self):
         recovery, snapshot = self._recovery_with_timeout_line(
@@ -1534,7 +1550,7 @@ class AdapterTests(AdapterFixture):
         service = self.unit_dir / "crq-tick.service"
         text = self.python_service("crq-tick.service")["bytes"].decode("utf-8")
         _write(service, text.replace(
-            "TimeoutStartSec=10min", "TimeoutStartSec=20m").encode(), 0o600)
+            "TimeoutStartSec=10min", "TimeoutStartSec=bogus").encode(), 0o600)
         self.fake.active["crq-tick.service"] = "inactive"
         current = self.make_adapter()
         snapshot = current.snapshot("crq-tick.service")
