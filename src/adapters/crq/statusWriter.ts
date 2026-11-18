@@ -119,7 +119,10 @@ export function fileStatusWriterEffects(
       const at = new Date(now() * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
       await writeFile(
         join(roots.stateRoot, 'events.jsonl'),
-        `${JSON.stringify({ at, event: event.event, error: event.error })}\n`,
+        `${pythonJsonText(
+          { at, event: event.event, error: event.error },
+          { asciiOnly: true, sortKeys: false, keyOrder: 'insertion', spacedSeparators: true },
+        )}\n`,
         { flag: 'a' },
       );
     },
