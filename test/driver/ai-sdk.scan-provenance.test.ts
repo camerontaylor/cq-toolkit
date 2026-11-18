@@ -13,7 +13,13 @@ import { probeRgVersion } from '../../src/harness/tools.js';
 
 // grep needs a runnable rg >= RG_MINIMUM_VERSION; the driver withholds grep
 // otherwise, so this leg can only exercise the raw-scan path where rg works.
-const rgUsable = (await probeRgVersion()).ok === true;
+const rgProbe = await probeRgVersion();
+const rgUsable = rgProbe.ok === true;
+// INSTALLED, not usable: an rg older than RG_MINIMUM_VERSION still RUNS (the
+// provenance leg below injects resolveRg, so the driver offers grep, and the
+// tool spawns `rg` from PATH with no fallback) — old-rg is exactly the case
+// that leg covers. Only an ABSENT rg binary breaks it.
+const rgInstalled = rgUsable || (rgProbe.ok === false && rgProbe.reason === 'old');
 
 describe('ai-sdk driver specifics (mock model)', () => {
   test('read upload scanning uses normalized executor provenance for file_path', async () => {
@@ -61,6 +67,12 @@ describe('ai-sdk driver specifics (mock model)', () => {
   });
 
   test('grep upload scanning uses normalized executor provenance for matched files', async () => {
+    // Prerequisite: an INSTALLED rg (not merely a usable one). The injected
+    // resolveRg only decides whether the driver SERVES grep; the tool then
+    // spawns `rg` from PATH with no fallback, so with an ABSENT rg the spawn
+    // fails and no secret.ts content ever reaches beforeRequest. An rg older
+    // than RG_MINIMUM_VERSION still runs — that is exactly this leg's case.
+    if (!rgInstalled) return;
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-grep-provenance-'));
     const workspace = join(scratchDir, 'workspace');
     await mkdir(workspace);
