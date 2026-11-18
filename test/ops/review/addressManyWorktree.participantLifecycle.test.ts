@@ -253,6 +253,14 @@ test('a rejected action that deferred a cancelled attempt still settles it befor
     expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('export const a = 1;\n');
     expect(report.failed).toHaveLength(1);
     expect(f.repo.git('show', `${report.failed[0]!.sha}:src/a.ts`)).toBe('RAW CANCELLED PARTIAL\n');
+    // Settlement succeeded, so the open-participant pass wrote the one terminal
+    // report (it carries the cancel reason and the retained reference).
+    const persisted = JSON.parse(await readFile(report.reportPath, 'utf8')) as {
+      reasons: string[];
+      failed: unknown[];
+    };
+    expect(persisted.reasons).toContain('parent cancelled');
+    expect(persisted.failed).toHaveLength(1);
   } finally {
     await f.repo.cleanup();
   }

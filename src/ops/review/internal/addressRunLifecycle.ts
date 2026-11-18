@@ -472,8 +472,10 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
       try {
         const work = (async () => {
           let persistFailure: { error: unknown } | undefined;
+          let settled = false;
           try {
             await settleAddressTerminalEvidence(terminalToken(this), attempts);
+            settled = true;
           } finally {
             // Real local ref effects survive a later restore/report failure.
             // Every participant, closed or open: a closed participant's cancelled
@@ -503,7 +505,10 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
             // the caller).
             for (const participant of gained) {
               if (!participant.report || !participant.reportTarget) continue;
-              if (!participant.closed && !participant.rejected) continue;
+              // An open rejected participant is written once, by the open pass
+              // below, when settlement succeeds; only a failed settlement (no
+              // open pass) needs the early write.
+              if (!participant.closed && !(participant.rejected && !settled)) continue;
               try {
                 await persistAddressTerminalReport(
                   terminalToken(this),
