@@ -92,8 +92,11 @@ describe('makeSubprocessPrEffects spawn env — repoRoot is the only repo select
       await chmod(join(binDir, 'gh'), 0o755);
       const originalPath = process.env['PATH'];
       const originalGhRepo = process.env['GH_REPO'];
+      const originalGhBin = process.env['CQ_GH_BIN'];
       process.env['PATH'] = `${binDir}:${originalPath ?? ''}`;
       process.env['GH_REPO'] = 'other/repo';
+      // An inherited CQ_GH_BIN would bypass the fake gh on PATH.
+      delete process.env['CQ_GH_BIN'];
       try {
         const effects = makeSubprocessPrEffects(repoDir);
         await expect(effects.getPrBody(123)).resolves.toBe('x');
@@ -107,6 +110,8 @@ describe('makeSubprocessPrEffects spawn env — repoRoot is the only repo select
         else process.env['PATH'] = originalPath;
         if (originalGhRepo === undefined) delete process.env['GH_REPO'];
         else process.env['GH_REPO'] = originalGhRepo;
+        if (originalGhBin === undefined) delete process.env['CQ_GH_BIN'];
+        else process.env['CQ_GH_BIN'] = originalGhBin;
       }
     } finally {
       await rm(scratch, { recursive: true, force: true });
