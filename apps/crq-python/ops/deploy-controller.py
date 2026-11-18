@@ -678,6 +678,25 @@ def preservation_check(effects: Effects, before: dict, surfaces=None) -> dict:
     return {"preserved": True, "checked": sorted(surfaces)}
 
 
+def rebaseline_preserved(effects: Effects, state: dict, unit: str, failed_phase: str):
+    """Preserved-state baseline for the post-restore check, after a fence.
+
+    Once activation was pending the target unit may have run and legitimately
+    advanced queue.json or the heartbeat, so the pre-activation digests no
+    longer describe what restore must leave alone. A successful stop_and_drain
+    fence proves nothing else is writing: observe the digests now, and let the
+    post-restore check prove that restoring did not change them. Earlier
+    phases keep the original baseline. Returns (state, prior) where prior is
+    the replaced digests (or None) so the caller can journal the change.
+    """
+    if state is None or failed_phase not in ("activation_pending", "restore_activation_pending"):
+        return state, None
+    surfaces = preserved_surfaces(unit)
+    fresh = preserved_digests(effects, surfaces)
+    prior = {key: state.get(key) for key in fresh}
+    return {**state, **fresh}, prior
+
+
 # ------------------------------------------------------------------- health
 
 
@@ -1462,7 +1481,7 @@ def _completion(adapter, unit, runtime, previous):
 def recover_unit(effects, adapter, path, *, adapter_factory=None):
     """Restore a pre-activation intent; activation ambiguity requires investigation.
 
-    ``adapter_factory(unit, prior_runtime)`` is a composition callback used by
+    ``adapter_factory(unit, prior_runtime, source_sha=None)`` is a composition callback used by
     the production CLI. It is invoked under the controller lock with values the
     controller validated from the one retained record, after the read-only
     queue-drain gate and before snapshot validation, so composition cannot race
@@ -1511,7 +1530,11 @@ def recover_unit(effects, adapter, path, *, adapter_factory=None):
         # decides whether that observation applies at all.
         queue_drain_gate(effects, record["unit"])
         if adapter_factory is not None:
-            adapter = adapter_factory(record["unit"], record["prior_runtime"])
+            # Render the prior runtime at the commit the transaction retained,
+            # not at a HEAD that may have advanced past what can render it.
+            retained = record["state"].get("prior_head") if isinstance(record.get("state"), dict) else None
+            adapter = adapter_factory(record["unit"], record["prior_runtime"],
+                                      source_sha=retained if _hex(SHA_RE, retained) else None)
         if adapter is None:
             raise Refused("no unit recovery adapter")
         adapter.validate_snapshot(record["unit"], record["snapshot"])
@@ -1526,12 +1549,15 @@ def recover_unit(effects, adapter, path, *, adapter_factory=None):
             # recovery_required. The record retains the failed phase, the
             # original reason and the fence evidence.
             fence = adapter.stop_and_drain(record["unit"])
+            state, rebased_from = rebaseline_preserved(
+                effects, record["state"], record["unit"], failed_phase)
             adapter.restore(record["unit"], record["snapshot"])
-            if record["state"] is not None:
-                preservation_check(effects, record["state"],
-                                   preserved_surfaces(record["unit"]))
+            if state is not None:
+                preservation_check(effects, state, preserved_surfaces(record["unit"]))
             record = {**record, "phase": "restore_activation_pending",
-                      "failed_phase": failed_phase, "fence": fence}
+                      "failed_phase": failed_phase, "fence": fence, "state": state}
+            if rebased_from is not None:
+                record["rebaselined_from"] = rebased_from
             effects.journal_replace(path, record)
             adapter.restore_activation(record["unit"], record["snapshot"])
             completed = {**record, "outcome": "rolled_back"}
@@ -1879,13 +1905,16 @@ def switch_unit(effects, adapter, unit, runtime):
                 # phase, the reason and the fence evidence. A fence that cannot
                 # establish absence raises and stays recovery_required.
                 fence = adapter.stop_and_drain(unit)
+                state, rebased_from = rebaseline_preserved(
+                    effects, identity["state"], unit, failed_phase)
                 adapter.restore(unit, snapshot)
-                if identity["state"] is not None:
-                    preservation_check(effects, identity["state"],
-                                       preserved_surfaces(unit))
+                if state is not None:
+                    preservation_check(effects, state, preserved_surfaces(unit))
                 identity = {**identity, "phase": "restore_activation_pending",
                             "failed_phase": failed_phase, "fence": fence,
-                            "reason": str(exc)[:400]}
+                            "state": state, "reason": str(exc)[:400]}
+                if rebased_from is not None:
+                    identity["rebaselined_from"] = rebased_from
                 effects.journal_replace(path, identity)
                 adapter.restore_activation(unit, snapshot)
                 record = {**identity, "outcome": "rolled_back"}
@@ -2198,11 +2227,12 @@ def main(argv=None) -> int:
         elif args.operation == "recover":
             overlay, _raw = helper_module.load_overlay(args.overlay)
 
-            def adapter_factory(unit, prior_runtime):
+            def adapter_factory(unit, prior_runtime, source_sha=None):
                 live = _load_live_binding()
                 try:
                     adapter, _selection = live.production_adapter(
-                        effects, overlay, unit=unit, runtime=prior_runtime)
+                        effects, overlay, unit=unit, runtime=prior_runtime,
+                        source_sha=source_sha)
                 except (live.LiveBindingRefused, live.factory.FactoryRefused,
                         live.completion.CompletionError) as exc:
                     raise Refused(str(exc)[:400]) from exc

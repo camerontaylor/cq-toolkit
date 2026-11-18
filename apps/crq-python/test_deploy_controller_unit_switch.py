@@ -138,6 +138,49 @@ class UnitSwitchTests(ControllerFixture):
         self.assertEqual(final["phase"], "restore_activation_pending")
         self.assertEqual(final["outcome"], "rolled_back")
 
+    def test_recovery_rebaselines_state_the_activated_unit_advanced(self):
+        """An issuing unit that ran after activation may advance queue state;
+        the fenced recovery re-observes it instead of refusing."""
+        test = self
+
+        class Crash(BaseException):
+            pass
+
+        class RunningAdapter(Adapter):
+            def start(self, unit):
+                super().start(unit)
+                test.write_state("queue.json", {"items": [], "starts": ["ran"]})
+                raise Crash()
+
+        adapter = RunningAdapter("python")
+        with self.assertRaises(Crash):
+            dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
+        path = next(self.record_dir.glob("controller-*.json"))
+        before = json.loads(path.read_text())["state"]
+        recovered = dc.recover_unit(self.effects, adapter, path)
+        self.assertEqual(recovered["outcome"], "rolled_back")
+        self.assertEqual(recovered["rebaselined_from"]["preserved/queue.json"],
+                         before["preserved/queue.json"])
+        self.assertNotEqual(recovered["state"]["preserved/queue.json"],
+                            before["preserved/queue.json"])
+
+    def test_switch_rollback_rebaselines_after_activation_advanced_state(self):
+        test = self
+
+        class FailingAdapter(Adapter):
+            def start(self, unit):
+                super().start(unit)
+                test.write_state("queue.json", {"items": [], "starts": ["ran"]})
+                raise RuntimeError("start failed after the unit ran")
+
+        adapter = FailingAdapter("python")
+        with self.assertRaises(dc.RecoveryRequired):
+            dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
+        record = json.loads(next(self.record_dir.glob("controller-*.json")).read_text())
+        self.assertEqual(record["outcome"], "rolled_back")
+        self.assertEqual(record["failed_phase"], "activation_pending")
+        self.assertIn("preserved/queue.json", record["rebaselined_from"])
+
     def test_activation_recovery_drains_owned_work_before_restoring(self):
         class Crash(BaseException):
             pass
@@ -711,7 +754,7 @@ class RecoverFactoryTests(ControllerFixture):
                 events.append("validate_snapshot")
                 super().validate_snapshot(unit, snapshot)
 
-        def factory(unit, prior_runtime):
+        def factory(unit, prior_runtime, source_sha=None):
             events.append("factory")
             calls.append((unit, prior_runtime))
             self.assertNotIn("validate_snapshot", events)
@@ -728,7 +771,7 @@ class RecoverFactoryTests(ControllerFixture):
         calls = []
         adapters = []
 
-        def factory(unit, prior_runtime):
+        def factory(unit, prior_runtime, source_sha=None):
             calls.append((unit, prior_runtime))
             adapter = Adapter(prior_runtime)
             adapters.append(adapter)
@@ -751,12 +794,24 @@ class RecoverFactoryTests(ControllerFixture):
         factory.assert_not_called()
         self.assertEqual(path.read_bytes(), before)
 
+    def test_recover_factory_receives_the_retained_source_commit(self):
+        path = self.pending_record()
+        retained = json.loads(path.read_text())["state"]["prior_head"]
+        seen = []
+
+        def factory(unit, prior_runtime, source_sha=None):
+            seen.append(source_sha)
+            return Adapter(prior_runtime)
+
+        dc.recover_unit(self.effects, None, path, adapter_factory=factory)
+        self.assertEqual(seen, [retained])
+
     def test_recover_factory_runs_under_the_controller_lock(self):
         path = self.pending_record()
         lock = self.runner / "state" / dc.LOCK_NAME
         observed = []
 
-        def factory(unit, prior_runtime):
+        def factory(unit, prior_runtime, source_sha=None):
             descriptor = os.open(lock, os.O_RDONLY)
             try:
                 with self.assertRaises(BlockingIOError):
@@ -882,7 +937,7 @@ class RecoverFactoryTests(ControllerFixture):
 
         adapters = []
 
-        def factory(unit, prior_runtime):
+        def factory(unit, prior_runtime, source_sha=None):
             adapter = OwnedWorkAdapter()
             adapters.append(adapter)
             return adapter
@@ -920,7 +975,7 @@ class RecoverFactoryTests(ControllerFixture):
 
         adapters = []
 
-        def factory(unit, prior_runtime):
+        def factory(unit, prior_runtime, source_sha=None):
             adapter = UndrainedAdapter()
             adapters.append(adapter)
             return adapter

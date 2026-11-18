@@ -960,6 +960,46 @@ def diff_changed_lines(patch):
     return added, removed
 
 
+HUNK_HEADER = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
+
+
+def diff_changed_locations(patch):
+    """Changed lines of a -U0 diff keyed by position, not file-wide text.
+
+    Returns (added, removed_gaps, removed, added_gaps) as sets: added holds
+    (new_line, text); removed holds (old_line, text); removed_gaps holds
+    (new-side line preceding the deletion, text); added_gaps holds (old-side
+    line preceding the insertion, text). The gap forms let a deletion in one
+    diff be matched to a re-insertion in a diff that starts from its result.
+    """
+    added, removed, added_gaps, removed_gaps = set(), set(), set(), set()
+    old_no = new_no = old_anchor = new_anchor = 0
+    in_hunk = False
+    for line in patch.splitlines():
+        if line.startswith('diff --git '):
+            in_hunk = False
+        elif line.startswith('@@'):
+            match = HUNK_HEADER.match(line)
+            in_hunk = match is not None
+            if not in_hunk:
+                continue
+            old_start, old_count, new_start, new_count = match.groups()
+            old_no, new_no = int(old_start), int(new_start)
+            # git names the preceding line for an empty side, else the first.
+            old_anchor = old_no if old_count == '0' else old_no - 1
+            new_anchor = new_no if new_count == '0' else new_no - 1
+        elif in_hunk and line.startswith('+'):
+            added.add((new_no, line[1:]))
+            added_gaps.add((old_anchor, line[1:]))
+            new_no += 1
+        elif in_hunk and line.startswith('-'):
+            removed.add((old_no, line[1:]))
+            removed_gaps.add((new_anchor, line[1:]))
+            old_no += 1
+    return {'added': added, 'removed': removed,
+            'added_gaps': added_gaps, 'removed_gaps': removed_gaps}
+
+
 def path_diff(c, tmp, name, args):
     """Write a diff through --output so trailing whitespace is not stripped."""
     target = Path(tmp) / name
@@ -986,11 +1026,15 @@ def head_change_patch(c, tmp, name, published, actual_head, path):
 
 
 def change_undone(published, head):
-    """Lines the head diff undoes relative to the published changed lines."""
-    published_added, published_removed = published
-    head_added, head_removed = head
-    return (sorted(set(published_added) & set(head_removed)) +
-            sorted(set(published_removed) & set(head_added)))
+    """Changes the head diff undoes at the same location in the published tree.
+
+    Both arguments are diff_changed_locations() results. The published diff
+    maps parent->published and the head diff maps published->head, so
+    published new-line numbers and head old-line numbers share one coordinate
+    system. An identical line elsewhere in the file is not an undo.
+    """
+    return (sorted(published['added'] & head['removed']) +
+            sorted(published['removed_gaps'] & head['added_gaps']))
 
 
 def extra_commits(c, published, actual_head):
@@ -1081,7 +1125,8 @@ def merge_head_evidence(c, record, actual_head):
             total_bytes += head_size
             if head_size > MAX_CONTAINMENT_PATCH_BYTES or total_bytes > MAX_CONTAINMENT_TOTAL_BYTES:
                 raise ValueError('published repair change too large to verify; needs revalidation: ' + path)
-            undone = change_undone(published_lines, diff_changed_lines(head_patch))
+            undone = change_undone(diff_changed_locations(published_patch),
+                                   diff_changed_locations(head_patch))
             if undone or (mode_changed and after[0] != before[0]):
                 raise ValueError('merged repair source changed; needs revalidation: ' + path)
             result.update(status='contained', published_parent=published_parent,

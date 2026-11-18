@@ -46,6 +46,11 @@ def utc(text):
 
 class RepairDrainTest(unittest.TestCase):
     def setUp(self):
+        # The snapshot secret scan shells out to the denylist/gitleaks policy;
+        # drain fixtures pin clean source, so patch the scanner verdict.
+        scan = mock.patch.object(service, 'triage_context_safe', return_value=True)
+        scan.start()
+        self.addCleanup(scan.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -956,6 +961,21 @@ class RepairDrainTest(unittest.TestCase):
                                   self.root / 'dispatch', judge=False)
             snapshot.assert_not_called()
             provider.assert_not_called()
+
+    def test_dispatch_refuses_a_secret_bearing_source_snapshot_before_any_driver(self):
+        self.worktree()
+        job = json.loads((self.root / 'state/repair/inbox/crq-run1-F1.json').read_text())
+        snapshot = {'path': 'src/a.py', 'source': '1: key = "' + 'AKIA' + 'IOSFODNN7EXAMPLE"'}
+        for driver, target in (('cq', service.cq), ('codex', service.codex)):
+            with mock.patch.object(service, 'require_canonical_delivery'), \
+                 mock.patch.object(service, 'source_snapshot', return_value=snapshot), \
+                 mock.patch.object(service, 'triage_context_safe', return_value=False), \
+                 mock.patch.object(target, 'invoke') as provider:
+                with self.assertRaisesRegex(ValueError, 'secret scan rejected'):
+                    service._dispatch(self.config, {'driver': driver}, job, self.root,
+                                      self.root / ('dispatch-' + driver), judge=False)
+                provider.assert_not_called()
+            self.assertFalse((self.root / ('dispatch-' + driver) / 'source-snapshot.json').exists())
 
     def test_child_refusal_stops_the_pass_before_the_child_exits(self):
         # The reviewer's interleaving: child A refuses, the marker is removed
@@ -1943,9 +1963,9 @@ class RepairDrainTest(unittest.TestCase):
             service.main([])
         drain.assert_called_once()
 
-    def test_disabled_dispatch_narrates_on_stderr_and_keeps_stdout_empty(self):
-        # I1: stdout is the machine-readable channel; the disabled-dispatch
-        # narration is stderr-only and nothing is written to stdout.
+    def test_disabled_dispatch_narrates_on_stderr_and_emits_one_json_status(self):
+        # I1: stdout is the machine-readable channel and carries exactly one
+        # JSON status; the narration stays on stderr.
         disabled = {**self.config, 'repair': {**self.config['repair'], 'spend_authorization': '  '}}
         atomic(self.root / 'config.json', disabled)
         stdout, stderr = io.StringIO(), io.StringIO()
@@ -1955,11 +1975,11 @@ class RepairDrainTest(unittest.TestCase):
              contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             service.main([])
         drain.assert_not_called()
-        self.assertEqual(stdout.getvalue(), '')
+        self.assertEqual(json.loads(stdout.getvalue())['status'], 'disabled')
         self.assertIn('repair dispatch disabled', stderr.getvalue())
 
-    def test_selector_refusal_writes_nothing_to_stdout_and_returns_2(self):
-        # 1692: refusal exit code 2, and (I1) nothing on stdout for it.
+    def test_selector_refusal_emits_one_json_status_and_returns_2(self):
+        # 1692: refusal exit code 2, and (I1) one JSON status on stdout.
         atomic(self.root / 'config.json', self.config)
         stdout, stderr = io.StringIO(), io.StringIO()
         with mock.patch.object(service, 'ROOT', self.root), \
@@ -1969,7 +1989,7 @@ class RepairDrainTest(unittest.TestCase):
             code = service.main(['--job', 'crq-run1-F1'])
         self.assertEqual(code, 2)
         drain.assert_not_called()
-        self.assertEqual(stdout.getvalue(), '')
+        self.assertEqual(json.loads(stdout.getvalue())['status'], 'refused')
         self.assertIn('repair dispatch refused', stderr.getvalue())
 
     def test_write_result_emits_one_single_line_json_document(self):
