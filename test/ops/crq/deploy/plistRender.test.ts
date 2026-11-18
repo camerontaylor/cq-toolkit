@@ -162,3 +162,11 @@ describe('liveRender', () => {
     expect(log).not.toContain('lock+');
   });
 });
+
+describe('plist CR round trip', () => {
+  test('a string containing CR survives dump then parse', () => {
+    const value = new Map([['k', 'a\rb\r\nc']]);
+    expect(parsePlist(dumpPlist(value))).toEqual(value);
+    expect(dumpPlist(value)).toContain('&#13;');
+  });
+});

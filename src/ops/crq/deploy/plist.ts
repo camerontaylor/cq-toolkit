@@ -150,7 +150,11 @@ function escapeXml(text: string): string {
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(text))
     throw new ValueError('strings can not contain control characters; encode as bytes instead');
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\r/g, '&#13;');
 }
 
 export function dumpPlist(root: PlistValue): string {
