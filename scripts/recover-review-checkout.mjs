@@ -87,6 +87,11 @@ export async function recoverReviewCheckout(env, io) {
         io.print(`${slot.metadataPath}: ${error.message}`);
       }
     }
+    // The shell may change the checkout, so no complete record may survive its start.
+    for (const [index, slot] of slots.entries()) {
+      const value = metadata[index];
+      if (value?.incomplete === false) await slot.writeMetadata({ ...value, incomplete: true });
+    }
     const success = await io.shell(slots.map((slot) => slot.fd));
     if (mode === 'inspect') return;
     if (!success) throw new Error('Recovery shell exited unsuccessfully; metadata left incomplete');
