@@ -157,6 +157,7 @@ export async function runReviewChild(options: {
   try {
     const err = await open(join(dir, 'stderr.log'), 'w');
     try {
+      const startedAt = now().getTime();
       const child = spawn(
         options.timeoutBinary ?? 'timeout',
         ['--kill-after=60', `${options.timeoutMinutes}m`, ...meta.cmd],
@@ -196,10 +197,17 @@ export async function runReviewChild(options: {
         throw error;
       }
       const exit = await finished;
+      // Without `--foreground`, timeout's `--kill-after` SIGKILL hits the whole group,
+      // including timeout itself, so Node sees a signal exit (-9) rather than 124/137.
+      // Count that as a timeout only when the deadline had elapsed; an earlier external
+      // SIGKILL stays a plain failure.
+      const forcedKill =
+        exit === -osConstants.signals.SIGKILL &&
+        now().getTime() - startedAt >= options.timeoutMinutes * 60_000;
       await save(join(dir, 'exit.json'), {
         exit,
         ended_at: iso(),
-        timed_out: exit === 124 || exit === 137,
+        timed_out: exit === 124 || exit === 137 || forcedKill,
       });
       return 0;
     } finally {

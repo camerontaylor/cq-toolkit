@@ -35,9 +35,9 @@ async function waitFor(path: string): Promise<string> {
 const modulePath = fileURLToPath(
   new URL('../../../dist/adapters/crq/reviewProcess.js', import.meta.url),
 );
-async function start(root: string, timeoutBinary = 'timeout') {
+async function start(root: string, timeoutBinary = 'timeout', clockStepMs = 0) {
   const moduleUrl = pathToFileURL(modulePath).href;
-  const code = `import {runReviewChild} from ${JSON.stringify(moduleUrl)}; await runReviewChild({stateRoot:${JSON.stringify(root)},runId:'run-1',timeoutMinutes:1,timeoutBinary:${JSON.stringify(timeoutBinary)},env:{PATH:'/usr/bin:/bin'}});`;
+  const code = `import {runReviewChild} from ${JSON.stringify(moduleUrl)}; await runReviewChild({stateRoot:${JSON.stringify(root)},runId:'run-1',timeoutMinutes:1,now:(()=>{let t=Date.now();return()=>new Date(t+=${clockStepMs})})(),timeoutBinary:${JSON.stringify(timeoutBinary)},env:{PATH:'/usr/bin:/bin'}});`;
   return spawnReviewWrapper({
     stateRoot: root,
     runId: 'run-1',
@@ -83,6 +83,18 @@ describe('inactive detached review process', () => {
       );
     },
   );
+  it.each([
+    ['after the deadline', 61 * 60_000, true],
+    ['before the deadline', 0, false],
+  ])('records a group SIGKILL exit %s with timed_out=%s', async (_label, clockStepMs, timedOut) => {
+    const { root, dir } = await setup('open', ['/bin/echo', 'hello']);
+    const timeout = join(root, 'fake-timeout');
+    await writeFile(timeout, '#!/bin/sh\nkill -9 $$\n');
+    await chmod(timeout, 0o700);
+    await start(root, timeout, clockStepMs);
+    const result: unknown = JSON.parse(await waitFor(join(dir, 'exit.json')));
+    expect(result).toMatchObject({ exit: -9, timed_out: timedOut });
+  });
   it('refuses backfill before invoking any command', async () => {
     const { root, dir } = await setup('backfill', ['/bin/false']);
     await writeFile(
