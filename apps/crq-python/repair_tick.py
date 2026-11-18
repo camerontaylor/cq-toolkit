@@ -18,6 +18,13 @@ from crq_repair.bounded import JOB_ID, identity, job_path, require_canonical_del
 # fixed counts on these rungs, so nothing else may be recorded as a fix.
 FIXED_RUNGS = ('A0', 'A1', 'A2')
 
+# Total `gh pr create` launches allowed per publication. A process that dies
+# after journaling pr_create_pending but before launching gh (or a transient
+# gh failure) is retried on later ticks up to this bound; exhausted attempts
+# park the run in 'stale' for manual reconciliation instead of failing every
+# future tick.
+PR_CREATE_ATTEMPTS = 3
+
 
 def scan_fix_instructions(c, instructions, source_sha, scan_path):
     """Validate and scan the exact bounded guidance before binding it to a job."""
@@ -664,8 +671,18 @@ def finalize_publication(c, q, item, run, record, publication):
     else:
         prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
         if not prs:
-            if publication.get('pr_create_pending'):
-                raise ValueError('previous PR creation outcome unknown; reconcile existing PR before retry')
+            # recover_publication reconciled the fix branch to the prepared
+            # head and adopts any PR matching that head before calling here,
+            # so an empty list with a journaled pr_create_pending means the
+            # create never landed: relaunch it a bounded number of times,
+            # then hand off to a stale record instead of failing every
+            # future tick.
+            attempts = publication.get('pr_create_attempts', 0)
+            if attempts >= PR_CREATE_ATTEMPTS:
+                record.update(state='stale',
+                              error='fix PR creation never completed after ' + str(PR_CREATE_ATTEMPTS)
+                                    + ' attempts; reconcile the PR for ' + branch + ' manually')
+                return
             body = ['Verified CodeRabbit repairs from ' + run, '', '| finding | verdict | reason |', '|---|---|---|']
             for v in record['verdicts']:
                 body.append('| ' + v['job'] + ' | ' + v['verdict'] + ' | ' + v['reason'].replace('|', r'\|').replace('\n', ' ') + ' |')
@@ -673,6 +690,7 @@ def finalize_publication(c, q, item, run, record, publication):
             path = c.STATE / 'repair' / record['jobs'][0] / 'fix-pr.md'
             path.write_text('\n'.join(body) + '\n')
             publication['pr_create_pending'] = True
+            publication['pr_create_attempts'] = attempts + 1
             atomic(c.STATE / 'repair' / record['jobs'][0] / 'publication.json', publication)
             c.save_queue(q)
             c.run(['gh', 'pr', 'create', '--repo', c.REPO, '--base', DEFAULT_BRANCH, '--head', branch,
