@@ -1495,6 +1495,40 @@ class AdapterTests(AdapterFixture):
         self.assertEqual(self.fake.active["crq-tick.service"], "active")
         self.assertEqual(self.fake.active["crq-tick.timer"], "active")
 
+    def _recovery_with_timeout_line(self, line):
+        service = self.unit_dir / "crq-tick.service"
+        text = self.python_service("crq-tick.service")["bytes"].decode("utf-8")
+        _write(service, text.replace("TimeoutStartSec=10min", line).encode(), 0o600)
+        self.fake.active["crq-tick.service"] = "active"
+        current = self.make_adapter()
+        snapshot = current.snapshot("crq-tick.service")
+        recovery = self.make_adapter()
+        recovery.validate_snapshot("crq-tick.service", snapshot)
+        recovery.stop_and_drain("crq-tick.service")
+        recovery.restore("crq-tick.service", snapshot)
+        return recovery, snapshot
+
+    def test_restore_start_timeout_accepts_whitespace_before_equals(self):
+        recovery, snapshot = self._recovery_with_timeout_line("TimeoutStartSec =20min")
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_unsupported_saved_timeout_refuses_before_the_mask_is_released(self):
+        recovery, snapshot = self._recovery_with_timeout_line("TimeoutStartSec=bogus")
+        service = self.unit_dir / "crq-tick.service"
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused, "unsupported TimeoutStartSec"):
+            recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(_tree(self.unit_dir), before)
+        self.assertTrue(service.is_symlink())
+
+    def test_space_separated_time_span_is_summed(self):
+        self.assertEqual(adapter_mod._duration_seconds("5min 20s"), 320)
+        self.assertEqual(adapter_mod._duration_seconds("1h 30min"), 5400)
+        self.assertIsNone(adapter_mod._duration_seconds("5min bogus"))
+        self.assertIsNone(adapter_mod._duration_seconds(""))
+
     def test_forward_and_recovery_for_both_runtimes(self):
         cases = [
             ("crq-tick.service", NODE_RUNTIME, "python", 0o600),

@@ -226,27 +226,50 @@ def _read_template(prepare, root: Path, source_sha: str, name: str):
     return oid, raw, raw.decode("utf-8")
 
 
+def _logical_lines(text: str) -> list[str]:
+    """Physical lines joined across trailing-backslash continuations, as systemd reads them."""
+    logical = []
+    pending = ""
+    for line in text.splitlines():
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        logical.append(pending + line)
+        pending = ""
+    if pending:
+        logical.append(pending)
+    return logical
+
+
 def _section_values(text: str, section: str, key: str) -> list[str]:
     values = []
     current = None
-    for line in text.splitlines():
+    for line in _logical_lines(text):
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             current = stripped[1:-1].strip()
             continue
-        if current == section and stripped.startswith(key + "="):
-            values.append(stripped.split("=", 1)[1].strip())
+        if current != section or "=" not in stripped:
+            continue
+        name, value = stripped.split("=", 1)
+        # systemd ignores whitespace around the key and the equals sign.
+        if name.strip() == key:
+            values.append(value.strip())
     return values
 
 
 def _duration_seconds(text: str) -> int | None:
-    match = DURATION_RE.fullmatch(text.strip())
-    if match is None:
+    # systemd time spans may join several components with whitespace ("5min 20s").
+    pieces = text.split()
+    if not pieces:
         return None
-    value = int(match.group("value"))
-    unit = match.group("unit") or "s"
-    factor = {"ms": 0.001, "s": 1, "min": 60, "h": 3600}[unit]
-    seconds = value * factor
+    seconds = 0.0
+    for piece in pieces:
+        match = DURATION_RE.fullmatch(piece)
+        if match is None:
+            return None
+        factor = {"ms": 0.001, "s": 1, "min": 60, "h": 3600}[match.group("unit") or "s"]
+        seconds += int(match.group("value")) * factor
     if seconds <= 0:
         return None
     return int(seconds) if seconds >= 1 else 1
@@ -1849,6 +1872,10 @@ class ProductionUnitAdapter:
         self._compare_state(staged, service_state)
         if self._runtime_from_unit(staged) != snapshot["runtime"]:
             self.refuse("staged restore runtime changed before activation")
+        # Derive the start timeout while the mask and staged file are still in place, so an
+        # unsupported TimeoutStartSec refuses before the service is released.
+        start_timeout = self._restored_service_start_timeout(
+            unit, inventory, service_state)
         masked = self._show(unit, ["LoadState", "FragmentPath"])
         fenced = self._path_state(service)
         if masked["LoadState"] != "masked" \
@@ -1871,9 +1898,7 @@ class ProductionUnitAdapter:
         desired_service = snapshot["activators"]["service_active"]
         if desired_service == "active":
             self._ok(
-                self._run("start", unit,
-                          timeout=self._restored_service_start_timeout(
-                              unit, inventory, service_state)),
+                self._run("start", unit, timeout=start_timeout),
                 "restore service activation")
         elif desired_service == "inactive":
             result = self._run("stop", unit, timeout=60)
