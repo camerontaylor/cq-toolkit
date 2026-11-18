@@ -69,9 +69,17 @@ export const BashToolConfigSchema = z
     /** Workspace-relative default for calls that omit workdir/cwd. */
     defaultCwd: z.string().min(1).optional(),
     timeoutMs: z.number().int().positive().optional(),
+    /**
+     * How long finalization waits for `close` after a kill of ours before it
+     * stops waiting (a pipe-holder that escaped the group may never close).
+     */
+    killGraceMs: z.number().int().positive().optional(),
     maxOutputChars: z.number().int().positive().optional(),
   })
   .strict();
+
+/** Default post-kill wait when a bash config sets no `killGraceMs`. */
+export const DEFAULT_KILL_GRACE_MS = 1_000;
 
 /** The pre-F1 name for {@link BashToolConfig} — accepted for one release. */
 export const RunToolConfigSchema = BashToolConfigSchema;

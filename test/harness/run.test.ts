@@ -272,6 +272,8 @@ describe('no-shell run lifecycle', { timeout: 30_000 }, () => {
         env: buildChildEnv(process.env),
         maxBytes: 1_024,
         timeoutMs: 2_000,
+        // The post-kill wait is per-op config, passed through the options.
+        killGraceMs: 100,
       });
       const elapsed = Date.now() - startedAt;
       expect(outcome).toMatchObject({ kind: 'killed' });

@@ -1,17 +1,10 @@
 import { checkoutWriterStdio, trackCheckoutWriter } from '../shared/checkoutWriterContext.js';
 import { spawn } from 'node:child_process';
 import { registerProcessSignalCleanup } from '../shared/process-signals.js';
+import { DEFAULT_KILL_GRACE_MS } from './config.js';
 
 /** POSIX platforms get per-command process groups (`detached` + group kill). */
 const POSIX = process.platform !== 'win32';
-
-/**
- * How long `close` may lag a kill of ours before finalization stops waiting.
- * A group SIGKILL closes the command's own pipes almost immediately; this bound
- * exists only for a pipe-holder that escaped the group, where `close` may never
- * arrive at all.
- */
-const KILL_FINALIZE_GRACE_MS = 1_000;
 
 // ---------------------------------------------------------------------------
 // runShellCommand — one `run` command in its own process group
@@ -32,6 +25,11 @@ export interface RunCommandOptions {
   maxBytes: number;
   /** Per-command wall clock; on expiry the whole process group is killed. */
   timeoutMs?: number;
+  /**
+   * How long `close` may lag a kill of ours before finalization stops waiting;
+   * per-op CONFIG data (`bash.killGraceMs`), defaulting to the config default.
+   */
+  killGraceMs?: number;
   /** Cancellation: abort kills the whole process group. */
   signal?: AbortSignal;
 }
@@ -105,7 +103,10 @@ function spawnAndCollect(
     // the inherited pipes open forever, so waiting for `close` may never end.
     const armFinalize = (): void => {
       if (finalizeTimer !== undefined) return;
-      finalizeTimer = setTimeout(() => finalize(null, null), KILL_FINALIZE_GRACE_MS);
+      finalizeTimer = setTimeout(
+        () => finalize(null, null),
+        opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
+      );
     };
 
     let killedByUs = false;
