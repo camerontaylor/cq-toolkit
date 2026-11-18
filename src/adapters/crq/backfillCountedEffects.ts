@@ -10,13 +10,18 @@ import { LedgerIntegrityError, ledgerLoads } from '../../policy/crq/ledger.js';
 import { atomicWrite } from './atomic.js';
 import { artifactLocation, type ArtifactStore } from './findingStore.js';
 
+/** One run-directory name: no empty, dot, separator or NUL forms that could leave `runs/`. */
+function assertRunId(runId: string): void {
+  if (!runId || runId === '.' || runId === '..' || /[/\\\0]/.test(runId))
+    throw new LedgerIntegrityError('invalid run id');
+}
+
 /** Existing run artifacts only. `submission.json` is optional; the rest must exist. */
 export function backfillCountedArtifactReader(
   stateRoot: string,
 ): (runId: string) => Promise<BackfillCountedArtifacts> {
   return async (runId) => {
-    if (!runId || runId === '.' || runId === '..' || /[/\\\0]/.test(runId))
-      throw new LedgerIntegrityError('invalid run id');
+    assertRunId(runId);
     const root = await realpath(join(stateRoot, 'runs'));
     const dir = await realpath(join(root, runId));
     if (relative(root, dir) !== runId)
@@ -84,6 +89,7 @@ export function backfillCountedRetainedEventReader(
   stateRoot: string,
 ): (runId: string) => Promise<JsonObject | null> {
   return async (runId) => {
+    assertRunId(runId);
     let bytes: Uint8Array;
     try {
       // Same containment rule as the artifact reader: a symlinked event must

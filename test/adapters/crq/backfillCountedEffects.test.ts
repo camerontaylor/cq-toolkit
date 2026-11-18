@@ -197,6 +197,8 @@ describe('counted backfill retained event reader', () => {
       await rm(join(dir, 'review-event.json'));
       await symlink(join(other, 'review-event.json'), join(dir, 'review-event.json'));
       await expect(read('r')).rejects.toThrow('escapes run directory');
+      for (const bad of ['', '.', '..', '../runs', 'a/b', 'a\\b', 'a\0b'])
+        await expect(read(bad)).rejects.toThrow('invalid run id');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
