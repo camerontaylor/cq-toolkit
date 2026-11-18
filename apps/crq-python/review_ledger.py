@@ -402,6 +402,10 @@ class ArtifactStore:
         if filename.exists():
             if filename.read_bytes() != data:
                 raise IntegrityError("artifact store corruption")
+            # Always persist the file's directory entry, also when the artifact
+            # already exists: a previous call may have replaced it and failed
+            # before this sync, and a retry must not skip it.
+            fsync_dir(filename.parent)
         else:
             atomic(filename, data)
         return {"sha256": ident, "location": str(filename)}
