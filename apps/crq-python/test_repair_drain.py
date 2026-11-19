@@ -2242,6 +2242,21 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(process_item.call_args.args[1][0]['item'], 'pr4-merged')
         self.assertEqual(broken.read_bytes(), before)
 
+    def test_process_item_continues_past_a_job_whose_result_is_unreadable(self):
+        (self.root / 'wt/crq-repair-pr1-merged').mkdir(parents=True)
+        jobs = [bounded.drain_job(self.root, self.config, self.queue, j)[1] for j in ('crq-run1-F1', 'crq-run1-F2')]
+        calls = []
+
+        def flaky(config, job, wt):
+            calls.append(job['job'])
+            if len(calls) == 1:
+                raise ValueError('malformed result.json')
+            return {'verdict': 'FAILED'}
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'process', side_effect=flaky):
+            self.assertIsNone(service.process_item(self.config, jobs))
+        self.assertEqual(len(calls), 2)
+
     def test_process_item_stops_once_the_pause_marker_is_written(self):
         (self.root / 'wt/crq-repair-pr1-merged').mkdir(parents=True)
         jobs = [bounded.drain_job(self.root, self.config, self.queue, j)[1] for j in ('crq-run1-F1', 'crq-run1-F2')]

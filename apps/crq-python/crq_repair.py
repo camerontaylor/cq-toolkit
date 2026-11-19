@@ -1105,7 +1105,12 @@ def process_item(config, jobs):
             p = command(['git', 'worktree', 'add', '--detach', str(wt), base], cwd=config['clone'])
             if p.returncode:
                 raise RuntimeError('repair worktree creation failed')
-        res = process(config, job, wt)
+        try:
+            res = process(config, job, wt)
+        except (OSError, ValueError) as exc:
+            # a malformed result.json ends only its own job, not its siblings
+            narrate('repair ' + job['job'] + ': unreadable result: ' + str(exc))
+            continue
         if dispatch_paused(config):
             return 'rate-limit'
         if res.get('retry_after'):
