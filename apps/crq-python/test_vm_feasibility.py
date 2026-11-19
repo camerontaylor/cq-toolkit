@@ -228,8 +228,8 @@ class BoundsTests(unittest.TestCase):
     def test_qemu_is_bounded_and_isolated(self):
         argv = vm.qemu_command(pathlib.Path("/state/runs/r1"), 2222)
         joined = " ".join(argv)
-        self.assertIn("-m 2048", joined)
-        self.assertIn("-smp 2", joined)
+        self.assertEqual(argv[argv.index("-m") + 1], "2048")
+        self.assertEqual(argv[argv.index("-smp") + 1], "2")
         self.assertIn("hostfwd=tcp:127.0.0.1:2222-:22", joined)
         self.assertIn("overlay.qcow2", joined)
         self.assertIn("seed.iso", joined)
