@@ -5,7 +5,9 @@ test_host_config_overlay.py, test_host_config_policy.py, test_host_config_render
 test_host_config_switch.py, test_host_config_units.py, test_host_config_prepare.py
 and test_host_config_legacy.py.
 """
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import unittest
@@ -84,12 +86,54 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         # preview writes config.json under --output; an overlay inside that tree
         # would be replaced by the rendered runner config, so the next
         # invocation would reject it for lacking the overlay schema.
-        with self.assertRaisesRegex(ValueError, 'must not hold the overlay'):
-            host.main(['--overlay', str(self.overlay_path), 'preview', '--output', str(self.base)])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = host.main(['--overlay', str(self.overlay_path), 'preview', '--output', str(self.base)])
+        self.assertEqual(code, 1)
+        self.assertIn('must not hold the overlay', err.getvalue())
         self.assertEqual(self.overlay_path.read_bytes(), self.raw)
         self.assertFalse((self.base / 'config.json').exists())
         self.assertFalse((self.base / 'systemd').exists())
         self.assertFalse((self.base / 'records').exists())
+
+    def run_main(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = host.main(argv)
+            except SystemExit as exc:
+                code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_json_mode_usage_error_is_one_stdout_artifact_with_exit_2(self):
+        # I1: in machine mode a usage error, on the parser or a subparser, is
+        # one JSON error object on stdout and nothing on stderr.
+        for argv, subcommand in (
+                (['--json', '--overlay', str(self.overlay_path)], None),
+                (['--json', '--overlay', str(self.overlay_path), 'preview'], 'preview')):
+            with self.subTest(argv=argv):
+                code, out, err = self.run_main(argv)
+                self.assertEqual(code, 2)
+                self.assertEqual(err, '')
+                error = json.loads(out)['error']
+                self.assertEqual((error['kind'], error['subcommand'], error['exitCode']),
+                                 ('usage', subcommand, 2))
+
+    def test_json_mode_operation_failure_is_one_stdout_artifact_with_exit_1(self):
+        missing = self.base / 'missing-overlay.json'
+        code, out, err = self.run_main(['--json', '--overlay', str(missing), 'live-config'])
+        self.assertEqual(code, 1)
+        self.assertEqual(err, '')
+        error = json.loads(out)['error']
+        self.assertEqual((error['kind'], error['subcommand'], error['exitCode']),
+                         ('failed', 'live-config', 1))
+
+    def test_operation_failure_without_json_narrates_on_stderr_only(self):
+        missing = self.base / 'missing-overlay.json'
+        code, out, err = self.run_main(['--overlay', str(missing), 'live-config'])
+        self.assertEqual(code, 1)
+        self.assertEqual(out, '')
+        self.assertNotEqual(err, '')
 
     def test_prepare_rejects_worktree_drift_before_installing_units(self):
         self.command('checkout', '-q', '--detach', self.target)
