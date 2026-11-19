@@ -189,9 +189,20 @@ the root-move section above adds only the legacy overlay, `.bak` removal and
    every active `crq-*` unit, and the slot timer would keep admitting
    reviews during the drain. Wait for tick inactivity and for
    `crq-slot.service` to settle, and drain owned reviews.
-2. Move the checkout onto the target first, through the audited helper
-   fence the runbook itself drives (`prepare-host.py switch`; the manual
-   helper path below documents the same fence):
+2. Before moving the checkout, run the rollback-compatibility check
+   `deploy-runbook.py` enforces before its switch and this manual path
+   otherwise bypasses: the controller's `compatibility_record` judged by
+   `rollback_compatible` (`ops/deploy-controller.py`, with
+   `Effects(root, private-record-dir)`), for the live HEAD — the prior
+   SHA a rollback would return to. A queue carrying any explicit
+   `schema_version` marker (any value), any `author_*` key the prior
+   target's committed source never names, an unreadable queue, or a
+   missing, unchecked or malformed record refuses the switch exactly as
+   the runbook refuses: reconcile the queue with the owner first, and
+   never proceed past a refusal by hand. Then move the checkout onto
+   the target, through the audited helper fence the runbook itself
+   drives (`prepare-host.py switch`; the manual helper path below
+   documents the same fence):
    `switch --sha FULL40TARGETSHA [--tag crq-runner/YYYYMMDD-N]`. It
    verifies the target without fetching, refuses active units,
    drift-checks the live config against the current HEAD's render, holds
@@ -218,10 +229,17 @@ the root-move section above adds only the legacy overlay, `.bak` removal and
    back to the prior SHA; no automatic rollback runs here. To roll
    back: stop the tick/watchdog timers and records service again (and
    `crq-slot.timer` if it was stopped in step 1), because the helper
-   refuses active units; run the same helper `switch` back to the prior
-   SHA; remove any target-only `crq-*` unit the target installed that
-   is absent from the saved prior set; restore the complete saved prior
-   unit set into `$HOME/.config/systemd/user`; run
+   refuses active units; wait for tick inactivity and drain owned
+   reviews as in step 1; then run the step 2 compatibility check again,
+   judged against the prior SHA — the rollback target that must be able
+   to read the queue — and refuse the rollback when it is no longer
+   clean: the runbook's rollback treats a queue shape the prior target
+   cannot provably read as operator recovery, and this manual path must
+   not bypass that refusal. Only after the check passes, run the same
+   helper `switch` back to the prior SHA; remove any target-only
+   `crq-*` unit the target installed that is absent from the saved
+   prior set; restore the complete saved prior unit set into
+   `$HOME/.config/systemd/user`; run
    `systemctl --user daemon-reload`; and only then restart as in
    step 5.
 5. Verify and approve the recorded evidence (rendered config, unit
