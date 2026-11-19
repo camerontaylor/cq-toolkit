@@ -68,7 +68,8 @@ describe('capability dispatcher', () => {
     const h = harness('queue-v1', ['--x']);
     expect(await h.run()).toBe(2);
     expect(h.calls).toEqual([]);
-    expect(h.errors).toEqual([DISPATCH_REFUSAL]);
+    // Python returns 2 before its try block, so nothing is written.
+    expect(h.errors).toEqual([]);
   });
 
   test('a capability that throws is the opaque refusal, exit 2', async () => {

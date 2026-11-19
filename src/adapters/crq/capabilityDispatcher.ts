@@ -32,8 +32,9 @@ export function selectCapability(command: string | undefined): Capability | unde
 
 /** Serve one forced-command invocation and return the process exit code. */
 export async function runCapabilityDispatcher(deps: CapabilityDispatcherDeps): Promise<number> {
+  // Python checks `len(sys.argv) != 1` before its try block and returns 2 silently.
+  if (deps.argv.length !== 0) return 2;
   try {
-    if (deps.argv.length !== 0) throw new Error('unexpected argument');
     const capability = selectCapability(deps.env('SSH_ORIGINAL_COMMAND'));
     if (capability === undefined) throw new Error('unsupported forced command');
     return await deps.handlers[capability]();
