@@ -952,8 +952,16 @@ class Run:
         compatibility = self.controller.compatibility_record(
             self.effects, self.prior_sha)
         self.post_compatibility = compatibility
-        if not self.controller.rollback_compatible(compatibility):
-            self.rollback_disabled = compatibility_reason(compatibility)
+        # Refuse while the hold is still owned: releasing admission and
+        # starting the target's triggers without rollback permission would
+        # admit work on the target this run cannot undo. The refusal routes
+        # to rollback_to_prior, whose compatibility checks then retain the
+        # hold for the owner instead.
+        require(self.controller.rollback_compatible(compatibility),
+                "the switch left the queue without automatic rollback "
+                "permission: " + compatibility_reason(compatibility)
+                + "; refusing before admission is released and the target's "
+                "triggers are started")
 
     def runtime_pointer_check(self):
         live = measure_cq_bin(read_config(self.root))
