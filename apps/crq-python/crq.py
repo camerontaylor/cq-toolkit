@@ -3384,23 +3384,37 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         # State persists before admission so a crash cannot re-enroll a range.
         log += push_current.discover(sys.modules[__name__], q, dry)
     starts_before = len(q.get("starts", []))
-    for item in list(live_items(q)):
-        if not dry and item.get("kind") == local_review_runtime.KIND and item.get("publication_pending"):
-            local_review_runtime.republish(sys.modules[__name__], q, item)
-        if item["state"] == "reviewing":
-            msg = harvest_review(q, item, dry)
-            if msg:
-                log.append(msg)
-        if item["state"] == "addressing":
-            if not dry:
-                item["state"] = "repair_failed"
-                item["last_error"] = "legacy addressing retained for manual reconciliation; no new dispatch"
-        if not dry and item.get("repair_runs"):
-            try:
-                log.extend(repair_tick.harvest(sys.modules[__name__], q, item))
-            except Exception as exc:
-                key = "repair_error" if item["kind"] == review_receipt.KIND else "last_error"
-                item[key] = "repair harvest failed: " + str(exc)[:300]
+    # The backfill fix-PR count belongs to this tick's harvest pass alone: it is
+    # cleared before the read and after the pass, so a publication outside the
+    # pass never sees another tick's count (an unread count holds creation).
+    repair_tick.reset_fix_pr_backlog()
+    if not dry and repair_tick.backfill_repair_present(q):
+        # Before the first publish: the hard cap on backfill fix PRs reads this
+        # and the drain reads the file it writes. One forge request under its
+        # own allowance, like reconcile below; a tick with no backfill repair
+        # work makes no call.
+        with forge_window(ForgeBudget(requests=1, seconds=30)):
+            repair_tick.refresh_fix_pr_backlog(sys.modules[__name__])
+    try:
+        for item in list(live_items(q)):
+            if not dry and item.get("kind") == local_review_runtime.KIND and item.get("publication_pending"):
+                local_review_runtime.republish(sys.modules[__name__], q, item)
+            if item["state"] == "reviewing":
+                msg = harvest_review(q, item, dry)
+                if msg:
+                    log.append(msg)
+            if item["state"] == "addressing":
+                if not dry:
+                    item["state"] = "repair_failed"
+                    item["last_error"] = "legacy addressing retained for manual reconciliation; no new dispatch"
+            if not dry and item.get("repair_runs"):
+                try:
+                    log.extend(repair_tick.harvest(sys.modules[__name__], q, item))
+                except Exception as exc:
+                    key = "repair_error" if item["kind"] == review_receipt.KIND else "last_error"
+                    item[key] = "repair harvest failed: " + str(exc)[:300]
+    finally:
+        repair_tick.reset_fix_pr_backlog()
     if not dry:
         # Findings-issue retries (the review is terminal; only the issue upload
         # can still be outstanding) run after the harvest pass and are capped, so
