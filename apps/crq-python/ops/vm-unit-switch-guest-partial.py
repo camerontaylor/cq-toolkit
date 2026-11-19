@@ -629,6 +629,10 @@ def partial_activation_observe(args):
         spec["prior_runtime"], case + " recovery")
     require(record_after["sha256"] == record["sha256"],
             "activation recovery changed the retained record bytes")
+    before_completions = before["repair_completions"]
+    require(after_recovery["repair_completions"][:len(before_completions)]
+            == before_completions,
+            "activation recovery rewrote a pre-recovery completion entry")
     require(baseline["count"] == len(after_recovery["repair_completions"]),
             "activation recovery produced a completion after the settled fence")
     require(baseline["invocations"] == [
@@ -648,6 +652,9 @@ def partial_activation_observe(args):
     require(len(after_repeat["repair_completions"])
             == baseline_repeat["count"],
             "activation repeat produced a completion after the settled fence")
+    require(after_repeat["repair_completions"]
+            == after_recovery["repair_completions"],
+            "activation repeat rewrote the settled completion log")
     require_fenced_state(after_repeat, case + " repeat")
     return require_source({
         "phase": "partial-" + case + "-observe",
@@ -708,6 +715,10 @@ def partial_restore_observe(args):
         spec["runtime"], spec["prior_runtime"], case + " recovery")
     require(record_after["sha256"] == record["sha256"],
             "restore recovery changed the retained record bytes")
+    before_completions = before["repair_completions"]
+    require(after_recovery["repair_completions"][:len(before_completions)]
+            == before_completions,
+            "restore recovery rewrote a pre-recovery completion entry")
     require(baseline["count"] == len(after_recovery["repair_completions"]),
             "restore recovery produced a completion after the settled fence")
     require(baseline["invocations"] == [
@@ -730,6 +741,9 @@ def partial_restore_observe(args):
     require(len(after_repeat["repair_completions"])
             == baseline_repeat["count"],
             "restore repeat produced a completion after the settled fence")
+    require(after_repeat["repair_completions"]
+            == after_recovery["repair_completions"],
+            "restore repeat rewrote the settled completion log")
     require_fenced_state(after_repeat, case + " repeat")
     return require_source({
         "phase": "partial-" + case + "-observe",
