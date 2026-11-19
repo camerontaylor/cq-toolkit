@@ -100,6 +100,12 @@ const PATTERNS = [
   '    description: test token',
   "    regex: 'SECRET_[A-Z]+'",
   "    sample: 'SECRET_TOKEN'",
+  '  - id: test:scoped-env',
+  '    description: path-scoped test token',
+  "    regex: 'SCOPED_[A-Z]+'",
+  "    path: '[.]env$'",
+  "    probe_path: 'x.env'",
+  "    sample: 'SCOPED_TOKEN'",
   '  - id: class:key-material-env',
   '    description: universal env material',
   "    regex: 'NEVER_MATCH_[A-Z]+'",
@@ -362,6 +368,19 @@ describe('installAuthorSnapshot', () => {
 
   test('refuses a removed denylisted line', async () => {
     const repo = await cloneWithFile('.env', 'SECRET_TOKEN\n');
+    try {
+      const fixture = emptySnapshotFor(repo.base);
+      await expect(installAuthorSnapshot(input(repo, fixture))).rejects.toThrow(
+        'snapshot secret scan refused',
+      );
+      expect(await objectExists(repo.dir, fixture.head)).toBe(false);
+    } finally {
+      repo.pool.killAll();
+    }
+  });
+
+  test('refuses a removed denylisted line in a git-quoted non-ASCII path', async () => {
+    const repo = await cloneWithFile('secrét.env', 'SCOPED_TOKEN\n');
     try {
       const fixture = emptySnapshotFor(repo.base);
       await expect(installAuthorSnapshot(input(repo, fixture))).rejects.toThrow(
