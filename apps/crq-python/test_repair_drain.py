@@ -2290,9 +2290,13 @@ class RepairDrainTest(unittest.TestCase):
                 (wt / 'src/kept.ts').write_text('partial edit')
                 self.git('commit', '-qam', 'partial fixer commit')
                 (wt / 'partial-untracked').write_text('partial file')
+                (wt / '.gitignore').write_text('cache/\n')
+                (wt / 'cache/state').mkdir(parents=True)
+                (wt / 'cache/state/ignored-marker').write_text('ignored')
                 return {'stop': 'rate-limit'}
             self.assertEqual(self.git('rev-parse', 'HEAD'), original)
             self.assertFalse((wt / 'partial-untracked').exists())
+            self.assertFalse((wt / 'cache/state/ignored-marker').exists())
             return {'stop': 'ok', 'changed': False}
         with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'DEEPSEEK_API_KEY': 'fixture'}), \
              mock.patch.object(service, '_dispatch', side_effect=invoke):
