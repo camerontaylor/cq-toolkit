@@ -845,6 +845,15 @@ class SubprocessSystemd:
                     and name.endswith((".d", ".wants", ".requires")):
                 error = error or probe_failure
                 continue
+            # systemd v257 resolves a symlinked .wants/.requires directory and
+            # loads the links inside it, while the no-follow probe above and
+            # the no-follow dependency scan both skip the directory, so its
+            # contents would go unexamined. Keep the no-follow policy and
+            # refuse rather than treat the dependency edges as absent.
+            if entry.is_symlink() and name.endswith((".wants", ".requires")):
+                error = error or ("dependency directory is a symlink that "
+                                  "discovery does not follow: " + str(entry))
+                continue
             # An inherited type-wide or dash-prefix drop-in directory is
             # merged into an expected unit even though it is not named after
             # one, so its overrides would run outside the verified bytes.

@@ -206,6 +206,16 @@ class NoChangeRefused(Refused):
         self.record = record
 
 
+class HeartbeatReadRefused(Refused):
+    """The completion heartbeat exists but cannot be read.
+
+    An unreadable file, invalid JSON or a non-object root is a failed
+    observation of the runner, not an argument or environment refusal: the
+    CLI health boundary reports it with the health failure exit code (1),
+    never the refusal exit code (2).
+    """
+
+
 class RecoveryRequired(Exception):
     """The helper was entered: mutation occurred or cannot be excluded.
 
@@ -286,22 +296,23 @@ class Effects:
         checkout's queue/state saves.
 
         Returns None only when no heartbeat exists yet; one that is present
-        but unreadable or not a JSON object refuses assessment.
+        but unreadable or not a JSON object refuses assessment
+        (HeartbeatReadRefused, an observation failure at the CLI boundary).
         """
         try:
             raw = self.completion_heartbeat_path().read_text()
         except FileNotFoundError:
             return None
         except OSError as exc:
-            raise Refused("completion heartbeat unreadable: "
-                          + str(exc)[:120]) from exc
+            raise HeartbeatReadRefused("completion heartbeat unreadable: "
+                                       + str(exc)[:120]) from exc
         try:
             payload = json.loads(raw)
         except ValueError as exc:
-            raise Refused("completion heartbeat is not valid JSON: "
-                          + str(exc)[:120]) from exc
+            raise HeartbeatReadRefused("completion heartbeat is not valid JSON: "
+                                       + str(exc)[:120]) from exc
         if not isinstance(payload, dict):
-            raise Refused("completion heartbeat is not a JSON object")
+            raise HeartbeatReadRefused("completion heartbeat is not a JSON object")
         return payload
 
     def unit_digests(self) -> dict:
@@ -739,7 +750,8 @@ def preservation_check(effects: Effects, before: dict, surfaces=None) -> dict:
     return {"preserved": True, "checked": sorted(surfaces)}
 
 
-def rebaseline_preserved(effects: Effects, state: dict, unit: str, failed_phase: str):
+def rebaseline_preserved(effects: Effects, state: dict, unit: str, failed_phase: str,
+                         current_phase: str | None = None):
     """Preserved-state baseline for the post-restore check, after a fence.
 
     Once activation was pending the target unit may have run and legitimately
@@ -747,10 +759,18 @@ def rebaseline_preserved(effects: Effects, state: dict, unit: str, failed_phase:
     longer describe what restore must leave alone. A successful stop_and_drain
     fence proves nothing else is writing: observe the digests now, and let the
     post-restore check prove that restoring did not change them. Earlier
-    phases keep the original baseline. Returns (state, prior) where prior is
-    the replaced digests (or None) so the caller can journal the change.
+    phases keep the original baseline. A recovery may resume a rollback that
+    already restored prior activation after an earlier-phase failure, so
+    ``current_phase`` — the phase the durable record is in now — permits
+    rebaselining too; deciding on ``failed_phase`` alone would keep a baseline
+    the restored runtime may have invalidated. When neither phase permitted
+    activation the original baseline stands. Returns (state, prior) where
+    prior is the replaced digests (or None) so the caller can journal the
+    change.
     """
-    if state is None or failed_phase not in ("activation_pending", "restore_activation_pending"):
+    activated = ("activation_pending", "restore_activation_pending")
+    if state is None or (failed_phase not in activated
+                         and current_phase not in activated):
         return state, None
     surfaces = preserved_surfaces(unit)
     fresh = preserved_digests(effects, surfaces)
@@ -1594,7 +1614,12 @@ def recover_unit(effects, adapter, path, *, adapter_factory=None):
         if adapter_factory is not None:
             # Render the prior runtime at the commit the transaction retained,
             # not at a HEAD that may have advanced past what can render it.
-            retained = record["state"].get("prior_head") if isinstance(record.get("state"), dict) else None
+            # Snapshot-phase intents retained that commit at the record's top
+            # level (they have no post-drain state); records written before
+            # the intent captured it kept it in the post-drain state.
+            retained = record.get("prior_head")
+            if retained is None and isinstance(record.get("state"), dict):
+                retained = record["state"].get("prior_head")
             # A malformed retained head must not silently fall back to the
             # current HEAD (the very drift this guards against): fail closed.
             if not _hex(SHA_RE, retained):
@@ -1614,8 +1639,14 @@ def recover_unit(effects, adapter, path, *, adapter_factory=None):
             # recovery_required. The record retains the failed phase, the
             # original reason and the fence evidence.
             fence = adapter.stop_and_drain(record["unit"])
+            # The durable phase can already reflect a rollback that restored
+            # prior activation after an earlier-phase failure (failed_phase
+            # drained, phase restore_activation_pending); that runtime may
+            # have ticked since, so the current phase permits rebaselining
+            # too. failed_phase stays the original, for diagnosis.
             state, rebased_from = rebaseline_preserved(
-                effects, record["state"], record["unit"], failed_phase)
+                effects, record["state"], record["unit"], failed_phase,
+                record["phase"])
             adapter.restore(record["unit"], record["snapshot"])
             if state is not None:
                 preservation_check(effects, state, preserved_surfaces(record["unit"]))
@@ -1940,10 +1971,22 @@ def switch_unit(effects, adapter, unit, runtime):
         if (not isinstance(snapshot, dict)
                 or snapshot.get("runtime") != prior["runtime"]):
             raise Refused("snapshot runtime does not match prior runtime")
+        # Snapshot-phase records have no post-drain state yet, so recovery
+        # could not derive the adapter's render source from them and a stop
+        # during stop_and_drain would strand the intent (it blocks every
+        # other controller operation). Capture and validate the commit the
+        # prior runtime renders BEFORE the durable intent, and retain it at
+        # the record's top level, separate from the post-drain preservation
+        # baseline. An unobservable or malformed HEAD refuses instead of
+        # journaling an intent recovery could never finish.
+        prior_head = effects.git("rev-parse", "HEAD")
+        if not _hex(SHA_RE, prior_head):
+            raise Refused("invalid prior head for unit switch")
         identity = {"schema_version": JOURNAL_SCHEMA, "transaction_id": uuid.uuid4().hex,
                     "operation": "unit_switch", "unit": unit, "runtime": runtime,
                     "prior_runtime": prior["runtime"], "outcome": "pending", "at": now_iso(),
-                    "snapshot": snapshot, "state": None, "phase": "snapshot"}
+                    "snapshot": snapshot, "state": None, "phase": "snapshot",
+                    "prior_head": prior_head}
         path = effects.journal_append(identity)
         try:
             adapter.stop_and_drain(unit)
@@ -2256,13 +2299,18 @@ def main(argv=None) -> int:
 
     root = args.root.resolve()
     helper_path = args.helper or (root / "apps/crq-python/ops/prepare-host.py")
-    # Absolute without following the FINAL component: record_preflight() must
-    # still see a symlinked --record-dir and refuse it instead of writing
-    # journals to its target — while any `..` in the spelling keeps its
-    # filesystem meaning (ancestors resolved, not collapsed lexically).
-    effects = Effects(root, absolute_record_dir(args.record_dir))
 
     try:
+        # Record-path setup belongs inside the guard: absolute_record_dir()
+        # answers a symlink loop with Refused (Path.resolve() raises
+        # RuntimeError on 3.10-3.12), so that refusal must reach the JSON
+        # error boundary instead of escaping as a traceback with no artifact.
+        # Absolute without following the FINAL component: record_preflight()
+        # must still see a symlinked --record-dir and refuse it instead of
+        # writing journals to its target — while any `..` in the spelling
+        # keeps its filesystem meaning (ancestors resolved, not collapsed
+        # lexically).
+        effects = Effects(root, absolute_record_dir(args.record_dir))
         # Identity first, then the controller lock, then preflight (#549).
         helper_module, helper_sha256 = _load_helper(helper_path,
                                                     args.expect_helper_sha256)
@@ -2340,6 +2388,16 @@ def main(argv=None) -> int:
             print("refused: " + str(exc), file=sys.stderr)
         return 2
     except Refused as exc:
+        if args.operation == "health" and isinstance(exc, HeartbeatReadRefused):
+            # A present-but-unreadable heartbeat is a failed observation, so
+            # no health result exists: emit the I1 error artifact and keep the
+            # health exit-1 contract (a failed observation is never a refusal).
+            message = str(exc)[:400]
+            print(json.dumps(_error_artifact("thrown", args.operation, message, 1),
+                             indent=2, sort_keys=True))
+            if not parser.json_mode:
+                print("health observation failed: " + message, file=sys.stderr)
+            return 1
         print(json.dumps(_error_artifact("refused", args.operation, str(exc), 2),
                          indent=2, sort_keys=True))
         if not parser.json_mode:
