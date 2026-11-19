@@ -1526,6 +1526,15 @@ def host_identity_phase(args):
             "manager": manager_identity()}
 
 
+def _matrix_case_of(phase):
+    """The matrix case an observe phase proves, from its phase name alone."""
+    if phase.endswith("-observe"):
+        candidate = phase[:-len("-observe")]
+        if candidate in MATRIX_CASES:
+            return candidate
+    return None
+
+
 def _matrix_adapter():
     return load_adapter().GuestFixtureAdapter(
         unit_dir=UNIT_DIR, fixture_dir=FIXTURE, unit=UNIT,
@@ -1624,10 +1633,12 @@ def matrix_boundary_phase(args):
 
 
 def matrix_observe_phase(args):
-    spec = MATRIX_CASES[args.boundary]
+    case = _matrix_case_of(args.phase)
+    require(case is not None, args.phase + " is not a matrix observe phase")
+    spec = MATRIX_CASES[case]
     record_dir = spec["record_dir"]
-    boundary = json.loads((PHASE_DIR / (args.boundary + ".json")).read_text())
-    require(boundary.get("case") == args.boundary,
+    boundary = json.loads((PHASE_DIR / (case + ".json")).read_text())
+    require(boundary.get("case") == case,
             "boundary phase evidence does not match the requested case")
     after = snapshot(record_dir)
     before_snapshot = boundary["snapshot"]
@@ -1678,7 +1689,7 @@ def matrix_observe_phase(args):
     else:
         recovery = recovery_refuse(record_path, record_dir, args.phase)
         repeat = recovery_refuse(record_path, record_dir, args.phase)
-    return {"case": args.boundary, "kind": spec["kind"],
+    return {"case": case, "kind": spec["kind"],
             "boundary": spec["boundary"], "runtime": spec["runtime"],
             "prior_runtime": spec["prior_runtime"],
             "record_dir": str(record_dir),
@@ -2674,6 +2685,30 @@ def activators_inspect(args):
             "preserved": check_preserved({"phase": "activators-inspect"})}
 
 
+# Options each phase dereferences without a default; validate before dispatch.
+PHASE_REQUIRED_OPTIONS = {
+    "drain-alive": ("runtime", "seed"),
+    "drain-ambiguous": ("runtime", "seed"),
+    "recover-drain-alive": ("record",),
+    "recover-kill": ("record",),
+    "recover": ("record",),
+    "recover-repeat": ("record",),
+    "matrix-reset-python": ("after",),
+    "matrix-reset-python-final": ("after",),
+}
+
+
+class _Parser(argparse.ArgumentParser):
+    """Usage errors keep argparse's exit 2 but print the JSON error artifact."""
+
+    phase = None
+
+    def error(self, message):
+        print(json.dumps({"phase": self.phase, "error": "usage",
+                          "detail": str(message)[:1000]}, sort_keys=True))
+        self.exit(2, "%s: error: %s\n" % (self.prog, message))
+
+
 def main(argv=None):
     phases = ("prepare", "drain-alive", "switch-node", "drain-ambiguous",
               "switch-python", "drain-harvest", "interrupt",
@@ -2684,7 +2719,7 @@ def main(argv=None):
               *MATRIX_CASES.keys(),
               *(name + "-observe" for name in MATRIX_CASES),
               *ACTIVATOR_PHASES)
-    parser = argparse.ArgumentParser()
+    parser = _Parser()
     parser.add_argument("phase", choices=phases)
     parser.add_argument("--record")
     parser.add_argument("--boundary")
@@ -2694,6 +2729,16 @@ def main(argv=None):
     parser.add_argument("--seed", choices=("alive", "ambiguous", "harvest"))
     parser.add_argument("--label")
     args = parser.parse_args(argv)
+    parser.phase = args.phase
+    missing = [flag for flag in PHASE_REQUIRED_OPTIONS.get(args.phase, ())
+               if getattr(args, flag) is None]
+    if missing:
+        parser.error(args.phase + " requires "
+                     + ", ".join("--" + flag for flag in missing))
+    case = _matrix_case_of(args.phase)
+    if case is not None and args.boundary not in (None, case):
+        parser.error(args.phase + " proves the " + case + " case derived"
+                     " from its name, not --boundary " + args.boundary)
     try:
         require(os.uname().nodename == "crq-probe",
                 "proof driver only runs on the disposable crq-probe guest")
@@ -2729,8 +2774,7 @@ def main(argv=None):
             payload = reset_fixture_phase(args)
         elif args.phase in MATRIX_CASES:
             payload = matrix_boundary_phase(args)
-        elif args.phase.endswith("-observe") \
-                and args.phase[:-len("-observe")] in MATRIX_CASES:
+        elif case is not None:
             payload = matrix_observe_phase(args)
         elif args.phase == "activators-install":
             payload = activators_install(args)
