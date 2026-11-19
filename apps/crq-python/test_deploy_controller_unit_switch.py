@@ -216,23 +216,39 @@ class UnitSwitchTests(ControllerFixture):
         class CrashingAdapter(Adapter):
             crashed = False
 
+            def __init__(self):
+                super().__init__("python")
+                self.events = []
+
             def install(self, unit, runtime):
                 raise RuntimeError("install failed")
 
+            def stop_and_drain(self, unit):
+                self.events.append(("drain", self.running))
+                super().stop_and_drain(unit)
+
             def restore_activation(self, unit, snapshot):
+                self.events.append(("release", self.running))
                 super().restore_activation(unit, snapshot)
                 if not self.crashed:
                     self.crashed = True
                     raise Crash()
 
-        adapter = CrashingAdapter("python")
+        adapter = CrashingAdapter()
         with self.assertRaises(Crash):
             dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
         path = next(self.record_dir.glob("controller-*.json"))
         self.assertEqual(json.loads(path.read_text())["phase"], "restore_activation_pending")
+        # The interrupted release already left the unit running, so the recovery
+        # must not be able to release again without fencing the unit first.
+        self.assertEqual(adapter.events[-1], ("release", False))
+        self.assertTrue(adapter.running)
+        before = len(adapter.events)
         recovered = dc.recover_unit(self.effects, adapter, path)
         self.assertEqual(recovered["outcome"], "rolled_back")
         self.assertEqual(recovered["failed_phase"], "drained")
+        self.assertEqual(adapter.events[before:],
+                         [("drain", True), ("release", False)])
         self.assertTrue(adapter.running)
         final = json.loads(path.read_text())
         self.assertEqual(final["phase"], "restore_activation_pending")
