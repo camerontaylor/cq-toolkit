@@ -806,11 +806,18 @@ class BoundedRepairTest(unittest.TestCase):
         self.config['repair'].update(enabled=True, spend_authorization='offline-test-fixture-only')
         atomic(self.root / 'config.json', self.config)
         out = io.StringIO()
+        # A direct selector reads the one named job, never the whole inbox: a
+        # listing here would mean the dispatch enumerated every prepared job.
+        enumerating = AssertionError('bounded dispatch must not enumerate the inbox')
         with mock.patch.object(service, 'ROOT', self.root), \
              mock.patch.object(service, 'process_item', return_value=None) as dispatch, \
+             mock.patch.object(service, 'drain_order', side_effect=enumerating) as listing, \
+             mock.patch.object(bounded, 'drain_order', side_effect=enumerating) as bounded_listing, \
              contextlib.redirect_stdout(out):
             service.main(['--job', job_id, '--source-sha', SOURCE,
                           '--finding-sha256', self.evidence['finding_sha256']])
+        listing.assert_not_called()
+        bounded_listing.assert_not_called()
         dispatch.assert_called_once_with(self.config, [job])
         artifact = json.loads(out.getvalue())
         self.assertEqual((artifact['status'], artifact['job']), ('no-result', job_id))
