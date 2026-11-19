@@ -978,6 +978,29 @@ class RepairDrainTest(unittest.TestCase):
                 provider.assert_not_called()
             self.assertFalse((self.root / ('dispatch-' + driver) / 'source-snapshot.json').exists())
 
+    def test_review_diff_sections_are_scanned_under_their_own_paths(self):
+        diff = ('diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+x = 1\n'
+                'diff --git a/config/.env b/config/.env\n@@ -0,0 +1 @@\n+DATABASE_URL=db\n')
+        self.assertEqual([path for path, _ in service.review_diff_sections(diff)],
+                         ['src/a.py', 'config/.env'])
+        self.assertEqual([path for path, _ in service.review_diff_sections('')], ['review-diff.txt'])
+        self.worktree()
+        job = json.loads((self.root / 'state/repair/inbox/crq-run1-F1.json').read_text())
+        job['review_diff'] = diff
+        seen = []
+        def scan(c, context, output):
+            seen.append(context['current_path'])
+            return context['current_path'] != 'config/.env'
+        with mock.patch.object(service, 'require_canonical_delivery'), \
+             mock.patch.object(service, 'source_snapshot', return_value={'path': 'src/a.py', 'source': ''}), \
+             mock.patch.object(service, 'triage_context_safe', side_effect=scan), \
+             mock.patch.object(service.cq, 'invoke') as provider:
+            with self.assertRaisesRegex(ValueError, 'review diff secret scan rejected'):
+                service._dispatch(self.config, {'driver': 'cq'}, job, self.root,
+                                  self.root / 'dispatch', judge=False)
+            provider.assert_not_called()
+        self.assertEqual(seen, ['src/a.py', 'src/a.py', 'config/.env'])
+
     def test_child_refusal_stops_the_pass_before_the_child_exits(self):
         # The reviewer's interleaving: child A refuses, the marker is removed
         # before A exits, and item B must still not be admitted in this pass.
