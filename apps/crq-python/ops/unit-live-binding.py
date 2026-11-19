@@ -842,7 +842,7 @@ class SubprocessSystemd:
                 foreign.append("unexpected installed entry: " + str(entry))
             is_dir, probe_failure = _directory_probe(entry)
             if probe_failure is not None \
-                    and name.endswith((".d", ".wants", ".requires")):
+                    and name.endswith((".d", ".wants", ".requires", ".upholds")):
                 error = error or probe_failure
                 continue
             # An inherited type-wide or dash-prefix drop-in directory is
@@ -853,7 +853,11 @@ class SubprocessSystemd:
             if name.endswith(".d") and self._inherited_dropin_applies(
                     name[:-2], units):
                 foreign.append("undeclared drop-in directory: " + str(entry))
-            if is_dir and name.endswith((".wants", ".requires")):
+            # systemd v257 also reads ``*.upholds`` enablement directories: a
+            # link there makes the upstream unit restart the named one when it
+            # becomes inactive, which is an incoming dependency edge like
+            # ``*.wants``/``*.requires`` and must be checked the same way.
+            if is_dir and name.endswith((".wants", ".requires", ".upholds")):
                 try:
                     children = list(entry.iterdir())
                 except OSError as exc:

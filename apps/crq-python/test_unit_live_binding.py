@@ -570,6 +570,20 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("crq-tick.socket", " ".join(evidence["foreign"]))
 
+    def test_undeclared_upholds_enablement_link_is_unsupported(self):
+        declared = self.declare()
+        # systemd v257 records ``Upholds=`` as a link under
+        # ``<unit>.upholds/``, so a link there is an incoming activation edge
+        # exactly like ``*.wants``/``*.requires``: the upholding target
+        # restarts the selected unit whenever it becomes inactive.
+        upheld = self.link("ingress.target.upholds/crq-tick.service",
+                           self.unit_dir / "crq-tick.service")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("unexpected enablement link: " + str(upheld),
+                      " ".join(evidence["foreign"]))
+
     def test_listing_failure_is_incomplete(self):
         declared = self.declare()
 
