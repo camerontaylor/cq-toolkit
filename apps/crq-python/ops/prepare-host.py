@@ -779,7 +779,9 @@ def switch(root, overlay, raw, target, tag=None):
         try:
             if git(root, 'status', '--porcelain', '--untracked-files=all'):
                 raise ValueError('checkout not clean after config restore')
-            git(root, 'checkout', '--detach', target)
+            # --no-overwrite-ignore aborts the checkout instead of silently
+            # replacing an ignored host-local file at a tracked path.
+            git(root, 'checkout', '--no-overwrite-ignore', '--detach', target)
             # Same tick lock spans drift check, checkout, render and audit.
             record(root, overlay, raw, destination, 'switch-render', previous_sha=previous, tag=tag)
             atomic_bytes(root / CONFIG, destination)
@@ -799,7 +801,7 @@ def switch(root, overlay, raw, target, tag=None):
                 # that local modification, so restore the committed bytes
                 # first; the previous rendering is reinstalled below.
                 git(root, 'restore', '--', CONFIG)
-                git(root, 'checkout', '--detach', previous)
+                git(root, 'checkout', '--no-overwrite-ignore', '--detach', previous)
             except BaseException as rollback:
                 # HEAD may still name the target commit, so reinstalling the
                 # previous rendering here would install config from a different
