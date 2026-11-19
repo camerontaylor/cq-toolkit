@@ -367,6 +367,26 @@ def run_cleanup_steps(actions):
     return results
 
 
+def finish_cleanup(cleanup, process_actions, restore_actions):
+    """Stop processes, then always restore the queue and run metadata.
+
+    Process-stop results go into ``cleanup``; a stop failure is re-raised only
+    after the restore actions have run, and it wins over a restore failure.
+    """
+    first = None
+    try:
+        cleanup.extend(run_cleanup_steps(process_actions))
+    except Exception as exc:
+        first = exc
+    try:
+        run_cleanup_steps(restore_actions)
+    except Exception as exc:
+        if first is None:
+            first = exc
+    if first is not None:
+        raise first
+
+
 def drain_observation():
     """The actual controller drain_check bound to the actual runner liveness."""
     dc = load_controller()
@@ -962,11 +982,10 @@ def drain_refuse_phase(args):
                                         "after": unrelated_after}},
         }
     finally:
-        cleanup.extend(run_cleanup_steps([
+        finish_cleanup(cleanup, [
             lambda: stop_process(seeded["process"]),
             lambda: stop_process(unrelated),
-        ]))
-        run_cleanup_steps([
+        ], [
             lambda: restore_queue(saved_queue),
             remove_drain_runs,
         ])
@@ -1082,10 +1101,9 @@ def drain_harvest_phase(args):
             "preserved": preserved,
         }
     finally:
-        cleanup.extend(run_cleanup_steps([
+        finish_cleanup(cleanup, [
             lambda: stop_process(unrelated),
-        ]))
-        run_cleanup_steps([
+        ], [
             lambda: restore_queue(saved_queue),
             remove_drain_runs,
         ])
@@ -1184,11 +1202,10 @@ def recover_drain_refuse_phase(args):
                                         "after": unrelated_after}},
         }
     finally:
-        cleanup.extend(run_cleanup_steps([
+        finish_cleanup(cleanup, [
             lambda: stop_process(seeded["process"]),
             lambda: stop_process(unrelated),
-        ]))
-        run_cleanup_steps([
+        ], [
             lambda: restore_queue(saved_queue),
             remove_drain_runs,
         ])
