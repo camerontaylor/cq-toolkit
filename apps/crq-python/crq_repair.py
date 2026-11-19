@@ -854,7 +854,9 @@ def triage_phase(config, dry_run=False):
     result = phase(inbox, repo, tip, judge, transport, utc(),
                    maximum=max(0, min(6, int(options.get('max_per_pass', 6)))),
                    seconds=config['repair']['budget']['wall_clock_min'] * 60, dry_run=dry_run)
-    write_result(result)
+    # The report returns to the caller instead of stdout: the drain folds it
+    # into its one JSON result and the triage dry-run returns it directly, so
+    # stdout stays exactly one JSON artifact.
     if result.get('stopped') == 'rate-limit' and not dry_run:
         rate_limit_pause(result.get('stop_report', {}), 'backfill-triage')
     return result
@@ -862,7 +864,8 @@ def triage_phase(config, dry_run=False):
 
 def drain(config):
     """Automatic inbox drain, minor-only items after critical/major items. Items use isolated worker
-    processes up to the configured cap, with serial findings within each item."""
+    processes up to the configured cap, with serial findings within each item. Returns the pass's
+    JSON result (None only on a narrated early exit), with the triage report inside when triage ran."""
     # Admission before any fetch, triage or write: a handed-over host must cost
     # nothing and leave the queue and inbox exactly as they are.
     if runner_disabled():
@@ -885,12 +888,18 @@ def drain(config):
     if runner_disabled():
         narrate(RUNNER_DISABLED + ': pass stopped before triage')
         return
+    triage = None
     try:
-        triage_phase(config)
+        triage = triage_phase(config)
     except Exception as exc:  # backfill deferral must not starve existing repair jobs
         narrate('backfill triage deferred: ' + str(exc)[:300])
+    # The triage report rides inside the drain's result, so a caller parsing
+    # stdout reads exactly one JSON value even on a pass triage ran.
+    result = {'status': 'drained'}
+    if triage is not None:
+        result['triage'] = triage
     if dispatch_paused(config):
-        return
+        return result
     groups = {}  # item -> job ids, items in order of their oldest job
     for job_id in drain_order(ROOT):
         try:
@@ -903,7 +912,16 @@ def drain(config):
     # Classify against the queue before sorting. Skipped, stale and completed
     # jobs cannot promote a minor-only item; stable sort retains inbox order.
     queue_path = ROOT / 'state/queue.json'
-    queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
+    try:
+        queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
+    except (OSError, ValueError) as exc:
+        # An unreadable queue must still yield one JSON artifact: keep the
+        # completed triage report and let run() exit non-zero. Nothing was
+        # admitted yet, so no spend or child is left behind.
+        narrate('repair drain failed: queue unreadable: ' + str(exc)[:300])
+        result['status'] = 'error'
+        result['error'] = 'queue unreadable: ' + str(exc)[:300]
+        return result
     def priority(item):
         for job_id in groups[item]:
             status, job, _ = drain_job(ROOT, config, queue, job_id)
@@ -913,6 +931,7 @@ def drain(config):
                 return 0
         return 1
     drain_items(config, groups, sorted(groups, key=priority))
+    return result
 
 
 def drain_item(config, item, job_ids):
@@ -1337,8 +1356,7 @@ class UsageArgumentParser(argparse.ArgumentParser):
 
 
 def run(argv=None):
-    """Returns (exit code, result). A None result means the path already wrote its own JSON
-    (the triage dry-run does so only when triage ran; otherwise it reports no-triage)."""
+    """Returns (exit code, result); main writes result as the one JSON artifact on stdout."""
     parser = UsageArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
     parser.add_argument('--triage-dry-run', action='store_true')
     parser.add_argument('--job')
@@ -1372,12 +1390,13 @@ def run(argv=None):
         narrate('repair dispatch refused: recovery selects exactly one job')
         return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
     if args.triage_dry_run:
-        # triage_phase writes its own JSON result only when triage is configured
-        # and has a rollout; otherwise it returns None having written nothing,
-        # so report that explicitly to keep one JSON artifact per exit.
-        if triage_phase(config, dry_run=True) is None:
+        # triage_phase returns its report only when triage is configured and
+        # has a rollout; otherwise it returns None having written nothing, so
+        # report that explicitly to keep one JSON artifact per exit.
+        result = triage_phase(config, dry_run=True)
+        if result is None:
             return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
-        return 0, None
+        return 0, result
     if any(supplied) and not all(supplied):
         narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
         return 2, {'status': 'refused', 'reason': '--job, --source-sha and --finding-sha256 go together'}
@@ -1434,8 +1453,10 @@ def run(argv=None):
             job = select_job(ROOT, config, args.job, args.source_sha, args.finding_sha256)
             outcome = process_item(config, [job])
             return 0, explicit_job_result(job, outcome)
-        drain(config)
-        return 0, {'status': 'drained'}
+        result = drain(config)
+        if result is None:
+            result = {'status': 'drained'}
+        return (1 if result.get('status') == 'error' else 0), result
 
 
 

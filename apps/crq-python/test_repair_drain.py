@@ -1763,6 +1763,21 @@ class RepairDrainTest(unittest.TestCase):
         self.assertIn('runner disabled for host handover (state/runner-disabled)', stderr.getvalue())
         self.assertEqual(before, (self.root / 'state/queue.json').read_bytes())
 
+    def test_drain_folds_the_triage_report_into_its_result_without_printing(self):
+        # I1: the triage report rides inside the drain's one JSON result; the
+        # drain itself writes nothing to stdout, so main emits a single value.
+        report = {'status': 'triaged', 'processed': 1}
+        out = io.StringIO()
+        with mock.patch.object(service, 'fetch_clone', return_value=None), \
+             mock.patch.object(service, 'triage_phase', return_value=report), \
+             mock.patch.object(service, 'dispatch_paused', side_effect=[None, '2026-11-20T00:00:00Z']), \
+             mock.patch.object(service, 'process_item') as process_item, \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            result = service.drain(self.config)
+        self.assertEqual(result, {'status': 'drained', 'triage': report})
+        self.assertEqual(out.getvalue(), '')
+        process_item.assert_not_called()
+
     def test_drain_admits_no_item_after_the_marker_appears(self):
         # The check is per admission, never mid-item: the admitted item runs to
         # completion, the next one is refused, and the pass ends there.
@@ -2020,17 +2035,17 @@ class RepairDrainTest(unittest.TestCase):
 
     def test_main_refuses_without_zai_key_and_inside_blackout(self):
         atomic(self.root / 'config.json', self.config)
-        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(service, 'drain') as drain:
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(service, 'drain', return_value=None) as drain:
             service.main([])
         drain.assert_not_called()
         with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'unused-fixture'}), \
              mock.patch.object(service, 'blocked', return_value=True), \
-             mock.patch.object(service, 'drain') as drain:
+             mock.patch.object(service, 'drain', return_value=None) as drain:
             service.main([])
         drain.assert_not_called()
         with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'unused-fixture'}), \
              mock.patch.object(service, 'blocked', return_value=False), \
-             mock.patch.object(service, 'drain') as drain:
+             mock.patch.object(service, 'drain', return_value=None) as drain:
             service.main([])
         drain.assert_called_once()
 
@@ -2041,7 +2056,7 @@ class RepairDrainTest(unittest.TestCase):
         atomic(self.root / 'config.json', disabled)
         stdout, stderr = io.StringIO(), io.StringIO()
         with mock.patch.object(service, 'ROOT', self.root), \
-             mock.patch.object(service, 'drain') as drain, \
+             mock.patch.object(service, 'drain', return_value=None) as drain, \
              mock.patch.dict(os.environ, {'ZAI_API_KEY': 'unused-fixture'}), \
              contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             service.main([])
@@ -2049,12 +2064,34 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(json.loads(stdout.getvalue())['status'], 'disabled')
         self.assertIn('repair dispatch disabled', stderr.getvalue())
 
+    def test_unreadable_queue_after_triage_emits_one_error_artifact_with_the_report(self):
+        # I1: a queue read failure after triage must not lose the triage report
+        # or leave stdout empty; the exit code stays non-zero.
+        atomic(self.root / 'config.json', self.config)
+        (self.root / 'state/queue.json').write_text('{broken')
+        report = {'status': 'triaged', 'processed': 1}
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(service, 'ROOT', self.root), \
+             mock.patch.object(service, 'fetch_clone', return_value=None), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'triage_phase', return_value=report), \
+             mock.patch.object(service, 'drain_items') as drain_items, \
+             mock.patch.dict(os.environ, {'ZAI_API_KEY': 'unused-fixture'}), \
+             contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = service.main([])
+        self.assertEqual(code, 1)
+        drain_items.assert_not_called()
+        artifact = json.loads(stdout.getvalue())
+        self.assertEqual(artifact['status'], 'error')
+        self.assertEqual(artifact['triage'], report)
+        self.assertIn('queue unreadable', artifact['error'])
+
     def test_selector_refusal_emits_one_json_status_and_returns_2(self):
         # 1692: refusal exit code 2, and (I1) one JSON status on stdout.
         atomic(self.root / 'config.json', self.config)
         stdout, stderr = io.StringIO(), io.StringIO()
         with mock.patch.object(service, 'ROOT', self.root), \
-             mock.patch.object(service, 'drain') as drain, \
+             mock.patch.object(service, 'drain', return_value=None) as drain, \
              mock.patch.dict(os.environ, {'ZAI_API_KEY': 'unused-fixture'}), \
              contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = service.main(['--job', 'crq-run1-F1'])
