@@ -337,6 +337,14 @@ def _dispatch(config, role, job, wt, directory, judge=False):
         raise ValueError('source snapshot secret scan rejected; refusing dispatch')
     job['source_snapshot'] = snapshot
     atomic(directory / 'source-snapshot.json', snapshot)
+    # The admission checks sample the clock before worktree retention and the
+    # snapshot scan above; either can outlast the margin they allowed, so the
+    # switch below could start a paid call inside the blackout. Sample the
+    # clock again at this last boundary before the call (never during one) and
+    # refuse to start when the window has opened or the remaining budget would
+    # still reach it.
+    if blocked(config.get('repair', {})):
+        return {'stop': 'blackout', 'summary': 'GLM peak blackout began during preparation; driver call not started'}
     if role['driver'] == 'cq':
         if judge:
             return cq.judge(config, role, job, wt, directory)
@@ -477,6 +485,12 @@ def process(config, job, wt):
                 atomic(progress_path, result)
                 report = dispatch(config, role, current, wt, attempt_dir)
                 result.pop('dispatch_pending', None)
+                if report.get('stop') == 'blackout':
+                    # The window opened while this rung prepared its worktree;
+                    # no provider call started, so keep the rung and defer the
+                    # attempt to a later pass.
+                    result['next_rung'] = rung
+                    return defer('GLM peak blackout; attempt deferred')
                 disposition = report.get('worker_disposition') or report.get('disposition')
                 if (report.get('stop') in ('ok', 'error') and disposition == 'needs_human'
                         and str(report.get('summary') or '').strip()):
@@ -557,6 +571,11 @@ def process(config, job, wt):
                     raise
                 finally:
                     result.pop('dispatch_pending', None)
+                if judged.get('stop') == 'blackout':
+                    # The window opened before the judge call started; the
+                    # recorded pending_judge keeps the judge resumable after
+                    # the blackout without repeating this rung's fixer.
+                    return defer('GLM peak blackout; judge deferred without repeating fixer')
                 if judged.get('stop') == 'rate-limit':
                     return defer('judge rate limit; resume judge without repeating fixer', rate_limit=judged)
                 result.pop('pending_judge', None)
