@@ -834,6 +834,21 @@ class BoundedRepairTest(unittest.TestCase):
         # A dry run with no triage state writes nothing itself, so it reports that.
         self.assertEqual(artifact(['--triage-dry-run']), 'no-triage')
 
+    def test_argument_failure_emits_one_json_usage_artifact_and_returns_2(self):
+        # An argparse failure (`--job` without a value) must not exit before the
+        # CLI result writer runs: stdout still carries one JSON artifact and the
+        # exit code stays 2.
+        atomic(self.root / 'config.json', self.config)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(service, 'ROOT', self.root), \
+             mock.patch.object(service, 'drain') as drain, \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = service.main(['--job'])
+        self.assertEqual(code, 2)
+        drain.assert_not_called()
+        self.assertEqual(json.loads(out.getvalue())['status'], 'usage-error')
+        self.assertIn('--job', err.getvalue())
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1213,16 +1213,37 @@ def explicit_job_result(job, outcome):
     return {'status': outcome or ('finished' if result else 'no-result'), 'job': job['job'], 'result': result}
 
 
+class UsageError(Exception):
+    """An argparse argument failure, routed to the CLI result writer so the
+    invocation still emits its one machine-readable JSON artifact."""
+
+
+class UsageArgumentParser(argparse.ArgumentParser):
+    """The CLI parser, whose argument failures are results instead of exits.
+
+    argparse's own error path exits 2 with nothing on stdout (e.g. `--job`
+    without a value), which would leave a caller with no JSON artifact. Raising
+    here lets run() report the usage error and keep exit code 2.
+    """
+
+    def error(self, message):
+        raise UsageError(str(message))
+
+
 def run(argv=None):
     """Returns (exit code, result). A None result means the path already wrote its own JSON
     (the triage dry-run does so only when triage ran; otherwise it reports no-triage)."""
-    parser = argparse.ArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
+    parser = UsageArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
     parser.add_argument('--triage-dry-run', action='store_true')
     parser.add_argument('--job')
     parser.add_argument('--source-sha')
     parser.add_argument('--finding-sha256')
     parser.add_argument('--recover-job')
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except UsageError as exc:
+        narrate('repair dispatch refused: ' + str(exc))
+        return 2, {'status': 'usage-error', 'reason': str(exc)}
     # CLI admission before the lock, the state directory and every alternate
     # path (--recover-job, --job): a handed-over host must not write or spend.
     if runner_disabled():
