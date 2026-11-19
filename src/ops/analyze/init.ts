@@ -101,6 +101,35 @@ function eslintTrigger(dir: string): string | undefined {
   return undefined;
 }
 
+/**
+ * A solution-style tsconfig (`"files": []` plus `"references"`) checks nothing
+ * under a plain `tsc --noEmit`; it needs build-mode traversal. Comments and
+ * trailing commas are stripped before the (JSONC) text is parsed; an
+ * unparseable file is not solution-style, so detection falls back to the
+ * plain invocation.
+ */
+function isSolutionStyleTsconfig(dir: string): boolean {
+  try {
+    const text = readFileSync(join(dir, 'tsconfig.json'), 'utf8')
+      .replace(/"(?:[^"\\]|\\.)*"|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (m) =>
+        m.startsWith('"') ? m : '',
+      )
+      .replace(/,(\s*[}\]])/g, '$1');
+    const cfg: unknown = JSON.parse(text);
+    if (typeof cfg !== 'object' || cfg === null) return false;
+    const rec = cfg as Record<string, unknown>;
+    const { references, files } = rec;
+    return (
+      Array.isArray(references) &&
+      references.length > 0 &&
+      Array.isArray(files) &&
+      files.length === 0
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Detect the supported checks for `dir` (pure over the file system's current state). */
 export function detectChecks(dir: string): { checks: CheckRunnerInput[]; detected: string[] } {
   const checks: CheckRunnerInput[] = [];
@@ -110,7 +139,9 @@ export function detectChecks(dir: string): { checks: CheckRunnerInput[]; detecte
       adapter: 'tsc-lines',
       command: {
         command: toolCommand(dir, 'tsc'),
-        args: ['--noEmit', '--pretty', 'false'],
+        args: isSolutionStyleTsconfig(dir)
+          ? ['-b', '--noEmit', '--pretty', 'false']
+          : ['--noEmit', '--pretty', 'false'],
         cwd: '.',
       },
     });

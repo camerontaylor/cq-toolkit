@@ -262,7 +262,17 @@ export function buildChildEnv(
     child[name] = value;
   }
   if (overrides !== undefined) {
-    for (const [name, value] of Object.entries(overrides)) child[name] = value;
+    for (const [name, value] of Object.entries(overrides)) {
+      // Windows env names are case-insensitive: an override `Path` must
+      // replace the inherited `PATH`, not ride beside it.
+      if (process.platform === 'win32') {
+        const folded = name.toUpperCase();
+        for (const existing of Object.keys(child)) {
+          if (existing !== name && existing.toUpperCase() === folded) delete child[existing];
+        }
+      }
+      child[name] = value;
+    }
   }
   // Direct op parent correlation (measurement M5b1): translate the
   // enclosing Paseo agent id into the derived `paseo:<id>` parent-work

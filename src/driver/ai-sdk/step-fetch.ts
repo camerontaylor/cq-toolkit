@@ -61,9 +61,25 @@ export function createStepFetch(
       transport ?? getGlobalDispatcher(),
       stepTimeoutMs + marginMs,
     );
-    return undiciFetch(input as Parameters<typeof undiciFetch>[0], {
-      ...(init as Parameters<typeof undiciFetch>[1]),
-      dispatcher,
-    }) as unknown as Promise<Response>;
+    type UndiciInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
+    const base = { ...(init as unknown as UndiciInit), dispatcher };
+    // undici's fetch does not recognise a runtime-native Request (a different
+    // class) and would stringify it. Unpack it into url + init; explicit init
+    // fields still win, as in the fetch contract.
+    if (typeof Request !== 'undefined' && input instanceof Request) {
+      return undiciFetch(input.url, {
+        method: input.method,
+        headers: input.headers as unknown as UndiciInit['headers'],
+        signal: input.signal as UndiciInit['signal'],
+        ...(input.body !== null
+          ? { body: input.body as unknown as UndiciInit['body'], duplex: 'half' as const }
+          : {}),
+        ...base,
+      } as UndiciInit) as unknown as Promise<Response>;
+    }
+    return undiciFetch(
+      input as Parameters<typeof undiciFetch>[0],
+      base,
+    ) as unknown as Promise<Response>;
   };
 }

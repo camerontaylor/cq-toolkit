@@ -152,6 +152,7 @@ import {
   zeroUsage,
 } from './usage.js';
 import { classifyFailure } from './failures.js';
+import { nativeTranscriptPath } from './cli.js';
 import { RoutingTableSchema, defaultRoutingTable, resolveRoute } from './routing.js';
 import type { RoutingTable } from './routing.js';
 import { buildChildEnv } from '../../shared/proc.js';
@@ -775,6 +776,7 @@ export class ClaudeCodeSdkTransport implements Driver {
       structuredMiss,
       resultCause,
       accounting,
+      workspace,
     );
   }
 
@@ -831,6 +833,7 @@ export class ClaudeCodeSdkTransport implements Driver {
     structuredMiss: string | undefined,
     resultCause: string | undefined,
     accounting: ReturnType<typeof prepareResultUsage>,
+    workspace: string,
   ): WorkerResult {
     const measuredFrame = accounting.measured;
     const measured = measuredFrame !== undefined ? measuredFrame.usage : undefined;
@@ -931,6 +934,22 @@ export class ClaudeCodeSdkTransport implements Driver {
       usageProvenance: usageMeasured ? 'measured' : 'unmeasured',
       ...cost,
       sessionId,
+      // The harness-native session id the SDK reported (and the transcript
+      // path it implies, when present on disk) — the archiver's join keys,
+      // as on the CLI transport. Absent when no frame carried a session id.
+      ...(observation.agentSessionId !== undefined
+        ? {
+            nativeSessionId: observation.agentSessionId,
+            ...(nativeTranscriptPath(observation.agentSessionId, workspace) !== undefined
+              ? {
+                  nativeSessionPath: nativeTranscriptPath(
+                    observation.agentSessionId,
+                    workspace,
+                  ) as string,
+                }
+              : {}),
+          }
+        : {}),
       denials: observation.denials,
       stopReason: effectiveStopReason,
       ...(error !== undefined ? { error: boundedErrorText(error) } : {}),

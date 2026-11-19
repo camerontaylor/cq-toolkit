@@ -1186,6 +1186,8 @@ export interface RunObservation {
   stderr: string[];
   /** Usage folded from assistant events — the fallback when no result usage. */
   assistantUsage: Usage | undefined;
+  /** `message.id`s whose usage is already folded: a repeated id counts once (parity with the SDK transport). */
+  countedAssistantMessageIds: Set<string>;
   /** The terminal result event, when it arrived. */
   result: ResultEvent | undefined;
   /** The child's settled close (exit code/signal/spawn error), when it closed — error-cause evidence (#208). */
@@ -1239,6 +1241,7 @@ function newObservation(): RunObservation {
     narration: [],
     stderr: [],
     assistantUsage: undefined,
+    countedAssistantMessageIds: new Set(),
     result: undefined,
     close: undefined,
     toolUseNameById: new Map(),
@@ -1363,7 +1366,12 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
         observation.narration.push(refusalNarrationMarker());
       }
       const usage = usageFromWire(message['usage']);
-      if (usage !== undefined) {
+      const messageId = asString(message['id']);
+      if (
+        usage !== undefined &&
+        (messageId === undefined || !observation.countedAssistantMessageIds.has(messageId))
+      ) {
+        if (messageId !== undefined) observation.countedAssistantMessageIds.add(messageId);
         observation.assistantUsage = addUsage(observation.assistantUsage, usage);
       }
       const content = asArray(message['content']) ?? [];

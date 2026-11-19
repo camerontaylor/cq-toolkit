@@ -38,6 +38,22 @@ afterEach(() => {
 const init = makeAnalyzeInit();
 
 describe('analyze.init detection', () => {
+  test('a solution-style tsconfig (empty files + references, with comments) uses tsc -b', async () => {
+    const dir = project({
+      'tsconfig.json':
+        '// solution\n{ "files": [], /* none */ "references": [{ "path": "./app" },], }\n',
+    });
+    const result = await init({ dir });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.config.checks[0]?.command.args).toEqual([
+      '-b',
+      '--noEmit',
+      '--pretty',
+      'false',
+    ]);
+  });
+
   test('tsconfig.json → one tsc-lines check with the bare tool name; the file parses back', async () => {
     const dir = project({ 'tsconfig.json': '{}' });
     const result = await init({ dir });

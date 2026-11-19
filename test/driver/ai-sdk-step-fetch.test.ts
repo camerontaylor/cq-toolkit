@@ -110,6 +110,34 @@ describe('createStepFetch', () => {
     expect(response.status).toBe(200);
   });
 
+  test('a native Request input keeps its url, method, headers and body', async () => {
+    let seen: { url?: string; method?: string; header?: string; body: string } | undefined;
+    const server = createServer((request: IncomingMessage, response: ServerResponse) => {
+      let body = '';
+      request.on('data', (chunk: Buffer) => (body += chunk.toString()));
+      request.on('end', () => {
+        seen = {
+          ...(request.url !== undefined ? { url: request.url } : {}),
+          ...(request.method !== undefined ? { method: request.method } : {}),
+          header: request.headers['x-probe'] as string,
+          body,
+        };
+        response.end('ok');
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    const { port } = server.address() as AddressInfo;
+    const input = new Request(`http://127.0.0.1:${String(port)}/p`, {
+      method: 'POST',
+      headers: { 'x-probe': '1' },
+      body: 'hello',
+    });
+    const response = await createStepFetch(2_000, 0)(input);
+    expect(await response.text()).toBe('ok');
+    expect(seen).toEqual({ url: '/p', method: 'POST', header: '1', body: 'hello' });
+  });
+
   test('honors Node startup proxy settings in a fresh process', async () => {
     let connects = 0;
     const proxy = createServer();
