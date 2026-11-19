@@ -275,9 +275,14 @@ def dispatch_paused(config):
 
 
 def dispatch(config, role, job, wt, directory, judge=False):
-    if role['driver'] != 'cq' or not config.get('repair', {}).get('fallback_models'):
+    if not config.get('repair', {}).get('fallback_models'):
         with correlation(job, judge):
             return _dispatch(config, role, job, wt, directory, judge)
+    # Fallback admission applies to the lane being dispatched, not only CQ
+    # fixers: a Codex or Paseo judge retrying after rate-limit must observe its
+    # provider's persisted cooldown (recorded below by remember_provider_limit)
+    # instead of reopening the rate-limited lane, while a ready CQ fallback
+    # elsewhere proceeds without being blocked by that pause.
     deadline = time.monotonic() + config['repair']['budget']['wall_clock_min'] * 60
     waits = []
     baseline = git(wt, 'rev-parse', 'HEAD') if not judge else None
