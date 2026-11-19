@@ -988,7 +988,11 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
             and (manager.get("before") or {}).get("manager", {}).get("invocation_id")
             != (manager.get("after") or {}).get("manager", {}).get("invocation_id")),
         "boot_id_changed": (
-            bool(reboot.get("boot_id_before"))
+            reboot.get("boot_id_before")
+            == (reboot.get("before") or {}).get("boot_id")
+            and reboot.get("boot_id_after")
+            == (reboot.get("after") or {}).get("boot_id")
+            and bool(reboot.get("boot_id_before"))
             and bool(reboot.get("boot_id_after"))
             and reboot.get("boot_id_before") != reboot.get("boot_id_after")),
         "metadata_equal": not restore_changes,
