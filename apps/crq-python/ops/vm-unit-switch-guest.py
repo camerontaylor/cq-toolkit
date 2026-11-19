@@ -1272,7 +1272,37 @@ def recovery_repeat(record_path, record_dir, label):
     return payload
 
 
+FENCE_PROPS = ("LoadState", "ActiveState", "UnitFileState", "FragmentPath")
+
+
+def _activation_fence():
+    """Observable preactivation fence that a refusal must leave untouched."""
+    return {
+        "service": file_state(SERVICE),
+        "staged": file_state(STAGED_SERVICE),
+        "units": {name: show(name, list(FENCE_PROPS))
+                  for name in (UNIT, TIMER)},
+        "completions": file_state(COMPLETIONS),
+    }
+
+
+def _require_fence_retained(label, before, after):
+    """A preactivation refusal must not release or alter any fence element."""
+    require(after["service"] == before["service"],
+            label + " refusal changed the service unit path")
+    require(after["service"]["type"] == "symlink"
+            and after["service"].get("target") == "/dev/null",
+            label + " refusal released the durable service mask")
+    require(after["staged"] == before["staged"],
+            label + " refusal changed the staged service")
+    require(after["units"] == before["units"],
+            label + " refusal changed service or timer activation state")
+    require(after["completions"] == before["completions"],
+            label + " refusal released completion work")
+
+
 def recovery_refuse(record_path, record_dir, label):
+    fence_before = _activation_fence()
     payload = recover_phase(type("Args", (), {"record": str(record_path)})(),
                             record_dir=record_dir, label=label)
     require(payload["cli"]["rc"] == 3,
@@ -1282,6 +1312,7 @@ def recovery_refuse(record_path, record_dir, label):
     require(payload["record_after"]["outcome"] == "pending"
             and payload["record_after"]["phase"] == "activation_pending",
             "ambiguous activation recovery did not retain the pending intent")
+    _require_fence_retained(label, fence_before, _activation_fence())
     return payload
 
 
@@ -1467,12 +1498,15 @@ def fence_phase(args):
     require(len(after["completions"]) == len(before["completions"]),
             "fence probe target ran behind the durable mask")
     record_before = record_summary(record_path)
+    fence_before = _activation_fence()
     recovered = cli("recover", ["--record", str(record_path)])
     require(recovered["rc"] == 3,
             "ambiguous fence recovery did not require investigation")
     record_after = record_summary(record_path)
     require(record_after["sha256"] == record_before["sha256"],
             "refused ambiguous recovery changed the retained record")
+    fence_after = _activation_fence()
+    _require_fence_retained("fence", fence_before, fence_after)
     return {"cli": result, "record_path": str(record_path),
             "record": record_before, "record_after_refusal": record_after,
             "recovery": recovered, "direct_start": direct,
@@ -1490,6 +1524,15 @@ def host_identity_phase(args):
             "boot_id": pathlib.Path(
                 "/proc/sys/kernel/random/boot_id").read_text().strip(),
             "manager": manager_identity()}
+
+
+def _matrix_case_of(phase):
+    """The matrix case an observe phase proves, from its phase name alone."""
+    if phase.endswith("-observe"):
+        candidate = phase[:-len("-observe")]
+        if candidate in MATRIX_CASES:
+            return candidate
+    return None
 
 
 def _matrix_adapter():
@@ -1590,10 +1633,12 @@ def matrix_boundary_phase(args):
 
 
 def matrix_observe_phase(args):
-    spec = MATRIX_CASES[args.boundary]
+    case = _matrix_case_of(args.phase)
+    require(case is not None, args.phase + " is not a matrix observe phase")
+    spec = MATRIX_CASES[case]
     record_dir = spec["record_dir"]
-    boundary = json.loads((PHASE_DIR / (args.boundary + ".json")).read_text())
-    require(boundary.get("case") == args.boundary,
+    boundary = json.loads((PHASE_DIR / (case + ".json")).read_text())
+    require(boundary.get("case") == case,
             "boundary phase evidence does not match the requested case")
     after = snapshot(record_dir)
     before_snapshot = boundary["snapshot"]
@@ -1644,7 +1689,7 @@ def matrix_observe_phase(args):
     else:
         recovery = recovery_refuse(record_path, record_dir, args.phase)
         repeat = recovery_refuse(record_path, record_dir, args.phase)
-    return {"case": args.boundary, "kind": spec["kind"],
+    return {"case": case, "kind": spec["kind"],
             "boundary": spec["boundary"], "runtime": spec["runtime"],
             "prior_runtime": spec["prior_runtime"],
             "record_dir": str(record_dir),
@@ -1973,6 +2018,11 @@ def cli_paused(extra, callback, timeout=180):
                 "timeout": False, "pause_reached": False, "during": None,
                 "json": None}
     during = callback()
+    # Release the fence only after the observation callback returned: the
+    # adapter resumes once the marker is gone and refuses at its bound when
+    # the callback never completes, so the switch cannot continue while
+    # evidence is still being collected.
+    REPAIR_PAUSE_MARKER.unlink(missing_ok=True)
     timed_out = False
     try:
         out, err = proc.communicate(timeout=timeout)
@@ -2383,6 +2433,9 @@ def activators_fence(args):
             "external path activation was not fenced")
     require(external.get("external_completion_delta") == 0,
             "external activation produced a completion before release")
+    require(external.get("completions_before_external") == completions_before,
+            "a completion landed between the pre-switch log "
+            "and the first pause sample")
     require(any(REPAIR_UNIT in line for line in external.get("jobs", [])),
             "queued target job was not retained through mask and reload")
     require(external.get("marker", {}).get("phase") == "after-mask-reload",
@@ -2632,6 +2685,30 @@ def activators_inspect(args):
             "preserved": check_preserved({"phase": "activators-inspect"})}
 
 
+# Options each phase dereferences without a default; validate before dispatch.
+PHASE_REQUIRED_OPTIONS = {
+    "drain-alive": ("runtime", "seed"),
+    "drain-ambiguous": ("runtime", "seed"),
+    "recover-drain-alive": ("record",),
+    "recover-kill": ("record",),
+    "recover": ("record",),
+    "recover-repeat": ("record",),
+    "matrix-reset-python": ("after",),
+    "matrix-reset-python-final": ("after",),
+}
+
+
+class _Parser(argparse.ArgumentParser):
+    """Usage errors keep argparse's exit 2 but print the JSON error artifact."""
+
+    phase = None
+
+    def error(self, message):
+        print(json.dumps({"phase": self.phase, "error": "usage",
+                          "detail": str(message)[:1000]}, sort_keys=True))
+        self.exit(2, "%s: error: %s\n" % (self.prog, message))
+
+
 def main(argv=None):
     phases = ("prepare", "drain-alive", "switch-node", "drain-ambiguous",
               "switch-python", "drain-harvest", "interrupt",
@@ -2642,7 +2719,7 @@ def main(argv=None):
               *MATRIX_CASES.keys(),
               *(name + "-observe" for name in MATRIX_CASES),
               *ACTIVATOR_PHASES)
-    parser = argparse.ArgumentParser()
+    parser = _Parser()
     parser.add_argument("phase", choices=phases)
     parser.add_argument("--record")
     parser.add_argument("--boundary")
@@ -2652,6 +2729,16 @@ def main(argv=None):
     parser.add_argument("--seed", choices=("alive", "ambiguous", "harvest"))
     parser.add_argument("--label")
     args = parser.parse_args(argv)
+    parser.phase = args.phase
+    missing = [flag for flag in PHASE_REQUIRED_OPTIONS.get(args.phase, ())
+               if getattr(args, flag) is None]
+    if missing:
+        parser.error(args.phase + " requires "
+                     + ", ".join("--" + flag for flag in missing))
+    case = _matrix_case_of(args.phase)
+    if case is not None and args.boundary not in (None, case):
+        parser.error(args.phase + " proves the " + case + " case derived"
+                     " from its name, not --boundary " + args.boundary)
     try:
         require(os.uname().nodename == "crq-probe",
                 "proof driver only runs on the disposable crq-probe guest")
@@ -2687,8 +2774,7 @@ def main(argv=None):
             payload = reset_fixture_phase(args)
         elif args.phase in MATRIX_CASES:
             payload = matrix_boundary_phase(args)
-        elif args.phase.endswith("-observe") \
-                and args.phase[:-len("-observe")] in MATRIX_CASES:
+        elif case is not None:
             payload = matrix_observe_phase(args)
         elif args.phase == "activators-install":
             payload = activators_install(args)

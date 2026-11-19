@@ -46,6 +46,11 @@ def utc(text):
 
 class RepairDrainTest(unittest.TestCase):
     def setUp(self):
+        # The snapshot secret scan shells out to the denylist/gitleaks policy;
+        # drain fixtures pin clean source, so patch the scanner verdict.
+        scan = mock.patch.object(service, 'triage_context_safe', return_value=True)
+        scan.start()
+        self.addCleanup(scan.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -70,7 +75,8 @@ class RepairDrainTest(unittest.TestCase):
         self.git('fetch', '-q', 'origin')
         self.config = {'clone': str(self.clone), 'worktree_root': str(self.root / 'wt'),
                        'repair': {'enabled': True, 'spend_authorization': 'offline-test-fixture-only',
-                                  'max_rounds_per_pin': 2, 'blackout': BLACKOUT, 'roles': ROLES,
+                                  'max_rounds_per_pin': 2, # Wall-clock-independent: blackout tests pass BLACKOUT or mock `blocked` explicitly.
+                                  'blackout': {**BLACKOUT, 'enabled': False}, 'roles': ROLES,
                                   'budget': {'wall_clock_min': 20, 'max_tokens': 400000,
                                              'max_output_tokens': 500000, 'max_context_tokens': 200000}}}
         self.queue = {'items': [
@@ -207,6 +213,26 @@ class RepairDrainTest(unittest.TestCase):
             active[pid] = (item, rfd)
         with mock.patch.object(service.os, 'waitpid', side_effect=[(100, 0), (101, 9)]):
             self.assertTrue(service.reap_item(active))
+        self.assertEqual(active, {})
+        for rfd, wfd in fds:
+            os.close(wfd)
+            with self.assertRaises(OSError):
+                os.close(rfd)  # reap_completed closed the read end
+
+    def test_interrupted_reap_untracks_consumed_worker_and_keeps_waiting(self):
+        fds = []
+        active = {}
+        for pid, item in ((100, 'consumed'), (101, 'exited')):
+            rfd, wfd = os.pipe()
+            fds.append((rfd, wfd))
+            active[pid] = (item, rfd)
+        # An interrupt after a waitpid consumed the first worker's status but
+        # before its PID was untracked leaves a stale entry; the next poll must
+        # tolerate it and keep waiting for the remaining owned worker.
+        with mock.patch.object(service.os, 'waitpid', side_effect=[ChildProcessError(), (101, 0)]):
+            failed, reaped = service.reap_completed(active)
+        self.assertTrue(failed)
+        self.assertTrue(reaped)
         self.assertEqual(active, {})
         for rfd, wfd in fds:
             os.close(wfd)
@@ -956,6 +982,21 @@ class RepairDrainTest(unittest.TestCase):
                                   self.root / 'dispatch', judge=False)
             snapshot.assert_not_called()
             provider.assert_not_called()
+
+    def test_dispatch_refuses_a_secret_bearing_source_snapshot_before_any_driver(self):
+        self.worktree()
+        job = json.loads((self.root / 'state/repair/inbox/crq-run1-F1.json').read_text())
+        snapshot = {'path': 'src/a.py', 'source': '1: key = "' + 'AKIA' + 'IOSFODNN7EXAMPLE"'}
+        for driver, target in (('cq', service.cq), ('codex', service.codex)):
+            with mock.patch.object(service, 'require_canonical_delivery'), \
+                 mock.patch.object(service, 'source_snapshot', return_value=snapshot), \
+                 mock.patch.object(service, 'triage_context_safe', return_value=False), \
+                 mock.patch.object(target, 'invoke') as provider:
+                with self.assertRaisesRegex(ValueError, 'secret scan rejected'):
+                    service._dispatch(self.config, {'driver': driver}, job, self.root,
+                                      self.root / ('dispatch-' + driver), judge=False)
+                provider.assert_not_called()
+            self.assertFalse((self.root / ('dispatch-' + driver) / 'source-snapshot.json').exists())
 
     def test_child_refusal_stops_the_pass_before_the_child_exits(self):
         # The reviewer's interleaving: child A refuses, the marker is removed
@@ -1899,6 +1940,20 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(result['next_rung'], 0)
         self.assertIn('blackout', result['reason'])
 
+    def test_blackout_reached_during_preparation_defers_before_the_driver_call(self):
+        _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
+        wt = self.worktree()
+        # Admission is clear, but the retention and reset that prepare the
+        # rung outlast the margin that check allowed: the recheck at the last
+        # boundary before the paid call must defer with the rung preserved.
+        with mock.patch.object(service, 'blocked', side_effect=[False, True]), \
+             mock.patch.object(service.cq, 'invoke') as invoke:
+            result = service.process(self.config, dict(job), wt)
+        invoke.assert_not_called()
+        self.assertTrue(result['retry_after'])
+        self.assertEqual(result['next_rung'], 0)
+        self.assertIn('blackout', result['reason'])
+
     def test_drained_snapshot_keeps_pin_while_base_chains(self):
         _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
         job['repair_base'] = 'd' * 40  # predecessor commit of an earlier finding
@@ -1943,9 +1998,9 @@ class RepairDrainTest(unittest.TestCase):
             service.main([])
         drain.assert_called_once()
 
-    def test_disabled_dispatch_narrates_on_stderr_and_keeps_stdout_empty(self):
-        # I1: stdout is the machine-readable channel; the disabled-dispatch
-        # narration is stderr-only and nothing is written to stdout.
+    def test_disabled_dispatch_narrates_on_stderr_and_emits_one_json_status(self):
+        # I1: stdout is the machine-readable channel and carries exactly one
+        # JSON status; the narration stays on stderr.
         disabled = {**self.config, 'repair': {**self.config['repair'], 'spend_authorization': '  '}}
         atomic(self.root / 'config.json', disabled)
         stdout, stderr = io.StringIO(), io.StringIO()
@@ -1955,11 +2010,11 @@ class RepairDrainTest(unittest.TestCase):
              contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             service.main([])
         drain.assert_not_called()
-        self.assertEqual(stdout.getvalue(), '')
+        self.assertEqual(json.loads(stdout.getvalue())['status'], 'disabled')
         self.assertIn('repair dispatch disabled', stderr.getvalue())
 
-    def test_selector_refusal_writes_nothing_to_stdout_and_returns_2(self):
-        # 1692: refusal exit code 2, and (I1) nothing on stdout for it.
+    def test_selector_refusal_emits_one_json_status_and_returns_2(self):
+        # 1692: refusal exit code 2, and (I1) one JSON status on stdout.
         atomic(self.root / 'config.json', self.config)
         stdout, stderr = io.StringIO(), io.StringIO()
         with mock.patch.object(service, 'ROOT', self.root), \
@@ -1969,7 +2024,7 @@ class RepairDrainTest(unittest.TestCase):
             code = service.main(['--job', 'crq-run1-F1'])
         self.assertEqual(code, 2)
         drain.assert_not_called()
-        self.assertEqual(stdout.getvalue(), '')
+        self.assertEqual(json.loads(stdout.getvalue())['status'], 'refused')
         self.assertIn('repair dispatch refused', stderr.getvalue())
 
     def test_write_result_emits_one_single_line_json_document(self):
@@ -2459,8 +2514,9 @@ class RepairDrainTest(unittest.TestCase):
         wt = self.worktree()
         _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
         unchanged = {'stop': 'ok', 'changed': False, 'summary': 'no change warranted', 'commits': []}
-        # First guard (fixer) is clear; the judge guard falls inside the blackout.
-        with mock.patch.object(service, 'blocked', side_effect=[False, True]), \
+        # The fixer admission and pre-call guards are clear; the judge guard
+        # falls inside the blackout.
+        with mock.patch.object(service, 'blocked', side_effect=[False, False, True]), \
              mock.patch.object(service.cq, 'invoke', return_value=unchanged) as invoke, \
              mock.patch.object(service.cq, 'judge') as judge:
             result = service.process(self.config, dict(job), wt)
@@ -2482,6 +2538,23 @@ class RepairDrainTest(unittest.TestCase):
         self.assertNotIn('pending_judge', result)
         self.assertNotIn('retry_after', result)
 
+    def test_blackout_reached_before_judge_call_preserves_pending_judge(self):
+        self.job('crq-run1-F1', 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')
+        wt = self.worktree()
+        _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
+        unchanged = {'stop': 'ok', 'changed': False, 'summary': 'no change warranted', 'commits': []}
+        # The fixer call completes clear of the window; the blackout opens
+        # while the judge dispatch prepares, so the judge call never starts.
+        with mock.patch.object(service, 'blocked', side_effect=[False, False, False, True]), \
+             mock.patch.object(service.cq, 'invoke', return_value=unchanged) as invoke, \
+             mock.patch.object(service.cq, 'judge') as judge:
+            result = service.process(self.config, dict(job), wt)
+        self.assertEqual(invoke.call_count, 1)
+        judge.assert_not_called()
+        self.assertTrue(result['pending_judge'])
+        self.assertTrue(result['retry_after'])
+        self.assertIn('judge deferred', result['reason'])
+
     def test_pending_judge_with_missing_worktree_fails_closed(self):
         self.job('crq-run1-F1', 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')
         wt = self.worktree()
@@ -2501,6 +2574,31 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(result['verdict'], 'FAILED')
         self.assertIn('pending judge worktree unavailable', result['reason'])
         self.assertNotIn('pending_judge', result)
+        self.assertEqual(json.loads((self.root / 'state/repair/crq-run1-F1/result.json').read_text())['verdict'], 'FAILED')
+
+    def test_pending_mechanical_with_missing_worktree_fails_closed(self):
+        # A deferred candidate whose recorded checkout is gone must not be
+        # verified against the base tree: that would reject commits that are
+        # not ancestors of the original HEAD and silently lose a valid repair.
+        self.job('crq-run1-F1', 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')
+        wt = self.worktree()
+        _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
+        missing = str(wt) + '-A2'
+        self.assertFalse(Path(missing).exists())
+        progress = self.root / 'state/repair/crq-run1-F1/progress.json'
+        atomic(progress, {'job': 'crq-run1-F1', 'item': 'pr1-merged',
+                          'repair_base': self.pin, 'verdict': 'FAILED', 'reason': '',
+                          'commits': [], 'attempts': [{'rung': 'A0'}], 'judge': None,
+                          'worktree': missing, 'next_rung': 0,
+                          'pending_mechanical': {'fixer_reason': 'fixed it', 'rung': 0,
+                                                 'commits': ['1' * 40]}})
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'mechanical') as mechanical:
+            result = service.process(self.config, dict(job), wt)
+        mechanical.assert_not_called()
+        self.assertEqual(result['verdict'], 'FAILED')
+        self.assertIn('pending mechanical worktree unavailable', result['reason'])
+        self.assertNotIn('pending_mechanical', result)
         self.assertEqual(json.loads((self.root / 'state/repair/crq-run1-F1/result.json').read_text())['verdict'], 'FAILED')
 
     def test_harvest_publishes_fixed_findings_around_a_stale_one(self):

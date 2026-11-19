@@ -84,9 +84,9 @@ export async function prepareOrdinaryReview(
   )
     throw new Error('incomplete review plan');
   const profile = input.plan.get('profile');
-  let cmd: JsonValue[] = ['coderabbit', 'review', '--agent', '--deep'];
-  if (pyTruthy(input.plan.get('range_policy'))) cmd.push('--committed');
-  cmd.push('--base-commit', base);
+  const rangeArgs: JsonValue[] = pyTruthy(input.plan.get('range_policy')) ? ['--committed'] : [];
+  rangeArgs.push('--base-commit', base);
+  let cmd: JsonValue[] = ['coderabbit', 'review', '--agent', '--deep', ...rangeArgs];
   if (pyTruthy(profile)) {
     if (
       !(profile instanceof JsonObject) ||
@@ -95,7 +95,19 @@ export async function prepareOrdinaryReview(
       input.plan.get('config_digest') === undefined
     )
       throw new Error('invalid review profile');
-    cmd = ['coderabbit', 'review', ...(profile.get('flags') as JsonValue[])];
+    // The runner owns the review range; a profile flag must not pick another base.
+    if ((profile.get('flags') as string[]).some((flag) => /^--base(?:-commit)?(?:=|$)/.test(flag)))
+      throw new Error('review profile must not set a base selector');
+    // Nor may it pick the review scope (uncommitted/untracked/committed/all).
+    if (
+      (profile.get('flags') as string[]).some((flag) =>
+        /^(?:--(?:uncommitted|committed|all|type|untracked|include-untracked|dir)(?:=|$)|-t(?:=|$))/.test(
+          flag,
+        ),
+      )
+    )
+      throw new Error('review profile must not set a review scope');
+    cmd = ['coderabbit', 'review', ...(profile.get('flags') as JsonValue[]), ...rangeArgs];
   }
   const runId = await effects.allocate(id);
   if (!runId.startsWith(`${id}-`) || !/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(runId))

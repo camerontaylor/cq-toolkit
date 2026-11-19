@@ -174,7 +174,10 @@ class HealthTests(ControllerFixture):
     def test_excessively_nested_receipt_is_malformed_not_a_crash(self):
         raw = b"[" * 100000 + b"]" * 100000
         name = hashlib.sha256(raw).hexdigest() + ".json"
-        self.assertIn("not valid JSON", dc.receipt_problem(name, raw))
+        # Python 3.14+ bounds JSON nesting by C-stack size, so the parse either
+        # raises RecursionError ("not valid JSON") or yields a list ("not a JSON
+        # object"). Either way the receipt is malformed and never crashes.
+        self.assertIn("malformed:", dc.receipt_problem(name, raw))
 
     def test_invalid_receipt_sample_is_a_distinct_verdict_not_a_tick_failure(self):
         good = self.write_receipt(self.receipt_document())

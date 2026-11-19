@@ -32,6 +32,34 @@ function object(value: JsonValue | undefined, label: string): JsonObject {
   return value;
 }
 
+/** Mark `repo#pr`'s recorded link stale when it names another head or base.
+ * Returns `queue` itself when there is no link, or the link still matches. */
+function markPreviousLinkStale(
+  queue: JsonObject,
+  repo: string,
+  pr: number,
+  base: string,
+  head: string,
+): JsonObject {
+  const linksValue = queue.get('review_pr_links');
+  // null counts as absent here: a null map never held a link, so the queue is unchanged.
+  const links =
+    linksValue === undefined || linksValue === null
+      ? new JsonObject([])
+      : object(linksValue, 'review_pr_links');
+  const key = `${repo}#${pr}`;
+  const previousValue = links.get(key);
+  const previous = pyTruthy(previousValue) ? object(previousValue, 'review_pr_link') : undefined;
+  if (previous === undefined) return queue;
+  if (previous.get('head') === head && previous.get('base') === base) return queue;
+  return withObjectKeys(queue, [
+    [
+      'review_pr_links',
+      withObjectKeys(links, [[key, withObjectKeys(previous, [['stale', true]])]]),
+    ],
+  ]);
+}
+
 export async function associateLocalReview(
   queue: JsonObject,
   repo: string,
@@ -45,7 +73,14 @@ export async function associateLocalReview(
   if (!Array.isArray(items)) throw new Error('queue items must be an array');
   const isLocal = (v: JsonValue): v is JsonObject =>
     v instanceof JsonObject && v.get('kind') === LOCAL_REVIEW_KIND;
-  if (!items.some(isLocal)) return { queue, associated: false };
+  if (!items.some(isLocal)) {
+    // No local item means no identity to resolve, but a link left by an older
+    // head still goes stale — exactly as it does when nothing else matches.
+    return {
+      queue: dry ? queue : markPreviousLinkStale(queue, repo, pr, base, head),
+      associated: false,
+    };
+  }
   const wanted = await effects.facts(repo, base, head);
   if (wanted === null) return { queue, associated: false };
   const candidates = items.filter(isLocal).filter((item) => {

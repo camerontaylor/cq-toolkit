@@ -198,18 +198,27 @@ export function attachSlotMetadata(lock: Awaited<ReturnType<typeof acquireFileLo
     async writeMetadata(metadata: SlotMetadata): Promise<void> {
       await lock.assertIdentity();
       parseMetadata(JSON.stringify(metadata));
+      // An incomplete record only invalidates reuse, so it keeps its stored
+      // paths verbatim (a gone or unresolvable checkout must not block
+      // recovery); a complete record must still resolve and is canonicalized.
+      const resolveStored = async (path: string): Promise<string> =>
+        metadata.incomplete ? path : await realpath(path);
       const canonical =
         metadata.state === 'bound'
           ? {
               ...metadata,
-              checkoutGitDir: await realpath(metadata.checkoutGitDir),
-              checkoutPath: await realpath(metadata.checkoutPath),
+              checkoutGitDir: await resolveStored(metadata.checkoutGitDir),
+              checkoutPath: await resolveStored(metadata.checkoutPath),
             }
           : metadata;
+      // Reject what the bounded reader would refuse, before the temporary file exists,
+      // so an oversized document never replaces the metadata on disk.
+      const text = `${JSON.stringify(canonical)}\n`;
+      if (Buffer.byteLength(text, 'utf8') > 16_384) throw new Error('Oversized slot metadata');
       const temporary = `${metadataPath}.${randomUUID()}.tmp`;
       const output = await open(temporary, 'wx', 0o600);
       try {
-        await output.writeFile(`${JSON.stringify(canonical)}\n`);
+        await output.writeFile(text);
         await output.sync();
         await output.close();
         await lock.assertIdentity();

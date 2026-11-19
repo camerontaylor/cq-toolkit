@@ -82,7 +82,10 @@ shapes:
 * there is exactly one service, exactly one timer and at most one path unit,
   and the service is the requested unit;
 * no unexpected prefix entry, enablement link, drop-in directory, extra
-  installed or loaded manager unit, or job on an unexpected prefix unit;
+  installed or loaded manager unit, or job on an unexpected prefix unit, and
+  no undeclared top-level symlink that resolves to a declared unit, since
+  systemd lets a plain name of the same type alias a unit and an alias can be
+  used in dependency directives;
 * no dependency directive in a source file outside the declared set names an
   expected unit, and no directive in a declared source names a CRQ unit
   outside the expected units: `Wants`, `Requires`, `Requisite`, `BindsTo`,

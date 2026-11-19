@@ -49,7 +49,7 @@ class RuntimeTest(RuntimeTestBase):
         self.assertEqual([row["decision"] for row in self.q["backfill_admissions"]], ["admit", "admit"])
         self.assertFalse(self.q.get("backfill_reservations"))
 
-    def test_background_turn_reserves_with_pending_interactive_but_unknown_usage_refuses(self):
+    def test_background_turn_reserves_only_once_ordinary_exhausted_and_usage_known(self):
         for known in (True, False):
             with self.subTest(known=known):
                 self.q = {"items": [self.item, dict(id="interactive", kind="local-review", generation=1,
@@ -75,7 +75,7 @@ class RuntimeTest(RuntimeTestBase):
                     result = crq.start_one(self.q, [], False, None, False)
                 self.assertEqual(result[0], "reserved-run" if known else None)
                 self.assertEqual(self.c.launch.call_count, int(known))
-                self.assertEqual(self.q["backfill_ordinary_exhausted"], not known)
+                self.assertTrue(self.q["backfill_ordinary_exhausted"])  # ordinary item exhausted (prepare None)
 
 if __name__ == "__main__":
     unittest.main()

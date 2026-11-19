@@ -137,6 +137,8 @@ export async function harvestLocalReviewExit(
       !Number.isSafeInteger(exitCode))
   )
     throw new Error('unsupported exit code');
+  // Validate before any side effect so a missing ended_at cannot leave partial writes behind.
+  const endedAt = string(required(exit, 'ended_at'));
   await effects.writeNext(effects.nowIso());
   const meta = await effects.readMeta(runId);
   const stream = await effects.readStream(runId);
@@ -162,7 +164,6 @@ export async function harvestLocalReviewExit(
       ['paused', true],
       ['pause_reason', `${outcome} on ${runId}; owner action needed`],
     ]);
-  const endedAt = string(required(exit, 'ended_at'));
   next = await effects.complete(next, item, runId, cls, endedAt, exitCode, stream);
   try {
     await effects.cleanup(item, meta);

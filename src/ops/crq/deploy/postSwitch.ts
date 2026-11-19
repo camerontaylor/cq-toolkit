@@ -223,7 +223,8 @@ export interface RecheckBaselineArgs {
   readonly root: string;
   readonly originalConfig: Uint8Array;
   readonly cqBin: CqBinRecord;
-  readonly target: string;
+  /** The PRIOR (live) sha: the target that must read the queue if this deploy rolls back. */
+  readonly priorSha: string;
   phase(name: string, extra: Record<string, unknown>): void;
 }
 
@@ -242,7 +243,7 @@ export async function recheckBaseline(args: RecheckBaselineArgs): Promise<Preser
     'the runtime pointer changed while admission was being held; nothing was switched',
   );
   const preserved = await args.controller.preservedDigests();
-  const compatibility = await args.controller.compatibilityRecord(args.target);
+  const compatibility = await args.controller.compatibilityRecord(args.priorSha);
   require_(
     args.controller.rollbackCompatible(compatibility),
     'the queue no longer grants automatic rollback after the drain: ' +

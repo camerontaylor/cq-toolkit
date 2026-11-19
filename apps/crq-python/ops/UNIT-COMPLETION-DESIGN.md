@@ -2,8 +2,10 @@
 
 2026-11-12. Companion to `ops/unit-completion.py` and
 `test_unit_completion.py`. This is a read-only evidence provider. It does not
-install, start, stop, mask or restore a unit, and it is not wired into the
-production adapter or controller.
+install, start, stop, mask or restore a unit. The module itself does not wire
+into the production adapter or controller. `ops/unit-switch-factory.py`
+constructs `SystemdJournalCompletionPort` for the production adapter, and the
+controller CLI uses that factory through the live binding.
 
 ## Contract
 
@@ -14,7 +16,10 @@ systemd facts?
 Evidence must bind:
 
 * **Unit**: `systemctl show` `FragmentPath` equals the selected installed unit
-  in `unit_dir`, and the journal witness names the same unit.
+  in `unit_dir`; that match is required in both modes. A journal record naming
+  the same unit is a matching journal witness, mandatory only in strict mode
+  (`require_journal_witness=True`); the default show-only mode accepts a quiet
+  oneshot and reports `witness: none`.
 * **Runtime**: the installed `ExecStart` parses to `python` or
   `node:<source-sha>`.
 * **Selected identity**: the installed service SHA-256 equals the expected
@@ -146,7 +151,8 @@ sequence(unit) -> int
 read(unit, runtime, previous) -> dict | None
 ```
 
-The adapter changes, if it is wired later:
+The adapter changes, on the adapter the live binding composes through
+`ops/unit-switch-factory.py`:
 
 1. Add `SUPPORTED_UNITS = {"crq-tick.service", "crq-slot.service"}` and refuse
    every other unit before mutation.

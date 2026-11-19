@@ -390,10 +390,15 @@ describe('reconcile page loop', () => {
       { incomplete_results: 'false' },
       { truncated: true },
       { errors: [{ message: 'partial data' }] },
-    ]) {
+    ] as ReadonlyArray<Record<string, unknown>>) {
       const saves: JsonObject[] = [];
       const page = cursorPage([pr(1, B)]);
-      const withFlags = object({ ...(page as unknown as Record<string, unknown>), ...flags });
+      // Spread of a JsonObject copies its `entries` property, not its fields;
+      // the flags must be added to a valid page for the flags to be the reason.
+      const withFlags = withObjectKeys(
+        page,
+        Object.entries(flags).map(([key, value]) => [key, json(value)] as const),
+      );
       await expect(
         reconcile(() => Promise.resolve(withFlags), {
           ...options(),

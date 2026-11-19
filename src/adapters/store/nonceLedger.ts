@@ -63,8 +63,10 @@ export function makeInMemoryNonceLedger(): InspectableNonceLedger {
  * DURABILITY, matched to the journal's own idiom (src/kernel/journal.ts,
  * `durable: true`) rather than to a hand-rolled idea: the line is written
  * through an append-mode handle and `fdatasync`ed BEFORE `consume` resolves,
- * and the ledger's DIRECTORY is fsync'd once, when this process creates the
- * file, so the directory entry is durable too. A plain `appendFileSync` was
+ * and the ledger's DIRECTORY is fsync'd on the first consumption of every
+ * instance — never skipped just because the file already exists — so the
+ * directory entry is durable too even when an earlier instance created the
+ * file and crashed before its own directory sync. A plain `appendFileSync` was
  * the first version here and it was NOT durable in the sense the ADR's crash
  * analysis needs: it returns once the bytes are in the OS page cache, so a
  * machine crash could lose a spent nonce and leave the token REPLAYABLE —
@@ -117,9 +119,18 @@ export function makeFileNonceLedger(
   const path = realpathOrSelf(ledgerPath);
   const write = config.write ?? defaultWrite;
   const known = new Set<string>();
-  // The directory entry is durable once the FILE is created; later appends
-  // to a known file skip the dir fsync entirely (the journal's own rule).
-  let dirSynced = existsSync(path);
+  // FILE EXISTENCE DOES NOT PROVE DIRECTORY DURABILITY, so this starts FALSE
+  // even when the ledger file is already there. An earlier instance may have
+  // created the file and failed before its directory fsync; its error path
+  // removes the append lock but cannot remove the file. A new instance that
+  // trusted existence would append and report `consumed` with the directory
+  // entry still unflushed, and a system crash could then drop that entry —
+  // losing the record and permitting replay, since the file's own fsync says
+  // nothing about its parent directory. So the first successful consumption
+  // in EACH instance syncs the directory; later appends in the same instance
+  // skip it (the journal's own rule, applied per instance rather than per
+  // file existence).
+  let dirSynced = false;
   const absorb = (): void => {
     // Fresh read every time: the in-process set is a CACHE of a file another
     // process may have appended since. A missing file is an empty ledger
@@ -174,7 +185,7 @@ export function makeFileNonceLedger(
     // Synchronous on purpose: the append must be COMPLETE before this
     // promise resolves, or the exercise would report "consumed" for a
     // nonce that is still only a promise of a byte on disk.
-    const isNew = !dirSynced;
+    const needsDirSync = !dirSynced;
     const line = Buffer.from(`${nonce}\n`, 'utf8');
     const handle = openSync(path, 'a');
     try {
@@ -192,10 +203,25 @@ export function makeFileNonceLedger(
     } finally {
       closeSync(handle);
     }
-    if (isNew) {
+    if (needsDirSync) {
       // Flagged only AFTER the fsync returns: a hard failure leaves the flag
       // clear, so the next consume retries the directory sync.
-      syncDirSync(dirname(path));
+      // Independent of whether THIS process created any directory: another
+      // process may have made `/state/new/nonces` without syncing `/state`,
+      // and a prior failed sync is only retried because the flag stayed clear.
+      // Leaf first: the file's own entry, then each ancestor's entry upward.
+      try {
+        for (let current = path; current !== dirname(current); current = dirname(current)) {
+          syncDirSync(dirname(current));
+        }
+      } catch (err) {
+        // The record is already appended and fsynced, so a failed directory sync
+        // is the same INDETERMINATE outcome as a failed write.
+        throw new Error(
+          `approval ledger: append persistence is INDETERMINATE after the record was written — ${err instanceof Error ? err.message : String(err)}; inspect the ledger before re-approving`,
+          { cause: err },
+        );
+      }
       dirSynced = true;
     }
     known.add(nonce);
@@ -278,7 +304,7 @@ function makeAppendLock(artifact: string): {
 } {
   return {
     async withLock<T>(fn: () => Promise<T>): Promise<T> {
-      await mkdir(dirname(artifact), { recursive: true });
+      await mkdirDurable(dirname(artifact));
       for (let attempt = 0; ; attempt++) {
         try {
           await mkdir(artifact);
@@ -331,6 +357,43 @@ function syncDirSync(dir: string): void {
     if (code === undefined || !SOFT_ERRORS.has(code)) throw err;
   } finally {
     if (handle !== undefined) closeSync(handle);
+  }
+}
+
+/**
+ * `mkdir -p`, but the DIRECTORY ENTRIES it creates are persisted too.
+ *
+ * A recursive `mkdir` can create more than the leaf: for `/state/new/nonces`
+ * it can create BOTH `/state/new` and `/state/new/nonces`, so TWO directory
+ * entries are at risk. The leaf's entry (`nonces` in `/state/new`) is covered
+ * by the parent fsync `consume` does once the ledger file exists, but
+ * `/state/new`'s entry lives in `/state`, which nothing else in this file ever
+ * syncs. A system crash could then lose `/state/new` and the ledger under it
+ * even though `consume` returned `consumed` — exactly the replay §4c's crash
+ * analysis forbids. So every directory this call creates gets its own parent
+ * synced, using {@link syncDirSync}'s documented best-effort policy.
+ *
+ * The pre-existing ancestor is captured BEFORE the mkdir: every directory
+ * between it and `dir` is one this call creates. That is a direct reading of
+ * the filesystem's state rather than a heuristic over timestamps, so it is
+ * immune to coarse or non-monotonic mtimes.
+ *
+ * Order is LEAF FIRST, oldest last: syncing a parent before its own entry is
+ * durable could pin an entry inside a directory that a crash then drops,
+ * leaving a visible child with no findable parent. An `EEXIST` mkdir (another
+ * process won the race) creates nothing, and the extra parent fsync it can
+ * cause is harmless.
+ */
+async function mkdirDurable(dir: string): Promise<void> {
+  let preexisting = dir;
+  while (preexisting !== dirname(preexisting) && !existsSync(preexisting)) {
+    preexisting = dirname(preexisting);
+  }
+  await mkdir(dir, { recursive: true });
+  // Leaf first: `dir`'s own entry, then its parent's, up to the deepest
+  // ancestor that was already there (whose parent already holds its entry).
+  for (let current = dir; current !== preexisting; current = dirname(current)) {
+    syncDirSync(dirname(current));
   }
 }
 

@@ -101,7 +101,8 @@ const hasGlob = (refspec: string): boolean =>
  * the guard through however innocuous its tokens look. The eight shapes
  * (after the `-C <path>` prefix is stripped):
  *   rev-parse <flags/ref>…                    — ref resolution (≥1 arg)
- *   fetch <remote> <refspec>…                 — FLAG-FREE and GLOB-FREE
+ *   fetch [--refmap=] <remote> <refspec>…     — FLAG-FREE (bar the one
+ *       literal `--refmap=` token) and GLOB-FREE
  *       (round 4: the documented shape carries neither, so `fetch origin
  *       --upload-pack=<cmd>` — the remote slot included — and a glob
  *       refspec whose '*' destination would hide the protected branch are
@@ -189,7 +190,12 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
       return args;
     }
     case 'fetch': {
-      const tail = rest.slice(1);
+      // The ONE flag the shape admits: the exact token `--refmap=` (empty
+      // value), which stops configured `remote.<name>.fetch` mappings from
+      // opportunistically updating tracking refs for a command-line
+      // refspec. It is a fixed literal in the fetch slot, never a pattern.
+      const noRefmap = rest[1] === '--refmap=';
+      const tail = rest.slice(noRefmap ? 2 : 1);
       if (tail.length < 2) throw unknown(); // remote + ≥1 refspec
       // FLAG-FREE and GLOB-FREE (round 4), the same rule push and worktree
       // already carry: the documented fetch shape carries no flags, and the
@@ -620,9 +626,9 @@ export interface MergeEffects {
    */
   objectExists(sha: string): Promise<GhResult>;
   /**
-   * Fetch one branch from origin (`git fetch origin <branch>`, a
+   * Fetch one branch from origin (`git fetch --refmap= origin <branch>`, a
    * colon-less refspec that lands in FETCH_HEAD only — the existing
-   * safeArgs fetch shape already admits exactly this, and the branch name
+   * safeArgs fetch shape admits exactly this, and the branch name
    * is the schema-gated conservative refname from the op input, never
    * forge text). Used by the publication gate to bring a not-yet-local
    * forge base tip into the object store before the ancestry read.
@@ -765,7 +771,7 @@ export interface RealMergeEffectsOpts {
  *                   review P2 ntJt; encoding pinned P1 q2-s)
  *   - objectExists:  `git -C <repoRoot> cat-file -e <sha>` (is the forge
  *                   base tip local yet? review P2 ntJj)
- *   - fetchBaseBranch: `git -C <repoRoot> fetch origin <branch>` (bring a
+ *   - fetchBaseBranch: `git -C <repoRoot> fetch --refmap= origin <branch>` (bring a
  *                   not-yet-local base tip in; colon-less, FETCH_HEAD only)
  */
 export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
@@ -786,13 +792,23 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     // numbers collide. The spawn cwd fixes that without touching argv
     // shapes (safeArgs unaffected); GH_REPO is stripped from the inherited
     // env because gh's resolution precedence (-R > GH_REPO > cwd) would
-    // otherwise defeat the cwd. The git runner keeps -C argv scoping.
+    // otherwise defeat the cwd. The git runner keeps -C argv scoping (and
+    // strips the GIT_* selectors that would override -C; see below).
     cwd: repoRoot,
     unsetEnv: ['GH_REPO'],
   };
   const gitRunnerOpts = {
     ...(opts.gitBin !== undefined ? { bin: opts.gitBin } : {}),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    // Scope git to repoRoot too (review P1, backfill finding fc7ec07): the
+    // `-C <repoRoot>` argv scoping does not choose the repository on its
+    // own — git uses an inherited GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR IN
+    // PLACE of discovery, so a caller whose environment selects another
+    // repository (or worktree) would have validateRef/isAncestor reads and
+    // fetchRef/pushRef writes land THERE. Stripping the inherited names
+    // makes -C authoritative, the same way the gh runner above strips
+    // GH_REPO to make its cwd authoritative.
+    unsetEnv: ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR'],
     // OBJECT-GRAPH HARDENING (review P1 p528, PR #1641): every gate read
     // — validate/parents/diff/message/ancestry/presence — and the push
     // must see the TRUE objects, never attacker-chosen refs/replace
@@ -904,9 +920,10 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
 
   // The base fetch (review P2 ntJj): the branch name is the op input's
   // schema-gated conservative refname; the argv is a colon-less fetch
-  // refspec the existing safeArgs fetch shape already admits.
+  // refspec; `--refmap=` (the one flag safeArgs admits) keeps configured
+  // remote.origin.fetch mappings from updating tracking refs as a side effect.
   const fetchBaseBranch = (branch: string): Promise<GhResult> =>
-    git(['-C', repoRoot, 'fetch', 'origin', branch]);
+    git(['-C', repoRoot, 'fetch', '--refmap=', 'origin', branch]);
 
   // The worktree root's base dir, derived LAZILY (first prepare, then
   // cached) from git's COMMON dir (round 2): a linked worktree's .git is a

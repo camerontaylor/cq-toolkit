@@ -109,11 +109,15 @@ function parseDispatchLine(value: unknown, path: string, where: string): Dispatc
  * posts, so mid-file corruption stays loud, never tolerant. `record`
  * appends exactly one newline-terminated line — no read-modify-write, so
  * interleaved loads/records can never lose a record and a crash can never
- * damage PRIOR lines — and it repairs the tail before appending: junk is
- * truncated, while an unterminated tail that already parses as a complete
- * record is KEPT (load() counts it dispatched) and only its newline
- * boundary is added — the retry never discards a landed dispatch nor
- * concatenates onto junk.
+ * damage PRIOR lines — and it repairs the tail before appending: the tail
+ * is the last NON-BLANK line, exactly as `load` picks it, so a junk final
+ * line is truncated from the start of that line whether or not a newline
+ * follows it (external corruption can leave a terminated malformed line,
+ * which `load` tolerates only while it is final — appending past it would
+ * make it a mid-file line the next `load` throws on). An UNTERMINATED tail
+ * that already parses as a complete record is KEPT (load() counts it
+ * dispatched) and only its newline boundary is added — the retry never
+ * discards a landed dispatch nor concatenates onto junk.
  *
  * VERSION (ADR-0005 decision 10): every new line carries `version: 1`; a
  * line without one is a legacy v1 record (old logs exist in runner caches)
@@ -182,32 +186,60 @@ export function fileDispatchLog(path: string): DispatchLog {
         `fileDispatchLog: refusing to record a malformed dispatch record (${fault}) — nothing was appended; fix the caller and re-run`,
       );
     }
-    // A discarded partial tail is truncated before the retry appends, so a
-    // crash mid-append can never poison the next record — BUT not every
-    // unterminated tail is garbage: a crash AFTER the record's closing '}'
-    // but BEFORE its '\n' left a VALID record that load() already parses
-    // and counts dispatched. The repair therefore mirrors load() exactly:
-    // an unterminated tail that parses as JSON is KEPT (only its '\n'
-    // boundary is added — truncating it would discard a landed dispatch
-    // and cause a repost), while a tail that does not parse is truncated.
-    // A tail that parses but the reader would REFUSE (wrong version, not a
-    // record object) is never silently accepted as a boundary either.
-    // Either way the new record lands on a clean newline boundary.
+    // A malformed tail is truncated before the retry appends, so debris can
+    // never poison the next record — BUT not every tail is garbage: a crash
+    // AFTER the record's closing '}' but BEFORE its '\n' left a VALID record
+    // that load() already parses and counts dispatched. The repair therefore
+    // mirrors load() exactly, including WHICH line is the tail: the last
+    // NON-BLANK line, with trailing newline(s) treated as termination, not
+    // content. Repairing only the bytes after the last '\n' would miss a
+    // malformed final line that happens to be newline-terminated (external
+    // corruption — a torn write or a hand edit leaving e.g. `{"actionId":\n`):
+    // load() tolerates it while it is final, but appending after it would
+    // make it a MID-FILE line the next load() throws on. So a tail that does
+    // not parse is truncated from the START OF ITS OWN LINE, terminated or
+    // not, while an UNTERMINATED tail that parses as JSON is KEPT (only its
+    // '\n' boundary is added — truncating it would discard a landed dispatch
+    // and cause a repost). A tail that parses but the reader would REFUSE
+    // (wrong version, not a record object) is never silently accepted as a
+    // boundary either. Either way the new record lands on a clean boundary.
     let handle: FileHandle | null = null;
     let boundaryNeeded = false;
     try {
       handle = await open(path, 'r+');
       const bytes = await handle.readFile();
-      const keep = bytes.lastIndexOf(0x0a) + 1; // through the last COMPLETE line
-      if (keep < bytes.length) {
-        const tail = bytes.subarray(keep).toString('utf8');
+      // The tail is the last NON-BLANK line, exactly as load() picks it:
+      // trailing newline(s) and blank lines are termination, not content.
+      // `tailStart`/`tailEnd` bracket that line's bytes (end exclusive), so
+      // `tailEnd === bytes.length` means the line is UNTERMINATED.
+      let tailStart = -1;
+      let tailEnd = 0;
+      let lineStart = 0;
+      // The `i === bytes.length` pass closes an unterminated final line.
+      for (let i = 0; i <= bytes.length; i += 1) {
+        if (i === bytes.length || bytes[i] === 0x0a) {
+          if (bytes.subarray(lineStart, i).toString('utf8').trim() !== '') {
+            tailStart = lineStart;
+            tailEnd = i;
+          }
+          lineStart = i + 1;
+        }
+      }
+      if (tailStart >= 0) {
+        // JSON.parse never yields `undefined` for accepted input, so
+        // `undefined` is the honest "this tail line is not JSON" marker.
         let parsedTail: unknown;
         try {
-          parsedTail = JSON.parse(tail);
+          parsedTail = JSON.parse(bytes.subarray(tailStart, tailEnd).toString('utf8').trim());
         } catch {
-          await handle.truncate(keep); // junk tail: cut it
+          parsedTail = undefined;
         }
-        if (parsedTail !== undefined) {
+        if (parsedTail === undefined) {
+          // Junk final line — terminated or not: cut it from the START OF ITS
+          // OWN LINE (with any blank lines after it) so the append can never
+          // turn tail debris the reader tolerated into a mid-file throw.
+          await handle.truncate(tailStart);
+        } else if (tailEnd === bytes.length) {
           // The tail IS a complete record — keep it byte-for-byte; only
           // the newline boundary is missing.
           parseDispatchLine(parsedTail, path, 'unterminated tail');

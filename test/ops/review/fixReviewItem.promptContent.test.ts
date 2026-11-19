@@ -46,6 +46,9 @@ describe('trusted fixer operating instructions', () => {
       'smallest complete working fix is ready, inspect the owned diff',
     );
     expect(prompt).toContain('Do not commit incomplete plumbing');
+    const cleanup = prompt.replace(/\s+/g, ' ');
+    expect(cleanup).toContain('leave the worktree exactly as you found it');
+    expect(cleanup).toContain('revert your own uncommitted edits');
     expect(prompt).toContain('The worktree cwd is already set.');
     expect(prompt).toContain('Submit one permitted command per call');
     expect(prompt).toContain('use the exposed read tool instead of trying denied shape variants.');

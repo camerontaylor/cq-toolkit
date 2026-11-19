@@ -134,6 +134,29 @@ describe('claude-code sdk transport seam v2 §2.3 (S3): invocation outputSchema 
     }
   });
 
+  test('a dispatch throw after an error result frame still classifies the frame cause', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-s3-'));
+    try {
+      const driver = streamDriver(scratchDir, function* () {
+        yield {
+          type: 'result',
+          subtype: 'error_during_execution',
+          is_error: true,
+          session_id: 'agent-cli-s3',
+          errors: ['rate_limit_error: Rate limit exceeded. Try again in 25 seconds.'],
+          usage: AGENT_USAGE,
+        };
+        throw new Error('stream closed');
+      } as never);
+      const result = await driver.run(invocation({ toolPolicy: { allow: [], mode: 'none' } }));
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('rate-limit');
+      expect(result.providerSignals).toEqual({ retryAfterMs: 25_000 });
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('a bare rate_limit_error (no stated retry-after) is provider-error, never rate-limit', async () => {
     // The 'rate-limit' class MEANS "429 WITH retry-after" (types.ts; the
     // ai-sdk lane's bare-429 row): without a backoff to honor the same
