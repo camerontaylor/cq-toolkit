@@ -186,17 +186,38 @@ the root-move section above adds only the legacy overlay, `.bak` removal and
 
 1. Stop the tick/watchdog timers and records service; wait for tick
    inactivity and drain owned reviews.
-2. With the target overlay, run `prepare --tag crq-runner/YYYYMMDD-N
-   --units-output "$HOME/.config/systemd/user"`. It refuses active units,
-   renders the target's units, verifies them with the user manager, records
-   hashes and reloads the user manager. It starts and enables nothing.
-3. Review the installed unit diff against the prior definitions and keep the
-   prior definitions for rollback; the runbook cannot restore them.
-4. After prepare succeeds, verify and approve its recorded evidence, then
-   remove the `state/runner-disabled` marker prepare wrote; the host stays
-   inert behind it. Only then re-run the deploy runbook for the same
-   target: it finds no template delta and proceeds, because Hold.acquire
-   refuses an existing marker and never removes a foreign one.
+2. Move the checkout onto the target first, through the audited helper
+   fence the runbook itself drives (`prepare-host.py switch`; the manual
+   helper path below documents the same fence):
+   `switch --sha FULL40TARGETSHA [--tag crq-runner/YYYYMMDD-N]`. It
+   verifies the target without fetching, refuses active units,
+   drift-checks the live config against the current HEAD's render, holds
+   the tick lock, checks out the target detached and atomically writes
+   the target's rendered config. It installs no unit files and starts
+   and enables nothing.
+3. Only then run `prepare --tag crq-runner/YYYYMMDD-N --units-output
+   "$HOME/.config/systemd/user"`. Prepare renders from HEAD, so this is
+   the step that applies the template delta, and its `--tag` must peel
+   to the target HEAD. It refuses active units, verifies the rendered
+   units with `systemd-analyze --user verify`, records hashes, writes
+   the inert `state/runner-disabled` marker and the rendered config,
+   and reloads the user manager. It starts and enables nothing. If the
+   target removes a template, prepare refuses the leftover installed
+   file outside the rendered set; keep it with the prior definitions,
+   remove it, and re-run prepare.
+4. Review the installed unit diff against the prior definitions and keep
+   the prior definitions for rollback; the runbook cannot restore them.
+   Rollback is those definitions plus the same helper `switch` back to
+   the prior SHA; no automatic rollback runs here.
+5. Verify and approve the recorded evidence (rendered config, unit
+   hashes, Git status), then remove the inert marker and start the
+   tick/watchdog timers and records service; accept only after
+   `last_tick` advances for two consecutive slots in the heartbeat
+   and summary. Do not finish this target by re-running
+   `deploy-runbook.py`: it refuses a target that is already the
+   checked-out HEAD, and until the checkout moves, installing unit
+   files changes neither Git tree, so the template-delta check refuses
+   the same commit again — installing units resolves neither refusal.
 
 ## Controller wrapper (Q7, #395) — proposed, offline-tested only
 
