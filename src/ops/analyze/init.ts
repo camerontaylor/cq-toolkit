@@ -101,20 +101,68 @@ function eslintTrigger(dir: string): string | undefined {
   return undefined;
 }
 
+/**
+ * The referenced project configs of a solution-style root tsconfig (empty
+ * `files`, no `include`, non-empty `references`), or undefined for an
+ * ordinary config. Comments are stripped before parsing; anything unreadable
+ * counts as an ordinary config.
+ */
+function solutionReferences(dir: string): string[] | undefined {
+  try {
+    const text = readFileSync(join(dir, 'tsconfig.json'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    const config = JSON.parse(text) as {
+      files?: unknown;
+      include?: unknown;
+      references?: unknown;
+    };
+    if (!Array.isArray(config.files) || config.files.length > 0 || config.include !== undefined) {
+      return undefined;
+    }
+    if (!Array.isArray(config.references)) return undefined;
+    const projects: string[] = [];
+    for (const ref of config.references) {
+      const path = (ref as { path?: unknown } | null)?.path;
+      if (typeof path !== 'string' || path === '') continue;
+      const clean = path.replace(/^\.\//, '').replace(/\/$/, '');
+      projects.push(clean.endsWith('.json') ? clean : `${clean}/tsconfig.json`);
+    }
+    return projects.length > 0 ? projects : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Detect the supported checks for `dir` (pure over the file system's current state). */
 export function detectChecks(dir: string): { checks: CheckRunnerInput[]; detected: string[] } {
   const checks: CheckRunnerInput[] = [];
   const detected: string[] = [];
   if (existsSync(join(dir, 'tsconfig.json'))) {
-    checks.push({
-      adapter: 'tsc-lines',
-      command: {
-        command: toolCommand(dir, 'tsc'),
-        args: ['--noEmit', '--pretty', 'false'],
-        cwd: '.',
-      },
-    });
-    detected.push('tsc-lines: tsconfig.json');
+    // A solution-style root ({"files": [], "references": [...]}) has no source
+    // files of its own: plain `tsc` would check nothing. Check each referenced
+    // project instead, so the starter check never leaves application source unchecked.
+    const projects = solutionReferences(dir) ?? ['tsconfig.json'];
+    for (const project of projects) {
+      checks.push({
+        adapter: 'tsc-lines',
+        command: {
+          command: toolCommand(dir, 'tsc'),
+          args: [
+            '--noEmit',
+            '--pretty',
+            'false',
+            ...(project === 'tsconfig.json' ? [] : ['-p', project]),
+          ],
+          cwd: '.',
+        },
+      });
+    }
+    detected.push(
+      projects[0] === 'tsconfig.json'
+        ? 'tsc-lines: tsconfig.json'
+        : `tsc-lines: tsconfig.json (solution; ${projects.join(', ')})`,
+    );
   }
   const eslint = eslintTrigger(dir);
   if (eslint !== undefined) {

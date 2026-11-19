@@ -38,6 +38,21 @@ afterEach(() => {
 const init = makeAnalyzeInit();
 
 describe('analyze.init detection', () => {
+  test('a solution-style tsconfig.json → one tsc-lines check per referenced project', async () => {
+    const dir = project({
+      'tsconfig.json':
+        '{ /* solution */ "files": [], "references": [{ "path": "./app" }, { "path": "./lib/tsconfig.build.json" }] }',
+    });
+    const result = await init({ dir });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    const args = result.value.config.checks.map((check) => check.command.args);
+    expect(args).toEqual([
+      ['--noEmit', '--pretty', 'false', '-p', 'app/tsconfig.json'],
+      ['--noEmit', '--pretty', 'false', '-p', 'lib/tsconfig.build.json'],
+    ]);
+  });
+
   test('tsconfig.json → one tsc-lines check with the bare tool name; the file parses back', async () => {
     const dir = project({ 'tsconfig.json': '{}' });
     const result = await init({ dir });
