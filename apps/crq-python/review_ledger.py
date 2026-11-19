@@ -424,26 +424,31 @@ class ArtifactStore:
             raise IntegrityError("missing or corrupt retained artifact")
 
     def put_file(self, filename):
-        hasher = hashlib.sha256()
-        with Path(filename).open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                hasher.update(chunk)
-        ident = hasher.hexdigest()
-        destination = self.root / "sha256" / ident
-        durable_directory(destination.parent)
-        if not destination.exists():
-            temporary = None
-            try:
-                with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
-                    temporary = stream.name
-                    with Path(filename).open("rb") as source:
-                        shutil.copyfileobj(source, stream)
-                    stream.flush(); os.fsync(stream.fileno())
+        durable_directory(self.root / "sha256")
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=self.root / "sha256", delete=False) as stream:
+                temporary = stream.name
+                with Path(filename).open("rb") as source:
+                    shutil.copyfileobj(source, stream)
+                stream.flush(); os.fsync(stream.fileno())
+            # Hash the staged copy, never the source in a separate pass: the
+            # producer may replace the source between passes, and the bytes
+            # that get installed must land under the digest of themselves.
+            hasher = hashlib.sha256()
+            with open(temporary, "rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+            ident = hasher.hexdigest()
+            destination = self.root / "sha256" / ident
+            if destination.exists():
+                Path(temporary).unlink()
+            else:
                 os.replace(temporary, destination)
-                temporary = None
-            finally:
-                if temporary is not None:
-                    Path(temporary).unlink(missing_ok=True)
+            temporary = None
+        finally:
+            if temporary is not None:
+                Path(temporary).unlink(missing_ok=True)
         # Always persist the destination's directory entry, also when the
         # artifact already exists: a previous call may have replaced it and
         # failed before this sync, and a retry must not skip it.
