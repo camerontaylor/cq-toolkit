@@ -130,6 +130,34 @@ describe('repair scan adapter allowlist and denylist', () => {
     expect(docs.report.denylistHits).toBe(0);
   });
 
+  test('Git-quoted paths are decoded before path rules apply; undecodable ones fail closed', async () => {
+    const scoped = makeRepairScan({
+      rules: [{ id: 'scoped', description: 'test', regex: SECRET, path: '^src/\u00e9' }],
+      gitleaksEffects: fakeGitleaks({}),
+      gitleaksAvailable: () => false,
+    });
+    const quoted =
+      'diff --git "a/src/\\303\\251.ts" "b/src/\\303\\251.ts"\n' +
+      '--- "a/src/\\303\\251.ts"\n' +
+      '+++ "b/src/\\303\\251.ts"\n' +
+      '@@ -0,0 +1 @@\n' +
+      `+${SECRET}\n`;
+    const hit = await scoped.scanDiff({
+      patch: quoted,
+      name: 'scan.json',
+      base: null,
+      head: SOURCE,
+    });
+    expect(hit.report.denylistHits).toBe(1);
+    const bad = await scoped.scanDiff({
+      patch: quoted.replaceAll('\\303\\251', '\\777'),
+      name: 'scan.json',
+      base: null,
+      head: SOURCE,
+    });
+    expect(bad.clean).toBe(false);
+  });
+
   test('removed and added lines are scanned; context and headers are not', async () => {
     const patch =
       'diff --git a/src/lock.ts b/src/lock.ts\n' +

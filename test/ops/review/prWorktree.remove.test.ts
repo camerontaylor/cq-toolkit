@@ -460,3 +460,21 @@ describe('removePrWorktree lock discipline (review-debt #121)', () => {
     }
   });
 });
+
+describe('removePrWorktree ignored-file guard', () => {
+  test('an ignored non-bookkeeping file refuses the remove (git would delete it silently)', async () => {
+    const tree = `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`;
+    const registry = memRegistry({ '7': { path: tree, branch: LABEL, createdAt: NOW - 1000 } });
+    const model = mkModel([{ path: tree, branch: LABEL, head: SHA_B }], {
+      ignoredFiles: { [tree]: ['notes.local'] },
+    });
+    await expect(
+      removePrWorktree({
+        ...baseOpts(model, registry, { run: fakeGit(model), isBookkeepingPath: async () => false }),
+        path: tree,
+      }),
+    ).rejects.toThrow(/unowned ignored checkout path would be deleted: notes\.local/);
+    expect(model.worktrees).toHaveLength(1);
+    expect(registry.current()['7']).toBeDefined();
+  });
+});

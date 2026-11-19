@@ -97,6 +97,10 @@ interface FakeGit {
   fetchHeadSha?: string;
   /** Current worktrees (porcelain list order); branch null = detached. */
   worktrees: Array<{ path: string; branch: string | null; head: string }>;
+  /** Local `refs/heads/<name>` labels no tree holds → unique commits ahead of the fetched head. */
+  localBranches?: Record<string, { unique: number }>;
+  /** Paths whose `ls-files --ignored` lists these files. */
+  ignoredFiles?: Record<string, string[]>;
   /** When set, `worktree add` fails with this result. */
   addFails?: { code: number; stderr: string };
   /** When set, `worktree remove` fails with this result. */
@@ -142,6 +146,18 @@ export const fakeGit = (
     const initial = firstCall;
     firstCall = false;
     const sub = args[2];
+    if (sub === 'ls-files' && args.includes('--ignored')) {
+      const files = model.ignoredFiles?.[args[1] ?? ''] ?? [];
+      return { code: 0, stdout: files.map((f) => `${f}\0`).join(''), stderr: '' };
+    }
+    if (sub === 'show-ref') {
+      const name = (args[5] ?? '').replace(/^refs\/heads\//, '');
+      return { code: model.localBranches?.[name] === undefined ? 1 : 0, stdout: '', stderr: '' };
+    }
+    if (sub === 'rev-list' && args.includes('--not')) {
+      const name = (args[4] ?? '').replace(/^refs\/heads\//, '');
+      return { code: 0, stdout: `${model.localBranches?.[name]?.unique ?? 0}\n`, stderr: '' };
+    }
     if (sub === 'diff' || sub === 'ls-files') return { code: 0, stdout: '', stderr: '' };
     if (sub === 'rev-parse' && args.includes('--git-common-dir')) {
       commonDir ??= initial ? join(args[1]!, '.git') : join(REPO, '.git');

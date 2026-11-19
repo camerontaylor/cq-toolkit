@@ -108,6 +108,11 @@ const PATTERNS = [
   '    description: primary-only vocabulary',
   "    regex: 'portkey'",
   "    sample: 'portkey'",
+  '  - id: test:path-scoped',
+  '    description: path scoped token',
+  "    regex: 'PATHSCOPED_[A-Z]+'",
+  "    path: '\\.env$'",
+  "    sample: 'PATHSCOPED_TOKEN'",
   'clean_probes:',
   "  - 'ordinary text'",
   '',
@@ -237,6 +242,18 @@ describe('installAuthorSnapshot', () => {
       );
       expect(await objectExists(repo.dir, fixture.blob)).toBe(false);
       expect(await objectExists(repo.dir, fixture.head)).toBe(false);
+    } finally {
+      repo.pool.killAll();
+    }
+  });
+
+  test('decodes a Git-quoted non-ASCII path before applying path-scoped rules', async () => {
+    const repo = await clone();
+    try {
+      const fixture = snapshotFor(repo.base, 'PATHSCOPED_TOKEN\n', false, { path: '\u00e9.env' });
+      await expect(installAuthorSnapshot(input(repo, fixture))).rejects.toThrow(
+        'snapshot secret scan refused',
+      );
     } finally {
       repo.pool.killAll();
     }
