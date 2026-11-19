@@ -299,6 +299,26 @@ export function planRepairHarvest(input: RepairHarvestInput): RepairHarvestPlan 
     ]);
   }
   const evidence = new JsonObject(evidenceEntries);
+  const sourceKeyFor = (candidate: RepairHarvestAction): string =>
+    'repair-outcome:' +
+    ledgerDigestOf(
+      new JsonObject([
+        ['job', input.job],
+        ['action', candidate],
+        ['evidence', evidence],
+      ]),
+    );
+  const isRecorded = (key: string): boolean =>
+    input.retained.some(
+      (value) =>
+        value instanceof JsonObject &&
+        value.get('event_type') === 'finding-event' &&
+        value.get('source_key') === key,
+    );
+  // Replay check first, on the action before any retry escalation: the event
+  // this job already wrote counts toward the retry bound, which would turn a
+  // replayed needs-retriage into needs-human and write a second outcome.
+  if (isRecorded(sourceKeyFor(action))) return { kind: 'already-recorded', action };
   let effectiveAction = action;
   if (effectiveAction === 'needs-retriage') {
     const events = retainedEvents(input.retained);
@@ -307,20 +327,8 @@ export function planRepairHarvest(input: RepairHarvestInput): RepairHarvestPlan 
     if (count >= input.maxFindingRetries) effectiveAction = 'needs-human';
   }
 
-  const token = ledgerDigestOf(
-    new JsonObject([
-      ['job', input.job],
-      ['action', effectiveAction],
-      ['evidence', evidence],
-    ]),
-  );
-  const sourceKey = 'repair-outcome:' + token;
-  for (const value of input.retained) {
-    if (!(value instanceof JsonObject)) continue;
-    if (value.get('event_type') === 'finding-event' && value.get('source_key') === sourceKey) {
-      return { kind: 'already-recorded', action: effectiveAction };
-    }
-  }
+  const sourceKey = sourceKeyFor(effectiveAction);
+  if (isRecorded(sourceKey)) return { kind: 'already-recorded', action: effectiveAction };
 
   const previousEventId = input.row.get('previous_event_id') as JsonValue;
   const event = ledgerEvent(
