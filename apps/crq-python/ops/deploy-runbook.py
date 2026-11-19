@@ -642,6 +642,30 @@ class Run:
                     "Nothing has been switched.")
 
     # -- steps ---------------------------------------------------------
+    def require_rollback_target(self):
+        """Refuse before admission if the rollback target would not verify.
+
+        Automatic rollback switches back to the live prior SHA through the
+        helper's ``switch``, which runs ``verify_target`` on it: merged to
+        ``refs/remotes/origin/main`` and at or above the policy floor. The
+        preflight above tests only the target, so a local-only prior SHA
+        passes it and then fails inside the helper after the forward switch
+        has already installed the target, leaving admission held for the
+        owner. Apply the rollback's own rule to the prior SHA here, before
+        admission and before any switch, so preflight and rollback agree.
+        """
+        verify = getattr(self.helper, "verify_target", None)
+        if verify is None:
+            return
+        try:
+            verify(self.root, self.prior_sha, None)
+        except Exception as exc:
+            raise Refused(
+                "the live prior SHA " + self.prior_sha + " fails the helper's "
+                "rollback target check, so a health failure could not roll "
+                "back to it; nothing has been admitted or switched: "
+                + str(exc)[:200]) from exc
+
     def refuse_unfinished_controller_transactions(self):
         """Run the controller's unfinished-transaction guard before a switch.
 
@@ -705,6 +729,10 @@ class Run:
         require(self.git("rev-parse", "HEAD") == self.prior_sha,
                 "live HEAD changed before the controller lock was acquired; "
                 "nothing has been switched. Retry the deploy.")
+        # Preflight proves only the target. Rollback switches back to the
+        # prior SHA through the helper's own fence, so that SHA must pass the
+        # same rule now, before admission and any switch.
+        self.require_rollback_target()
         if self.units is None:
             self.units = RealUnits()
         self.original_config = read_config(self.root)
