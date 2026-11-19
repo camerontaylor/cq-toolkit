@@ -1952,7 +1952,7 @@ def write_repair_fixture():
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
-        "ExecStart=/bin/sleep 10\n"), 0o644)
+        "ExecStart=/bin/sleep 60\n"), 0o644)
     REPAIR_TIMER_WANTS.symlink_to("../" + REPAIR_TIMER)
     REPAIR_PATH_WANTS.symlink_to("../" + REPAIR_PATH_UNIT)
     REPAIR_COMPLETIONS.unlink(missing_ok=True)
@@ -2096,6 +2096,11 @@ def activators_positive(args):
     queued_entries = read_completions(REPAIR_COMPLETIONS)
     require(len(queued_entries) == len(before),
             "queued target completed before cancellation")
+    recheck = jobs_observation()
+    require(not recheck["command"]["timeout"] and recheck["command"]["rc"] == 0
+            and any(waiting_start_job(line, REPAIR_UNIT)
+                    for line in recheck["lines"]),
+            "queued target is no longer the waiting start job before the stop")
     stopped = systemctl("stop", REPAIR_UNIT)
     require(not stopped["timeout"] and stopped["rc"] == 0,
             "queued target stop did not complete")
