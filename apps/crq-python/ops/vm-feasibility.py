@@ -88,6 +88,15 @@ LIMITATIONS = [
 ]
 
 
+class UsageRefusal(ValueError):
+    """A usage error or refusal: the invocation itself is unacceptable.
+
+    Only this dedicated exception is a usage error (exit 2, doctrine I1).
+    Every other ``ValueError`` -- e.g. ``verify_image`` rejecting a corrupted
+    cached image -- is a thrown runtime error (exit 1).
+    """
+
+
 # ------------------------------------------------------------------ pure
 
 
@@ -124,6 +133,39 @@ def verify_image(path: pathlib.Path, expected: str) -> str:
         raise ValueError("image digest mismatch: expected %s, got %s"
                          % (expected, actual))
     return actual
+
+
+def commit_blob(commit: str, path: str, cwd: pathlib.Path) -> bytes:
+    """Return the exact blob bytes git records for ``path`` in ``commit``."""
+    result = subprocess.run(["git", "show", "%s:%s" % (commit, path)],
+                            cwd=str(cwd), capture_output=True)
+    if result.returncode != 0:
+        raise ValueError("git cannot read %s from %s: %s"
+                         % (path, commit,
+                            result.stderr.decode("utf-8", "replace").strip()))
+    return result.stdout
+
+
+def verify_source_scripts(source_commit: str, host_source: pathlib.Path,
+                          guest_source: pathlib.Path, host_bytes: bytes,
+                          guest_bytes: bytes) -> None:
+    """Refuse a run whose executed script bytes differ from source_commit.
+
+    The artifact digests and the guest upload digest only prove that the
+    recorded bytes are the bytes that ran; neither ties those bytes to the
+    stated commit. Comparing each script against the blob recorded in
+    ``source_commit`` turns a modified working tree into a refusal before
+    any provenance is written.
+    """
+    for script, executed in ((host_source, host_bytes),
+                             (guest_source, guest_bytes)):
+        expected = commit_blob(source_commit, "./" + script.name,
+                               script.parent)
+        if executed != expected:
+            raise ValueError(
+                "%s differs from its blob in %s; provenance is only bound "
+                "to scripts that the stated commit actually contains"
+                % (script.name, source_commit))
 
 
 def render_user_data(public_key: str, *, user: str = GUEST_USER) -> str:
@@ -651,20 +693,32 @@ def guest_ssh(run: dict, remote: str, recorder: Recorder,
 
 
 def wait_ssh(run: dict, recorder: Recorder, timeout: float = 240) -> dict:
-    deadline = time.time() + timeout
+    # One monotonic deadline governs the whole readiness window: every SSH call
+    # and sleep is capped to the budget that remains, so a late first SSH reply
+    # cannot grant cloud-init a fresh 240s and double the stated timeout.
+    deadline = time.monotonic() + timeout
     attempts = 0
-    while time.time() < deadline:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         attempts += 1
-        result = guest_ssh(run, "true", recorder, timeout=15)
+        result = guest_ssh(run, "true", recorder, timeout=min(15, remaining))
         if result["rc"] == 0:
-            done = guest_ssh(run, "cloud-init status --wait", recorder, timeout=240)
-            if done["rc"] == 0:
-                return {"attempts": attempts, "at": utc_now()}
-            status = guest_ssh(run, "cloud-init status", recorder, timeout=15)
-            if "status: error" in (status.get("stdout") or ""):
-                raise RuntimeError("cloud-init reported an error: "
-                                   + (status.get("stdout") or ""))
-        time.sleep(2)
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                done = guest_ssh(run, "cloud-init status --wait", recorder,
+                                 timeout=remaining)
+                if done["rc"] == 0:
+                    return {"attempts": attempts, "at": utc_now()}
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                status = guest_ssh(run, "cloud-init status", recorder,
+                                   timeout=min(15, remaining))
+                if "status: error" in (status.get("stdout") or ""):
+                    raise RuntimeError("cloud-init reported an error: "
+                                       + (status.get("stdout") or ""))
+        time.sleep(max(0.0, min(2, deadline - time.monotonic())))
     raise RuntimeError("guest SSH/cloud-init did not become ready")
 
 
@@ -988,7 +1042,11 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
             and (manager.get("before") or {}).get("manager", {}).get("invocation_id")
             != (manager.get("after") or {}).get("manager", {}).get("invocation_id")),
         "boot_id_changed": (
-            bool(reboot.get("boot_id_before"))
+            reboot.get("boot_id_before")
+            == (reboot.get("before") or {}).get("boot_id")
+            and reboot.get("boot_id_after")
+            == (reboot.get("after") or {}).get("boot_id")
+            and bool(reboot.get("boot_id_before"))
             and bool(reboot.get("boot_id_after"))
             and reboot.get("boot_id_before") != reboot.get("boot_id_after")),
         "metadata_equal": not restore_changes,
@@ -1198,8 +1256,8 @@ def cmd_run(args) -> int:
     source_commit = (getattr(args, "source_commit", None)
                      or os.environ.get("CRQ_VM_SOURCE_COMMIT"))
     if not isinstance(source_commit, str) or not COMMIT_RE.fullmatch(source_commit):
-        raise ValueError("run requires --source-commit with the full git commit "
-                         "whose tree produced the executed scripts")
+        raise UsageRefusal("run requires --source-commit with the full git commit "
+                           "whose tree produced the executed scripts")
     recorder = Recorder(state)
     stamps = {"start": host_stamp()}
     image = fetch_image(state, recorder)
@@ -1209,10 +1267,13 @@ def cmd_run(args) -> int:
         run_dir = pathlib.Path(run["path"])
         host_source = pathlib.Path(__file__).resolve()
         guest_source = host_source.with_name("vm-guest-probe.py")
+        host_bytes = host_source.read_bytes()
         guest_bytes = guest_source.read_bytes()
+        verify_source_scripts(source_commit, host_source, guest_source,
+                              host_bytes, guest_bytes)
         host_artifact = run_dir / "executed-host-script.py"
         guest_artifact = run_dir / "executed-guest-probe.py"
-        shutil.copy2(host_source, host_artifact)
+        host_artifact.write_bytes(host_bytes)
         guest_artifact.write_bytes(guest_bytes)
         provenance = {
             "source_commit": source_commit,
@@ -1340,7 +1401,7 @@ def cmd_verify(args) -> int:
     report_path = pathlib.Path(args.report).resolve()
     report = json.loads(report_path.read_text())
     if not isinstance(report, dict):
-        raise ValueError("report is not a JSON object: " + str(report_path))
+        raise UsageRefusal("report is not a JSON object: " + str(report_path))
     problems = verify_report(report, report_path.parent)
     print(json.dumps({"problems": problems}, indent=2, sort_keys=True))
     return 0 if not problems else 1
@@ -1433,20 +1494,22 @@ def main(argv=None) -> int:
                 "run": cmd_run, "destroy": cmd_destroy, "verify": cmd_verify}
     try:
         return commands[args.command](args)
-    except ValueError as exc:
-        # Refusals and missing arguments (e.g. run without --source-commit)
-        # stay usage errors (exit 2) but still write the one JSON artifact to
-        # stdout; stderr stays empty in machine mode.
+    except UsageRefusal as exc:
+        # Usage errors and refusals (e.g. run without --source-commit, or a
+        # report that is not a JSON object) stay usage errors (exit 2) but
+        # still write the one JSON artifact to stdout; stderr stays empty in
+        # machine mode.
         message = _error_message(exc)
-        print(json.dumps(_error_artifact("refused", args.command, message, 2),
+        print(json.dumps(_error_artifact("usage", args.command, message, 2),
                          indent=2, sort_keys=True))
         if not parser.json_mode:
             print("refused: " + message, file=sys.stderr)
         return 2
-    except (RuntimeError, OSError) as exc:
-        # A RuntimeError from QEMU or a guest phase, or an OSError from a
-        # missing report, a download or the filesystem, is a thrown error
-        # (exit 1), never an argument error.
+    except (ValueError, RuntimeError, OSError) as exc:
+        # A ValueError from runtime integrity (e.g. verify_image rejecting a
+        # corrupted cached image), a RuntimeError from QEMU or a guest phase,
+        # or an OSError from a missing report, a download or the filesystem,
+        # is a thrown error (exit 1), never an argument error.
         message = _error_message(exc)
         print(json.dumps(_error_artifact("thrown", args.command, message, 1),
                          indent=2, sort_keys=True))

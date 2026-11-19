@@ -173,7 +173,7 @@ class DeployFixture(unittest.TestCase):
 
     def stopped(self, argv):
         if argv[0] == "systemctl":
-            if argv[2] in {"list-unit-files", "list-units"}:
+            if argv[2] in {"list-unit-files", "list-units", "list-jobs"}:
                 return ""
             return "inactive\n"
         return subprocess.run(argv, check=True, capture_output=True,
@@ -318,6 +318,26 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertEqual(self.units.stopped, [])
         self.assertFalse(self.marker().exists())
         self.assertEqual(self.head(), unmerged)
+
+    def test_unrollbackable_prior_refuses_before_admission(self):
+        # Only the target was tested for merged-main ancestry, so a live prior
+        # SHA that is not merged to origin/main passed preflight and then
+        # failed the helper's same check inside the rollback switch, after the
+        # target was installed. The prior SHA must be refused up front, before
+        # admission and any switch.
+        self.command("commit", "--allow-empty", "-qm", "local only")
+        local = self.head()
+        self.assertNotEqual(
+            subprocess.run(["git", "-C", str(self.root), "merge-base",
+                            "--is-ancestor", local,
+                            "refs/remotes/origin/main"]).returncode, 0)
+        run = self.build(target_sha=self.target)
+        with self.assertRaisesRegex(rb.Refused, "rollback target check"):
+            run.run()
+        self.assertEqual(self.head(), local)
+        self.assertEqual(self.units.stopped, [])
+        self.assertEqual(self.units.started, [])
+        self.assertFalse(self.marker().exists())
 
     def test_foreign_marker_refuses_and_touches_no_unit(self):
         self.marker().write_text("someone else's hold\n")

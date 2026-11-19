@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import random
 import re
+import signal
 import sys
 import time
 from zoneinfo import ZoneInfo
@@ -275,9 +276,14 @@ def dispatch_paused(config):
 
 
 def dispatch(config, role, job, wt, directory, judge=False):
-    if role['driver'] != 'cq' or not config.get('repair', {}).get('fallback_models'):
+    if not config.get('repair', {}).get('fallback_models'):
         with correlation(job, judge):
             return _dispatch(config, role, job, wt, directory, judge)
+    # Fallback admission applies to the lane being dispatched, not only CQ
+    # fixers: a Codex or Paseo judge retrying after rate-limit must observe its
+    # provider's persisted cooldown (recorded below by remember_provider_limit)
+    # instead of reopening the rate-limited lane, while a ready CQ fallback
+    # elsewhere proceeds without being blocked by that pause.
     deadline = time.monotonic() + config['repair']['budget']['wall_clock_min'] * 60
     waits = []
     baseline = git(wt, 'rev-parse', 'HEAD') if not judge else None
@@ -337,6 +343,14 @@ def _dispatch(config, role, job, wt, directory, judge=False):
         raise ValueError('source snapshot secret scan rejected; refusing dispatch')
     job['source_snapshot'] = snapshot
     atomic(directory / 'source-snapshot.json', snapshot)
+    # The admission checks sample the clock before worktree retention and the
+    # snapshot scan above; either can outlast the margin they allowed, so the
+    # switch below could start a paid call inside the blackout. Sample the
+    # clock again at this last boundary before the call (never during one) and
+    # refuse to start when the window has opened or the remaining budget would
+    # still reach it.
+    if blocked(config.get('repair', {})):
+        return {'stop': 'blackout', 'summary': 'GLM peak blackout began during preparation; driver call not started'}
     if role['driver'] == 'cq':
         if judge:
             return cq.judge(config, role, job, wt, directory)
@@ -386,14 +400,16 @@ def process(config, job, wt):
         result = json.loads(progress_path.read_text())
     if result.get('dispatch_pending') or result.get('pending_judge') or result.get('pending_mechanical'):
         wt = resume_worktree(result, wt)
-    if (result.get('pending_judge') and result.get('worktree')
+    if ((result.get('pending_judge') or result.get('pending_mechanical')) and result.get('worktree')
             and Path(result['worktree']).resolve() != Path(wt).resolve()):
-        # The A2 tree the deferred judge must inspect is gone: judging the
-        # base tree would record a verdict and snapshot for the wrong checkout.
+        # The recorded candidate tree is gone: verifying or judging the base
+        # tree would record a result for the wrong checkout.
+        pending = 'judge' if result.get('pending_judge') else 'mechanical'
         result.update(verdict='FAILED',
-                      reason='pending judge worktree unavailable; needs human',
+                      reason='pending ' + pending + ' worktree unavailable; needs human',
                       finished_at=utc())
         result.pop('pending_judge', None)
+        result.pop('pending_mechanical', None)
         atomic(result_path, result)
         return result
     if resume_progress:
@@ -477,6 +493,12 @@ def process(config, job, wt):
                 atomic(progress_path, result)
                 report = dispatch(config, role, current, wt, attempt_dir)
                 result.pop('dispatch_pending', None)
+                if report.get('stop') == 'blackout':
+                    # The window opened while this rung prepared its worktree;
+                    # no provider call started, so keep the rung and defer the
+                    # attempt to a later pass.
+                    result['next_rung'] = rung
+                    return defer('GLM peak blackout; attempt deferred')
                 disposition = report.get('worker_disposition') or report.get('disposition')
                 if (report.get('stop') in ('ok', 'error') and disposition == 'needs_human'
                         and str(report.get('summary') or '').strip()):
@@ -557,6 +579,11 @@ def process(config, job, wt):
                     raise
                 finally:
                     result.pop('dispatch_pending', None)
+                if judged.get('stop') == 'blackout':
+                    # The window opened before the judge call started; the
+                    # recorded pending_judge keeps the judge resumable after
+                    # the blackout without repeating this rung's fixer.
+                    return defer('GLM peak blackout; judge deferred without repeating fixer')
                 if judged.get('stop') == 'rate-limit':
                     return defer('judge rate limit; resume judge without repeating fixer', rate_limit=judged)
                 result.pop('pending_judge', None)
@@ -782,6 +809,13 @@ def triage_phase(config, dry_run=False):
             # The blackout can start during drain()'s tick-lock wait or this pass;
             # phase() keeps deferred rows pending for the next pass.
             return {'stop': 'deferred', 'errorClass': 'blackout', 'reason': 'GLM peak blackout; triage judge deferred'}
+        until = dispatch_paused(config)
+        if until:
+            # --triage-dry-run enters the phase without drain()'s pass-level pause
+            # check, so the gate samples the global marker itself: a live provider
+            # pause defers this judgment instead of reaching the provider.
+            return {'stop': 'deferred', 'errorClass': 'rate-limit',
+                    'reason': 'provider dispatch paused until ' + until + '; triage judge deferred'}
         return dispatch(bounded_config, selected, job, config['clone'],
                         state / 'repair/triage' / row['finding']['id'], judge=True)
     def transport(key, request):
@@ -958,9 +992,24 @@ def drain_items(config, groups, order):
                 # as the backfill triage report) are written again per child.
                 sys.stdout.flush()
                 sys.stderr.flush()
-                pid = os.fork()
+                # A KeyboardInterrupt between this fork and the registration
+                # below would unwind to the finally with no record of the
+                # child, and the coordinator could return without reaping it
+                # while its work still holds service.lock: hold SIGINT until
+                # the child is owned, then let a pending interrupt surface at
+                # the barrier read as before. The child unblocks first thing.
+                interrupt = {signal.SIGINT}
+                signal.pthread_sigmask(signal.SIG_BLOCK, interrupt)
+                try:
+                    pid = os.fork()
+                except BaseException:
+                    signal.pthread_sigmask(signal.SIG_UNBLOCK, interrupt)
+                    raise
             if pid == 0:
                 try:
+                    # The fork inherited the parent's blocked mask; the child
+                    # keeps its normal interrupt disposition for its own work.
+                    signal.pthread_sigmask(signal.SIG_UNBLOCK, interrupt)
                     global _REFUSAL_CHANNEL
                     os.close(refused_r)
                     for _pid, (_item, _rfd) in list(active.items()):
@@ -994,11 +1043,16 @@ def drain_items(config, groups, order):
                     sys.stderr.flush()
                 finally:
                     os._exit(code)
-            os.close(refused_w)
-            # Register the child BEFORE the blocking read: an interrupt that
-            # lands in the barrier must still find this admitted child in
-            # active, or the cleanup releases service.lock beneath it.
-            active[pid] = (item, refused_r)
+            try:
+                os.close(refused_w)
+                # Register the child BEFORE the blocking read: an interrupt that
+                # lands in the barrier must still find this admitted child in
+                # active, or the cleanup releases service.lock beneath it.
+                active[pid] = (item, refused_r)
+            finally:
+                # The child is owned now; a SIGINT held during the transition
+                # above is delivered from here on, and the cleanup finds it.
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, interrupt)
             # Barrier: the child publishes its item-gate result before any work.
             # Accepted means the child passed the gate; refused or a dead child
             # (EOF) latches the coordinator stop.
@@ -1039,7 +1093,16 @@ def reap_completed(active):
     """Collect every currently completed owned child before new admission."""
     failed, reaped = False, False
     for pid, (item, rfd) in list(active.items()):
-        found, status = os.waitpid(pid, os.WNOHANG)
+        lost = False
+        try:
+            found, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            # An interrupt landed after a previous reap consumed this child's
+            # exit status but before its PID was untracked, so the worker has
+            # already exited and its status is lost. Untrack it, keep waiting
+            # for the remaining owned children, and stop new admission rather
+            # than treat the unverified exit as success.
+            found, lost = pid, True
         if found:
             del active[pid]
             try:
@@ -1047,7 +1110,10 @@ def reap_completed(active):
             except OSError:
                 pass
             reaped = True
-            if status:
+            if lost:
+                narrate('repair item ' + item + ': worker exit status lost to an interrupt; stopping new admission')
+                failed = True
+            elif status:
                 code = os.waitstatus_to_exitcode(status)
                 message = ('provider pause; stopping new admission' if code == 2 else
                            'runner disabled; stopping new admission' if code == 3 else
@@ -1213,16 +1279,37 @@ def explicit_job_result(job, outcome):
     return {'status': outcome or ('finished' if result else 'no-result'), 'job': job['job'], 'result': result}
 
 
+class UsageError(Exception):
+    """An argparse argument failure, routed to the CLI result writer so the
+    invocation still emits its one machine-readable JSON artifact."""
+
+
+class UsageArgumentParser(argparse.ArgumentParser):
+    """The CLI parser, whose argument failures are results instead of exits.
+
+    argparse's own error path exits 2 with nothing on stdout (e.g. `--job`
+    without a value), which would leave a caller with no JSON artifact. Raising
+    here lets run() report the usage error and keep exit code 2.
+    """
+
+    def error(self, message):
+        raise UsageError(str(message))
+
+
 def run(argv=None):
     """Returns (exit code, result). A None result means the path already wrote its own JSON
     (the triage dry-run does so only when triage ran; otherwise it reports no-triage)."""
-    parser = argparse.ArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
+    parser = UsageArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
     parser.add_argument('--triage-dry-run', action='store_true')
     parser.add_argument('--job')
     parser.add_argument('--source-sha')
     parser.add_argument('--finding-sha256')
     parser.add_argument('--recover-job')
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except UsageError as exc:
+        narrate('repair dispatch refused: ' + str(exc))
+        return 2, {'status': 'usage-error', 'reason': str(exc)}
     # CLI admission before the lock, the state directory and every alternate
     # path (--recover-job, --job): a handed-over host must not write or spend.
     if runner_disabled():
@@ -1234,6 +1321,16 @@ def run(argv=None):
     if repair.get('enabled') is not True or not isinstance(authorization, str) or not authorization.strip():
         narrate('repair dispatch disabled: repair.enabled and a recorded spend_authorization are required')
         return 0, {'status': 'disabled', 'reason': 'repair.enabled and a recorded spend_authorization are required'}
+    selectors = (args.job, args.source_sha, args.finding_sha256)
+    # Presence is separate from validity: an empty string was still supplied,
+    # so it must select a job and refuse, never fall through to the drain.
+    supplied = tuple(selector is not None for selector in selectors)
+    # Mode validation before any alternate path runs: recovery selects exactly
+    # one job and never combines with --job/--source-sha/--finding-sha256 or
+    # --triage-dry-run.
+    if args.recover_job and (any(supplied) or args.triage_dry_run):
+        narrate('repair dispatch refused: recovery selects exactly one job')
+        return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
     if args.triage_dry_run:
         # triage_phase writes its own JSON result only when triage is configured
         # and has a rollout; otherwise it returns None having written nothing,
@@ -1241,13 +1338,12 @@ def run(argv=None):
         if triage_phase(config, dry_run=True) is None:
             return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
         return 0, None
-    selectors = (args.job, args.source_sha, args.finding_sha256)
-    if args.recover_job and (any(selectors) or args.triage_dry_run):
-        narrate('repair dispatch refused: recovery selects exactly one job')
-        return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
-    if any(selectors) and not all(selectors):
+    if any(supplied) and not all(supplied):
         narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
         return 2, {'status': 'refused', 'reason': '--job, --source-sha and --finding-sha256 go together'}
+    if any(selector is not None and not selector.strip() for selector in selectors):
+        narrate('repair dispatch refused: supplied selector values must not be empty')
+        return 2, {'status': 'refused', 'reason': 'supplied selector values must not be empty'}
     # Validate all configured paid lanes before any A0 spend. Missing hard
     # budget support is an activation prerequisite, never a soft prompt promise.
     drivers = {role['driver'] for role in repair['roles'].values()}
@@ -1294,7 +1390,7 @@ def run(argv=None):
             if result.get('report', {}).get('stop') == 'rate-limit':
                 rate_limit_pause(result['report'], args.recover_job)
             return 0, result
-        if all(selectors):
+        if all(supplied):
             job = select_job(ROOT, config, args.job, args.source_sha, args.finding_sha256)
             outcome = process_item(config, [job])
             return 0, explicit_job_result(job, outcome)
