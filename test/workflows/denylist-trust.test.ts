@@ -45,6 +45,9 @@ describe.each(PATHS)('%s scans with a trusted scanner policy', (path) => {
     for (const line of invocations) {
       expect(line, line).toContain('--config "$GITLEAKS_CONFIG"');
       expect(line, line).not.toContain('--config .gitleaks.toml');
+      // The head must control neither inline allows nor its own ignore file.
+      expect(line, line).toContain('--ignore-gitleaks-allow');
+      expect(line, line).toContain('--gitleaks-ignore-path "$GITLEAKS_IGNORE_PATH"');
     }
   });
 
@@ -81,7 +84,8 @@ describe.each(PATHS)('%s scans with a trusted scanner policy', (path) => {
     expect(jobEnv(text, 'GITLEAKS_CONFIG')).toBe('${{ github.workspace }}/trust/.gitleaks.toml');
     expect(text).toContain('ref: ${{ github.event.repository.default_branch }}');
     expect(text).toContain('path: trust');
-    expect(text).toContain('sparse-checkout: .gitleaks.toml');
+    expect(jobEnv(text, 'GITLEAKS_IGNORE_PATH')).toBe('${{ github.workspace }}/trust');
+    expect(text).toMatch(/sparse-checkout: \|\n\s+\.gitleaks\.toml\n\s+\.gitleaksignore\n/);
   });
 });
 
