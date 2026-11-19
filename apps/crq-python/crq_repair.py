@@ -796,7 +796,6 @@ def triage_phase(config, dry_run=False):
     result = phase(inbox, repo, tip, judge, transport, utc(),
                    maximum=max(0, min(6, int(options.get('max_per_pass', 6)))),
                    seconds=config['repair']['budget']['wall_clock_min'] * 60, dry_run=dry_run)
-    write_result(result)
     if result.get('stopped') == 'rate-limit' and not dry_run:
         rate_limit_pause(result.get('stop_report', {}), 'backfill-triage')
     return result
@@ -804,7 +803,8 @@ def triage_phase(config, dry_run=False):
 
 def drain(config):
     """Automatic inbox drain, minor-only items after critical/major items. Items use isolated worker
-    processes up to the configured cap, with serial findings within each item."""
+    processes up to the configured cap, with serial findings within each item.
+    Returns the triage report (or None) for run() to fold into the one stdout artifact."""
     # Admission before any fetch, triage or write: a handed-over host must cost
     # nothing and leave the queue and inbox exactly as they are.
     if runner_disabled():
@@ -827,12 +827,13 @@ def drain(config):
     if runner_disabled():
         narrate(RUNNER_DISABLED + ': pass stopped before triage')
         return
+    report = None
     try:
-        triage_phase(config)
+        report = triage_phase(config)
     except Exception as exc:  # backfill deferral must not starve existing repair jobs
         narrate('backfill triage deferred: ' + str(exc)[:300])
     if dispatch_paused(config):
-        return
+        return report
     groups = {}  # item -> job ids, items in order of their oldest job
     for job_id in drain_order(ROOT):
         try:
@@ -854,6 +855,7 @@ def drain(config):
                 return 0
         return 1
     drain_items(config, groups, sorted(groups, key=priority))
+    return report
 
 
 def drain_item(config, item, job_ids):
@@ -1214,8 +1216,7 @@ def explicit_job_result(job, outcome):
 
 
 def run(argv=None):
-    """Returns (exit code, result). A None result means the path already wrote its own JSON
-    (the triage dry-run does so only when triage ran; otherwise it reports no-triage)."""
+    """Returns (exit code, result); main() writes the result as the one JSON artifact."""
     parser = argparse.ArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
     parser.add_argument('--triage-dry-run', action='store_true')
     parser.add_argument('--job')
@@ -1235,12 +1236,12 @@ def run(argv=None):
         narrate('repair dispatch disabled: repair.enabled and a recorded spend_authorization are required')
         return 0, {'status': 'disabled', 'reason': 'repair.enabled and a recorded spend_authorization are required'}
     if args.triage_dry_run:
-        # triage_phase writes its own JSON result only when triage is configured
-        # and has a rollout; otherwise it returns None having written nothing,
-        # so report that explicitly to keep one JSON artifact per exit.
-        if triage_phase(config, dry_run=True) is None:
+        # triage_phase returns its report, or None when triage is not configured
+        # or has no rollout; main() writes the one artifact either way.
+        report = triage_phase(config, dry_run=True)
+        if report is None:
             return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
-        return 0, None
+        return 0, report
     selectors = (args.job, args.source_sha, args.finding_sha256)
     if args.recover_job and (any(selectors) or args.triage_dry_run):
         narrate('repair dispatch refused: recovery selects exactly one job')
@@ -1298,8 +1299,11 @@ def run(argv=None):
             job = select_job(ROOT, config, args.job, args.source_sha, args.finding_sha256)
             outcome = process_item(config, [job])
             return 0, explicit_job_result(job, outcome)
-        drain(config)
-        return 0, {'status': 'drained'}
+        report = drain(config)
+        result = {'status': 'drained'}
+        if report is not None:
+            result['triage'] = report
+        return 0, result
 
 
 

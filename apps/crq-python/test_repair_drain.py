@@ -1960,7 +1960,7 @@ class RepairDrainTest(unittest.TestCase):
         drain.assert_not_called()
         with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'unused-fixture'}), \
              mock.patch.object(service, 'blocked', return_value=False), \
-             mock.patch.object(service, 'drain') as drain:
+             mock.patch.object(service, 'drain', return_value=None) as drain:
             service.main([])
         drain.assert_called_once()
 
@@ -1992,6 +1992,23 @@ class RepairDrainTest(unittest.TestCase):
         drain.assert_not_called()
         self.assertEqual(json.loads(stdout.getvalue())['status'], 'refused')
         self.assertIn('repair dispatch refused', stderr.getvalue())
+
+    def test_drain_folds_the_triage_report_into_one_stdout_artifact(self):
+        report = {'status': 'triaged', 'count': 1}
+        self.config['repair'].update(enabled=True, spend_authorization='offline-test-fixture-only')
+        atomic(self.root / 'config.json', self.config)
+        stdout = io.StringIO()
+        with mock.patch.object(service, 'ROOT', self.root), \
+             mock.patch.object(service, 'runner_disabled', return_value=False), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'fetch_clone', return_value=None), \
+             mock.patch.object(service, 'triage_phase', return_value=report), \
+             mock.patch.object(service, 'drain_items'), \
+             mock.patch.dict(os.environ, {'ZAI_API_KEY': 'unused-fixture'}), \
+             contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            code = service.main([])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout.getvalue()), {'status': 'drained', 'triage': report})
 
     def test_write_result_emits_one_single_line_json_document(self):
         stdout, stderr = io.StringIO(), io.StringIO()

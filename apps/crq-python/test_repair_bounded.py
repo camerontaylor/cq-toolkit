@@ -342,7 +342,7 @@ class BoundedRepairTest(unittest.TestCase):
     def test_service_without_selector_drains(self):
         self.config['repair'].update(enabled=True, spend_authorization='offline-test-fixture-only')
         atomic(self.root / 'config.json', self.config)
-        with mock.patch.object(service, 'ROOT', self.root), mock.patch.object(service, 'drain') as drain:
+        with mock.patch.object(service, 'ROOT', self.root), mock.patch.object(service, 'drain', return_value=None) as drain:
             service.main([])
         drain.assert_called_once_with(self.config)
 
