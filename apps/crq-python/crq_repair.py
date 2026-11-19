@@ -1039,7 +1039,16 @@ def reap_completed(active):
     """Collect every currently completed owned child before new admission."""
     failed, reaped = False, False
     for pid, (item, rfd) in list(active.items()):
-        found, status = os.waitpid(pid, os.WNOHANG)
+        lost = False
+        try:
+            found, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            # An interrupt landed after a previous reap consumed this child's
+            # exit status but before its PID was untracked, so the worker has
+            # already exited and its status is lost. Untrack it, keep waiting
+            # for the remaining owned children, and stop new admission rather
+            # than treat the unverified exit as success.
+            found, lost = pid, True
         if found:
             del active[pid]
             try:
@@ -1047,7 +1056,10 @@ def reap_completed(active):
             except OSError:
                 pass
             reaped = True
-            if status:
+            if lost:
+                narrate('repair item ' + item + ': worker exit status lost to an interrupt; stopping new admission')
+                failed = True
+            elif status:
                 code = os.waitstatus_to_exitcode(status)
                 message = ('provider pause; stopping new admission' if code == 2 else
                            'runner disabled; stopping new admission' if code == 3 else
