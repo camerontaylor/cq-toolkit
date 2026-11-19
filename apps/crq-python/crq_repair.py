@@ -1306,7 +1306,16 @@ def run(argv=None):
 
 def main(argv=None):
     """Every CLI path ends in exactly one JSON artifact on stdout."""
-    code, result = run(argv)
+    try:
+        code, result = run(argv)
+    except Exception as exc:
+        # An operational failure (wrong finding digest, unreadable job or
+        # corrupt state) still owes the caller its JSON artifact, then exits 1.
+        # argparse usage errors are SystemExit, so they keep exit code 2, and
+        # normal skip results stay 0.
+        narrate('repair dispatch failed: ' + str(exc)[:200])
+        write_result({'status': 'error', 'reason': str(exc)[:200]})
+        return 1
     if result is not None:
         write_result(result)
     return code
