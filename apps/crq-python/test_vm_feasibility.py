@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -228,8 +229,8 @@ class BoundsTests(unittest.TestCase):
     def test_qemu_is_bounded_and_isolated(self):
         argv = vm.qemu_command(pathlib.Path("/state/runs/r1"), 2222)
         joined = " ".join(argv)
-        self.assertIn("-m 2048", joined)
-        self.assertIn("-smp 2", joined)
+        self.assertEqual(argv[argv.index("-m") + 1], "2048")
+        self.assertEqual(argv[argv.index("-smp") + 1], "2")
         self.assertIn("hostfwd=tcp:127.0.0.1:2222-:22", joined)
         self.assertIn("overlay.qcow2", joined)
         self.assertIn("seed.iso", joined)
@@ -438,9 +439,11 @@ class LifecycleTests(unittest.TestCase):
             (run / "process.json").write_text(json.dumps(
                 {"pid": os.getpid(), "starttime": "0",
                  "scope_unit": "crq-vm-test.scope"}))
-            with self.assertRaises(RuntimeError):
-                vm.stop_owned_process(
-                    {"run_id": "r1", "path": str(run)}, purge=False)
+            with mock.patch.object(vm.subprocess, "run") as run_cmd:
+                with self.assertRaises(RuntimeError):
+                    vm.stop_owned_process(
+                        {"run_id": "r1", "path": str(run)}, purge=False)
+            run_cmd.assert_not_called()
 
     def test_destroy_treats_a_changed_process_as_stopped(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -469,6 +472,7 @@ class LifecycleTests(unittest.TestCase):
                  mock.patch.object(vm, "prepare_run", return_value={
                      "run_id": "r1", "path": str(run), "port": 2222,
                      "started_at": "now"}), \
+                 mock.patch.object(vm, "verify_source_scripts"), \
                  mock.patch.object(vm, "host_stamp",
                                    return_value={"kvm_writable": True}), \
                  mock.patch.object(vm, "boot", return_value={
@@ -492,6 +496,56 @@ class LifecycleTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     vm.cmd_run(args)
             fetch.assert_not_called()
+
+    def test_cmd_run_refuses_bytes_outside_the_source_commit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            args = type("Args", (), {"state_dir": str(state), "tools": None,
+                                     "keep": False,
+                                     "source_commit": "a" * 40})()
+            with mock.patch.object(vm, "fetch_image"), \
+                 mock.patch.object(vm, "prepare_run", return_value={
+                     "run_id": "r1", "path": str(run), "port": 2222,
+                     "started_at": "now"}), \
+                 mock.patch.object(vm, "commit_blob",
+                                   return_value=b"committed bytes"), \
+                 mock.patch.object(vm, "boot") as boot, \
+                 mock.patch.object(vm, "stop_owned_process",
+                                   return_value={"stopped": True}) as stop:
+                with self.assertRaises(ValueError):
+                    vm.cmd_run(args)
+            boot.assert_not_called()
+            stop.assert_called_once()
+            self.assertFalse((run / "executed-host-script.py").exists())
+            self.assertFalse((run / "executed-guest-probe.py").exists())
+
+    def test_verify_source_scripts_against_a_real_commit(self):
+        def git(cwd, *argv):
+            subprocess.run(["git", *argv], cwd=str(cwd), check=True,
+                           capture_output=True)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            host = root / "vm-feasibility.py"
+            guest = root / "vm-guest-probe.py"
+            host.write_bytes(b"host bytes\n")
+            guest.write_bytes(b"guest bytes\n")
+            git(root, "init", "-q")
+            git(root, "-c", "user.email=probe@example.com",
+                "-c", "user.name=probe", "add", ".")
+            git(root, "-c", "user.email=probe@example.com",
+                "-c", "user.name=probe", "commit", "-q", "--no-verify",
+                "-m", "probe")
+            commit = subprocess.run(["git", "rev-parse", "HEAD"],
+                                    cwd=str(root), check=True,
+                                    capture_output=True).stdout.decode().strip()
+            vm.verify_source_scripts(commit, host, guest,
+                                     b"host bytes\n", b"guest bytes\n")
+            with self.assertRaises(ValueError):
+                vm.verify_source_scripts(commit, host, guest,
+                                         b"host bytes\n", b"modified\n")
+            with self.assertRaises(ValueError):
+                vm.commit_blob("b" * 40, "./vm-feasibility.py", root)
 
     def test_boot_failure_does_not_stop_an_unverified_scope(self):
         class ExitedProcess:
@@ -741,7 +795,6 @@ class EvidenceTests(unittest.TestCase):
     def test_queued_setup_requires_success_and_a_waiting_fixture(self):
         phases = self._phases()
         phases["activation"]["queue_start"] = {"rc": 1}
-        phases["activation"]["jobs_before_mask"] = self._jobs()
         manager = {"before": self._snapshot(10, "i1", "boot-1"),
                    "after": self._snapshot(11, "i2", "boot-1"),
                    "after_phase": self._refusals()}
@@ -751,6 +804,10 @@ class EvidenceTests(unittest.TestCase):
                   "boot_id_before": "boot-1", "boot_id_after": "boot-2",
                   "qemu_pid_before": 99, "qemu_pid_after": 99,
                   "qemu_identity_verified": True}
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["queued_setup_proven"])
+        phases["activation"]["queue_start"] = {"rc": 0}
+        phases["activation"]["jobs_before_mask"] = self._jobs()
         checks = vm.build_checks(phases, manager, reboot)
         self.assertFalse(checks["queued_setup_proven"])
 
@@ -768,6 +825,9 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(vm.build_checks(phases, manager, reboot)
                         ["queued_stop_proven"])
         phases["activation"]["stop_queued_fixture"] = {"rc": 1}
+        phases["activation"]["jobs2_after_stop"] = self._jobs()
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["queued_stop_proven"])
         phases["activation"]["jobs2_after_stop"] = self._jobs(
             "135 crq-queued-fixture.service start waiting")
         checks = vm.build_checks(phases, manager, reboot)

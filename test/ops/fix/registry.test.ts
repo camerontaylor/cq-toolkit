@@ -283,6 +283,31 @@ describe('fix-run report accounting', () => {
     });
   });
 
+  test('a commitless ATTEMPTED fixed row is not skipped: it stays unresolved', () => {
+    const attemptedNoCommit = plannedTaskRowOf(
+      task({
+        outcome: 'fixed',
+        attempts: [
+          {
+            tier: 'worker',
+            attempt: 1,
+            invocation: 'edit',
+            model,
+            wallMs: 1,
+            reason: 'initial task',
+          },
+        ],
+      }),
+    );
+    expect(fixRunCounters([attemptedNoCommit])).toMatchObject({
+      planned: 1,
+      attempted: 1,
+      fixed: 0,
+      skipped: 0,
+      unresolved: 1,
+    });
+  });
+
   test('a never-started unit row names the unit branchlessly and counts planned and unresolved', () => {
     const row = neverStartedRow(
       { kind: 'tests-1', slug: 'other-repo', branch: 'cq/run/tests-1/other-repo' },
