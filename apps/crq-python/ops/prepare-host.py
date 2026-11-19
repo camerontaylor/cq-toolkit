@@ -200,8 +200,14 @@ def require_outside_git(path):
     parent = Path(path).resolve()
     while not parent.is_dir():
         parent = parent.parent
+    # Fixed locale so the diagnostic below is matched untranslated, and no
+    # inherited repository-discovery override that could hide a checkout.
+    env = {key: value for key, value in os.environ.items()
+           if key not in ('GIT_CEILING_DIRECTORIES', 'GIT_DIR', 'GIT_WORK_TREE')}
+    env['LC_ALL'] = 'C'
+    env['GIT_DISCOVERY_ACROSS_FILESYSTEM'] = '1'
     result = subprocess.run(['git', '-C', str(parent), 'rev-parse', '--show-toplevel'],
-                            capture_output=True, text=True)
+                            capture_output=True, text=True, env=env)
     if result.returncode == 0:
         raise ValueError('private host artifacts must be outside every Git checkout')
     # Only git's "not a git repository" answer proves the path is outside a

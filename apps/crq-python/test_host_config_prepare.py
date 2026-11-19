@@ -15,6 +15,23 @@ from test_host_config_fixtures import HostConfigFixture, ROOT, host
 
 
 class HostConfigTests(HostConfigFixture, unittest.TestCase):
+    def test_outside_git_probe_uses_fixed_locale_and_clean_discovery_env(self):
+        seen = {}
+
+        def fake(argv, **kwargs):
+            seen.update(kwargs['env'])
+            return mock.Mock(returncode=128, stderr='fatal: not a git repository')
+
+        overrides = {'GIT_CEILING_DIRECTORIES': '/', 'GIT_DIR': '/nonexistent',
+                     'GIT_WORK_TREE': '/nonexistent', 'LC_ALL': 'fr_FR.UTF-8'}
+        with mock.patch.dict('os.environ', overrides), \
+                mock.patch.object(host.subprocess, 'run', side_effect=fake):
+            host.require_outside_git(self.root.parent)
+        self.assertEqual(seen['LC_ALL'], 'C')
+        self.assertEqual(seen['GIT_DISCOVERY_ACROSS_FILESYSTEM'], '1')
+        for key in ('GIT_CEILING_DIRECTORIES', 'GIT_DIR', 'GIT_WORK_TREE'):
+            self.assertNotIn(key, seen)
+
     def test_notification_allowlist_overlay_renders_and_validates(self):
         hosts = ['triton:6767', 'uranus:6767', 'pluto:6767']
         self.overlay['config']['notify'] = {'hosts': hosts}
