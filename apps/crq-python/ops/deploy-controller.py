@@ -1594,7 +1594,12 @@ def recover_unit(effects, adapter, path, *, adapter_factory=None):
         if adapter_factory is not None:
             # Render the prior runtime at the commit the transaction retained,
             # not at a HEAD that may have advanced past what can render it.
-            retained = record["state"].get("prior_head") if isinstance(record.get("state"), dict) else None
+            # Snapshot-phase intents retained that commit at the record's top
+            # level (they have no post-drain state); records written before
+            # the intent captured it kept it in the post-drain state.
+            retained = record.get("prior_head")
+            if retained is None and isinstance(record.get("state"), dict):
+                retained = record["state"].get("prior_head")
             # A malformed retained head must not silently fall back to the
             # current HEAD (the very drift this guards against): fail closed.
             if not _hex(SHA_RE, retained):
@@ -1939,10 +1944,22 @@ def switch_unit(effects, adapter, unit, runtime):
         if (not isinstance(snapshot, dict)
                 or snapshot.get("runtime") != prior["runtime"]):
             raise Refused("snapshot runtime does not match prior runtime")
+        # Snapshot-phase records have no post-drain state yet, so recovery
+        # could not derive the adapter's render source from them and a stop
+        # during stop_and_drain would strand the intent (it blocks every
+        # other controller operation). Capture and validate the commit the
+        # prior runtime renders BEFORE the durable intent, and retain it at
+        # the record's top level, separate from the post-drain preservation
+        # baseline. An unobservable or malformed HEAD refuses instead of
+        # journaling an intent recovery could never finish.
+        prior_head = effects.git("rev-parse", "HEAD")
+        if not _hex(SHA_RE, prior_head):
+            raise Refused("invalid prior head for unit switch")
         identity = {"schema_version": JOURNAL_SCHEMA, "transaction_id": uuid.uuid4().hex,
                     "operation": "unit_switch", "unit": unit, "runtime": runtime,
                     "prior_runtime": prior["runtime"], "outcome": "pending", "at": now_iso(),
-                    "snapshot": snapshot, "state": None, "phase": "snapshot"}
+                    "snapshot": snapshot, "state": None, "phase": "snapshot",
+                    "prior_head": prior_head}
         path = effects.journal_append(identity)
         try:
             adapter.stop_and_drain(unit)
