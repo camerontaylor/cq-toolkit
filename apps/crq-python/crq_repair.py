@@ -307,7 +307,21 @@ def dispatch(config, role, job, wt, directory, judge=False):
                 # compares expired), so dispatch_paused's override returns None
                 # and the next item relaunches it during the global pause this
                 # stop wrote.
-                remember_provider_limit(role['model'].split('/', 1)[0], report)
+                try:
+                    remember_provider_limit(role['model'].split('/', 1)[0], report)
+                except CooldownStateError as exc:
+                    # Corrupt persisted state must not replace this rate-limit
+                    # report: process defers the job with a bounded retry only
+                    # when the stop survives. Keep it, surface the persistence
+                    # failure, and skip the stamp write entirely -- the corrupt
+                    # file is never cleared or overwritten here, and the
+                    # deferral pause (rate-limited-until) does not touch it.
+                    # dispatch_paused and direct_provider_hold keep failing
+                    # closed while it stays corrupt, so no provider spends
+                    # until an operator repairs the state.
+                    report['summary'] = ' '.join(
+                        part for part in (str(report.get('summary') or ''), OPERATOR_RECOVERY_PAUSE) if part)
+                    report['cooldown_persistence_error'] = str(exc)[:600]
             return report
     deadline = time.monotonic() + config['repair']['budget']['wall_clock_min'] * 60
     waits = []
