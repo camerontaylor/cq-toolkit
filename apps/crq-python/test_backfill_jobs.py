@@ -21,6 +21,15 @@ def partition(number=0, generation=0, target="a" * 40, path="a"):
 
 
 class JobsTest(unittest.TestCase):
+    def test_pending_job_not_eligible_after_24_hours(self):
+        q = {"items": []}; item = jobs.enqueue(q, partition(), AT)
+        self.assertTrue(jobs.eligible(q, item, "2026-10-31T00:00:00Z"))
+        self.assertFalse(jobs.eligible(q, item, "2026-10-31T00:00:01Z"))
+        del item["created_at"]
+        self.assertFalse(jobs.eligible(q, item, AT))
+        item["created_at"] = "bad"
+        self.assertFalse(jobs.eligible(q, item, AT))
+
     def test_failure_reclassifies_as_retry(self):
         q = {"items": []}
         item = jobs.enqueue(q, {**partition(), "retry": False}, AT)
