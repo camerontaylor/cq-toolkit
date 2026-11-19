@@ -2576,6 +2576,31 @@ class RepairDrainTest(unittest.TestCase):
         self.assertNotIn('pending_judge', result)
         self.assertEqual(json.loads((self.root / 'state/repair/crq-run1-F1/result.json').read_text())['verdict'], 'FAILED')
 
+    def test_pending_mechanical_with_missing_worktree_fails_closed(self):
+        # A deferred candidate whose recorded checkout is gone must not be
+        # verified against the base tree: that would reject commits that are
+        # not ancestors of the original HEAD and silently lose a valid repair.
+        self.job('crq-run1-F1', 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')
+        wt = self.worktree()
+        _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
+        missing = str(wt) + '-A2'
+        self.assertFalse(Path(missing).exists())
+        progress = self.root / 'state/repair/crq-run1-F1/progress.json'
+        atomic(progress, {'job': 'crq-run1-F1', 'item': 'pr1-merged',
+                          'repair_base': self.pin, 'verdict': 'FAILED', 'reason': '',
+                          'commits': [], 'attempts': [{'rung': 'A0'}], 'judge': None,
+                          'worktree': missing, 'next_rung': 0,
+                          'pending_mechanical': {'fixer_reason': 'fixed it', 'rung': 0,
+                                                 'commits': ['1' * 40]}})
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'mechanical') as mechanical:
+            result = service.process(self.config, dict(job), wt)
+        mechanical.assert_not_called()
+        self.assertEqual(result['verdict'], 'FAILED')
+        self.assertIn('pending mechanical worktree unavailable', result['reason'])
+        self.assertNotIn('pending_mechanical', result)
+        self.assertEqual(json.loads((self.root / 'state/repair/crq-run1-F1/result.json').read_text())['verdict'], 'FAILED')
+
     def test_harvest_publishes_fixed_findings_around_a_stale_one(self):
         jobs = ['crq-run5-F1', 'crq-run5-F2', 'crq-run5-F3']
         item = self.item('pr5-merged', 'run5', jobs, open_pr=False)
