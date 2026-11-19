@@ -831,8 +831,43 @@ def legacy_check(root, overlay, raw):
     record(root, overlay, raw, data, 'legacy-drift-check', baseline_sha=LEGACY_SHA)
 
 
+def error_artifact(kind, subcommand, message, exit_code):
+    """The one JSON artifact for an error with no result (doctrine I1)."""
+    return {"error": {"kind": kind, "subcommand": subcommand,
+                      "message": message, "exitCode": exit_code}}
+
+
+class JsonArgumentParser(argparse.ArgumentParser):
+    """argparse parser that answers argument failures with the I1 artifact.
+
+    Machine mode (--json) is shared with the subparsers argparse derives from
+    this class, so every usage error -- on this parser or a subparser --
+    writes one error object to stdout with exit code 2 and keeps stderr
+    empty. Without --json, argparse's own stderr usage report still applies.
+    """
+
+    json_mode = False
+    subcommand = None
+
+    def error(self, message):
+        if not self.json_mode:
+            super().error(message)
+        print(json.dumps(error_artifact('usage', self.subcommand,
+                                        str(message)[:400], 2),
+                         indent=2, sort_keys=True))
+        raise SystemExit(2)
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    if argv is None:
+        argv = sys.argv[1:]
+    # The spelled-out form stays accepted; both spellings mean live-config.
+    argv = ['live-config' if arg == '--live-config' else arg for arg in argv]
+    parser = JsonArgumentParser(description=__doc__)
+    parser.add_argument('--json', action='store_true',
+                        help='machine mode: narration stays off stderr; every '
+                             'failure is one JSON error artifact on stdout '
+                             '(usage exit 2, operation exit 1)')
     parser.add_argument('--overlay', required=True, type=Path)
     sub = parser.add_subparsers(dest='operation', required=True)
     sub.add_parser('live-config')
@@ -848,40 +883,52 @@ def main(argv=None):
                                 'merged main SHA')
     legacy = sub.add_parser('legacy-check')
     legacy.add_argument('--legacy-root', required=True, type=Path)
-    if argv is None:
-        argv = sys.argv[1:]
-    args = parser.parse_args(['live-config' if arg == '--live-config' else arg for arg in argv])
-    overlay, raw = load_overlay(args.overlay)
-    root = Path(overlay['deploy_root'])
-    if args.operation == 'legacy-check':
-        legacy_check(args.legacy_root, overlay, raw)
-    elif args.operation == 'switch':
-        switch(root, overlay, raw, args.sha, args.tag)
-    elif args.operation == 'prepare':
-        require_outside_git(args.units_output)
-        if not outside(args.units_output, root):
-            raise ValueError('rendered units must be outside checkout')
-        prepare(root, overlay, raw, args.units_output, args.tag)
-    elif args.operation == 'preview':
-        root_check(root, overlay)
-        require_outside_git(args.output)
-        if not outside(args.output, root):
-            raise ValueError('preview output must be outside checkout')
-        with tick_lock(root):
-            data = render(root, overlay)
-            record(root, overlay, raw, data, 'preview')
-            atomic_bytes(args.output / 'config.json', data)
-            render_units(root, args.output / 'systemd')
-            render_plists(root, args.output / 'launchd', args.overlay)
-    else:
-        live_render(root, overlay, raw)
+    # Machine mode is needed before the parse, because a usage error is the
+    # one failure that never produces a namespace to read --json from.
+    parser.json_mode = '--json' in argv
+    for name, child in parser._subparsers._group_actions[0].choices.items():
+        child.json_mode = parser.json_mode
+        child.subcommand = name
+    args = parser.parse_args(argv)
+    try:
+        overlay, raw = load_overlay(args.overlay)
+        root = Path(overlay['deploy_root'])
+        if args.operation == 'legacy-check':
+            legacy_check(args.legacy_root, overlay, raw)
+        elif args.operation == 'switch':
+            switch(root, overlay, raw, args.sha, args.tag)
+        elif args.operation == 'prepare':
+            require_outside_git(args.units_output)
+            if not outside(args.units_output, root):
+                raise ValueError('rendered units must be outside checkout')
+            prepare(root, overlay, raw, args.units_output, args.tag)
+        elif args.operation == 'preview':
+            root_check(root, overlay)
+            require_outside_git(args.output)
+            if not outside(args.output, root):
+                raise ValueError('preview output must be outside checkout')
+            with tick_lock(root):
+                data = render(root, overlay)
+                record(root, overlay, raw, data, 'preview')
+                atomic_bytes(args.output / 'config.json', data)
+                render_units(root, args.output / 'systemd')
+                render_plists(root, args.output / 'launchd', args.overlay)
+        else:
+            live_render(root, overlay, raw)
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        # CalledProcessError text only contains argv, not private captured output.
+        if not parser.json_mode:
+            print(str(exc), file=sys.stderr)
+        else:
+            print(json.dumps(error_artifact('failed', args.operation,
+                                            str(exc)[:400], 1),
+                             indent=2, sort_keys=True))
+        return 1
     print(json.dumps({'operation': args.operation, 'status': 'ok'}, indent=2, sort_keys=True))
-    print('completed ' + args.operation + '; no units started', file=sys.stderr)
+    if not parser.json_mode:
+        print('completed ' + args.operation + '; no units started', file=sys.stderr)
+    return 0
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
-        # CalledProcessError text only contains argv, not private captured output.
-        raise SystemExit(str(exc)) from None
+    sys.exit(main())
