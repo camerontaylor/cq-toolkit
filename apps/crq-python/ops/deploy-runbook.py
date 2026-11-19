@@ -1096,11 +1096,22 @@ class Run:
         self.narrate("rolled back to " + self.prior_sha[:12]
                      + "; triggers restored")
 
+    def admission_held(self):
+        """Whether admission is held by this run right now.
+
+        A failed rollback reacquires admission and can fail again before
+        releasing it, leaving the hold retained while ``released`` is still
+        True: ``released`` records the earlier health-window release (and
+        selects the rollback digest baseline), so the recovery record must
+        report the current admission state separately."""
+        return self.hold is not None and self.hold.owns()
+
     def document(self, outcome, **extra):
         return {
             "operation": "deploy",
             "outcome": outcome,
             "released": self.released,
+            "admission_held": self.admission_held(),
             "target": self.target,
             "prior_sha": self.prior_sha,
             "tag": self.args.tag,
