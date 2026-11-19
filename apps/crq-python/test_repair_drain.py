@@ -1070,6 +1070,21 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(model.call_args.args[1]['job'], 'crq-run1-F1')
         self.assertEqual(outcome, service.RUNNER_DISABLED_OUTCOME)
 
+    def test_unreadable_result_halts_only_its_own_run(self):
+        self.worktree()
+        jobs = [json.loads(bounded.job_path(self.root, name).read_text())
+                for name in ('crq-run1-F1', 'crq-run1-F2')]
+        other = {**jobs[0], 'job': 'crq-run2-F1', 'run': 'run2'}
+        damaged = self.root / 'state/repair' / jobs[0]['job'] / 'result.json'
+        damaged.parent.mkdir(parents=True, exist_ok=True)
+        damaged.write_text('{not json')
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'require_canonical_delivery'), \
+             mock.patch.object(service, 'process', return_value={'verdict': 'NOT-FIXED'}) as model:
+            service.process_item(self.config, [*jobs, other])
+        self.assertEqual([c.args[1]['job'] for c in model.call_args_list], ['crq-run2-F1'])
+
     def test_recovery_job_uses_separate_worktree_and_preserves_original(self):
         original = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
         (original / 'src/kept.ts').write_text('retained staged edit\n')

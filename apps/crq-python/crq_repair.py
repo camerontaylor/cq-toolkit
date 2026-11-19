@@ -1086,7 +1086,11 @@ def process_item(config, jobs):
     item = jobs[0]['item']
     jobs.sort(key=finding_order)
     bases = {}  # run -> tip of that run's successful chain
+    damaged_runs = set()  # runs halted at an unreadable result.json
     for job in jobs:
+        if job['run'] in damaged_runs:
+            narrate('repair ' + job['job'] + ': skipped: an earlier job of this run has an unreadable result')
+            continue
         # Per-job admission: the plan's slice 5 acceptance is that the
         # in-flight job finishes and the next does not start, so a marker seen
         # between serial jobs of one item stops the rest of that item too.
@@ -1106,7 +1110,15 @@ def process_item(config, jobs):
         base = bases.get(job['run'], job['repair_base'])
         job['repair_base'] = base
         wt = Path(config['worktree_root']) / ('crq-repair-' + item + '-' + job['job'])
-        if pending(job['job']) and not wt.exists():
+        try:
+            is_pending = pending(job['job'])
+        except (OSError, ValueError, AttributeError) as exc:
+            # Fail closed for this run only: later jobs chain on this one's
+            # result, but healthy runs in the same item keep draining.
+            narrate('repair ' + job['job'] + ': unreadable result.json; run halted: ' + str(exc)[:200])
+            damaged_runs.add(job['run'])
+            continue
+        if is_pending and not wt.exists():
             p = command(['git', 'worktree', 'add', '--detach', str(wt), base], cwd=config['clone'])
             if p.returncode:
                 raise RuntimeError('repair worktree creation failed')
