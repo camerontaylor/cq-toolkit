@@ -204,6 +204,13 @@ def require_outside_git(path):
                             capture_output=True, text=True)
     if result.returncode == 0:
         raise ValueError('private host artifacts must be outside every Git checkout')
+    # Only git's "not a git repository" answer proves the path is outside a
+    # checkout: a shared-checkout ownership refusal or any other probe failure
+    # says nothing about exclusion, and a record written inside a checkout on
+    # that evidence would be a private artifact in Git.
+    if result.returncode != 128 or 'not a git repository' not in result.stderr.lower():
+        raise ValueError('cannot establish that the path is outside every Git checkout: '
+                         + 'git exited ' + str(result.returncode))
 
 
 def load_overlay(path):
