@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import random
 import re
+import signal
 import sys
 import time
 from zoneinfo import ZoneInfo
@@ -984,9 +985,24 @@ def drain_items(config, groups, order):
                 # as the backfill triage report) are written again per child.
                 sys.stdout.flush()
                 sys.stderr.flush()
-                pid = os.fork()
+                # A KeyboardInterrupt between this fork and the registration
+                # below would unwind to the finally with no record of the
+                # child, and the coordinator could return without reaping it
+                # while its work still holds service.lock: hold SIGINT until
+                # the child is owned, then let a pending interrupt surface at
+                # the barrier read as before. The child unblocks first thing.
+                interrupt = {signal.SIGINT}
+                signal.pthread_sigmask(signal.SIG_BLOCK, interrupt)
+                try:
+                    pid = os.fork()
+                except BaseException:
+                    signal.pthread_sigmask(signal.SIG_UNBLOCK, interrupt)
+                    raise
             if pid == 0:
                 try:
+                    # The fork inherited the parent's blocked mask; the child
+                    # keeps its normal interrupt disposition for its own work.
+                    signal.pthread_sigmask(signal.SIG_UNBLOCK, interrupt)
                     global _REFUSAL_CHANNEL
                     os.close(refused_r)
                     for _pid, (_item, _rfd) in list(active.items()):
@@ -1020,11 +1036,16 @@ def drain_items(config, groups, order):
                     sys.stderr.flush()
                 finally:
                     os._exit(code)
-            os.close(refused_w)
-            # Register the child BEFORE the blocking read: an interrupt that
-            # lands in the barrier must still find this admitted child in
-            # active, or the cleanup releases service.lock beneath it.
-            active[pid] = (item, refused_r)
+            try:
+                os.close(refused_w)
+                # Register the child BEFORE the blocking read: an interrupt that
+                # lands in the barrier must still find this admitted child in
+                # active, or the cleanup releases service.lock beneath it.
+                active[pid] = (item, refused_r)
+            finally:
+                # The child is owned now; a SIGINT held during the transition
+                # above is delivered from here on, and the cleanup finds it.
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, interrupt)
             # Barrier: the child publishes its item-gate result before any work.
             # Accepted means the child passed the gate; refused or a dead child
             # (EOF) latches the coordinator stop.
