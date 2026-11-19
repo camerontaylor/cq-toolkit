@@ -245,6 +245,12 @@ export async function switchUnit(
     if (!isDict(snapshot) || !jsonEqual(get(snapshot, 'runtime'), prior['runtime'])) {
       throw new RecordRefused('snapshot runtime does not match prior runtime');
     }
+    // Retain the render source before the durable intent: snapshot-phase
+    // recovery has no post-drain state from which to recover this commit.
+    const priorHead = await effects.git('rev-parse', 'HEAD');
+    if (typeof priorHead !== 'string' || !SHA_RE.test(priorHead)) {
+      throw new RecordRefused('invalid prior head for unit switch');
+    }
     let identity: Dict = {
       schema_version: JOURNAL_SCHEMA,
       transaction_id: effects.uuidHex(),
@@ -257,6 +263,7 @@ export async function switchUnit(
       snapshot,
       state: null,
       phase: 'snapshot',
+      prior_head: priorHead,
     };
     const path = await effects.journalAppend(identity);
     let record: Dict | undefined;
@@ -359,10 +366,7 @@ export async function recoverUnit(
       // Render the prior runtime at the commit the transaction retained, not at a
       // HEAD that may have advanced; a malformed retained head fails closed.
       const state = record['state'];
-      const retained =
-        typeof state === 'object' && state !== null && !Array.isArray(state)
-          ? (state as Dict)['prior_head']
-          : null;
+      const retained = record['prior_head'] ?? (isDict(state) ? state['prior_head'] : null);
       if (typeof retained !== 'string' || !SHA_RE.test(retained)) {
         throw new RecordRefused('invalid retained prior head for unit recovery');
       }
