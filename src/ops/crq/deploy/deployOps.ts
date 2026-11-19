@@ -260,8 +260,12 @@ export async function verifyTarget(
 // ---- switch -------------------------------------------------------------
 
 export interface SwitchEffects extends GitEffects, RootCheckEffects, InactiveEffects {
-  /** Run `fn` while holding the tick lock; releases on return or throw. */
-  withTickLock<T>(fn: () => Promise<T>): Promise<T>;
+  /**
+   * Run `fn` while holding the tick lock; releases on return or throw. `fn`
+   * gets the signal that aborts when the lock is lost and an `ownsLock` check
+   * to re-establish before every mutation, since the abort does not stop it.
+   */
+  withTickLock<T>(fn: (signal: AbortSignal, ownsLock: () => boolean) => Promise<T>): Promise<T>;
   /** Bytes of the live `<root>/apps/crq-python/config.json`. */
   readConfig(): Promise<Uint8Array>;
   writeConfig(data: Uint8Array): Promise<void>;
@@ -398,7 +402,13 @@ export async function prepare(
 ): Promise<void> {
   await rootCheck(effects, root, overlay);
   await inactive(effects);
-  await effects.withTickLock(async () => {
+  await effects.withTickLock(async (signal, ownsLock) => {
+    // The abort does not stop this callback; it keeps running past an await.
+    // Re-establish ownership before every mutation so nothing is written once
+    // the lock may already belong to a new holder.
+    const ensureOwnership = (): void => {
+      if (signal.aborted || !ownsLock()) throw new Error('tick lock lost while held');
+    };
     await inactive(effects);
     const sha = await gitText(effects, ['rev-parse', 'HEAD']);
     // Validate against the SHA read under the lock so a concurrent switch
@@ -409,14 +419,20 @@ export async function prepare(
       await effects.verifyUnits(paths);
       const shas: [string, JsonValue][] = [];
       for (const path of paths) shas.push([nameOf(path), digest(await effects.readFile(path))]);
+      ensureOwnership();
       await effects.record(data, 'prepare', [['unit_sha256', new JsonObject(shas)]]);
+      ensureOwnership();
       await effects.mkdirOutput();
-      for (const path of paths)
+      for (const path of paths) {
+        ensureOwnership();
         await effects.writeOutput(nameOf(path), await effects.readFile(path));
+      }
     });
+    ensureOwnership();
     // Marker first: a crash before the config write leaves the host inert
     // on its previous configuration instead of live without the marker.
     await effects.writeMarker(Buffer.from('Prepared inert; owner approval required to start.\n'));
+    ensureOwnership();
     await effects.writeConfig(data);
   });
   await effects.daemonReload();

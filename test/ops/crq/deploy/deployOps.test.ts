@@ -344,10 +344,12 @@ function sw(
       log.push('systemctl');
       return { code: 0, stdout: '', stderr: '' };
     },
-    withTickLock: async <R>(fn: () => Promise<R>): Promise<R> => {
+    withTickLock: async <R>(
+      fn: (signal: AbortSignal, ownsLock: () => boolean) => Promise<R>,
+    ): Promise<R> => {
       log.push('lock+');
       try {
-        return await fn();
+        return await fn(new AbortController().signal, () => true);
       } finally {
         log.push('lock-');
       }

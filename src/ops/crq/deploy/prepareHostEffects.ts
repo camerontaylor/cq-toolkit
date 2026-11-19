@@ -218,13 +218,14 @@ export class BlockingIOError extends Error {
 /**
  * `with tick_lock(root):` over the flock adapter. Creates the state directory
  * (not its parents), takes the non-blocking lock on `state/tick.lock`, runs
- * `fn` (handing it a signal that aborts if the lock is lost), and always
- * releases, after `fn` has settled.
+ * `fn` (handing it a signal that aborts if the lock is lost, plus an
+ * `ownsLock` check driven by the same loss notification, to re-check before
+ * each mutation), and always releases, after `fn` has settled.
  */
 export async function withTickLock<T>(
   lockFs: FlockLockFs,
   root: string,
-  fn: (signal: AbortSignal) => Promise<T>,
+  fn: (signal: AbortSignal, ownsLock: () => boolean) => Promise<T>,
 ): Promise<T> {
   const state = `${posixStr(root)}/${STATE_DIR}`;
   try {
@@ -235,9 +236,18 @@ export async function withTickLock<T>(
   const handle = await lockFs.tryLock(`${state}/tick.lock`);
   if (handle === null) throw new BlockingIOError();
   const controller = new AbortController();
+  // Ownership comes from the adapter's loss notification, not from the abort:
+  // the signal is only one consumer of it, so a callback that re-checks
+  // ownership before each mutation stops even if it never observes the abort.
+  let owned = true;
+  handle.lost?.then(() => {
+    owned = false;
+    controller.abort();
+  });
+  const ownsLock = (): boolean => owned;
   try {
-    if (handle.lost === undefined) return await fn(controller.signal);
-    const running = fn(controller.signal);
+    if (handle.lost === undefined) return await fn(controller.signal, ownsLock);
+    const running = fn(controller.signal, ownsLock);
     const outcome = await Promise.race([
       running.then(
         (value) => ({ kind: 'value' as const, value }),
@@ -246,8 +256,10 @@ export async function withTickLock<T>(
       handle.lost.then(() => ({ kind: 'lost' as const })),
     ]);
     if (outcome.kind === 'lost') {
-      // The callback keeps running until it observes the signal: release the
-      // lock only after it settles so it never overlaps a new holder.
+      // Waiting for the callback does not prevent overlap after lock loss: a
+      // new holder may already hold the lock and run. The await only lets the
+      // callback settle before the release; not overlapping is the callback's
+      // job, via its ownership checks before each mutation.
       controller.abort();
       await running.then(
         () => undefined,
