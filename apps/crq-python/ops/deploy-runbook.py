@@ -852,6 +852,14 @@ class Run:
         in between. After the drain nothing should be moving: this is the
         baseline the switch must preserve, and rollback permission is proven
         again here, immediately before the checkout moves.
+
+        The immutable recovery receipt keeps the pre-admission measurements,
+        so this re-measurement is persisted as its own durable checkpoint
+        before the switch: a tick that finished during the drain may have
+        moved the queue and heartbeat away from the receipt's digests, and a
+        process that dies in the switch must still leave the operator the
+        digests the switch was actually required to preserve. ``phase.json``
+        is not that evidence: every later phase rewrites it.
         """
         live_config = read_config(self.root)
         require(live_config == self.original_config,
@@ -867,6 +875,10 @@ class Run:
                 "the queue no longer grants automatic rollback after the "
                 "drain: " + compatibility_reason(compatibility)
                 + "; nothing was switched")
+        durable_write(Path(self.run_dir) / "post-drain-baseline.json",
+                      {"operation": "deploy", "written_at": now_iso(),
+                       "target": self.target, "prior_sha": self.prior_sha,
+                       "preserved": self.preserved})
         self.phase("remeasured", preserved=sorted(self.preserved))
 
     def require_unchanged_unit_templates(self):
