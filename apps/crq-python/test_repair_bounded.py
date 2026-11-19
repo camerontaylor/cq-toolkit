@@ -513,6 +513,9 @@ class BoundedRepairTest(unittest.TestCase):
                {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': [],
                 'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'],
                 'origin_job': OLD, 'repair_base': record['base']})
+        # Persist the two-job fixture so the replay below starts from the state a
+        # fresh tick would load, not from this test's in-memory queue.
+        self.c.save_queue(self.queue)
         self.c.iso = lambda: '2026-11-12T00:00:00Z'
         import finding_delivery
         import review_ledger as ledger
@@ -524,6 +527,11 @@ class BoundedRepairTest(unittest.TestCase):
                 repair_tick.harvest(self.c, self.queue, item)
         self.assertEqual(record['state'], 'failed')
         self.assertEqual(json.loads(row.read_text())['status'], 'delivered')
+        # The terminal run must survive a reload, exactly as a later tick sees it.
+        self.queue = json.loads((self.root / 'state/queue.json').read_text())
+        item = self.queue['items'][0]
+        self.assertEqual(item['repair_runs'][job['run']]['state'], 'failed')
+        self.assertEqual(item['repair_runs'][job['run']]['jobs'], [job_id, sibling_id])
         with mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
             repair_tick.harvest(self.c, self.queue, item)
         self.assertEqual(json.loads(row.read_text())['status'], 'needs-human')
