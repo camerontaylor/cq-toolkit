@@ -2255,13 +2255,18 @@ def main(argv=None) -> int:
 
     root = args.root.resolve()
     helper_path = args.helper or (root / "apps/crq-python/ops/prepare-host.py")
-    # Absolute without following the FINAL component: record_preflight() must
-    # still see a symlinked --record-dir and refuse it instead of writing
-    # journals to its target — while any `..` in the spelling keeps its
-    # filesystem meaning (ancestors resolved, not collapsed lexically).
-    effects = Effects(root, absolute_record_dir(args.record_dir))
 
     try:
+        # Record-path setup belongs inside the guard: absolute_record_dir()
+        # answers a symlink loop with Refused (Path.resolve() raises
+        # RuntimeError on 3.10-3.12), so that refusal must reach the JSON
+        # error boundary instead of escaping as a traceback with no artifact.
+        # Absolute without following the FINAL component: record_preflight()
+        # must still see a symlinked --record-dir and refuse it instead of
+        # writing journals to its target — while any `..` in the spelling
+        # keeps its filesystem meaning (ancestors resolved, not collapsed
+        # lexically).
+        effects = Effects(root, absolute_record_dir(args.record_dir))
         # Identity first, then the controller lock, then preflight (#549).
         helper_module, helper_sha256 = _load_helper(helper_path,
                                                     args.expect_helper_sha256)
