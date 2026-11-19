@@ -46,12 +46,7 @@ describe('analyze.init detection', () => {
     const result = await init({ dir });
     expect(result.status).toBe('ok');
     if (result.status !== 'ok') return;
-    expect(result.value.config.checks[0]?.command.args).toEqual([
-      '-b',
-      '--noEmit',
-      '--pretty',
-      'false',
-    ]);
+    expect(result.value.config.checks[0]?.command.args).toEqual(['-b', '--pretty', 'false']);
   });
 
   test('tsconfig.json → one tsc-lines check with the bare tool name; the file parses back', async () => {

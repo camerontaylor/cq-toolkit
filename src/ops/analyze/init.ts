@@ -103,10 +103,12 @@ function eslintTrigger(dir: string): string | undefined {
 
 /**
  * A solution-style tsconfig (`"files": []` plus `"references"`) checks nothing
- * under a plain `tsc --noEmit`; it needs build-mode traversal. Comments and
- * trailing commas are stripped before the (JSONC) text is parsed; an
- * unparseable file is not solution-style, so detection falls back to the
- * plain invocation.
+ * under a plain `tsc --noEmit`; it needs build-mode traversal. Build mode does
+ * NOT force `--noEmit` onto the reference graph: each referenced project's own
+ * emit settings still govern (a composite lib must emit the declarations its
+ * dependents consume). Comments and trailing commas are stripped before the
+ * (JSONC) text is parsed; an unparseable file is not solution-style, so
+ * detection falls back to the plain invocation.
  */
 function isSolutionStyleTsconfig(dir: string): boolean {
   try {
@@ -139,8 +141,13 @@ export function detectChecks(dir: string): { checks: CheckRunnerInput[]; detecte
       adapter: 'tsc-lines',
       command: {
         command: toolCommand(dir, 'tsc'),
+        // Build mode does NOT force --noEmit across the graph: each
+        // referenced project's own emit settings govern (a composite lib must
+        // emit the declarations its dependents read; forcing --noEmit onto
+        // the whole reference graph overrides them and breaks the dependency
+        // edge — TS6310).
         args: isSolutionStyleTsconfig(dir)
-          ? ['-b', '--noEmit', '--pretty', 'false']
+          ? ['-b', '--pretty', 'false']
           : ['--noEmit', '--pretty', 'false'],
         cwd: '.',
       },
