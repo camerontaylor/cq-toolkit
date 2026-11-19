@@ -858,7 +858,12 @@ def main(argv=None):
     # is an arg error (exit 2), not a thrown error inside the phase (exit 1).
     if args.phase not in ("prepare", "partial-install", "partial-inspect") \
             and not args.case:
-        parser.error("phase " + args.phase + " requires --case")
+        # parser.error writes only to stderr; keep the JSON-on-stdout failure
+        # contract callers parse, with the argparse usage exit code.
+        print(json.dumps({"phase": args.phase, "error": "UsageError",
+                          "detail": "phase " + args.phase + " requires --case"},
+                         sort_keys=True))
+        return 2
     try:
         # Every partial phase (prepare deletes ~/checkout) refuses off the
         # disposable guest before any host effect, as base.main() does.
