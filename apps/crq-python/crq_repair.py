@@ -801,6 +801,13 @@ def triage_phase(config, dry_run=False):
             # The blackout can start during drain()'s tick-lock wait or this pass;
             # phase() keeps deferred rows pending for the next pass.
             return {'stop': 'deferred', 'errorClass': 'blackout', 'reason': 'GLM peak blackout; triage judge deferred'}
+        until = dispatch_paused(config)
+        if until:
+            # --triage-dry-run enters the phase without drain()'s pass-level pause
+            # check, so the gate samples the global marker itself: a live provider
+            # pause defers this judgment instead of reaching the provider.
+            return {'stop': 'deferred', 'errorClass': 'rate-limit',
+                    'reason': 'provider dispatch paused until ' + until + '; triage judge deferred'}
         return dispatch(bounded_config, selected, job, config['clone'],
                         state / 'repair/triage' / row['finding']['id'], judge=True)
     def transport(key, request):
