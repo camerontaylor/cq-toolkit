@@ -307,6 +307,11 @@ def dispatch(config, role, job, wt, directory, judge=False):
                 remaining = deadline - time.monotonic()
                 if remaining < 0.001:
                     return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
+            # A prior provider's run (and this cleanup) consumed wall clock:
+            # recheck immediately before the paid launch so a fallback whose
+            # window would now reach the blackout defers without spending.
+            if attempted and blocked(config['repair']):
+                return {'stop': 'rate-limit', 'summary': 'GLM peak blackout; fallback launch deferred'}
             attempted = True
             bounded_config = copy.deepcopy(config)
             bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
@@ -473,6 +478,13 @@ def process(config, job, wt):
                     git(wt, 'reset', '--hard', base)
                     git(wt, 'clean', '-fd')
                 result['worktree'] = str(wt)
+                if blocked(repair):
+                    # Retention and reset consumed wall clock since the guard
+                    # above: recheck immediately before the paid launch so an
+                    # attempt whose window no longer fits defers here, before
+                    # any dispatch_pending marker claims an unknown outcome.
+                    result['next_rung'] = rung
+                    return defer('GLM peak blackout; attempt deferred')
                 result['dispatch_pending'] = {'rung': 'A' + str(rung), 'role': role}
                 atomic(progress_path, result)
                 report = dispatch(config, role, current, wt, attempt_dir)

@@ -1920,6 +1920,23 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(result['next_rung'], 0)
         self.assertIn('blackout', result['reason'])
 
+    def test_process_rechecks_blackout_after_retention_before_dispatch(self):
+        # Retention and reset consume wall clock: an attempt whose window would
+        # now reach the blackout defers at the launch recheck, spending nothing
+        # and persisting no dispatch_pending unknown-outcome marker.
+        wt = self.worktree()
+        _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
+        with mock.patch.object(service, 'blocked', side_effect=[False, True]), \
+             mock.patch.object(service.cq, 'invoke') as invoke:
+            result = service.process(self.config, job, wt)
+        invoke.assert_not_called()
+        self.assertIn('blackout', result['reason'])
+        self.assertTrue(result['retry_after'])
+        self.assertEqual(result['next_rung'], 0)
+        self.assertNotIn('dispatch_pending', result)
+        stored = json.loads((self.root / 'state/repair/crq-run1-F1/result.json').read_text())
+        self.assertNotIn('dispatch_pending', stored)
+
     def test_drained_snapshot_keeps_pin_while_base_chains(self):
         _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
         job['repair_base'] = 'd' * 40  # predecessor commit of an earlier finding
@@ -2345,6 +2362,20 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(report['stop'], 'rate-limit')
         self.assertEqual(dispatch.call_count, 1)
 
+    def test_fallback_launch_rechecks_blackout_after_cleanup(self):
+        # A prior provider's run plus the retention/reset cleanup can carry the
+        # clock into the peak window: the fallback launch recheck defers it as
+        # a rate-limit stop (a clean defer for every caller) without spend.
+        self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
+        self.config['repair']['blackout'] = dict(BLACKOUT)
+        with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'DEEPSEEK_API_KEY': 'fixture'}), \
+             mock.patch.object(service, '_dispatch', side_effect=[{'stop': 'rate-limit'}, {'stop': 'ok', 'changed': False}]) as dispatch, \
+             mock.patch.object(service, 'blocked', side_effect=[True]):
+            report = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root / 'attempt')
+        self.assertEqual(dispatch.call_count, 1)
+        self.assertEqual(report, {'stop': 'rate-limit', 'summary': 'GLM peak blackout; fallback launch deferred'})
+        self.assertEqual(list(service.provider_cooldowns()), ['zai'])
+
     def test_pause_defaults_to_30_minutes_and_is_never_shortened(self):
         now = dt.datetime.now(dt.timezone.utc)
         first = dt.datetime.fromisoformat(service.rate_limit_pause({}, 'j1').replace('Z', '+00:00'))
@@ -2480,8 +2511,9 @@ class RepairDrainTest(unittest.TestCase):
         wt = self.worktree()
         _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
         unchanged = {'stop': 'ok', 'changed': False, 'summary': 'no change warranted', 'commits': []}
-        # First guard (fixer) is clear; the judge guard falls inside the blackout.
-        with mock.patch.object(service, 'blocked', side_effect=[False, True]), \
+        # Fixer guard and its pre-launch recheck are clear; the judge guard
+        # falls inside the blackout.
+        with mock.patch.object(service, 'blocked', side_effect=[False, False, True]), \
              mock.patch.object(service.cq, 'invoke', return_value=unchanged) as invoke, \
              mock.patch.object(service.cq, 'judge') as judge:
             result = service.process(self.config, dict(job), wt)
