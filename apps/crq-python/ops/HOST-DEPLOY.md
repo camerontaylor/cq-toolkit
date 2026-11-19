@@ -215,7 +215,15 @@ the root-move section above adds only the legacy overlay, `.bak` removal and
    definitions from step 3 — never rely on the replaced files — and keep
    the saved definitions for rollback; the runbook cannot restore them.
    Rollback is those saved definitions plus the same helper `switch`
-   back to the prior SHA; no automatic rollback runs here.
+   back to the prior SHA; no automatic rollback runs here. To roll
+   back: stop the tick/watchdog timers and records service again (and
+   `crq-slot.timer` if it was stopped in step 1), because the helper
+   refuses active units; run the same helper `switch` back to the prior
+   SHA; remove any target-only `crq-*` unit the target installed that
+   is absent from the saved prior set; restore the complete saved prior
+   unit set into `$HOME/.config/systemd/user`; run
+   `systemctl --user daemon-reload`; and only then restart as in
+   step 5.
 5. Verify and approve the recorded evidence (rendered config, unit
    hashes, Git status), then remove the inert marker and start the
    tick/watchdog timers and records service (and `crq-slot.timer` if it
