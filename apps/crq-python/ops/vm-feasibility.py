@@ -1448,7 +1448,7 @@ def main(argv=None) -> int:
         # still write the one JSON artifact to stdout; stderr stays empty in
         # machine mode.
         message = _error_message(exc)
-        print(json.dumps(_error_artifact("refused", args.command, message, 2),
+        print(json.dumps(_error_artifact("usage", args.command, message, 2),
                          indent=2, sort_keys=True))
         if not parser.json_mode:
             print("refused: " + message, file=sys.stderr)

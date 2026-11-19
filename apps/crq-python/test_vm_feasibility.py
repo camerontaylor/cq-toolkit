@@ -1138,7 +1138,7 @@ class PlanTests(unittest.TestCase):
                 self.assertEqual(err.getvalue(), "")
                 artifact = json.loads(out.getvalue())
                 if expected == 2:
-                    self.assertEqual(artifact["error"]["kind"], "refused")
+                    self.assertEqual(artifact["error"]["kind"], "usage")
                 else:
                     self.assertTrue(artifact["problems"])
 
