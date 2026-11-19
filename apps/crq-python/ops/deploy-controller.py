@@ -739,7 +739,8 @@ def preservation_check(effects: Effects, before: dict, surfaces=None) -> dict:
     return {"preserved": True, "checked": sorted(surfaces)}
 
 
-def rebaseline_preserved(effects: Effects, state: dict, unit: str, failed_phase: str):
+def rebaseline_preserved(effects: Effects, state: dict, unit: str, failed_phase: str,
+                         current_phase: str | None = None):
     """Preserved-state baseline for the post-restore check, after a fence.
 
     Once activation was pending the target unit may have run and legitimately
@@ -747,10 +748,18 @@ def rebaseline_preserved(effects: Effects, state: dict, unit: str, failed_phase:
     longer describe what restore must leave alone. A successful stop_and_drain
     fence proves nothing else is writing: observe the digests now, and let the
     post-restore check prove that restoring did not change them. Earlier
-    phases keep the original baseline. Returns (state, prior) where prior is
-    the replaced digests (or None) so the caller can journal the change.
+    phases keep the original baseline. A recovery may resume a rollback that
+    already restored prior activation after an earlier-phase failure, so
+    ``current_phase`` — the phase the durable record is in now — permits
+    rebaselining too; deciding on ``failed_phase`` alone would keep a baseline
+    the restored runtime may have invalidated. When neither phase permitted
+    activation the original baseline stands. Returns (state, prior) where
+    prior is the replaced digests (or None) so the caller can journal the
+    change.
     """
-    if state is None or failed_phase not in ("activation_pending", "restore_activation_pending"):
+    activated = ("activation_pending", "restore_activation_pending")
+    if state is None or (failed_phase not in activated
+                         and current_phase not in activated):
         return state, None
     surfaces = preserved_surfaces(unit)
     fresh = preserved_digests(effects, surfaces)
@@ -1619,8 +1628,14 @@ def recover_unit(effects, adapter, path, *, adapter_factory=None):
             # recovery_required. The record retains the failed phase, the
             # original reason and the fence evidence.
             fence = adapter.stop_and_drain(record["unit"])
+            # The durable phase can already reflect a rollback that restored
+            # prior activation after an earlier-phase failure (failed_phase
+            # drained, phase restore_activation_pending); that runtime may
+            # have ticked since, so the current phase permits rebaselining
+            # too. failed_phase stays the original, for diagnosis.
             state, rebased_from = rebaseline_preserved(
-                effects, record["state"], record["unit"], failed_phase)
+                effects, record["state"], record["unit"], failed_phase,
+                record["phase"])
             adapter.restore(record["unit"], record["snapshot"])
             if state is not None:
                 preservation_check(effects, state, preserved_surfaces(record["unit"]))
