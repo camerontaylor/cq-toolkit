@@ -888,7 +888,16 @@ def drain(config):
     # Classify against the queue before sorting. Skipped, stale and completed
     # jobs cannot promote a minor-only item; stable sort retains inbox order.
     queue_path = ROOT / 'state/queue.json'
-    queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
+    try:
+        queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
+    except (OSError, ValueError) as exc:
+        # An unreadable queue must still yield one JSON artifact: keep the
+        # completed triage report and let run() exit non-zero. Nothing was
+        # admitted yet, so no spend or child is left behind.
+        narrate('repair drain failed: queue unreadable: ' + str(exc)[:300])
+        result['status'] = 'error'
+        result['error'] = 'queue unreadable: ' + str(exc)[:300]
+        return result
     def priority(item):
         for job_id in groups[item]:
             status, job, _ = drain_job(ROOT, config, queue, job_id)
@@ -1330,6 +1339,16 @@ def run(argv=None):
     if repair.get('enabled') is not True or not isinstance(authorization, str) or not authorization.strip():
         narrate('repair dispatch disabled: repair.enabled and a recorded spend_authorization are required')
         return 0, {'status': 'disabled', 'reason': 'repair.enabled and a recorded spend_authorization are required'}
+    selectors = (args.job, args.source_sha, args.finding_sha256)
+    # Presence is separate from validity: an empty string was still supplied,
+    # so it must select a job and refuse, never fall through to the drain.
+    supplied = tuple(selector is not None for selector in selectors)
+    # Mode validation before any alternate path runs: recovery selects exactly
+    # one job and never combines with --job/--source-sha/--finding-sha256 or
+    # --triage-dry-run.
+    if args.recover_job and (any(supplied) or args.triage_dry_run):
+        narrate('repair dispatch refused: recovery selects exactly one job')
+        return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
     if args.triage_dry_run:
         # triage_phase returns its report only when triage is configured and
         # has a rollout; otherwise it returns None having written nothing, so
@@ -1338,13 +1357,6 @@ def run(argv=None):
         if result is None:
             return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
         return 0, result
-    selectors = (args.job, args.source_sha, args.finding_sha256)
-    # Presence is separate from validity: an empty string was still supplied,
-    # so it must select a job and refuse, never fall through to the drain.
-    supplied = tuple(selector is not None for selector in selectors)
-    if args.recover_job and (any(supplied) or args.triage_dry_run):
-        narrate('repair dispatch refused: recovery selects exactly one job')
-        return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
     if any(supplied) and not all(supplied):
         narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
         return 2, {'status': 'refused', 'reason': '--job, --source-sha and --finding-sha256 go together'}
@@ -1404,7 +1416,7 @@ def run(argv=None):
         result = drain(config)
         if result is None:
             result = {'status': 'drained'}
-        return 0, result
+        return (1 if result.get('status') == 'error' else 0), result
 
 
 

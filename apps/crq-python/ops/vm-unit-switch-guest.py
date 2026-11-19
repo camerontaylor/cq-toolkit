@@ -1864,6 +1864,18 @@ def wait_until(predicate, timeout, label):
     raise RuntimeError(label + " did not settle within the bound")
 
 
+def waiting_start_job(line, unit_name):
+    """True for the exact canonical row ``ID unit start waiting``.
+
+    The queue and fence controls must sample the target unit's ``start`` job
+    while it is still ``waiting``: a ``running`` row means the blocker already
+    exited, and cancelling it would not prove cancellation of a waiting job.
+    """
+    fields = line.split()
+    return (len(fields) == 4 and fields[1] == unit_name
+            and fields[2] == "start" and fields[3] == "waiting")
+
+
 def wait_job(unit_name, timeout=15):
     deadline = time.time() + timeout
     last = None
@@ -1874,11 +1886,11 @@ def wait_job(unit_name, timeout=15):
                 "list-jobs failed; job identity is unknown")
         last = observation["lines"]
         for line in last:
-            if unit_name in line:
+            if waiting_start_job(line, unit_name):
                 return line, observation
         time.sleep(0.1)
-    raise RuntimeError("no job for " + unit_name + " within the bound: "
-                       + json.dumps(last)[:300])
+    raise RuntimeError("no waiting start job for " + unit_name
+                       + " within the bound: " + json.dumps(last)[:300])
 
 
 def wait_job_absent(unit_name, timeout=15):
@@ -1951,7 +1963,7 @@ def write_repair_fixture():
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
-        "ExecStart=/bin/sleep 10\n"), 0o644)
+        "ExecStart=/bin/sleep 60\n"), 0o644)
     REPAIR_TIMER_WANTS.symlink_to("../" + REPAIR_TIMER)
     REPAIR_PATH_WANTS.symlink_to("../" + REPAIR_PATH_UNIT)
     REPAIR_COMPLETIONS.unlink(missing_ok=True)
@@ -2095,11 +2107,16 @@ def activators_positive(args):
     target = systemctl("start", "--no-block", REPAIR_UNIT)
     require(target["rc"] == 0, "queued target failed to queue")
     job_line, job_observation = wait_job(REPAIR_UNIT, timeout=15)
-    require("start" in job_line, "queued target job is not a start job")
-    require(REPAIR_UNIT in job_line, "queued target job names another unit")
+    require(waiting_start_job(job_line, REPAIR_UNIT),
+            "queued target job is not the exact waiting start job")
     queued_entries = read_completions(REPAIR_COMPLETIONS)
     require(len(queued_entries) == len(before),
             "queued target completed before cancellation")
+    recheck = jobs_observation()
+    require(not recheck["command"]["timeout"] and recheck["command"]["rc"] == 0
+            and any(waiting_start_job(line, REPAIR_UNIT)
+                    for line in recheck["lines"]),
+            "queued target is no longer the waiting start job before the stop")
     stopped = systemctl("stop", REPAIR_UNIT)
     require(not stopped["timeout"] and stopped["rc"] == 0,
             "queued target stop did not complete")
@@ -2297,8 +2314,8 @@ def activators_fence(args):
     target = systemctl("start", "--no-block", REPAIR_UNIT)
     require(target["rc"] == 0, "failed to queue the target before the fence")
     job_line, job_observation = wait_job(REPAIR_UNIT, timeout=15)
-    require("start" in job_line and REPAIR_UNIT in job_line,
-            "queued target job is not the expected start job")
+    require(waiting_start_job(job_line, REPAIR_UNIT),
+            "fence seed job is not the exact waiting start job")
     started = systemctl("start", REPAIR_TIMER)
     require(started["rc"] == 0, "failed to start timer before the fence")
     require(show(REPAIR_TIMER, ["ActiveState"])["ActiveState"] == "active",

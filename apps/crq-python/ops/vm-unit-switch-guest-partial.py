@@ -880,6 +880,17 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.phase == "host-identity":
         return base.main(["host-identity", "--label", args.label or "identity"])
+    # Only prepare, partial-install and partial-inspect run without a case;
+    # validate the conditional argument before dispatch so a missing --case
+    # is an arg error (exit 2), not a thrown error inside the phase (exit 1).
+    if args.phase not in ("prepare", "partial-install", "partial-inspect") \
+            and not args.case:
+        # parser.error writes only to stderr; keep the JSON-on-stdout failure
+        # contract callers parse, with the argparse usage exit code.
+        print(json.dumps({"phase": args.phase, "error": "UsageError",
+                          "detail": "phase " + args.phase + " requires --case"},
+                         sort_keys=True))
+        return 2
     try:
         # Every partial phase (prepare deletes ~/checkout) refuses off the
         # disposable guest before any host effect, as base.main() does.
@@ -895,8 +906,6 @@ def main(argv=None):
         elif args.phase == "partial-inspect":
             payload = partial_inspect(args)
         elif args.phase.endswith("-observe"):
-            if not args.case:
-                raise RuntimeError("partial observe phase requires --case")
             if PARTIAL_CASES[args.case]["family"] == "activation":
                 payload = partial_activation_observe(args)
             else:
@@ -904,8 +913,6 @@ def main(argv=None):
         else:
             if args.phase not in ("partial-" + case for case in PARTIAL_ORDER):
                 raise RuntimeError("unknown partial phase: " + args.phase)
-            if not args.case:
-                raise RuntimeError("partial boundary phase requires --case")
             if PARTIAL_CASES[args.case]["family"] == "activation":
                 payload = partial_activation_boundary(args)
             else:

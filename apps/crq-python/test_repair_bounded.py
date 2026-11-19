@@ -865,6 +865,8 @@ class BoundedRepairTest(unittest.TestCase):
         atomic(self.root / 'config.json', self.config)
         self.assertEqual(artifact(['--job', OLD]), 'refused')
         self.assertEqual(artifact(['--recover-job', 'x', '--job', OLD]), 'refused')
+        # Mode validation precedes the dry run: recovery never combines with it.
+        self.assertEqual(artifact(['--recover-job', 'x', '--triage-dry-run']), 'refused')
         # A dry run with no triage state writes nothing itself, so it reports that.
         self.assertEqual(artifact(['--triage-dry-run']), 'no-triage')
 
