@@ -833,6 +833,9 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(artifact(['--recover-job', 'x', '--job', OLD]), 'refused')
         # A dry run with no triage state writes nothing itself, so it reports that.
         self.assertEqual(artifact(['--triage-dry-run']), 'no-triage')
+        # Conflicting options are refused before the dry-run branch is taken.
+        self.assertEqual(artifact(['--recover-job', 'x', '--triage-dry-run']), 'refused')
+        self.assertEqual(artifact(['--job', OLD, '--triage-dry-run']), 'refused')
 
 
 if __name__ == '__main__':
