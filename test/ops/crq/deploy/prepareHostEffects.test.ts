@@ -530,16 +530,34 @@ describe('main', () => {
 });
 
 describe('withTickLock lock loss', () => {
-  test('rejects when the holder is lost while the protected work is running', async () => {
+  test('aborts the work and releases only after it settles', async () => {
     const dir = fresh();
     mkdirSync(join(dir, 'apps/crq-python'), { recursive: true });
     let lose: () => void = () => undefined;
     const lost = new Promise<void>((r) => (lose = r));
+    const events: string[] = [];
     const lockFs = {
       mkdirp: async () => undefined,
-      tryLock: async () => ({ release: async () => undefined, lost }),
+      tryLock: async () => ({
+        release: async () => void events.push('release'),
+        lost,
+      }),
     };
-    const work = withTickLock(lockFs, dir, () => new Promise<string>(() => lose()));
+    const work = withTickLock(
+      lockFs,
+      dir,
+      (signal) =>
+        new Promise<string>((resolve) => {
+          signal.addEventListener('abort', () => {
+            setTimeout(() => {
+              events.push('settled');
+              resolve('late');
+            }, 10);
+          });
+          lose();
+        }),
+    );
     await expect(work).rejects.toThrow('tick lock lost while held');
+    expect(events).toEqual(['settled', 'release']);
   });
 });

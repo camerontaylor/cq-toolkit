@@ -220,6 +220,14 @@ export function reviewStatus(queue: JsonObject, requestId: string): JsonObject {
   }
   const reason = fields.waitReason ?? fields.lastError;
   if (reason !== null) result = withObjectKeys(result, [['reason', reason]]);
+  // Persisted by `admit` (Python `item["receipt_unavailable"]`): later status
+  // and retry replays keep the receipt recovery cue.
+  if (item.get('receipt_unavailable') === true) {
+    result = withObjectKeys(result, [
+      ['next_action', 'resubmit'],
+      ['reason', 'receipt-unavailable'],
+    ]);
+  }
   return result;
 }
 
@@ -287,8 +295,15 @@ export function admit(
     const reversed = [...equivalent].reverse();
     item =
       reversed.find((candidate) => adequate(candidate) && input.verifyReceipt(candidate)) ?? null;
-    if (item !== null) action = 'reused';
-    else {
+    if (item !== null) {
+      action = 'reused';
+      // The receipt verifies again, so a persisted receipt-unavailable
+      // condition from an earlier observed admission is stale.
+      if (item.has('receipt_unavailable')) {
+        item = new JsonObject(item.entries.filter(([name]) => name !== 'receipt_unavailable'));
+        queue = replaceItem(queue, item);
+      }
+    } else {
       item = reversed.find((candidate) => ACTIVE_STATES.has(itemFields(candidate).state)) ?? null;
       if (item !== null) action = 'joined';
       else if (equivalent.length > 0) {
@@ -352,15 +367,18 @@ export function admit(
     queue = replaceItem(queue, item);
   }
 
-  let result = reviewStatus(queue, input.requestId);
   if (action === 'observed' && adequate(item) && !input.verifyReceipt(item)) {
-    result = withObjectKeys(result, [
-      ['next_action', 'resubmit'],
-      ['reason', 'receipt-unavailable'],
-    ]);
+    // Persist the failed verification: `adequate` trusts the stored receipt
+    // id, so later status and retry responses must keep the recovery cue.
+    item = withObjectKeys(item, [['receipt_unavailable', true]]);
+    queue = replaceItem(queue, item);
   }
-  if (result.get('action') !== 'no-changes') result = withObjectKeys(result, [['action', action]]);
-  return { queue, result };
+  const result = reviewStatus(queue, input.requestId);
+  return {
+    queue,
+    result:
+      result.get('action') === 'no-changes' ? result : withObjectKeys(result, [['action', action]]),
+  };
 }
 
 /** `admission.cancel`: drop this observer and cancel an unobserved pending item. */

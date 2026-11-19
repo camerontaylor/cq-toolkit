@@ -218,12 +218,13 @@ export class BlockingIOError extends Error {
 /**
  * `with tick_lock(root):` over the flock adapter. Creates the state directory
  * (not its parents), takes the non-blocking lock on `state/tick.lock`, runs
- * `fn`, and always releases.
+ * `fn` (handing it a signal that aborts if the lock is lost), and always
+ * releases, after `fn` has settled.
  */
 export async function withTickLock<T>(
   lockFs: FlockLockFs,
   root: string,
-  fn: () => Promise<T>,
+  fn: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const state = `${posixStr(root)}/${STATE_DIR}`;
   try {
@@ -233,12 +234,29 @@ export async function withTickLock<T>(
   }
   const handle = await lockFs.tryLock(`${state}/tick.lock`);
   if (handle === null) throw new BlockingIOError();
+  const controller = new AbortController();
   try {
-    if (handle.lost === undefined) return await fn();
-    const lostSignal = handle.lost.then(() => {
+    if (handle.lost === undefined) return await fn(controller.signal);
+    const running = fn(controller.signal);
+    const outcome = await Promise.race([
+      running.then(
+        (value) => ({ kind: 'value' as const, value }),
+        (error: unknown) => ({ kind: 'error' as const, error }),
+      ),
+      handle.lost.then(() => ({ kind: 'lost' as const })),
+    ]);
+    if (outcome.kind === 'lost') {
+      // The callback keeps running until it observes the signal: release the
+      // lock only after it settles so it never overlaps a new holder.
+      controller.abort();
+      await running.then(
+        () => undefined,
+        () => undefined,
+      );
       throw new Error(`tick lock lost while held: ${state}/tick.lock`);
-    });
-    return await Promise.race([fn(), lostSignal]);
+    }
+    if (outcome.kind === 'error') throw outcome.error;
+    return outcome.value;
   } finally {
     await handle.release();
   }
