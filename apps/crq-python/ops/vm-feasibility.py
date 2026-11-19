@@ -651,20 +651,32 @@ def guest_ssh(run: dict, remote: str, recorder: Recorder,
 
 
 def wait_ssh(run: dict, recorder: Recorder, timeout: float = 240) -> dict:
-    deadline = time.time() + timeout
+    # One monotonic deadline governs the whole readiness window: every SSH call
+    # and sleep is capped to the budget that remains, so a late first SSH reply
+    # cannot grant cloud-init a fresh 240s and double the stated timeout.
+    deadline = time.monotonic() + timeout
     attempts = 0
-    while time.time() < deadline:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         attempts += 1
-        result = guest_ssh(run, "true", recorder, timeout=15)
+        result = guest_ssh(run, "true", recorder, timeout=min(15, remaining))
         if result["rc"] == 0:
-            done = guest_ssh(run, "cloud-init status --wait", recorder, timeout=240)
-            if done["rc"] == 0:
-                return {"attempts": attempts, "at": utc_now()}
-            status = guest_ssh(run, "cloud-init status", recorder, timeout=15)
-            if "status: error" in (status.get("stdout") or ""):
-                raise RuntimeError("cloud-init reported an error: "
-                                   + (status.get("stdout") or ""))
-        time.sleep(2)
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                done = guest_ssh(run, "cloud-init status --wait", recorder,
+                                 timeout=remaining)
+                if done["rc"] == 0:
+                    return {"attempts": attempts, "at": utc_now()}
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                status = guest_ssh(run, "cloud-init status", recorder,
+                                   timeout=min(15, remaining))
+                if "status: error" in (status.get("stdout") or ""):
+                    raise RuntimeError("cloud-init reported an error: "
+                                       + (status.get("stdout") or ""))
+        time.sleep(max(0.0, min(2, deadline - time.monotonic())))
     raise RuntimeError("guest SSH/cloud-init did not become ready")
 
 
