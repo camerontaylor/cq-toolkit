@@ -58,8 +58,8 @@ export interface ReadOnlyStatusEffects {
   now(): number;
   /**
    * Optional (#1420): commit subjects by sha, for PR-less pending items. The
-   * route asks only for shas the rendered `pending_items` actually look up
-   * (at most ten); an absent port or a missing sha leaves the item's title
+   * route asks only for shas the rendered `pending_items` actually look up:
+   * up to four candidate shas per row over ten rows (at most 40); an absent port or a missing sha leaves the item's title
    * label, never a failure.
    */
   readCommitSubjects?(shas: readonly string[]): Promise<ReadonlyMap<string, string>>;

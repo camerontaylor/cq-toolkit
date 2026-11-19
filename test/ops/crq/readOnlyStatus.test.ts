@@ -793,7 +793,7 @@ describe('read-only invariants', () => {
 });
 
 describe('commit-subject labels for PR-less pending items (#1420)', () => {
-  function pendingMerged(sha: string): JsonObject {
+  function pendingMerged(sha: string, title?: string): JsonObject {
     return withItemIds(
       requireObject(
         parseJsonValue(
@@ -805,6 +805,7 @@ describe('commit-subject labels for PR-less pending items (#1420)', () => {
                 order: 0,
                 pr: 5,
                 merge_commit: sha,
+                ...(title === undefined ? {} : { title }),
                 subject: { repo: 'owner/repo', pr: 5 },
               },
             ],
@@ -847,10 +848,15 @@ describe('commit-subject labels for PR-less pending items (#1420)', () => {
     expect(hit.stderr).toBe('');
     expect(labelOf(hit.stdout)).toBe('feat: the real subject');
 
-    await writeState(roots, { queue: pendingMerged('b'.repeat(40)), config, events: [] });
+    await writeState(roots, {
+      queue: pendingMerged('b'.repeat(40), 'fallback title'),
+      config,
+      events: [],
+    });
     const miss = await runCli(['summary-core'], roots, FIXED_NOW);
     expect(miss.exitCode).toBe(0);
-    expect(labelOf(miss.stdout)).toBeUndefined();
+    // A miss falls through to the item's own title, not to no label.
+    expect(labelOf(miss.stdout)).toBe('fallback title');
   });
 });
 
