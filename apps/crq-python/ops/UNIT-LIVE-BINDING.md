@@ -24,11 +24,14 @@ It returns the adapter and its selected identity. It never calls
 
 Recovery composes the same adapter through
 `production_adapter(effects, overlay, unit=record.unit,
-runtime=record.prior_runtime, source_sha=record.state.prior_head)`. The
+runtime=record.prior_runtime, source_sha=<retained prior_head>)`. The
 controller supplies the unit, prior runtime and pinned source from the one
-retained record it has already validated, under its lock, and refuses a
-missing or malformed retained `state.prior_head` instead of falling back to
-the current HEAD. The pinned source (the checkout `HEAD` captured before the
+retained record it has already validated, under its lock. It reads the
+retained head from the record's top-level `prior_head` first, and falls back to
+`state.prior_head` only when the top-level value is absent (snapshot-phase
+records have no `state`, so they depend on the top-level value). A missing or
+malformed retained head is refused rather than falling back to the current
+HEAD. The pinned source (the checkout `HEAD` captured before the
 failed switch) decides what the adapter renders for the composed selection,
 and its inventory also determines the allowed snapshot paths
 (`validate_snapshot` refuses a snapshot whose paths differ) and the restore
