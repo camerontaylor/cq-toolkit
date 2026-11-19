@@ -112,6 +112,13 @@ def phase_names():
     return tuple(names)
 
 
+def phase_case(phase):
+    for case in PARTIAL_ORDER:
+        if phase in ("partial-" + case, "partial-" + case + "-observe"):
+            return case
+    return None
+
+
 def case_dir(case):
     return HOME / ("records-partial-" + case)
 
@@ -858,6 +865,9 @@ def main(argv=None):
         # disposable guest before any host effect, as base.main() does.
         require(os.uname().nodename == "crq-probe",
                 "proof driver only runs on the disposable crq-probe guest")
+        if args.case and args.case != phase_case(args.phase):
+            raise RuntimeError("--case " + args.case + " does not match phase "
+                               + args.phase)
         if args.phase == "prepare":
             payload = partial_prepare(args)
         elif args.phase == "partial-install":
