@@ -1321,6 +1321,16 @@ def run(argv=None):
     if repair.get('enabled') is not True or not isinstance(authorization, str) or not authorization.strip():
         narrate('repair dispatch disabled: repair.enabled and a recorded spend_authorization are required')
         return 0, {'status': 'disabled', 'reason': 'repair.enabled and a recorded spend_authorization are required'}
+    selectors = (args.job, args.source_sha, args.finding_sha256)
+    # Presence is separate from validity: an empty string was still supplied,
+    # so it must select a job and refuse, never fall through to the drain.
+    supplied = tuple(selector is not None for selector in selectors)
+    # Mode validation before any alternate path runs: recovery selects exactly
+    # one job and never combines with --job/--source-sha/--finding-sha256 or
+    # --triage-dry-run.
+    if args.recover_job and (any(supplied) or args.triage_dry_run):
+        narrate('repair dispatch refused: recovery selects exactly one job')
+        return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
     if args.triage_dry_run:
         # triage_phase writes its own JSON result only when triage is configured
         # and has a rollout; otherwise it returns None having written nothing,
@@ -1328,13 +1338,6 @@ def run(argv=None):
         if triage_phase(config, dry_run=True) is None:
             return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
         return 0, None
-    selectors = (args.job, args.source_sha, args.finding_sha256)
-    # Presence is separate from validity: an empty string was still supplied,
-    # so it must select a job and refuse, never fall through to the drain.
-    supplied = tuple(selector is not None for selector in selectors)
-    if args.recover_job and (any(supplied) or args.triage_dry_run):
-        narrate('repair dispatch refused: recovery selects exactly one job')
-        return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
     if any(supplied) and not all(supplied):
         narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
         return 2, {'status': 'refused', 'reason': '--job, --source-sha and --finding-sha256 go together'}
