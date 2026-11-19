@@ -1965,6 +1965,14 @@ class RepairDrainTest(unittest.TestCase):
         self.assertTrue(service.blackout(on, inside))
         self.assertTrue(service.blocked(on, inside))
 
+    def test_blocked_uses_the_remaining_fallback_budget(self):
+        start = utc('2026-11-02T05:35:00')  # Mon 13:35 SGT
+        repair = {'blackout': {**BLACKOUT, 'enabled': True}}
+        self.assertFalse(service.blocked({**repair, 'budget': {'wall_clock_min': 10}}, start))  # ends 13:45
+        self.assertTrue(service.blocked({**repair, 'budget': {'wall_clock_min': 25}}, start))   # reaches 14:00
+        off = {'blackout': {**BLACKOUT, 'enabled': False}, 'budget': {'wall_clock_min': 25}}
+        self.assertFalse(service.blocked(off, start))
+
     def test_main_refuses_without_zai_key_and_inside_blackout(self):
         atomic(self.root / 'config.json', self.config)
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(service, 'drain') as drain:

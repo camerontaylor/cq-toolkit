@@ -310,11 +310,11 @@ def dispatch(config, role, job, wt, directory, judge=False):
             # A prior provider's run (and this cleanup) consumed wall clock:
             # recheck immediately before the paid launch so a fallback whose
             # window would now reach the blackout defers without spending.
-            if attempted and blocked(config['repair']):
-                return {'stop': 'rate-limit', 'summary': 'GLM peak blackout; fallback launch deferred'}
-            attempted = True
             bounded_config = copy.deepcopy(config)
             bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
+            if attempted and blocked(bounded_config['repair']):
+                return {'stop': 'rate-limit', 'summary': 'GLM peak blackout; fallback launch deferred'}
+            attempted = True
             previous_directory = directory / provider
             report = _dispatch(bounded_config, candidate, job, wt, previous_directory, judge)
             report.update(driver=candidate['driver'], model=candidate['model'])
