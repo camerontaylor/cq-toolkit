@@ -867,6 +867,11 @@ def main(argv=None):
         require_outside_git(args.output)
         if not outside(args.output, root):
             raise ValueError('preview output must be outside checkout')
+        # Preview writes config.json, systemd/ and launchd/ under --output. An
+        # overlay inside that tree would be replaced by rendered bytes, so the
+        # next invocation would reject it for lacking the overlay schema.
+        if not outside(Path(args.overlay).resolve(), args.output):
+            raise ValueError('preview output must not hold the overlay')
         with tick_lock(root):
             data = render(root, overlay)
             record(root, overlay, raw, data, 'preview')
