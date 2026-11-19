@@ -182,6 +182,34 @@ class CliTests(ControllerFixture):
         self.assertEqual(error["subcommand"], "health")
         self.assertEqual(error["exitCode"], 2)
 
+    def test_health_cli_unreadable_heartbeat_exits_1_as_failed_observation(self):
+        # The heartbeat exists but cannot be read: a failed observation keeps
+        # the health exit-1 contract (never a refusal), with one error
+        # artifact. A directory is unreadable even for root (EISDIR), unlike a
+        # chmod-based fixture.
+        def isolated(name):
+            xdg = self.base / ("cli-xdg-" + name)
+            (xdg / "crq").mkdir(parents=True)
+            return xdg
+
+        unreadable = isolated("unreadable")
+        (unreadable / "crq/heartbeat.json").mkdir()
+        invalid_json = isolated("invalid-json")
+        (invalid_json / "crq/heartbeat.json").write_text("{broken\n")
+        for name, xdg in (("unreadable", unreadable),
+                          ("invalid-json", invalid_json)):
+            with self.subTest(case=name):
+                result = self.run_cli("health", "--interval-seconds", "0",
+                                      env={"XDG_STATE_HOME": str(xdg)})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("health observation failed:", result.stderr)
+                self.assertIn("completion heartbeat", result.stderr)
+                error = json.loads(result.stdout)["error"]
+                self.assertEqual(error["kind"], "thrown")
+                self.assertEqual(error["subcommand"], "health")
+                self.assertEqual(error["exitCode"], 1)
+                self.assertIn("completion heartbeat", error["message"])
+
     def test_health_cli_stale_heartbeat_is_unhealthy_with_unchanged_shape(self):
         xdg = self.base / "cli-xdg"
         (xdg / "crq").mkdir(parents=True)
