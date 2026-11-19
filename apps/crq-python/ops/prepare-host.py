@@ -864,9 +864,12 @@ def main(argv=None):
         prepare(root, overlay, raw, args.units_output, args.tag)
     elif args.operation == 'preview':
         root_check(root, overlay)
-        require_outside_git(args.output)
-        if not outside(args.output, root):
-            raise ValueError('preview output must be outside checkout')
+        # render_units and render_plists create and follow these children, so
+        # the resolved subdirectories need the same fences as the output root.
+        for output in (args.output, args.output / 'systemd', args.output / 'launchd'):
+            require_outside_git(output)
+            if not outside(output, root):
+                raise ValueError('preview output must be outside checkout')
         with tick_lock(root):
             data = render(root, overlay)
             record(root, overlay, raw, data, 'preview')
