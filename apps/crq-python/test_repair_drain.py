@@ -377,7 +377,10 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(c.pr_info.call_count, 1)
         # ...but it expires on the bounded cadence and is refreshed while the
         # PR is still closed upstream.
+        # closed_marker_due reads real time, so age the stored marker itself.
         clock['now'] += repair_tick.CLOSED_FIX_RECHECK
+        record['fix_closed'] = (dt.datetime.now(dt.timezone.utc)
+                                - repair_tick.CLOSED_FIX_RECHECK).isoformat()
         repair_tick.reconcile_fix_prs(c, self.queue)
         self.assertEqual(c.pr_info.call_count, 2)
         self.assertEqual(record['fix_closed'], clock['now'].isoformat())
@@ -385,6 +388,8 @@ class RepairDrainTest(unittest.TestCase):
         # instead of hiding the reopened PR from every later tick.
         c.pr_info.return_value = {'state': 'OPEN'}
         clock['now'] += repair_tick.CLOSED_FIX_RECHECK
+        record['fix_closed'] = (dt.datetime.now(dt.timezone.utc)
+                                - repair_tick.CLOSED_FIX_RECHECK).isoformat()
         repair_tick.reconcile_fix_prs(c, self.queue)
         self.assertEqual(c.pr_info.call_count, 3)
         self.assertNotIn('fix_closed', record)
