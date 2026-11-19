@@ -157,7 +157,11 @@ const cases: readonly Case[] = [
     queue: healthQueue,
     frames: [
       rawFrame({ op: 'health', requestId: 'h1', binding: healthBinding }),
-      rawFrame({ op: 'health', requestId: 'h2', binding: { ...healthBinding, targetSelector: 'x' } }),
+      rawFrame({
+        op: 'health',
+        requestId: 'h2',
+        binding: { ...healthBinding, targetSelector: 'x' },
+      }),
       rawFrame({ op: 'health', requestId: 'h3', binding: mergedBinding(7) }),
       rawFrame({ op: 'health', requestId: 'h4', binding: healthBinding, extra: 1 }),
     ],
@@ -223,7 +227,15 @@ const cases: readonly Case[] = [
       reportFrame('r1', '$RID:1'),
       reportFrame('r1', '$RID:99'),
       reportFrame('r1', 'bad'),
-      rawFrame({ op: 'ack', requestId: 'r1', binding: mergedBinding(7), receiptId: '$RID', sha256: '$RID', chunks: 1, bytes: 1 }),
+      rawFrame({
+        op: 'ack',
+        requestId: 'r1',
+        binding: mergedBinding(7),
+        receiptId: '$RID',
+        sha256: '$RID',
+        chunks: 1,
+        bytes: 1,
+      }),
     ],
   },
   {
@@ -286,10 +298,16 @@ function pythonOutcome(item: Case): Outcome {
   };
 }
 
-async function tsOutcome(item: Case, oracle: Outcome): Promise<Outcome> {
+async function tsOutcome(
+  item: Case,
+  oracle: Outcome,
+): Promise<Pick<Outcome, 'responses' | 'queue'>> {
   let queue = json(item.queue ?? { items: [] }) as JsonObject;
   const receiptBytes = new Map(
-    Object.entries(oracle.receipts).map(([id, b64]) => [id, new Uint8Array(Buffer.from(b64, 'base64'))]),
+    Object.entries(oracle.receipts).map(([id, b64]) => [
+      id,
+      new Uint8Array(Buffer.from(b64, 'base64')),
+    ]),
   );
   const journals = new Map<string, JsonObject>();
   let lastReceipt = '';

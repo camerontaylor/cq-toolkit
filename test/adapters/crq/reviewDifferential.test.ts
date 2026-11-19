@@ -117,7 +117,11 @@ const cases: readonly Case[] = [
   {
     name: 'a disabled policy answers unsupported but still lists capabilities',
     policy: { ...basePolicy, enabled: false },
-    frames: () => [frame({ op: 'capabilities' }), submit('r1'), frame({ op: 'status', request_id: 'r1' })],
+    frames: () => [
+      frame({ op: 'capabilities' }),
+      submit('r1'),
+      frame({ op: 'status', request_id: 'r1' }),
+    ],
   },
   {
     name: 'a principal without write access is refused',
@@ -131,7 +135,15 @@ const cases: readonly Case[] = [
       submit('r1', {}, { task: 't1', branch: 'feat/x' }),
       frame({ op: 'status', request_id: 'r1' }),
       frame({ op: 'review-history', request_id: 'r1' }),
-      frame({ op: 'review-history', repo: REPO, target: 'main', head_commit: repo.head, head_tree: repo.headTree, limit: 5, cursor: 0 }),
+      frame({
+        op: 'review-history',
+        repo: REPO,
+        target: 'main',
+        head_commit: repo.head,
+        head_tree: repo.headTree,
+        limit: 5,
+        cursor: 0,
+      }),
       frame({ op: 'review-history', repo: REPO }),
       frame({ op: 'cancel', request_id: 'r1' }),
       frame({ op: 'status', request_id: 'r1' }),
@@ -179,7 +191,11 @@ const cases: readonly Case[] = [
   },
   {
     name: 'a pending request has no result to page',
-    frames: () => [submit('r1'), frame({ op: 'result', request_id: 'r1' }), frame({ op: 'result', request_id: 'r1', index: 3 })],
+    frames: () => [
+      submit('r1'),
+      frame({ op: 'result', request_id: 'r1' }),
+      frame({ op: 'result', request_id: 'r1', index: 3 }),
+    ],
   },
   {
     name: 'record refuses an unallowed repository before touching state',
@@ -208,7 +224,9 @@ function normalise(response: string | null): string | null {
   const decode =
     message !== undefined &&
     (DECODE_MESSAGES.has(message) || /^(Expecting|Extra data|Unterminated|Invalid )/.test(message));
-  return decode ? response.replace(JSON.stringify(message).slice(1, -1), '<decode refusal>') : response;
+  return decode
+    ? response.replace(JSON.stringify(message).slice(1, -1), '<decode refusal>')
+    : response;
 }
 
 interface Outcome {
@@ -222,7 +240,10 @@ const config = (r: Repo): Record<string, unknown> => ({
   repos: [],
   worktree_root: join(r.root, 'worktrees'),
   worktree_prefix: 'cq-wt-',
-  local_review_profile: { revision: 'committed-full-diff-v1', flags: ['--agent', '--deep', '--committed'] },
+  local_review_profile: {
+    revision: 'committed-full-diff-v1',
+    flags: ['--agent', '--deep', '--committed'],
+  },
 });
 
 const emptyQueue = { items: [], review_requests: {}, queue_client_requests: {} };
@@ -244,7 +265,9 @@ function pythonOutcome(item: Case): Outcome {
     queue: unknown;
   };
   return {
-    responses: parsed.responses.map((r) => (r.ok ? Buffer.from(r.b64, 'base64').toString('utf8') : null)),
+    responses: parsed.responses.map((r) =>
+      r.ok ? Buffer.from(r.b64, 'base64').toString('utf8') : null,
+    ),
     queue: parsed.queue,
   };
 }
@@ -281,7 +304,10 @@ async function tsOutcome(item: Case): Promise<Outcome> {
       });
       responses.push(code === 0 ? out : null);
     }
-    return { responses, queue: JSON.parse(await readFile(join(root, 'state/queue.json'), 'utf8')) as unknown };
+    return {
+      responses,
+      queue: JSON.parse(await readFile(join(root, 'state/queue.json'), 'utf8')) as unknown,
+    };
   } finally {
     pool.killAll();
   }
