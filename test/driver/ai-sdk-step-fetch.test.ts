@@ -163,6 +163,24 @@ describe('createStepFetch', () => {
     }
   });
 
+  test('a native Request input is unpacked, not stringified', async () => {
+    const transport = new agents.MockAgent();
+    transport.disableNetConnect();
+    transport
+      .get('http://request-input.invalid')
+      .intercept({ path: '/v1/x', method: 'POST', headers: { 'content-type': 'application/json' } })
+      .reply(200, 'from-request');
+    const request = new Request('http://request-input.invalid/v1/x', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{"a":1}',
+    });
+    const response = await createStepFetch(1_000, 0, transport)(request);
+    expect(await response.text()).toBe('from-request');
+    transport.assertNoPendingInterceptors();
+    await transport.close();
+  });
+
   test('a supplied transport is used as is, never replaced by a minted Agent', async () => {
     // A supplied dispatcher (an operator's proxy agent, stood in for by a
     // MockAgent) must carry the request itself: the driver must not mint its

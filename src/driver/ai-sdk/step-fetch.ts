@@ -44,7 +44,11 @@ class TimedDispatcher extends Dispatcher {
     handler: Dispatcher.DispatchHandler,
   ): boolean {
     return this.delegate.dispatch(
-      { ...options, headersTimeout: this.timeoutMs, bodyTimeout: this.timeoutMs },
+      {
+        ...options,
+        headersTimeout: this.timeoutMs,
+        bodyTimeout: this.timeoutMs,
+      },
       handler,
     );
   }
@@ -56,14 +60,31 @@ export function createStepFetch(
   marginMs: number = STEP_FETCH_MARGIN_MS,
   transport?: Dispatcher,
 ): typeof globalThis.fetch {
-  return (input, init) => {
+  return async (input, init) => {
     const dispatcher = new TimedDispatcher(
       transport ?? getGlobalDispatcher(),
       stepTimeoutMs + marginMs,
     );
-    return undiciFetch(input as Parameters<typeof undiciFetch>[0], {
+    // A native `Request` is not undici's own class, so undici's RequestInfo
+    // converter would stringify it ("[object Request]"). Unpack it into a URL
+    // plus init; an explicit `init` still wins, as it does for native fetch.
+    const target: string | URL =
+      typeof Request !== 'undefined' && input instanceof Request
+        ? input.url
+        : (input as string | URL);
+    const fromRequest =
+      typeof Request !== 'undefined' && input instanceof Request
+        ? {
+            method: input.method,
+            headers: input.headers,
+            signal: input.signal,
+            ...(input.body !== null ? { body: Buffer.from(await input.arrayBuffer()) } : {}),
+          }
+        : {};
+    return undiciFetch(target, {
+      ...fromRequest,
       ...(init as Parameters<typeof undiciFetch>[1]),
       dispatcher,
-    }) as unknown as Promise<Response>;
+    } as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>;
   };
 }

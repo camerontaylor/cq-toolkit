@@ -368,6 +368,8 @@ describe('claude-code sdk transport specifics (mock sdk)', () => {
         `${run1.sessionId as string}${CLI_SESSION_FILE}`,
       );
       await expect(readFile(sidecarPath, 'utf8')).resolves.toBe('agent-cli-1\n');
+      // The same observed native id is returned on the WorkerResult (archiver join key).
+      expect(run1.nativeSessionId).toBe('agent-cli-1');
       // 0o600 — the sidecar is evidence like the records it sits beside,
       // never world-readable (review thread: mode was umask-default 0o666).
       expect((await stat(sidecarPath)).mode & 0o777).toBe(0o600);
