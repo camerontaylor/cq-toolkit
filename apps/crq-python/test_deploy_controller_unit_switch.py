@@ -914,15 +914,18 @@ class RecoverFactoryTests(ControllerFixture):
     def test_recover_factory_error_is_a_refusal(self):
         path = self.pending_record()
         before = path.read_bytes()
+        classes = {name: type(name, (RuntimeError,), {}) for name in
+                   ("LiveBindingRefused", "FactoryRefused", "CompletionError")}
         for name in ("LiveBindingRefused", "FactoryRefused", "CompletionError"):
             with self.subTest(error=name):
-                error = type(name, (RuntimeError,), {})
                 binding = SimpleNamespace(
-                    LiveBindingRefused=error,
-                    factory=SimpleNamespace(FactoryRefused=error),
-                    completion=SimpleNamespace(CompletionError=error),
+                    LiveBindingRefused=classes["LiveBindingRefused"],
+                    factory=SimpleNamespace(
+                        FactoryRefused=classes["FactoryRefused"]),
+                    completion=SimpleNamespace(
+                        CompletionError=classes["CompletionError"]),
                     production_adapter=mock.Mock(
-                        side_effect=error("compose failed")))
+                        side_effect=classes[name]("compose failed")))
                 code, stdout, stderr = self.run_recover_cli(
                     path, mock.Mock(return_value=binding))
                 self.assertEqual(code, 2)
