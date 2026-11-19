@@ -1766,7 +1766,8 @@ def _unit_switch_identity(record):
         and _unit_runtime(record.get("runtime"))
         and _unit_runtime(record.get("prior_runtime"))
         and record["runtime"] != record["prior_runtime"]
-        and "snapshot" in record
+        and isinstance(record.get("snapshot"), dict)
+        and record["snapshot"].get("runtime") == record["prior_runtime"]
         and (state is None or isinstance(state, dict))
         and phase in _PHASES
         and ((phase == "snapshot" and state is None)
