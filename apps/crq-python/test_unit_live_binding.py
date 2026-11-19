@@ -696,6 +696,19 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["foreign"], [])
         self.assertIsNone(evidence["error"])
 
+    def test_escaped_crq_dependency_name_is_foreign(self):
+        declared = self.declare()
+        # ``\x2d`` is a systemd escape inside one complete CRQ unit name.
+        # A declared source naming a CRQ unit outside the expected set is
+        # foreign.
+        self.write("crq-tick.service",
+                   "[Unit]\nWants=crq-worker@tenant\\x2dblue.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("crq-worker@tenant\\x2dblue.service",
+                      " ".join(evidence["foreign"]))
+
     def test_declared_source_may_name_expected_units(self):
         declared = self.declare()
         self.write("crq-tick.timer",

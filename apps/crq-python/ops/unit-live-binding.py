@@ -94,7 +94,8 @@ MAX_PIDS = 4096
 ARG_RE = re.compile(r"[A-Za-z0-9_.@:/-]+")
 PROPERTY_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 PID_RE = re.compile(r"[0-9]+")
-CRQ_NAME_RE = re.compile(r"crq-[A-Za-z0-9_.@:-]+")
+# ``\xHH`` is systemd's C-style escape inside a unit name.
+CRQ_NAME_RE = re.compile(r"crq-(?:[A-Za-z0-9_.@:-]|\\x[0-9A-Fa-f]{2})+")
 DEPENDENCY_RE = re.compile(
     r"(?P<directive>Wants|Requires|Requisite|BindsTo|PartOf|Conflicts|"
     r"WantedBy|RequiredBy|Also|Upholds|OnFailure|OnSuccess|Triggers|"
