@@ -44,11 +44,14 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
 
     def test_prepare_stays_inert_verifies_before_install_and_reloads_without_start(self):
         calls = []
+        verified = []
         def stopped(argv):
             calls.append(argv)
             if argv[0] == 'systemd-analyze':
+                self.assertEqual(argv[:3], ['systemd-analyze', '--user', 'verify'])
                 self.assertTrue(all(Path(p).is_file() for p in argv[3:]))
                 self.assertFalse((self.base / 'installed').exists())
+                verified.append(argv[3:])
                 return ''
             if argv[:3] == ['systemctl', '--user', 'daemon-reload']:
                 return ''
@@ -57,6 +60,13 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         with mock.patch.object(host, 'run', side_effect=stopped):
             host.prepare(self.root, self.overlay, self.raw, self.base / 'installed',
                          'crq-runner/20261016-7')
+        expected = [path.name for path in host.unit_files(self.root)]
+        # prepare must have verified the rendered units themselves: one
+        # systemd-analyze run carrying every rendered unit path, checked
+        # above while the units output did not yet exist.
+        self.assertTrue(expected)
+        self.assertEqual([sorted(Path(p).name for p in paths) for paths in verified],
+                         [expected])
         self.assertTrue((self.runner / 'state/runner-disabled').is_file())
         self.assertTrue((self.base / 'installed/crq-tick.service').is_file())
         self.assertIn(['systemctl', '--user', 'daemon-reload'], calls)
