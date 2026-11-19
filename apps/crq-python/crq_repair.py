@@ -306,8 +306,15 @@ def dispatch(config, role, job, wt, directory, judge=False):
                 return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
             if attempted and not judge:
                 retain(wt, baseline, previous_directory)
+                # Each fallback fixer gets a fresh checkout at the baseline:
+                # -x also removes ignored files, and the doubled -f removes
+                # nested git repositories, so nothing a throttled fixer left
+                # behind can reach the next provider's context. retain() above
+                # archived only the tracked and non-ignored state; ignored
+                # output (build output, caches, nested repos) is deliberately
+                # discarded here and is not recoverable.
                 git(wt, 'reset', '--hard', baseline)
-                git(wt, 'clean', '-fd')
+                git(wt, 'clean', '-ffdx')
                 # Retention and reset consume the shared budget; remeasure so
                 # the next provider never starts past the deadline.
                 remaining = deadline - time.monotonic()
