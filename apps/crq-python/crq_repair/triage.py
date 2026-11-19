@@ -250,6 +250,9 @@ def phase(inbox, repo, tip, judge, transport, at, *, maximum=6, seconds=600, dry
         if dry_run:
             # A dry run reports the candidates that would need judgment; it
             # never calls the live judge, writes scan artifacts, or spends.
+            # Honour the deadline after context preparation, as the live path does.
+            if time.monotonic() >= deadline:
+                stopped = 'deadline'; break
             judgment_candidates.append(row['finding']['id'])
             judged += 1
             continue
