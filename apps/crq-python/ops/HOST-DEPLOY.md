@@ -184,8 +184,11 @@ differ from the live checkout's. The sequence below applies to any such target;
 the root-move section above adds only the legacy overlay, `.bak` removal and
 `dispatch_after_min` steps, which apply to that move alone.
 
-1. Stop the tick/watchdog timers and records service; wait for tick
-   inactivity and drain owned reviews.
+1. Stop the tick/watchdog timers and records service, and on a host using
+   the slot scheduling deployment also `crq-slot.timer`: `prepare` refuses
+   every active `crq-*` unit, and the slot timer would keep admitting
+   reviews during the drain. Wait for tick inactivity and for
+   `crq-slot.service` to settle, and drain owned reviews.
 2. Move the checkout onto the target first, through the audited helper
    fence the runbook itself drives (`prepare-host.py switch`; the manual
    helper path below documents the same fence):
@@ -215,7 +218,8 @@ the root-move section above adds only the legacy overlay, `.bak` removal and
    back to the prior SHA; no automatic rollback runs here.
 5. Verify and approve the recorded evidence (rendered config, unit
    hashes, Git status), then remove the inert marker and start the
-   tick/watchdog timers and records service; accept only after
+   tick/watchdog timers and records service (and `crq-slot.timer` if it
+   was stopped in step 1); accept only after
    `last_tick` advances for two consecutive slots in the heartbeat
    and summary. Do not finish this target by re-running
    `deploy-runbook.py`: it refuses a target that is already the
