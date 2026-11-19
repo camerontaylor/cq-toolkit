@@ -438,9 +438,11 @@ class LifecycleTests(unittest.TestCase):
             (run / "process.json").write_text(json.dumps(
                 {"pid": os.getpid(), "starttime": "0",
                  "scope_unit": "crq-vm-test.scope"}))
-            with self.assertRaises(RuntimeError):
-                vm.stop_owned_process(
-                    {"run_id": "r1", "path": str(run)}, purge=False)
+            with mock.patch.object(vm.subprocess, "run") as run_cmd:
+                with self.assertRaises(RuntimeError):
+                    vm.stop_owned_process(
+                        {"run_id": "r1", "path": str(run)}, purge=False)
+            run_cmd.assert_not_called()
 
     def test_destroy_treats_a_changed_process_as_stopped(self):
         with tempfile.TemporaryDirectory() as temporary:
