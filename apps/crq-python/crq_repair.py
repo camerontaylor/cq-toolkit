@@ -386,14 +386,16 @@ def process(config, job, wt):
         result = json.loads(progress_path.read_text())
     if result.get('dispatch_pending') or result.get('pending_judge') or result.get('pending_mechanical'):
         wt = resume_worktree(result, wt)
-    if (result.get('pending_judge') and result.get('worktree')
+    if ((result.get('pending_judge') or result.get('pending_mechanical')) and result.get('worktree')
             and Path(result['worktree']).resolve() != Path(wt).resolve()):
-        # The A2 tree the deferred judge must inspect is gone: judging the
-        # base tree would record a verdict and snapshot for the wrong checkout.
+        # The recorded candidate tree is gone: verifying or judging the base
+        # tree would record a result for the wrong checkout.
+        pending = 'judge' if result.get('pending_judge') else 'mechanical'
         result.update(verdict='FAILED',
-                      reason='pending judge worktree unavailable; needs human',
+                      reason='pending ' + pending + ' worktree unavailable; needs human',
                       finished_at=utc())
         result.pop('pending_judge', None)
+        result.pop('pending_mechanical', None)
         atomic(result_path, result)
         return result
     if resume_progress:
