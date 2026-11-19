@@ -1683,6 +1683,23 @@ class RepairDrainTest(unittest.TestCase):
                          ['crq-run4-F1'])
         self.assertEqual(broken.read_text(), '{broken')
 
+    def test_unreadable_result_json_holds_the_whole_run(self):
+        # A later job chains from the unreadable job's possible FIXED commit,
+        # so it must not be dispatched from the bare repair_base.
+        broken = self.root / 'state/repair/crq-run1-F1/result.json'
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        broken.write_text('{broken')
+        self.job('crq-run1-F3', 'pr1-merged', 'run1', 'src/kept.ts')
+        self.queue['items'][0]['repair_runs']['run1']['jobs'].append('crq-run1-F3')
+        atomic(self.root / 'state/queue.json', self.queue)
+        order = ['crq-run1-F1', 'crq-run1-F3']
+        with mock.patch.object(service, 'drain_order', return_value=order), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'process_item') as process_item:
+            service.drain(self.config)
+        process_item.assert_not_called()
+        self.assertEqual(broken.read_text(), '{broken')
+
     def test_started_job_resumes_even_if_now_superseded(self):
         atomic(self.root / 'state/repair/crq-run1-F2/progress.json', {'attempts': []})
         self.assertEqual(bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F2')[0], 'run')

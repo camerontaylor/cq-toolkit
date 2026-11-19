@@ -890,6 +890,7 @@ def drain_item(config, item, job_ids):
     queue_path = ROOT / 'state/queue.json'
     queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
     jobs = []
+    held_runs = set()
     for job_id in job_ids:
         status, job, reason = drain_job(ROOT, config, queue, job_id)
         if not job or job.get('item') != item:
@@ -905,10 +906,18 @@ def drain_item(config, item, job_ids):
                 # the run and retains it, so the job is excluded from dispatch
                 # here and in the priority sort instead of crashing the drain.
                 narrate('repair ' + job_id + ': skipped: unreadable result.json preserved for tick reconciliation')
+                # Later jobs of the same run chain from this job's possible
+                # FIXED commit; without its result they would start from a
+                # base that omits it, so the whole run waits for the tick.
+                held_runs.add(job['run'])
             else:
                 jobs.append(job)
         elif reason != 'no queued tick-owned repair run':
             narrate('repair ' + job_id + ': skipped: ' + reason)
+    if held_runs:
+        for run in sorted(held_runs):
+            narrate('repair run ' + str(run) + ': held: a job has an unreadable result.json')
+        jobs = [job for job in jobs if job['run'] not in held_runs]
     if not any(pending(job['job']) for job in jobs):
         return None
     try:
