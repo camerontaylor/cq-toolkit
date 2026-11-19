@@ -5,7 +5,7 @@ import {
   LIVE_UNIT_COMMANDS,
 } from '../../src/queue-runner/capabilities.js';
 
-const KNOWN = ['tick', 'slot', 'repair', 'publish', 'backfill inventory', 'watchdog'];
+const KNOWN = ['tick', 'slot', 'repair', 'publish', 'backfill inventory', 'watchdog', 'dispatch'];
 
 describe('queue-runner artifact capability declaration', () => {
   it('declares only known, unique live unit commands', () => {

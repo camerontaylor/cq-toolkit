@@ -13,7 +13,7 @@
  * It composes the merged C1 modules and changes none of them:
  * `prepareRepairGates` (read half, exact mutation bytes) and
  * `executeRepairPreparation` (write ordering). The operator command is not a
- * unit capability; `capabilities.json` stays `['watchdog', 'publish']` after
+ * unit capability; `capabilities.json` held `['watchdog', 'publish']` after
  * the publish route landed (S3).
  *
  * Copied-state-root rule: never run this against live CRQ state before the
