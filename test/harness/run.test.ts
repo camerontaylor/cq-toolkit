@@ -307,8 +307,10 @@ describe('kill grace bounds and truncation', { timeout: 30_000 }, () => {
   });
 
   test('a grace-expired kill marks the bash result truncated', async () => {
-    // `setsid` moves the sleeper out of the killed group while it keeps the pipes.
-    await withGitShim('setsid sleep 3 &\nsleep 30', async (workspace) => {
+    // Perl `setsid()` (portable; util-linux `setsid` is absent on macOS) moves
+    // the sleeper out of the killed group while it keeps the pipes.
+    const holder = `perl -e 'use POSIX; if (fork) { exit 0 } setsid() >= 0 or die; sleep 3'`;
+    await withGitShim(`${holder} &\nsleep 30`, async (workspace) => {
       const cfg = config(300);
       const result = await run(workspace, {
         ...cfg,
