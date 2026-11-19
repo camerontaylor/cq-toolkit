@@ -1213,10 +1213,22 @@ def explicit_job_result(job, outcome):
     return {'status': outcome or ('finished' if result else 'no-result'), 'job': job['job'], 'result': result}
 
 
+class _UsageRefused(Exception):
+    """Argparse usage rejection, carrying the parser's message for the artifact."""
+
+
+class _MachineParser(argparse.ArgumentParser):
+    """Raises _UsageRefused instead of exiting, so main() writes the JSON
+    result for an unknown flag instead of leaving stdout empty."""
+
+    def error(self, message):
+        raise _UsageRefused(message)
+
+
 def run(argv=None):
     """Returns (exit code, result). A None result means the path already wrote its own JSON
     (the triage dry-run does so only when triage ran; otherwise it reports no-triage)."""
-    parser = argparse.ArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
+    parser = _MachineParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
     parser.add_argument('--triage-dry-run', action='store_true')
     parser.add_argument('--job')
     parser.add_argument('--source-sha')
@@ -1306,7 +1318,20 @@ def run(argv=None):
 
 def main(argv=None):
     """Every CLI path ends in exactly one JSON artifact on stdout."""
-    code, result = run(argv)
+    try:
+        code, result = run(argv)
+    except _UsageRefused as refusal:
+        # An unknown flag used to exit from parse_args before any result was
+        # written: narrate to stderr and report it, keeping the usage exit 2.
+        narrate('usage: ' + str(refusal))
+        write_result({'status': 'refused', 'reason': str(refusal)[:200]})
+        return 2
+    except Exception as failure:
+        # A thrown operation failure (removed selected job, unreadable state)
+        # used to escape with empty stdout: narrate it and write the artifact.
+        narrate(type(failure).__name__ + ': ' + str(failure)[:200])
+        write_result({'status': 'error', 'reason': str(failure)[:200]})
+        return 1
     if result is not None:
         write_result(result)
     return code
