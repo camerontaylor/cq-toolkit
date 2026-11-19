@@ -1276,7 +1276,15 @@ def cmd_run(args) -> int:
         }
         recorder = Recorder(pathlib.Path(run["path"]))
         stamp = host_stamp()
-        boot_info = boot(run, recorder, args.tools, stamp)
+        with run_lock(run):
+            # Same guard as cmd_boot: boot() drops process.json before it
+            # launches, so a concurrent lifecycle command must not be racing it.
+            live = live_identity(run)
+            if live is not None:
+                raise ValueError(
+                    "run %s already owns a live VM (pid %s); destroy it before "
+                    "booting again" % (run["run_id"], live["pid"]))
+            boot_info = boot(run, recorder, args.tools, stamp)
         boot_info["ssh"] = wait_ssh(run, recorder)
         upload = upload_guest_probe(run, recorder, source=guest_bytes)
         provenance["guest_script"].update(upload)
@@ -1301,7 +1309,8 @@ def cmd_run(args) -> int:
     except BaseException as exc:
         if not args.keep:
             try:
-                stop_owned_process(run, purge=False)
+                with run_lock(run):
+                    stop_owned_process(run, purge=False)
             except Exception as cleanup_error:
                 _cleanup_diagnostic(args, "cleanup after failed run",
                                     cleanup_error, exc)
@@ -1309,7 +1318,8 @@ def cmd_run(args) -> int:
     cleanup = None
     if not args.keep:
         try:
-            cleanup = stop_owned_process(run, purge=False)
+            with run_lock(run):
+                cleanup = stop_owned_process(run, purge=False)
         except Exception as cleanup_error:
             # The diagnostic stays in the JSON result in machine mode (I1).
             _cleanup_diagnostic(args, "cleanup after run", cleanup_error)

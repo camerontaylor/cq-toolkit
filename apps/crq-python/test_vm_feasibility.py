@@ -483,6 +483,28 @@ class LifecycleTests(unittest.TestCase):
                     {"run_id": "r1", "path": str(run), "port": 2222,
                      "started_at": "now"}, purge=False)
 
+    def test_cmd_run_refuses_a_live_run_before_launching(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            args = type("Args", (), {"state_dir": str(state), "tools": None,
+                                     "keep": True,
+                                     "source_commit": "a" * 40})()
+            image = {"name": "image", "path": "/image", "sha256": DIGEST,
+                     "sums_sha256": DIGEST, "sums_verified": True,
+                     "signature_verified": False, "downloaded": False}
+            with mock.patch.object(vm, "fetch_image", return_value=image), \
+                 mock.patch.object(vm, "prepare_run", return_value={
+                     "run_id": "r1", "path": str(run), "port": 2222,
+                     "started_at": "now"}), \
+                 mock.patch.object(vm, "host_stamp",
+                                   return_value={"kvm_writable": True}), \
+                 mock.patch.object(vm, "live_identity",
+                                   return_value={"pid": 42}), \
+                 mock.patch.object(vm, "boot") as boot:
+                with self.assertRaisesRegex(ValueError, "already owns a live VM"):
+                    vm.cmd_run(args)
+                boot.assert_not_called()
+
     def test_cmd_run_requires_a_source_commit(self):
         with tempfile.TemporaryDirectory() as temporary:
             state, _run = self._prepared(temporary)
