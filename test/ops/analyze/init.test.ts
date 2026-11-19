@@ -69,6 +69,7 @@ describe('analyze.init detection', () => {
   test.each([
     ['trailing comma', '{ "files": [], "references": [{ "path": "./app" },] }'],
     ['inline // comment', '{ "files": [], // none\n "references": [{ "path": "./app" }] }'],
+    ['UTF-8 BOM', '\uFEFF{ "files": [], "references": [{ "path": "./app" }] }'],
     ['empty include', '{ "files": [], "include": [], "references": [{ "path": "./app" }] }'],
   ])('a JSONC solution root (%s) is still detected', async (_name, text) => {
     expect(await tscArgs({ 'tsconfig.json': text })).toEqual(BUILD);
