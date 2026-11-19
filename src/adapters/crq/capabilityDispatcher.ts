@@ -16,6 +16,19 @@ export type Capability = (typeof CAPABILITIES)[number];
 /** `capability_dispatcher.main`'s catch-all, whatever escapes a capability. */
 export const DISPATCH_REFUSAL = 'queue capability refused; no permission';
 
+/** `author_transport.main`'s own failure line; it never reflects the cause. */
+export const AUTHOR_REFUSAL = 'author-transport: request refused; no permission';
+
+/**
+ * The refusal line the Python dispatcher shows for a capability. Queue and
+ * review failures escape to `main`'s catch-all; author prints its own line.
+ * Each TS entrypoint words its refusal after itself, so under the router the
+ * line is rewritten to what clients of the Python dispatcher already see.
+ */
+export function dispatchedRefusal(capability: Capability): string {
+  return capability === 'author-v1' ? AUTHOR_REFUSAL : DISPATCH_REFUSAL;
+}
+
 export interface CapabilityDispatcherDeps {
   /** Arguments after the command name; `len(sys.argv) != 1` refuses. */
   readonly argv: readonly string[];
