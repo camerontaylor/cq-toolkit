@@ -200,17 +200,26 @@ export function redactUrlUserinfo(text: string): string {
   return out.join('');
 }
 
-// One forward pass: true when a letter-led scheme run is followed by `://`
-// before `end`. A bare `://` does not count. Linear in the prefix length.
+// One forward pass: true when a scheme run whose FIRST character is a letter
+// (the same word-start rule discoverSchemes applies) is followed by `://`
+// before `end`. A bare `://` does not count, and a digit-led run stays invalid
+// until the next delimiter rather than turning valid when a later letter
+// appears. Linear in the prefix length.
 const hasNamedScheme = (token: string, end: number): boolean => {
-  let letterInRun = false;
+  let wordStart = 0;
   for (let p = 0; p < end; p++) {
     const c = token[p] ?? '';
-    if (/[A-Za-z]/.test(c)) letterInRun = true;
-    else if (!/[0-9+.-]/.test(c)) {
-      if (c === ':' && letterInRun && token.startsWith('//', p + 1) && p + 3 <= end) return true;
-      letterInRun = false;
+    if (/[A-Za-z0-9+.-]/.test(c)) continue;
+    if (
+      c === ':' &&
+      p > wordStart &&
+      /[A-Za-z]/.test(token[wordStart] ?? '') &&
+      token.startsWith('//', p + 1) &&
+      p + 3 <= end
+    ) {
+      return true;
     }
+    wordStart = p + 1;
   }
   return false;
 };
