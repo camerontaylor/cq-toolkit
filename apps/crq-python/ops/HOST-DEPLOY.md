@@ -192,8 +192,11 @@ the root-move section above adds only the legacy overlay, `.bak` removal and
    hashes and reloads the user manager. It starts and enables nothing.
 3. Review the installed unit diff against the prior definitions and keep the
    prior definitions for rollback; the runbook cannot restore them.
-4. Re-run the deploy runbook for the same target. It now finds no template
-   delta and proceeds; the owner starts units only after approving evidence.
+4. After prepare succeeds, verify and approve its recorded evidence, then
+   remove the `state/runner-disabled` marker prepare wrote; the host stays
+   inert behind it. Only then re-run the deploy runbook for the same
+   target: it finds no template delta and proceeds, because Hold.acquire
+   refuses an existing marker and never removes a foreign one.
 
 ## Controller wrapper (Q7, #395) — proposed, offline-tested only
 
