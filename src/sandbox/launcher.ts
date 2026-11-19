@@ -281,10 +281,13 @@ export function resolveLauncher(
     const candidate = resolve(join(dir, name));
     try {
       accessSync(candidate, constants.X_OK);
-      return absolute(candidate);
     } catch {
-      // Keep searching the remaining PATH entries.
+      continue;
     }
+    // A candidate that is executable but whose realpath fails (broken or
+    // racing symlink) must not end the search: try the remaining entries.
+    const canonical = absolute(candidate);
+    if (canonical !== undefined) return canonical;
   }
   return undefined;
 }
