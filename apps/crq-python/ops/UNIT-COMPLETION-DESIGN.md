@@ -16,7 +16,10 @@ systemd facts?
 Evidence must bind:
 
 * **Unit**: `systemctl show` `FragmentPath` equals the selected installed unit
-  in `unit_dir`, and the journal witness names the same unit.
+  in `unit_dir`; that match is required in both modes. A journal record naming
+  the same unit is a matching journal witness, mandatory only in strict mode
+  (`require_journal_witness=True`); the default show-only mode accepts a quiet
+  oneshot and reports `witness: none`.
 * **Runtime**: the installed `ExecStart` parses to `python` or
   `node:<source-sha>`.
 * **Selected identity**: the installed service SHA-256 equals the expected
