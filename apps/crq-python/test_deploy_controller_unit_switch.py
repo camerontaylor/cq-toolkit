@@ -795,8 +795,15 @@ class RecoverFactoryTests(ControllerFixture):
         self.assertEqual(path.read_bytes(), before)
 
     def test_recover_factory_receives_the_retained_source_commit(self):
-        path = self.pending_record()
-        retained = json.loads(path.read_text())["state"]["prior_head"]
+        # The journal's retained commit must differ from the live checkout:
+        # otherwise this test would also pass if recovery composed the adapter
+        # at live HEAD instead of at the commit the record retained.
+        state = dc.captured_state(self.effects)
+        live = state["prior_head"]
+        retained = self.target
+        self.assertNotEqual(retained, live)
+        state["prior_head"] = retained
+        path = self.pending_record(state=state)
         seen = []
 
         def factory(unit, prior_runtime, source_sha=None):
