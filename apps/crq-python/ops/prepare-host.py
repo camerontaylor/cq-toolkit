@@ -447,7 +447,22 @@ def render_service_text(template_name, template_text, runner_root, command=None)
         matches = [i for i, line in enumerate(lines) if line.startswith('ExecStart=')]
         if len(matches) != 1:
             raise ValueError('unit must have exactly one ExecStart: ' + template_name)
-        lines[matches[0]] = 'ExecStart=' + command + '\n'
+        end = matches[0] + 1
+        # systemd joins physical lines ending in an odd run of backslashes
+        # (an even run is escaped) into one logical directive, and skips
+        # comment lines without ending the continuation. Replacing only the
+        # first physical line would leave a stale fragment of the old command.
+        def continues(line):
+            body = line.rstrip('\r\n')
+            return (len(body) - len(body.rstrip('\\'))) % 2 == 1
+        pending = continues(lines[matches[0]])
+        while pending and end < len(lines):
+            line = lines[end]
+            end += 1
+            if line.lstrip().startswith(('#', ';')):
+                continue
+            pending = continues(line)
+        lines[matches[0]:end] = ['ExecStart=' + command + '\n']
         text = ''.join(lines)
     return text
 
@@ -889,9 +904,12 @@ def main(argv=None):
         prepare(root, overlay, raw, args.units_output, args.tag)
     elif args.operation == 'preview':
         root_check(root, overlay)
-        require_outside_git(args.output)
-        if not outside(args.output, root):
-            raise ValueError('preview output must be outside checkout')
+        # render_units and render_plists create and follow these children, so
+        # the resolved subdirectories need the same fences as the output root.
+        for output in (args.output, args.output / 'systemd', args.output / 'launchd'):
+            require_outside_git(output)
+            if not outside(output, root):
+                raise ValueError('preview output must be outside checkout')
         # Preview writes config.json, systemd/ and launchd/ under --output. An
         # overlay inside that tree would be replaced by rendered bytes, so the
         # next invocation would reject it for lacking the overlay schema.
