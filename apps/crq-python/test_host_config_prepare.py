@@ -91,6 +91,20 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         self.assertFalse((self.base / 'systemd').exists())
         self.assertFalse((self.base / 'records').exists())
 
+    def test_preview_refuses_a_rendered_child_linked_into_a_checkout(self):
+        # render_units and render_plists follow systemd/ and launchd/ under
+        # --output; a child linked into the deployment checkout must be refused
+        # before any preview byte is written, not followed by the renderer.
+        for child in ('systemd', 'launchd'):
+            with self.subTest(child=child):
+                output = self.base / ('preview-' + child)
+                output.mkdir()
+                (output / child).symlink_to(self.root, target_is_directory=True)
+                with self.assertRaisesRegex(ValueError, 'outside every Git checkout|outside checkout'):
+                    host.main(['--overlay', str(self.overlay_path), 'preview', '--output', str(output)])
+                self.assertEqual(sorted(p.name for p in output.iterdir()), [child])
+                self.assertFalse((self.base / 'records').exists())
+
     def test_prepare_rejects_worktree_drift_before_installing_units(self):
         self.command('checkout', '-q', '--detach', self.target)
         directory = self.runner / 'ops/systemd'

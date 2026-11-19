@@ -889,9 +889,12 @@ def main(argv=None):
         prepare(root, overlay, raw, args.units_output, args.tag)
     elif args.operation == 'preview':
         root_check(root, overlay)
-        require_outside_git(args.output)
-        if not outside(args.output, root):
-            raise ValueError('preview output must be outside checkout')
+        # render_units and render_plists create and follow these children, so
+        # the resolved subdirectories need the same fences as the output root.
+        for output in (args.output, args.output / 'systemd', args.output / 'launchd'):
+            require_outside_git(output)
+            if not outside(output, root):
+                raise ValueError('preview output must be outside checkout')
         # Preview writes config.json, systemd/ and launchd/ under --output. An
         # overlay inside that tree would be replaced by rendered bytes, so the
         # next invocation would reject it for lacking the overlay schema.
