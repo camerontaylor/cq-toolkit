@@ -2417,6 +2417,9 @@ def activators_fence(args):
             "external path activation was not fenced")
     require(external.get("external_completion_delta") == 0,
             "external activation produced a completion before release")
+    require(external.get("completions_before_external") == completions_before,
+            "a completion landed between the pre-switch log "
+            "and the first pause sample")
     require(any(REPAIR_UNIT in line for line in external.get("jobs", [])),
             "queued target job was not retained through mask and reload")
     require(external.get("marker", {}).get("phase") == "after-mask-reload",
