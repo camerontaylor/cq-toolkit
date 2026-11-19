@@ -45,6 +45,12 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
     def test_prepare_stays_inert_verifies_before_install_and_reloads_without_start(self):
         calls = []
         verified = []
+        rendered_paths = []
+        real_render = host.render_units
+        def capture_render(*args, **kwargs):
+            paths = real_render(*args, **kwargs)
+            rendered_paths.append([str(p) for p in paths])
+            return paths
         def stopped(argv):
             calls.append(argv)
             if argv[0] == 'systemd-analyze':
@@ -57,9 +63,14 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
                 return ''
             return self.stopped(argv)
         self.command('tag', '-a', 'crq-runner/20261016-7', self.before, '-m', 'owner fixture approval')
-        with mock.patch.object(host, 'run', side_effect=stopped):
+        with mock.patch.object(host, 'run', side_effect=stopped), \
+                mock.patch.object(host, 'render_units', side_effect=capture_render):
             host.prepare(self.root, self.overlay, self.raw, self.base / 'installed',
                          'crq-runner/20261016-7')
+        # verification must receive exactly the paths render_units returned,
+        # not the original template paths.
+        self.assertEqual(len(rendered_paths), 1)
+        self.assertEqual(verified, rendered_paths)
         expected = [path.name for path in host.unit_files(self.root)]
         # prepare must have verified the rendered units themselves: one
         # systemd-analyze run carrying every rendered unit path, checked
