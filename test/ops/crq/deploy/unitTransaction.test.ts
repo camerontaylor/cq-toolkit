@@ -486,6 +486,7 @@ for d in sys.argv[5:]:
         read_json=lambda rel, s=state: json.loads((s / rel).read_text()),
         git=lambda *a: GIT[" ".join(a)], unit_digests=lambda: UD,
         controller_lock=contextlib.nullcontext, record_preflight=lambda: None,
+        tick_lock=contextlib.nullcontext,
         journal_append=append, journal_replace=replace)
     live_map = sc.get("live", {})
     def live(rdir, item, r, has_exit, m=live_map):
