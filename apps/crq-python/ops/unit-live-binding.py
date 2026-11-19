@@ -857,6 +857,15 @@ class SubprocessSystemd:
             # link there makes the upstream unit restart the named one when it
             # becomes inactive, which is an incoming dependency edge like
             # ``*.wants``/``*.requires`` and must be checked the same way.
+            if name.endswith((".wants", ".requires", ".upholds")) \
+                    and entry.is_symlink() \
+                    and os.path.realpath(entry) != os.devnull:
+                # systemd traverses a symlinked enablement directory, but
+                # the children are not inspected through the link here, so
+                # discovery cannot vouch for the topology.
+                foreign.append("symlinked enablement directory: "
+                               + str(entry))
+                continue
             if is_dir and name.endswith((".wants", ".requires", ".upholds")):
                 try:
                     children = list(entry.iterdir())
@@ -865,6 +874,11 @@ class SubprocessSystemd:
                                       + str(exc)[:160])
                     continue
                 for child in sorted(children):
+                    if child.is_symlink() \
+                            and os.path.realpath(child) == os.devnull:
+                        # systemd ignores a /dev/null mask in an
+                        # enablement directory.
+                        continue
                     if child.name.startswith(prefix) \
                             and str(child) not in declared_set:
                         foreign.append("unexpected enablement link: "

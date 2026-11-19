@@ -584,6 +584,27 @@ class DiscoveryTests(PortFixture):
         self.assertIn("unexpected enablement link: " + str(upheld),
                       " ".join(evidence["foreign"]))
 
+    def test_masked_upholds_child_is_ignored(self):
+        declared = self.declare()
+        self.link("ingress.target.upholds/crq-tick.service", os.devnull)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+
+    def test_symlinked_enablement_directory_is_unsupported(self):
+        declared = self.declare()
+        real = self.unit_dir / "elsewhere"
+        real.mkdir()
+        (real / "crq-tick.service").symlink_to(self.unit_dir / "crq-tick.service")
+        for suffix in (".wants", ".requires", ".upholds"):
+            link = self.unit_dir / ("ingress.target" + suffix)
+            link.symlink_to(real, target_is_directory=True)
+            evidence = self.discover(declared)
+            self.assertEqual(evidence["supported"], False, suffix)
+            self.assertIn("symlinked enablement directory: " + str(link),
+                          " ".join(evidence["foreign"]))
+            link.unlink()
+
     def test_listing_failure_is_incomplete(self):
         declared = self.declare()
 
