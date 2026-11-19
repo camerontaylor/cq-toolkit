@@ -2007,6 +2007,11 @@ def cli_paused(extra, callback, timeout=180):
                 "timeout": False, "pause_reached": False, "during": None,
                 "json": None}
     during = callback()
+    # Release the fence only after the observation callback returned: the
+    # adapter resumes once the marker is gone and refuses at its bound when
+    # the callback never completes, so the switch cannot continue while
+    # evidence is still being collected.
+    REPAIR_PAUSE_MARKER.unlink(missing_ok=True)
     timed_out = False
     try:
         out, err = proc.communicate(timeout=timeout)
