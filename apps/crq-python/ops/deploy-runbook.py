@@ -983,8 +983,10 @@ class Run:
         self.phase("admission_released")
 
     def complete(self):
+        compatibility = self.controller.compatibility_record(
+            self.effects, self.prior_sha)
         self.rollback = {
-            "permitted": True,
+            "permitted": self.controller.rollback_compatible(compatibility),
             "to": self.prior_sha,
             "cq_bin": self.cq_bin,
             "statement": "rollback is available while the queue carries no "
