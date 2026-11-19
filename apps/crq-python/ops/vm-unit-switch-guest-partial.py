@@ -112,6 +112,13 @@ def phase_names():
     return tuple(names)
 
 
+def phase_case(phase):
+    for case in PARTIAL_ORDER:
+        if phase in ("partial-" + case, "partial-" + case + "-observe"):
+            return case
+    return None
+
+
 def case_dir(case):
     return HOME / ("records-partial-" + case)
 
@@ -487,6 +494,9 @@ def partial_activation_boundary(args):
         expected_delta = None
     require(path_state == "inactive",
             "after-path boundary path is not inactive")
+    require(after["repair_completions"][:len(before["repair_completions"])]
+            == before["repair_completions"],
+            "activation boundary completion log is not append-only")
     new = after["repair_completions"][len(before["repair_completions"]):]
     released = [item for item in new if item.get("runtime") == spec["runtime"]]
     require(all(item.get("runtime") in (PYTHON_RUNTIME, NODE_RUNTIME)
@@ -563,6 +573,9 @@ def partial_restore_boundary(args):
             == "inactive", "restore boundary timer is already restored")
     require((after["repair_units"].get(REPAIR_PATH_UNIT) or {}).get("ActiveState")
             == "inactive", "restore boundary path is not inactive")
+    require(after["repair_completions"][:len(drained["repair_completions"])]
+            == drained["repair_completions"],
+            "restore boundary completion log is not append-only")
     new = after["repair_completions"][len(drained["repair_completions"]):]
     released = [item for item in new
                 if item.get("runtime") == spec["prior_runtime"]]
@@ -629,6 +642,10 @@ def partial_activation_observe(args):
         spec["prior_runtime"], case + " recovery")
     require(record_after["sha256"] == record["sha256"],
             "activation recovery changed the retained record bytes")
+    before_completions = before["repair_completions"]
+    require(after_recovery["repair_completions"][:len(before_completions)]
+            == before_completions,
+            "activation recovery rewrote a pre-recovery completion entry")
     require(baseline["count"] == len(after_recovery["repair_completions"]),
             "activation recovery produced a completion after the settled fence")
     require(baseline["invocations"] == [
@@ -648,6 +665,9 @@ def partial_activation_observe(args):
     require(len(after_repeat["repair_completions"])
             == baseline_repeat["count"],
             "activation repeat produced a completion after the settled fence")
+    require(after_repeat["repair_completions"]
+            == after_recovery["repair_completions"],
+            "activation repeat rewrote the settled completion log")
     require_fenced_state(after_repeat, case + " repeat")
     return require_source({
         "phase": "partial-" + case + "-observe",
@@ -708,6 +728,10 @@ def partial_restore_observe(args):
         spec["runtime"], spec["prior_runtime"], case + " recovery")
     require(record_after["sha256"] == record["sha256"],
             "restore recovery changed the retained record bytes")
+    before_completions = before["repair_completions"]
+    require(after_recovery["repair_completions"][:len(before_completions)]
+            == before_completions,
+            "restore recovery rewrote a pre-recovery completion entry")
     require(baseline["count"] == len(after_recovery["repair_completions"]),
             "restore recovery produced a completion after the settled fence")
     require(baseline["invocations"] == [
@@ -730,6 +754,9 @@ def partial_restore_observe(args):
     require(len(after_repeat["repair_completions"])
             == baseline_repeat["count"],
             "restore repeat produced a completion after the settled fence")
+    require(after_repeat["repair_completions"]
+            == after_recovery["repair_completions"],
+            "restore repeat rewrote the settled completion log")
     require_fenced_state(after_repeat, case + " repeat")
     return require_source({
         "phase": "partial-" + case + "-observe",
@@ -858,6 +885,9 @@ def main(argv=None):
         # disposable guest before any host effect, as base.main() does.
         require(os.uname().nodename == "crq-probe",
                 "proof driver only runs on the disposable crq-probe guest")
+        if args.case and args.case != phase_case(args.phase):
+            raise RuntimeError("--case " + args.case + " does not match phase "
+                               + args.phase)
         if args.phase == "prepare":
             payload = partial_prepare(args)
         elif args.phase == "partial-install":
@@ -881,9 +911,14 @@ def main(argv=None):
             else:
                 payload = partial_restore_boundary(args)
         PHASE_DIR.mkdir(parents=True, exist_ok=True)
+        report = json.dumps(payload, indent=2, sort_keys=True) + "\n"
         name = args.label or args.phase
-        (PHASE_DIR / (name + ".json")).write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        (PHASE_DIR / (name + ".json")).write_text(report)
+        if args.label and args.phase in (
+                "partial-" + case for case in PARTIAL_ORDER):
+            # A labeled boundary run still keeps the canonical boundary
+            # artifact that the observe phase reads before recovery.
+            _boundary_phase(args.case).write_text(report)
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     except Exception as exc:  # noqa: BLE001 - the harness must see the failure

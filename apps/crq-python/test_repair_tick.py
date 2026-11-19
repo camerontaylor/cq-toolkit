@@ -286,3 +286,14 @@ class ChangeUndoneLocationTest(unittest.TestCase):
         published = '@@ -4 +3,0 @@\n-gone\n'
         self.assertTrue(self.undone(published, '@@ -3,0 +4 @@\n+gone\n'))
         self.assertEqual(self.undone(published, '@@ -8,0 +9 @@\n+gone\n'), [])
+
+    def test_reinsertion_inside_a_replacement_hunk_at_the_gap_is_an_undo(self):
+        # The head replaces the line preceding the deletion gap, so the
+        # re-inserted line shares the replacement hunk's earlier gap anchor
+        # and the exact intersection misses it; the span overlap catches it.
+        published = '@@ -4 +3,0 @@\n-gone\n'
+        self.assertEqual(self.undone(published, '@@ -3 +3,2 @@\n-prev\n+next\n+gone\n'), [(3, 'gone')])
+
+    def test_replacement_text_at_another_location_is_not_an_undo(self):
+        published = '@@ -4 +3,0 @@\n-gone\n'
+        self.assertEqual(self.undone(published, '@@ -7 +7,2 @@\n-hold\n+gone\n+keep\n'), [])
