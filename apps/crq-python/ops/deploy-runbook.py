@@ -1185,6 +1185,17 @@ class Run:
             # rollback_to_prior revalidates before its restart: this path
             # must match or a restore resumes admission on unverified bytes.
             self.runtime_pointer_check()
+            # ``acquired`` only records that this run once persisted its
+            # token; the operator may have replaced the marker with a manual
+            # hold since the triggers stopped. Restarting triggers under a
+            # foreign marker would resume admission the operator blocked and
+            # would exit as if the hold were restored, so ownership is
+            # re-proven here and again by ``release`` below; a lost hold
+            # falls through to the fail-stop, which leaves the operator's
+            # marker in place and reports recovery required.
+            require(self.hold.owns(),
+                    "the admission marker is no longer this run's; refusing "
+                    "to restart triggers under a foreign hold")
             active = sorted(unit for unit, state in (self.original or {}).items()
                             if state == "active")
             if self.original:
@@ -1194,8 +1205,7 @@ class Run:
                 require(observed == self.original,
                         "pre-switch restore mismatch: observed "
                         + json.dumps(observed, sort_keys=True))
-            if self.hold.owns():
-                self.hold.release()
+            self.hold.release()
         except Exception as exc:
             self.fail_stop("pre-switch restore failed after refusal ("
                            + str(reason)[:200] + "): " + repr(exc))
