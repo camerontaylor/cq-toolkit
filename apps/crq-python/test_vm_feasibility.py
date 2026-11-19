@@ -768,6 +768,9 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(vm.build_checks(phases, manager, reboot)
                         ["queued_stop_proven"])
         phases["activation"]["stop_queued_fixture"] = {"rc": 1}
+        phases["activation"]["jobs2_after_stop"] = self._jobs()
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["queued_stop_proven"])
         phases["activation"]["jobs2_after_stop"] = self._jobs(
             "135 crq-queued-fixture.service start waiting")
         checks = vm.build_checks(phases, manager, reboot)
