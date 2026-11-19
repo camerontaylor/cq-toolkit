@@ -438,15 +438,34 @@ class BoundedRepairTest(unittest.TestCase):
         self.config.update(repo='example/repo')
         self.config['repair'].update(cq_bin='/unused', budget={'wall_clock_min': 1})
         with mock.patch.object(service.cq, 'command') as command:
-            for body, source in [('😀' * 4000, '2: pinned code'),
-                                 ('small', '2: ' + '\\' * 8000),
-                                 ('small', '3: wrong anchor')]:
+            for body, source, message in [('😀' * 4000, '2: pinned code', 'exceed item body budget'),
+                                          ('small', '2: ' + '\\' * 8000, 'exceed item body budget'),
+                                          ('small', '3: wrong anchor', 'incomplete or malformed')]:
                 with self.subTest(body=body[:8], source=source[:16]):
+                    # Rebind both finding digests to this case's body: a stale
+                    # binding must not be the rejection these assertions accept.
                     job['finding']['body'] = body
+                    job['finding_sha256'] = bounded.identity(job['finding'])
+                    job['source_snapshot']['finding_sha256'] = job['finding_sha256']
                     job['source_snapshot']['source'] = source
-                    with self.assertRaises(ValueError):
+                    with self.assertRaisesRegex(ValueError, message):
                         service.cq.invoke(self.config, {'model': 'p/m'}, job, self.root, self.root)
             command.assert_not_called()
+            # Under the same config, a fitting body with the pinned anchor and
+            # consistent digests reaches the command, so the refusals above
+            # come from size and anchor validation alone.
+            job['finding']['body'] = 'small'
+            job['finding_sha256'] = bounded.identity(job['finding'])
+            job['source_snapshot']['finding_sha256'] = job['finding_sha256']
+            job['source_snapshot']['source'] = '2: pinned code'
+            command.return_value = SimpleNamespace(returncode=0, stdout='{"status":"ok","value":{"changed":false}}', stderr='')
+            self.assertEqual(service.cq.invoke(self.config, {'model': 'p/m'}, job, self.root, self.root),
+                             {'stop': 'ok', 'changed': False})
+            self.assertEqual(command.call_count, 1)
+            item_arg = next(arg for arg in command.call_args.args[0] if arg.startswith('--item='))
+            sent = json.loads(item_arg.split('=', 1)[1])['body']
+            self.assertTrue(sent.startswith('small'))
+            self.assertIn('2: pinned code', sent)
 
     def test_harvest_records_wrong_prepared_source_binding_as_failed(self):
         job_id, job = self.prepare()
