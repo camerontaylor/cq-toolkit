@@ -177,6 +177,24 @@ No spool probes are authorized by this document. Any new probe requires separate
 recorded owner authorization. Retain the heartbeat endpoint confirmation from the
 old handover as evidence, without inventing new live evidence.
 
+## Owner procedure for any template-changing target
+
+`deploy-runbook.py` refuses a target whose rendered `crq-*` unit templates
+differ from the live checkout's. The sequence below applies to any such target;
+the root-move section above adds only the legacy overlay, `.bak` removal and
+`dispatch_after_min` steps, which apply to that move alone.
+
+1. Stop the tick/watchdog timers and records service; wait for tick
+   inactivity and drain owned reviews.
+2. With the target overlay, run `prepare --tag crq-runner/YYYYMMDD-N
+   --units-output "$HOME/.config/systemd/user"`. It refuses active units,
+   renders the target's units, verifies them with the user manager, records
+   hashes and reloads the user manager. It starts and enables nothing.
+3. Review the installed unit diff against the prior definitions and keep the
+   prior definitions for rollback; the runbook cannot restore them.
+4. Re-run the deploy runbook for the same target. It now finds no template
+   delta and proceeds; the owner starts units only after approving evidence.
+
 ## Controller wrapper (Q7, #395) — proposed, offline-tested only
 
 `ops/deploy-controller.py` wraps (never replaces) the helper's `switch` with

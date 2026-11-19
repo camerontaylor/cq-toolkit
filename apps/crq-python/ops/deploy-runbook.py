@@ -905,7 +905,8 @@ class Run:
                 "tree, so a retry finds the same delta and refuses again. "
                 "Complete the template change through the separate owner "
                 "ceremony documented in apps/crq-python/ops/HOST-DEPLOY.md "
-                "(prepare --units-output into the user manager); changed "
+                "(\"Owner procedure for any template-changing target\": "
+                "prepare --units-output into the user manager); changed "
                 "templates: " + ", ".join(changed))
 
     def verify_after_switch(self):
