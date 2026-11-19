@@ -424,7 +424,13 @@ def render_service_text(template_name, template_text, runner_root, command=None)
         matches = [i for i, line in enumerate(lines) if line.startswith('ExecStart=')]
         if len(matches) != 1:
             raise ValueError('unit must have exactly one ExecStart: ' + template_name)
-        lines[matches[0]] = 'ExecStart=' + command + '\n'
+        end = matches[0] + 1
+        # systemd joins physical lines ending in a backslash into one logical
+        # directive, so replacing only the first physical line would leave a
+        # stale fragment of the old command in the rendered unit.
+        while end < len(lines) and lines[end - 1].rstrip('\r\n').endswith('\\'):
+            end += 1
+        lines[matches[0]:end] = ['ExecStart=' + command + '\n']
         text = ''.join(lines)
     return text
 
