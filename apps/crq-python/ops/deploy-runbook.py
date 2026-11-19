@@ -899,9 +899,14 @@ class Run:
                 "target " + self.target[:12] + " changes rendered unit "
                 "templates this flow cannot reconcile: it installs no unit "
                 "files, verifies none with the user manager, and rollback "
-                "cannot restore the prior definitions. The owner must "
-                "install and verify the changed unit definitions against "
-                "this target first: " + ", ".join(changed))
+                "cannot restore the prior definitions. This runbook cannot "
+                "deploy a template-changing target from the current "
+                "checkout: installing the unit files changes neither Git "
+                "tree, so a retry finds the same delta and refuses again. "
+                "Complete the template change through the separate owner "
+                "ceremony documented in apps/crq-python/ops/HOST-DEPLOY.md "
+                "(prepare --units-output into the user manager); changed "
+                "templates: " + ", ".join(changed))
 
     def verify_after_switch(self):
         """The three facts a switch must not change: queue bytes, runtime
