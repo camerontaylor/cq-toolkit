@@ -441,10 +441,17 @@ class Hold:
         self.acquired = True
 
     def owns(self):
+        return self.ownership() is True
+
+    def ownership(self):
+        """True when the marker holds this run's token, False when it verifiably
+        does not (absent or foreign), None when a read failure leaves it unknown."""
         try:
             return self.path.read_bytes() == self.token
-        except OSError:
+        except FileNotFoundError:
             return False
+        except OSError:
+            return None
 
     def release(self):
         require(self.owns(),
@@ -1097,14 +1104,17 @@ class Run:
                      + "; triggers restored")
 
     def admission_held(self):
-        """Whether admission is held by this run right now.
+        """Whether admission is held by this run right now (None: marker
+        unreadable, so ownership is unknown).
 
         A failed rollback reacquires admission and can fail again before
         releasing it, leaving the hold retained while ``released`` is still
         True: ``released`` records the earlier health-window release (and
         selects the rollback digest baseline), so the recovery record must
         report the current admission state separately."""
-        return self.hold is not None and self.hold.owns()
+        if self.hold is None:
+            return False
+        return self.hold.ownership()
 
     def document(self, outcome, **extra):
         return {
