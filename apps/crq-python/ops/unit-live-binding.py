@@ -692,7 +692,15 @@ class SubprocessSystemd:
                                 continue
                             value = _expand_instance(path,
                                                      match.group("value"))
-                            for name in CRQ_NAME_RE.findall(value):
+                            for name in value.split():
+                                # Each whitespace-separated argument is one
+                                # complete unit name. A CRQ name embedded in
+                                # a longer argument such as
+                                # ``backup-crq-tick.service`` names a
+                                # different unit, so only an argument that is
+                                # wholly a CRQ name is a CRQ reference.
+                                if CRQ_NAME_RE.fullmatch(name) is None:
+                                    continue
                                 # An undeclared source is foreign only when it
                                 # names an expected unit; a declared source is
                                 # foreign when it names a unit outside the set.

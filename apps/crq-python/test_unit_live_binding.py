@@ -681,6 +681,21 @@ class DiscoveryTests(PortFixture):
         self.assertIn("Wants names crq-tick.service",
                       " ".join(evidence["foreign"]))
 
+    def test_cotenant_dependency_prefixing_the_selected_unit_is_supported(
+            self):
+        declared = self.declare()
+        # ``backup-crq-tick.service`` is one complete unit name that is not
+        # the selected unit; extracting ``crq-tick.service`` from the middle
+        # of the argument would reject a topology whose dependency names a
+        # different service. The direct name must still be refused above.
+        self.write("ingress.service",
+                   "[Unit]\nWants=backup-crq-tick.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+        self.assertIsNone(evidence["error"])
+
     def test_declared_source_may_name_expected_units(self):
         declared = self.declare()
         self.write("crq-tick.timer",
