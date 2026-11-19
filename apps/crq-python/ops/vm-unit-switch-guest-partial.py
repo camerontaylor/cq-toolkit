@@ -881,9 +881,14 @@ def main(argv=None):
             else:
                 payload = partial_restore_boundary(args)
         PHASE_DIR.mkdir(parents=True, exist_ok=True)
+        report = json.dumps(payload, indent=2, sort_keys=True) + "\n"
         name = args.label or args.phase
-        (PHASE_DIR / (name + ".json")).write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        (PHASE_DIR / (name + ".json")).write_text(report)
+        if args.label and args.phase in (
+                "partial-" + case for case in PARTIAL_ORDER):
+            # A labeled boundary run still keeps the canonical boundary
+            # artifact that the observe phase reads before recovery.
+            _boundary_phase(args.case).write_text(report)
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     except Exception as exc:  # noqa: BLE001 - the harness must see the failure
