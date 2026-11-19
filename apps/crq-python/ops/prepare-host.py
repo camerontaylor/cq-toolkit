@@ -350,6 +350,29 @@ def inactive(root):
             if not name.startswith('crq-') or not re.fullmatch(r'[A-Za-z0-9_.@:-]+', name):
                 raise ValueError('unrecognized CRQ unit listing')
             names.add(name)
+    # A queued or running crq-* job (e.g. a manual `systemctl --user start
+    # crq-repair.service` waiting behind another job) keeps the unit's
+    # ActiveState `inactive`, so the state check below would pass while that
+    # job still starts during the checkout. The queue query covers the manual
+    # helper path and the approved driver alike: both must observe the same
+    # empty queue before units are stopped or HEAD moves.
+    try:
+        jobs = run(['systemctl', '--user', 'list-jobs', '--no-legend',
+                    '--no-pager', 'crq-*'])
+    except subprocess.CalledProcessError as exc:
+        # The same pattern-matches-nothing exit-1 quirk as list-unit-files;
+        # an unavailable user bus or any other failure still raises.
+        if exc.returncode != 1 or (exc.stderr or '').strip():
+            raise
+        jobs = ''
+    for line in jobs.splitlines():
+        fields = line.split()
+        if (len(fields) != 4 or not re.fullmatch(r'[0-9]+', fields[0])
+                or not fields[1].startswith('crq-')
+                or not re.fullmatch(r'[A-Za-z0-9_.@:-]+', fields[1])
+                or fields[3] not in {'waiting', 'running'}):
+            raise ValueError('unrecognized CRQ job listing')
+        raise ValueError('refusing queued or running crq job: ' + ' '.join(fields))
     for name in sorted(names):
         state = run(['systemctl', '--user', 'show', '--property=ActiveState', '--value', name]).strip()
         if state not in {'inactive', 'failed'}:
@@ -779,7 +802,9 @@ def switch(root, overlay, raw, target, tag=None):
         try:
             if git(root, 'status', '--porcelain', '--untracked-files=all'):
                 raise ValueError('checkout not clean after config restore')
-            git(root, 'checkout', '--detach', target)
+            # --no-overwrite-ignore aborts the checkout instead of silently
+            # replacing an ignored host-local file at a tracked path.
+            git(root, 'checkout', '--no-overwrite-ignore', '--detach', target)
             # Same tick lock spans drift check, checkout, render and audit.
             record(root, overlay, raw, destination, 'switch-render', previous_sha=previous, tag=tag)
             atomic_bytes(root / CONFIG, destination)
@@ -799,7 +824,7 @@ def switch(root, overlay, raw, target, tag=None):
                 # that local modification, so restore the committed bytes
                 # first; the previous rendering is reinstalled below.
                 git(root, 'restore', '--', CONFIG)
-                git(root, 'checkout', '--detach', previous)
+                git(root, 'checkout', '--no-overwrite-ignore', '--detach', previous)
             except BaseException as rollback:
                 # HEAD may still name the target commit, so reinstalling the
                 # previous rendering here would install config from a different
@@ -907,6 +932,11 @@ def main(argv=None):
             require_outside_git(args.output)
             if not outside(args.output, root):
                 raise ValueError('preview output must be outside checkout')
+            # Preview writes config.json, systemd/ and launchd/ under --output. An
+            # overlay inside that tree would be replaced by rendered bytes, so the
+            # next invocation would reject it for lacking the overlay schema.
+            if not outside(Path(args.overlay).resolve(), args.output):
+                raise ValueError('preview output must not hold the overlay')
             with tick_lock(root):
                 data = render(root, overlay)
                 record(root, overlay, raw, data, 'preview')

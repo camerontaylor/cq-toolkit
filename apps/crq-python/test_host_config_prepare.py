@@ -80,6 +80,17 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         self.assertFalse((self.base / 'records').exists())
         self.assertFalse((self.runner / 'state/runner-disabled').exists())
 
+    def test_preview_refuses_an_output_that_holds_the_overlay(self):
+        # preview writes config.json under --output; an overlay inside that tree
+        # would be replaced by the rendered runner config, so the next
+        # invocation would reject it for lacking the overlay schema.
+        with self.assertRaisesRegex(ValueError, 'must not hold the overlay'):
+            host.main(['--overlay', str(self.overlay_path), 'preview', '--output', str(self.base)])
+        self.assertEqual(self.overlay_path.read_bytes(), self.raw)
+        self.assertFalse((self.base / 'config.json').exists())
+        self.assertFalse((self.base / 'systemd').exists())
+        self.assertFalse((self.base / 'records').exists())
+
     def test_prepare_rejects_worktree_drift_before_installing_units(self):
         self.command('checkout', '-q', '--detach', self.target)
         directory = self.runner / 'ops/systemd'
