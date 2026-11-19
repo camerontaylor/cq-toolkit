@@ -2219,6 +2219,29 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(process_item.call_count, 1)
         self.assertEqual(process_item.call_args.args[1][0]['item'], 'pr1-merged')
 
+    def test_malformed_result_does_not_block_the_drain(self):
+        # A queued, current job whose result.json is unreadable or malformed
+        # must not raise during priority sorting or item admission. The job is
+        # terminal (never a rerun permission), the artifact stays byte-identical
+        # for the tick's harvest, and every other item still drains.
+        directory = self.root / 'state/repair/crq-run1-F1'
+        directory.mkdir(parents=True)
+        broken = directory / 'result.json'
+        broken.write_text('{broken')
+        before = broken.read_bytes()
+        self.assertFalse(service.pending('crq-run1-F1'))
+        self.queue['items'].append(self.item('pr4-merged', 'run4', ['crq-run4-F1'], open_pr=False))
+        self.job('crq-run4-F1', 'pr4-merged', 'run4', 'src/kept.ts')
+        atomic(self.root / 'state/queue.json', self.queue)
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'process_item') as process_item:
+            service.drain(self.config)
+        # pr4 promotes first; the malformed job's own item admits no work and
+        # never dispatches a rerun, but it stops nothing else in the drain.
+        self.assertEqual(process_item.call_count, 1)
+        self.assertEqual(process_item.call_args.args[1][0]['item'], 'pr4-merged')
+        self.assertEqual(broken.read_bytes(), before)
+
     def test_process_item_stops_once_the_pause_marker_is_written(self):
         (self.root / 'wt/crq-repair-pr1-merged').mkdir(parents=True)
         jobs = [bounded.drain_job(self.root, self.config, self.queue, j)[1] for j in ('crq-run1-F1', 'crq-run1-F2')]

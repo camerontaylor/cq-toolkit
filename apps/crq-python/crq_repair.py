@@ -662,12 +662,21 @@ def finding_order(job):
 
 
 def pending(job_id):
-    """True unless the job already has a terminal (non-deferred) result."""
+    """True unless the job already has a terminal (non-deferred) result.
+
+    An unreadable or malformed result.json is terminal, never permission to
+    rerun the fixer: priority sorting and both admission checks run per job
+    and must not raise on one bad artifact (it must not block every item in
+    the drain). The artifact itself stays on disk for the tick's harvest.
+    """
     path = ROOT / 'state/repair' / job_id / 'result.json'
     if not path.exists():
         return True
-    prior = json.loads(path.read_text())
-    return bool(prior.get('retry_after'))
+    try:
+        prior = json.loads(path.read_text())
+        return bool(prior.get('retry_after'))
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def mark_stale(job, reason):
