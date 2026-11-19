@@ -1258,33 +1258,36 @@ def cmd_run(args) -> int:
     image = fetch_image(state, recorder)
     run = prepare_run(state, image, recorder, args.tools)
     save_json(pathlib.Path(run["path"]) / "run.json", run)
+    run_dir = pathlib.Path(run["path"])
+    host_source = pathlib.Path(__file__).resolve()
+    guest_source = host_source.with_name("vm-guest-probe.py")
+    guest_bytes = guest_source.read_bytes()
+    host_artifact = run_dir / "executed-host-script.py"
+    guest_artifact = run_dir / "executed-guest-probe.py"
+    shutil.copy2(host_source, host_artifact)
+    guest_artifact.write_bytes(guest_bytes)
+    provenance = {
+        "source_commit": source_commit,
+        "host_script": {"artifact": host_artifact.name,
+                        "sha256": sha256_file(host_artifact)},
+        "guest_script": {"artifact": guest_artifact.name,
+                         "sha256": sha256_file(guest_artifact)},
+    }
+    recorder = Recorder(pathlib.Path(run["path"]))
+    stamp = host_stamp()
+    with run_lock(run):
+        # Same guard as cmd_boot, placed before the cleanup try below with the
+        # lock held through launch: a refusal must exit before any cleanup
+        # path, so it can never reach stop_owned_process and stop a VM this
+        # invocation does not own, while failures after this launch still
+        # clean up the VM this invocation started.
+        live = live_identity(run)
+        if live is not None:
+            raise ValueError(
+                "run %s already owns a live VM (pid %s); destroy it before "
+                "booting again" % (run["run_id"], live["pid"]))
+        boot_info = boot(run, recorder, args.tools, stamp)
     try:
-        run_dir = pathlib.Path(run["path"])
-        host_source = pathlib.Path(__file__).resolve()
-        guest_source = host_source.with_name("vm-guest-probe.py")
-        guest_bytes = guest_source.read_bytes()
-        host_artifact = run_dir / "executed-host-script.py"
-        guest_artifact = run_dir / "executed-guest-probe.py"
-        shutil.copy2(host_source, host_artifact)
-        guest_artifact.write_bytes(guest_bytes)
-        provenance = {
-            "source_commit": source_commit,
-            "host_script": {"artifact": host_artifact.name,
-                            "sha256": sha256_file(host_artifact)},
-            "guest_script": {"artifact": guest_artifact.name,
-                             "sha256": sha256_file(guest_artifact)},
-        }
-        recorder = Recorder(pathlib.Path(run["path"]))
-        stamp = host_stamp()
-        with run_lock(run):
-            # Same guard as cmd_boot: boot() drops process.json before it
-            # launches, so a concurrent lifecycle command must not be racing it.
-            live = live_identity(run)
-            if live is not None:
-                raise ValueError(
-                    "run %s already owns a live VM (pid %s); destroy it before "
-                    "booting again" % (run["run_id"], live["pid"]))
-            boot_info = boot(run, recorder, args.tools, stamp)
         boot_info["ssh"] = wait_ssh(run, recorder)
         upload = upload_guest_probe(run, recorder, source=guest_bytes)
         provenance["guest_script"].update(upload)
