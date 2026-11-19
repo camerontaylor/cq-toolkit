@@ -1238,9 +1238,12 @@ def run(argv=None):
     # an empty selector must be refused, not silently drained as no selector.
     selectors = (args.job, args.source_sha, args.finding_sha256)
     supplied = tuple(selector is not None for selector in selectors)
-    if args.recover_job and (any(supplied) or args.triage_dry_run):
+    if args.recover_job is not None and (any(supplied) or args.triage_dry_run):
         narrate('repair dispatch refused: recovery selects exactly one job')
         return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
+    if args.recover_job is not None and not args.recover_job:
+        narrate('repair dispatch refused: --recover-job must be nonempty')
+        return 2, {'status': 'refused', 'reason': '--recover-job must be nonempty'}
     if any(supplied) and not all(supplied):
         narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
         return 2, {'status': 'refused', 'reason': '--job, --source-sha and --finding-sha256 go together'}
