@@ -1394,17 +1394,26 @@ def reconcile_fix_prs(c, q):
                 if proof is not None:
                     record['validated_merge_head'] = {**proof, 'merge_commit': merge}
                 fixed = {v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED'}
-                for index, job in enumerate(record['jobs'], 1):
-                    if job in fixed:
-                        expected = json.loads((c.STATE / 'repair/inbox' / (job + '.json')).read_text())
-                        result = next(v for v in record['verdicts'] if v['job'] == job)
-                        if not projected:
-                            if expected.get('canonical_finding_id') and proof and 'fixed_revalidation' in proof:
-                                result = {**result, 'reason': proof['fixed_revalidation']['reason']}
-                            mark_finding_outcome(c, expected, result, merge, pr.get('url'))
-                        for blocker in item.get('blocking', []):
-                            if blocker.get('repair_job') == job:
-                                blocker['resolution'] = {'fix_pr': pr['number'], 'merge': merge, 'at': c.iso()}
+                try:
+                    for index, job in enumerate(record['jobs'], 1):
+                        if job in fixed:
+                            expected = json.loads((c.STATE / 'repair/inbox' / (job + '.json')).read_text())
+                            result = next(v for v in record['verdicts'] if v['job'] == job)
+                            if not projected:
+                                if expected.get('canonical_finding_id') and proof and 'fixed_revalidation' in proof:
+                                    result = {**result, 'reason': proof['fixed_revalidation']['reason']}
+                                mark_finding_outcome(c, expected, result, merge, pr.get('url'))
+                            for blocker in item.get('blocking', []):
+                                if blocker.get('repair_job') == job:
+                                    blocker['resolution'] = {'fix_pr': pr['number'], 'merge': merge, 'at': c.iso()}
+                except Exception as exc:
+                    # A failed ledger write stays with this record: outcomes already
+                    # written earlier in the record remain in place and the retry
+                    # replays them idempotently (`repair_outcome` dedupes), later
+                    # repairs still get examined, and the counters still return.
+                    record['source_publication_error'] = str(exc)[:300]
+                    swallowed(exc, item, run)
+                    continue  # The repair is left retryable (no fix_merged stamp).
                 try:
                     if projected and canonical_fixed_events(c, record, info) != proof:
                         raise ValueError('canonical fixed finding changed before source feedback')
