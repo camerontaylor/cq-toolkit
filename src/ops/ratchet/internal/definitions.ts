@@ -162,7 +162,7 @@ const MAX_TSCONFIG_FILES = 64;
  * honoured, so `"a//b"` and `"\"/*"` survive). Throws on an unterminated
  * block comment or string.
  */
-function stripJsonc(text: string): string {
+export function stripJsonc(text: string): string {
   let out = '';
   let i = 0;
   while (i < text.length) {

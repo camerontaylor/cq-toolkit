@@ -33,6 +33,7 @@ import type { Op } from '../../kernel/types.js';
 import { messageOf } from '../../shared/messageOf.js';
 import type { CheckRunnerInput } from '../gates/checkRunner.js';
 import type { CqConfig } from './cqConfig.js';
+import { stripJsonc } from '../ratchet/internal/definitions.js';
 import {
   CqConfigSchema,
   CQ_CONFIG_FILE,
@@ -102,73 +103,65 @@ function eslintTrigger(dir: string): string | undefined {
 }
 
 /**
- * The referenced project configs of a solution-style root tsconfig (empty
- * `files`, no `include`, non-empty `references`), or undefined for an
- * ordinary config. Comments are stripped before parsing; anything unreadable
- * counts as an ordinary config.
+ * Whether the root tsconfig is solution-style: an empty literal `files` and a
+ * non-empty `references`. The text is parsed as JSONC (comments, trailing
+ * commas), as TypeScript does. Anything unreadable counts as an ordinary
+ * config. `include` and `extends` are deliberately not inspected: the root is
+ * checked together with its references by `tsc --build`, so sources the root
+ * inherits through `extends` are still covered.
  */
-function solutionReferences(dir: string): string[] | undefined {
+function isSolutionRoot(dir: string): boolean {
   try {
-    const text = readFileSync(join(dir, 'tsconfig.json'), 'utf8')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/^\s*\/\/.*$/gm, '');
-    const config = JSON.parse(text) as {
+    const config = JSON.parse(stripJsonc(readFileSync(join(dir, 'tsconfig.json'), 'utf8'))) as {
       files?: unknown;
-      include?: unknown;
       references?: unknown;
     };
-    if (!Array.isArray(config.files) || config.files.length > 0 || config.include !== undefined) {
-      return undefined;
-    }
-    if (!Array.isArray(config.references)) return undefined;
-    const projects: string[] = [];
-    for (const ref of config.references) {
-      const path = (ref as { path?: unknown } | null)?.path;
-      if (typeof path !== 'string' || path === '') continue;
-      const clean = path.replace(/^\.\//, '').replace(/\/$/, '');
-      projects.push(clean.endsWith('.json') ? clean : `${clean}/tsconfig.json`);
-    }
-    return projects.length > 0 ? projects : undefined;
+    return (
+      Array.isArray(config.files) &&
+      config.files.length === 0 &&
+      Array.isArray(config.references) &&
+      config.references.some((ref) => typeof (ref as { path?: unknown } | null)?.path === 'string')
+    );
   } catch {
-    return undefined;
+    return false;
   }
 }
 
 /** Detect the supported checks for `dir` (pure over the file system's current state). */
-export function detectChecks(dir: string): { checks: CheckRunnerInput[]; detected: string[] } {
+export function detectChecks(dir: string): {
+  checks: CheckRunnerInput[];
+  detected: string[];
+} {
   const checks: CheckRunnerInput[] = [];
   const detected: string[] = [];
   if (existsSync(join(dir, 'tsconfig.json'))) {
     // A solution-style root ({"files": [], "references": [...]}) has no source
-    // files of its own: plain `tsc` would check nothing. Check each referenced
-    // project instead, so the starter check never leaves application source unchecked.
-    const projects = solutionReferences(dir) ?? ['tsconfig.json'];
-    for (const project of projects) {
-      checks.push({
-        adapter: 'tsc-lines',
-        command: {
-          command: toolCommand(dir, 'tsc'),
-          args: [
-            '--noEmit',
-            '--pretty',
-            'false',
-            ...(project === 'tsconfig.json' ? [] : ['-p', project]),
-          ],
-          cwd: '.',
-        },
-      });
-    }
+    // files of its own: plain `tsc` would check nothing, and `--noEmit -p` per
+    // project fails on composite references (TS6305/TS6310). `tsc --build`
+    // checks the references in dependency order plus whatever the root itself
+    // selects. It emits build outputs (and .tsbuildinfo), as `tsc -b` does.
+    const solution = isSolutionRoot(dir);
+    checks.push({
+      adapter: 'tsc-lines',
+      command: {
+        command: toolCommand(dir, 'tsc'),
+        args: solution ? ['--build', '--pretty', 'false'] : ['--noEmit', '--pretty', 'false'],
+        cwd: '.',
+      },
+    });
     detected.push(
-      projects[0] === 'tsconfig.json'
-        ? 'tsc-lines: tsconfig.json'
-        : `tsc-lines: tsconfig.json (solution; ${projects.join(', ')})`,
+      solution ? 'tsc-lines: tsconfig.json (solution; tsc --build)' : 'tsc-lines: tsconfig.json',
     );
   }
   const eslint = eslintTrigger(dir);
   if (eslint !== undefined) {
     checks.push({
       adapter: 'eslint-json',
-      command: { command: toolCommand(dir, 'eslint'), args: ['--format', 'json', '.'], cwd: '.' },
+      command: {
+        command: toolCommand(dir, 'eslint'),
+        args: ['--format', 'json', '.'],
+        cwd: '.',
+      },
     });
     detected.push(`eslint-json: ${eslint}`);
   }
