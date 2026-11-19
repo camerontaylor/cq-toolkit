@@ -51,11 +51,13 @@ class StalePinInventoryTest(RuntimeTestBase):
             self.q["items"].append(item); keep[name] = item
         current = {**self.item, "id": "keep-current", "job_id": "keep-current", "target": tip}
         self.q["items"].append(current)
-        self.inventory()
+        _, ranked, _ = self.inventory()
         for name, item in keep.items():
             self.assertEqual(item["state"], name)
         self.assertEqual(current["state"], "pending")
         self.assertEqual(self.item["state"], "skipped")
+        # The reviewing/publication-pending jobs still own path "a" lines: none are eligible in the new ranking.
+        self.assertEqual(self.eligible_lines(ranked, "a"), [])
 
     def test_expired_jobs_at_the_current_pin_are_released_and_do_not_fill_the_cap(self):
         # Quiet main: 32 pending jobs at the tip are all past 24 h; a new inventory still enqueues.
@@ -70,6 +72,16 @@ class StalePinInventoryTest(RuntimeTestBase):
             self.assertEqual(item["state"], "skipped")
             self.assertEqual(item["last_error"], "expired: pending more than 24 h")
         self.assertTrue([i for i in self.q["items"] if i["state"] == "pending" and i["target"] == tip])
+
+    def test_unreadable_created_at_is_reported_as_such_not_as_age(self):
+        tip = self.advance()
+        bad = {**self.item, "id": "bad-ts", "job_id": "bad-ts", "target": tip, "created_at": "bad"}
+        gone = {**self.item, "id": "no-ts", "job_id": "no-ts", "target": tip}
+        del gone["created_at"]
+        self.q["items"] += [bad, gone]
+        self.inventory()
+        self.assertEqual(bad["last_error"], "expired: unreadable created_at")
+        self.assertEqual(gone["last_error"], "expired: unreadable created_at")
 
     def test_report_only_retires_nothing(self):
         self.advance()
@@ -97,7 +109,11 @@ class StalePinInventoryTest(RuntimeTestBase):
         pending = [i for i in self.q["items"] if i["state"] == "pending"]
         self.assertEqual(len(pending), 1)
         self.assertEqual(len(ranked["candidates"]), candidates)  # the rest stay ranked and eligible
-        self.assertTrue(any(r["eligible"] for r in ranked["paths"]))
+        enqueued = {x["path"] for i in pending for x in i["scope"]}
+        beyond = [path for c in ranked["candidates"] for path in c["paths"] if path not in enqueued]
+        self.assertEqual(len(beyond), candidates - 1)
+        for path in beyond:  # candidates past the cap stay eligible for the next inventory
+            self.assertTrue(self.eligible_lines(ranked, path), path)
 
 
 if __name__ == "__main__":

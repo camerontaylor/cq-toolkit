@@ -548,8 +548,14 @@ def collect_required(repo, target, required, store, *, cache_dir=None):
 
 def retire_superseded(item, target):
     item["state"] = "skipped"
-    item["last_error"] = ("superseded by inventory " + target if item.get("target") != target
-                          else "expired: pending more than 24 h")
+    if item.get("target") != target:
+        item["last_error"] = "superseded by inventory " + target
+    else:
+        try:
+            ledger.timestamp(item.get("created_at"))
+            item["last_error"] = "expired: pending more than 24 h"
+        except ValueError:
+            item["last_error"] = "expired: unreadable created_at"
 
 
 def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, enqueue=True, prepare_only=False):
