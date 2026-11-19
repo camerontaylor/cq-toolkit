@@ -53,6 +53,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
+import { currentEntryEnv, type EntryEnv } from '../../config/run-env.js';
 import type { DriverFactory } from '../../driver/factory.js';
 import type { Budget, ModelSpec } from '../../driver/types.js';
 import type { Op, OpResult } from '../../kernel/types.js';
@@ -202,6 +203,12 @@ export interface AnalyzeFixDeps {
    * returns still has to admit, exercise and lock like any ADR-0003 authority.
    */
   attended?: typeof makeAttendedApprovalAuthority;
+  /**
+   * The run's entry-time environment record (the dispatch wiring's `env`);
+   * the git invocations read it, never a call-time ambient `process.env`.
+   * Absent, the enclosing run's snapshot (or a fresh read outside a run).
+   */
+  env?: EntryEnv;
 }
 
 /** One selected cluster from a sidecar. */
@@ -367,8 +374,9 @@ function runGit(
   cwd: string,
   args: readonly string[],
   stdin?: string,
+  baseEnv: EntryEnv = currentEntryEnv(),
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const env: NodeJS.ProcessEnv = { ...baseEnv };
   for (const key of [
     'GIT_DIR',
     'GIT_WORK_TREE',
@@ -496,8 +504,9 @@ async function checkPatch(
   dir: string,
   patch: string,
   targets: readonly string[],
+  baseEnv?: EntryEnv,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
-  const prefixed = await runGit(dir, ['rev-parse', '--show-prefix']);
+  const prefixed = await runGit(dir, ['rev-parse', '--show-prefix'], undefined, baseEnv);
   if (prefixed.code !== 0) {
     return { ok: false, reason: `'${dir}' is not a git work tree (${prefixed.stderr.trim()})` };
   }
@@ -509,7 +518,7 @@ async function checkPatch(
     ...(prefix === '' ? [] : [`--directory=${prefix}`]),
     '-',
   ];
-  const checked = await runGit(dir, args, patch);
+  const checked = await runGit(dir, args, patch, baseEnv);
   const output = `${checked.stdout}\n${checked.stderr}`;
   if (checked.code !== 0) {
     return { ok: false, reason: `git apply --check refused the patch: ${output.trim()}` };
@@ -545,13 +554,14 @@ async function checkPatch(
 }
 
 /** Apply the (already checked) patch. Throws on failure (inside the approved write). */
-async function applyPatch(dir: string, patch: string): Promise<void> {
-  const prefixed = await runGit(dir, ['rev-parse', '--show-prefix']);
+async function applyPatch(dir: string, patch: string, baseEnv?: EntryEnv): Promise<void> {
+  const prefixed = await runGit(dir, ['rev-parse', '--show-prefix'], undefined, baseEnv);
   const prefix = prefixed.stdout.trim();
   const applied = await runGit(
     dir,
     ['apply', ...(prefix === '' ? [] : [`--directory=${prefix}`]), '-'],
     patch,
+    baseEnv,
   );
   if (applied.code !== 0) {
     throw new Error(`git apply failed after the check passed: ${applied.stderr.trim()}`);
@@ -750,7 +760,12 @@ export function makeAnalyzeFix(deps: AnalyzeFixDeps): Op<AnalyzeFixInput, Analyz
     // The approval binds to HEAD: a repository without a commit (or no
     // repository at all) cannot be approved against — say so plainly
     // instead of surfacing git's rev-parse error.
-    const head = await runGit(dir, ['rev-parse', '--verify', '--quiet', 'HEAD']);
+    const head = await runGit(
+      dir,
+      ['rev-parse', '--verify', '--quiet', 'HEAD'],
+      undefined,
+      deps.env,
+    );
     if (head.code !== 0) {
       return {
         status: 'needs-human',
@@ -897,9 +912,9 @@ export function makeAnalyzeFix(deps: AnalyzeFixDeps): Op<AnalyzeFixInput, Analyz
         mutation = await withApprovedMutation(
           authority,
           subject,
-          () => applyPatch(dir, patch),
+          () => applyPatch(dir, patch, deps.env),
           async () => {
-            const verdict = await checkPatch(dir, patch, preview.targets);
+            const verdict = await checkPatch(dir, patch, preview.targets, deps.env);
             return verdict.ok ? { ok: true } : { ok: false, reason: verdict.reason };
           },
         );
@@ -1108,7 +1123,7 @@ async function agentPreview(
       error: `analyze.fix: could not store the proposal — ${messageOf(err)}`,
     };
   }
-  const checked = await checkPatch(dir, patch, parsed.targets);
+  const checked = await checkPatch(dir, patch, parsed.targets, deps.env);
   if (!checked.ok) {
     return {
       status: 'failed',

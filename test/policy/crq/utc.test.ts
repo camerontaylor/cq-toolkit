@@ -187,4 +187,14 @@ describe('parseUtcDetailed — component-validation messages', () => {
     expect(parseUtcDetailed('')).toBeNull();
     expect(parseUtcDetailed(123)).toBeNull();
   });
+
+  test.each([
+    ['2025-W01-12:00', '2024-12-30T12:00:00.000000Z'],
+    ['2020-W01-123000', '2019-12-30T12:30:00.000000Z'],
+    ['2020W01123', '2019-12-30T23:00:00.000000Z'],
+    ['2020-W01-1T12', '2019-12-30T12:00:00.000000Z'],
+    ['2020W01T12', '2019-12-30T12:00:00.000000Z'],
+  ])("week-date separator follows CPython's fixed-position rule: %s", (value, expected) => {
+    expect(parseUtc(value)?.iso).toBe(expected);
+  });
 });

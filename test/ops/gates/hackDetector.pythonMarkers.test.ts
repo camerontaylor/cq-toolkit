@@ -112,6 +112,18 @@ describe('hackDetector: Python skip/xfail markers (#774)', () => {
     expect(await markersOf(reversed)).toEqual(['pytest.mark.xfail']);
   });
 
+  test('importorskip in a test signature or its continuation is not a test body', async () => {
+    expect(await markersOf(pyDiff(['def test_np(np=pytest.importorskip("numpy")):']))).toEqual([]);
+    expect(
+      await markersOf(
+        pyDiff(['def test_np(', '    np=pytest.importorskip("numpy"),', '):', '    pass']),
+      ),
+    ).toEqual([]);
+    expect(
+      await markersOf(pyDiff(['    np = pytest.importorskip("numpy")'], ['def test_np():'])),
+    ).toEqual(['pytest.importorskip']);
+  });
+
   test('pytest.importorskip flags only inside a visible test body (documented policy)', async () => {
     expect(await markersOf(pyDiff(['np = pytest.importorskip("numpy")']))).toEqual([]);
     expect(

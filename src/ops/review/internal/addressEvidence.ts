@@ -238,7 +238,9 @@ async function terminalSession(
           // Only a real parent traversal leaves the checkout; a descendant such
           // as `<root>/..tools/git` also begins with two dots.
           const relation = relative(canonical, candidate);
-          if (relation !== '..' && !relation.startsWith(`..${sep}`)) continue;
+          // `relative` returns an absolute path across Windows drives: that is outside too.
+          if (relation !== '..' && !relation.startsWith(`..${sep}`) && !isAbsolute(relation))
+            continue;
           await access(candidate, constants.X_OK);
           const stat = await lstat(candidate);
           if (stat.isFile()) {

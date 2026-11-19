@@ -642,12 +642,39 @@ class Run:
                     "Nothing has been switched.")
 
     # -- steps ---------------------------------------------------------
+    def require_rollback_target(self):
+        """Refuse before admission if the rollback target would not verify.
+
+        Automatic rollback switches back to the live prior SHA through the
+        helper's ``switch``, which runs ``verify_target`` on it: merged to
+        ``refs/remotes/origin/main`` and at or above the policy floor. The
+        preflight above tests only the target, so a local-only prior SHA
+        passes it and then fails inside the helper after the forward switch
+        has already installed the target, leaving admission held for the
+        owner. Apply the rollback's own rule to the prior SHA here, before
+        admission and before any switch, so preflight and rollback agree.
+        """
+        verify = getattr(self.helper, "verify_target", None)
+        if verify is None:
+            return
+        try:
+            verify(self.root, self.prior_sha, None)
+        except Exception as exc:
+            raise Refused(
+                "the live prior SHA " + self.prior_sha + " fails the helper's "
+                "rollback target check, so a health failure could not roll "
+                "back to it; nothing has been admitted or switched: "
+                + str(exc)[:200]) from exc
+
     def refuse_unfinished_controller_transactions(self):
-        """Run the controller's unfinished-transaction guard before a switch.
+        """Run the controller's unfinished-transaction guard before admission.
 
         deploy_plan runs this guard before its own switch; this runbook
         bypasses deploy_plan, so it runs the same guard itself, under the
-        controller lock this run holds. Controller journals
+        controller lock this run holds. The forward call runs before the hold
+        is claimed: an unresolved journal must refuse the deploy before this
+        run stops triggers and starts a drain it cannot finish, not after.
+        Controller journals
         (``controller-*.json``) live in ``--record-dir`` and, for unit
         transactions, in the overlay's ``record_dir``; the run's private
         directory never holds them, so both real directories are scanned.
@@ -705,13 +732,17 @@ class Run:
         require(self.git("rev-parse", "HEAD") == self.prior_sha,
                 "live HEAD changed before the controller lock was acquired; "
                 "nothing has been switched. Retry the deploy.")
+        # Preflight proves only the target. Rollback switches back to the
+        # prior SHA through the helper's own fence, so that SHA must pass the
+        # same rule now, before admission and any switch.
+        self.require_rollback_target()
         if self.units is None:
             self.units = RealUnits()
         self.original_config = read_config(self.root)
         self.cq_bin = measure_cq_bin(self.original_config)
         self.preserved = self.controller.preserved_digests(self.effects)
         compatibility = self.controller.compatibility_record(self.effects,
-                                                             self.target)
+                                                             self.prior_sha)
         require(self.controller.rollback_compatible(compatibility),
                 "the live queue disables automatic rollback, so this deploy "
                 "would have no fallback: " + compatibility_reason(compatibility)
@@ -737,6 +768,13 @@ class Run:
         # is stopped.
         self.require_unchanged_unit_templates()
 
+        # The unfinished-transaction guard runs here, under the controller lock
+        # and before the hold is claimed: an unresolved journal would otherwise
+        # be detected only after the hold and trigger stop, so a drain that
+        # never settles would keep this run's own hold and never reach the
+        # check. A clear journal still permits the normal drain and switch.
+        self.refuse_unfinished_controller_transactions()
+
         # The held phase rewrites phase.json, so the pre-admission evidence
         # must be copied to its own immutable receipt first: if this process
         # dies in the drain or the switch, the receipt is what recovery reads.
@@ -751,8 +789,6 @@ class Run:
         self.drain_queue()
         self.recheck_baseline()
         self.phase("drained")
-
-        self.refuse_unfinished_controller_transactions()
 
         self.narrate("switching to " + self.target)
         self.switch_attempted = True
@@ -852,6 +888,14 @@ class Run:
         in between. After the drain nothing should be moving: this is the
         baseline the switch must preserve, and rollback permission is proven
         again here, immediately before the checkout moves.
+
+        The immutable recovery receipt keeps the pre-admission measurements,
+        so this re-measurement is persisted as its own durable checkpoint
+        before the switch: a tick that finished during the drain may have
+        moved the queue and heartbeat away from the receipt's digests, and a
+        process that dies in the switch must still leave the operator the
+        digests the switch was actually required to preserve. ``phase.json``
+        is not that evidence: every later phase rewrites it.
         """
         live_config = read_config(self.root)
         require(live_config == self.original_config,
@@ -862,11 +906,15 @@ class Run:
                 "nothing was switched")
         self.preserved = self.controller.preserved_digests(self.effects)
         compatibility = self.controller.compatibility_record(self.effects,
-                                                             self.target)
+                                                             self.prior_sha)
         require(self.controller.rollback_compatible(compatibility),
                 "the queue no longer grants automatic rollback after the "
                 "drain: " + compatibility_reason(compatibility)
                 + "; nothing was switched")
+        durable_write(Path(self.run_dir) / "post-drain-baseline.json",
+                      {"operation": "deploy", "written_at": now_iso(),
+                       "target": self.target, "prior_sha": self.prior_sha,
+                       "preserved": self.preserved})
         self.phase("remeasured", preserved=sorted(self.preserved))
 
     def require_unchanged_unit_templates(self):
@@ -916,8 +964,16 @@ class Run:
         compatibility = self.controller.compatibility_record(
             self.effects, self.prior_sha)
         self.post_compatibility = compatibility
-        if not self.controller.rollback_compatible(compatibility):
-            self.rollback_disabled = compatibility_reason(compatibility)
+        # Refuse while the hold is still owned: releasing admission and
+        # starting the target's triggers without rollback permission would
+        # admit work on the target this run cannot undo. The refusal routes
+        # to rollback_to_prior, whose compatibility checks then retain the
+        # hold for the owner instead.
+        require(self.controller.rollback_compatible(compatibility),
+                "the switch left the queue without automatic rollback "
+                "permission: " + compatibility_reason(compatibility)
+                + "; refusing before admission is released and the target's "
+                "triggers are started")
 
     def runtime_pointer_check(self):
         live = measure_cq_bin(read_config(self.root))
@@ -983,8 +1039,10 @@ class Run:
         self.phase("admission_released")
 
     def complete(self):
+        compatibility = self.controller.compatibility_record(
+            self.effects, self.prior_sha)
         self.rollback = {
-            "permitted": True,
+            "permitted": self.controller.rollback_compatible(compatibility),
             "to": self.prior_sha,
             "cq_bin": self.cq_bin,
             "statement": "rollback is available while the queue carries no "
@@ -1185,6 +1243,17 @@ class Run:
             # rollback_to_prior revalidates before its restart: this path
             # must match or a restore resumes admission on unverified bytes.
             self.runtime_pointer_check()
+            # ``acquired`` only records that this run once persisted its
+            # token; the operator may have replaced the marker with a manual
+            # hold since the triggers stopped. Restarting triggers under a
+            # foreign marker would resume admission the operator blocked and
+            # would exit as if the hold were restored, so ownership is
+            # re-proven here and again by ``release`` below; a lost hold
+            # falls through to the fail-stop, which leaves the operator's
+            # marker in place and reports recovery required.
+            require(self.hold.owns(),
+                    "the admission marker is no longer this run's; refusing "
+                    "to restart triggers under a foreign hold")
             active = sorted(unit for unit, state in (self.original or {}).items()
                             if state == "active")
             if self.original:
@@ -1194,8 +1263,7 @@ class Run:
                 require(observed == self.original,
                         "pre-switch restore mismatch: observed "
                         + json.dumps(observed, sort_keys=True))
-            if self.hold.owns():
-                self.hold.release()
+            self.hold.release()
         except Exception as exc:
             self.fail_stop("pre-switch restore failed after refusal ("
                            + str(reason)[:200] + "): " + repr(exc))

@@ -248,7 +248,11 @@ export function neverStartedRow(
 export function fixRunCounters(rows: readonly PlannedTaskRow[]): FixRunCounters {
   const attempted = rows.filter((row) => row.attempts.length > 0).length;
   const fixed = rows.filter((row) => row.outcome === 'fixed' && row.commits.length > 0).length;
-  const skipped = rows.filter((row) => row.outcome === 'fixed' && row.commits.length === 0).length;
+  // `skipped` is resolution without an attempt: a `fixed` outcome with no
+  // commit AND no attempt. A commitless row that WAS attempted stays unresolved.
+  const skipped = rows.filter(
+    (row) => row.outcome === 'fixed' && row.commits.length === 0 && row.attempts.length === 0,
+  ).length;
   return {
     planned: rows.length,
     attempted,

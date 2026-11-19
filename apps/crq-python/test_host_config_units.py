@@ -94,6 +94,49 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         with mock.patch.object(host, 'run', side_effect=no_matches):
             host.inactive(self.root)  # a host with no CRQ units is not an error
 
+    def test_queued_crq_jobs_refuse_even_while_the_unit_reports_inactive(self):
+        def queued(argv):
+            if argv[:3] == ['systemctl', '--user', 'list-jobs']:
+                # A queued start job keeps ActiveState `inactive`, so only the
+                # job queue can see that crq-repair.service is about to start.
+                return ' 52 crq-repair.service start waiting\n'
+            return self.stopped(argv)
+        with mock.patch.object(host, 'run', side_effect=queued):
+            with self.assertRaisesRegex(ValueError, 'crq-repair.service'):
+                host.inactive(self.root)
+
+    def test_switch_refuses_while_a_crq_start_job_is_queued(self):
+        self.rendered()
+        def queued(argv):
+            if argv[:3] == ['systemctl', '--user', 'list-jobs']:
+                return ' 7 crq-repair.service start running\n'
+            return self.stopped(argv)
+        before = (self.root / host.CONFIG).read_bytes()
+        with mock.patch.object(host, 'run', side_effect=queued):
+            with self.assertRaisesRegex(ValueError, 'queued or running crq job'):
+                host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
+        self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.before)
+        self.assertEqual((self.root / host.CONFIG).read_bytes(), before)
+        self.assertFalse((self.base / 'records').exists())
+
+    def test_malformed_or_failed_job_listings_fail_closed(self):
+        def malformed(argv):
+            if argv[:3] == ['systemctl', '--user', 'list-jobs']:
+                return 'junk\n'
+            return self.stopped(argv)
+        with mock.patch.object(host, 'run', side_effect=malformed):
+            with self.assertRaisesRegex(ValueError, 'unrecognized CRQ job listing'):
+                host.inactive(self.root)
+
+        def unavailable(argv):
+            if argv[:3] == ['systemctl', '--user', 'list-jobs']:
+                raise subprocess.CalledProcessError(
+                    1, argv, '', 'Failed to connect to user scope bus')
+            return self.stopped(argv)
+        with mock.patch.object(host, 'run', side_effect=unavailable):
+            with self.assertRaises(subprocess.CalledProcessError):
+                host.inactive(self.root)
+
     def test_rendered_units_use_monorepo_root(self):
         paths = host.render_units(self.root, self.base / 'units')
         self.assertEqual(len(paths), len(list((ROOT / 'ops/systemd').glob('crq-*'))))
@@ -224,6 +267,22 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         manifest_path.write_text(json.dumps(manifest))
         with self.assertRaisesRegex(ValueError, 'provenance does not match'):
             host.artifact_identity(artifact, 'node:' + sha)
+
+    def test_render_service_text_follows_systemd_continuation_rules(self):
+        def render(body):
+            return host.render_service_text('u', '[Service]\n' + body, '/r', 'NEW')
+        # A comment between continued lines does not end the continuation.
+        self.assertEqual(
+            render('ExecStart=/a \\\n# note\n  --b\nEnvironment=X=1\n'),
+            '[Service]\nExecStart=NEW\nEnvironment=X=1\n')
+        # An escaped (even) trailing backslash run is not a continuation.
+        self.assertEqual(
+            render('ExecStart=/a \\\\\nRestart=always\n'),
+            '[Service]\nExecStart=NEW\nRestart=always\n')
+        # An odd run of three still continues.
+        self.assertEqual(
+            render('ExecStart=/a \\\\\\\n  --b\nRestart=always\n'),
+            '[Service]\nExecStart=NEW\nRestart=always\n')
 
     def test_single_unit_render_matches_render_units_for_all_services(self):
         sha = 'a' * 40

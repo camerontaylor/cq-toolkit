@@ -234,9 +234,11 @@ function extendsTargets(file: string, config: Record<string, unknown>): string[]
   const out: string[] = [];
   for (const ref of refs) {
     if (typeof ref !== 'string') continue;
+    // TS normalizes separators before deciding: `.\base.json` is relative too.
+    const slashRef = ref.replace(/\\/g, '/');
     // TS resolves only `./`/`../` extends relatively; anything else is a package.
-    if (!ref.startsWith('./') && !ref.startsWith('../')) continue;
-    const candidates = ref.endsWith('.json') ? [ref] : [ref, `${ref}.json`];
+    if (!slashRef.startsWith('./') && !slashRef.startsWith('../')) continue;
+    const candidates = slashRef.endsWith('.json') ? [slashRef] : [slashRef, `${slashRef}.json`];
     for (const candidate of candidates) {
       const resolved = resolveRelative(file, candidate);
       if (resolved !== null) out.push(resolved);
@@ -253,7 +255,9 @@ function referenceTargets(file: string, config: Record<string, unknown>): string
   for (const item of raw) {
     const path = (item as { path?: unknown } | null)?.path;
     if (typeof path !== 'string') continue;
-    const target = path.endsWith('.json') ? path : posix.join(path, 'tsconfig.json');
+    // Reference paths may use Windows separators; normalize before the repo check.
+    const slashPath = path.replace(/\\/g, '/');
+    const target = slashPath.endsWith('.json') ? slashPath : posix.join(slashPath, 'tsconfig.json');
     // A reference path is always relative to the referencing file's directory.
     const resolved = resolveRelative(file, target);
     if (resolved !== null) out.push(resolved);

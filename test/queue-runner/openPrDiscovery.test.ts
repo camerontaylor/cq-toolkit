@@ -343,6 +343,36 @@ describe('open PR discovery', () => {
     );
     expect(items(owned.queue)).toHaveLength(1);
   });
+  it('enrolls the full range when a retarget moved the base behind captured evidence', async () => {
+    const older = 'd'.repeat(40);
+    const cycles = [
+      {
+        base: older,
+        head: old,
+        range_policy: 'full-range-once-v1',
+        run_id: 'run',
+        completed_at: '2025',
+      },
+    ];
+    const item = { id: 'pr7', pr: 7, repo: 'o/r', kind: 'open', state: 'done', cycles };
+    let calls = 0;
+    const result = await discoverOpenPrs(
+      queue([item]),
+      [primary],
+      false,
+      'o/r',
+      effects({
+        ownRange: async () => {
+          calls++;
+          return true;
+        },
+      }),
+    );
+    expect(calls).toBe(0);
+    expect(items(result.queue)[1]?.get('id')).toBe(
+      `pr7-range-${base.slice(0, 10)}-${head.slice(0, 10)}`,
+    );
+  });
   it('skips active nonoptional work, isolates repo reads, and respects dry event semantics', async () => {
     const active = queue([{ id: 'pr7', pr: 7, kind: 'open', state: 'reviewing', cycles: [] }]);
     expect(
