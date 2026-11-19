@@ -203,7 +203,8 @@ def require_outside_git(path):
     # Fixed locale so the diagnostic below is matched untranslated, and no
     # inherited repository-discovery override that could hide a checkout.
     env = {key: value for key, value in os.environ.items()
-           if key not in ('GIT_CEILING_DIRECTORIES', 'GIT_DIR', 'GIT_WORK_TREE')}
+           if key not in ('GIT_CEILING_DIRECTORIES', 'GIT_COMMON_DIR', 'GIT_DIR',
+                          'GIT_OBJECT_DIRECTORY', 'GIT_WORK_TREE')}
     env['LC_ALL'] = 'C'
     env['GIT_DISCOVERY_ACROSS_FILESYSTEM'] = '1'
     result = subprocess.run(['git', '-C', str(parent), 'rev-parse', '--show-toplevel'],

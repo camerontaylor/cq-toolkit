@@ -22,15 +22,29 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
             seen.update(kwargs['env'])
             return mock.Mock(returncode=128, stderr='fatal: not a git repository')
 
-        overrides = {'GIT_CEILING_DIRECTORIES': '/', 'GIT_DIR': '/nonexistent',
+        routing = ('GIT_CEILING_DIRECTORIES', 'GIT_COMMON_DIR', 'GIT_DIR',
+                   'GIT_OBJECT_DIRECTORY', 'GIT_WORK_TREE')
+        overrides = {'GIT_CEILING_DIRECTORIES': '/', 'GIT_COMMON_DIR': '/nonexistent',
+                     'GIT_DIR': '/nonexistent', 'GIT_OBJECT_DIRECTORY': '/nonexistent',
                      'GIT_WORK_TREE': '/nonexistent', 'LC_ALL': 'fr_FR.UTF-8'}
         with mock.patch.dict('os.environ', overrides), \
                 mock.patch.object(host.subprocess, 'run', side_effect=fake):
             host.require_outside_git(self.root.parent)
         self.assertEqual(seen['LC_ALL'], 'C')
         self.assertEqual(seen['GIT_DISCOVERY_ACROSS_FILESYSTEM'], '1')
-        for key in ('GIT_CEILING_DIRECTORIES', 'GIT_DIR', 'GIT_WORK_TREE'):
+        for key in routing:
             self.assertNotIn(key, seen)
+        # Against real git, no routing variable aimed at a nonexistent path
+        # inside the fixture checkout may flip the probe's verdict: a path
+        # inside the checkout stays rejected and a genuinely outside one
+        # stays accepted.
+        hidden = str(self.root / 'nonexistent')
+        for key in routing:
+            with self.subTest(reject=key), mock.patch.dict('os.environ', {key: hidden}):
+                with self.assertRaisesRegex(ValueError, 'outside every Git checkout'):
+                    host.require_outside_git(self.root)
+            with self.subTest(accept=key), mock.patch.dict('os.environ', {key: hidden}):
+                host.require_outside_git(self.root.parent)
 
     def test_notification_allowlist_overlay_renders_and_validates(self):
         hosts = ['triton:6767', 'uranus:6767', 'pluto:6767']
