@@ -909,6 +909,7 @@ def drain(config):
             continue
         if isinstance(item, str):
             groups.setdefault(item, []).append(job_id)
+    groups = hold_backfill_groups(groups)
     # Classify against the queue before sorting. Skipped, stale and completed
     # jobs cannot promote a minor-only item; stable sort retains inbox order.
     queue_path = ROOT / 'state/queue.json'
@@ -932,6 +933,38 @@ def drain(config):
         return 1
     drain_items(config, groups, sorted(groups, key=priority))
     return result
+
+
+BACKLOG_MAX_AGE_SECONDS = 3600
+
+
+def hold_backfill_groups(groups):
+    """Soft budget: admit at most limit - open backfill groups this pass.
+
+    The drain never calls GitHub, so it reads the file the tick wrote. A
+    missing, unreadable or stale file holds every backfill group. Held jobs
+    stay in the inbox: nothing is failed, marked stale or counted as a retry.
+    """
+    held = [item for item in groups if item.startswith('backfill-finding-')]
+    if not held:
+        return groups
+    open_count = limit = None
+    try:
+        data = json.loads((ROOT / 'state/repair/fix-pr-backlog.json').read_text())
+        at = dt.datetime.fromisoformat(str(data['at']).replace('Z', '+00:00'))
+        age = (dt.datetime.now(dt.timezone.utc) - at).total_seconds()
+        if (age <= BACKLOG_MAX_AGE_SECONDS and not isinstance(data['open'], bool)
+                and not isinstance(data['limit'], bool)
+                and isinstance(data['open'], int) and isinstance(data['limit'], int)):
+            open_count, limit = data['open'], data['limit']
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    budget = 0 if open_count is None else max(0, limit - open_count)
+    drop = set(held[budget:])
+    if drop:
+        shown = 'unknown' if open_count is None else str(open_count)
+        narrate('backfill repair held: %s open fix PRs, limit %s' % (shown, 'unknown' if limit is None else limit))
+    return {item: ids for item, ids in groups.items() if item not in drop}
 
 
 def drain_item(config, item, job_ids):

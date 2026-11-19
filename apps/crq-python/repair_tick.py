@@ -24,6 +24,12 @@ FIXED_RUNGS = ('A0', 'A1', 'A2')
 # park the run in 'stale' for manual reconciliation instead of failing every
 # future tick.
 PR_CREATE_ATTEMPTS = 3
+BACKFILL_ITEM = 'backfill-finding-'
+BACKFILL_BRANCH = 'crq/fix-backfill-'
+BACKLOG_WINDOW_HOURS = 72
+BACKLOG_HOURS_OF_CAPACITY = 4
+# This tick's view of open backfill fix PRs; None means unread this tick.
+TICK_BACKLOG = {'open': None, 'limit': None}
 
 
 def scan_fix_instructions(c, instructions, source_sha, scan_path):
@@ -550,6 +556,60 @@ def harvest(c, q, item, dry=False):
     return messages
 
 
+def review_start_limit(c, now=None):
+    """review_started events in the trailing 72 h, times four hours of capacity."""
+    import datetime as dt
+    now = now or dt.datetime.now(dt.timezone.utc)
+    cutoff = now - dt.timedelta(hours=BACKLOG_WINDOW_HOURS)
+    started = 0
+    try:
+        lines = c.EVENTS.read_text().splitlines()
+    except OSError:
+        return 0
+    for line in lines:
+        if '"review_started"' not in line:
+            continue
+        try:
+            row = json.loads(line)
+            at = dt.datetime.fromisoformat(str(row['at']).replace('Z', '+00:00'))
+        except (ValueError, KeyError, TypeError):
+            continue
+        if row.get('event') == 'review_started' and at.tzinfo and cutoff <= at <= now:
+            started += 1
+    return started * BACKLOG_HOURS_OF_CAPACITY // BACKLOG_WINDOW_HOURS
+
+
+def refresh_fix_pr_backlog(c):
+    """Write state/repair/fix-pr-backlog.json once per tick, before any publish.
+
+    Counts open fix PRs on GitHub, never the queue: its cached state lags. A
+    failed read leaves the previous file for the drain and holds creation for
+    the rest of this tick.
+    """
+    import datetime as dt
+    TICK_BACKLOG.update(open=None, limit=None)
+    try:
+        prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--state', 'open', '--limit', '1000',
+                         '--json', 'headRefName'])
+        open_count = sum(1 for pr in prs if str(pr.get('headRefName', '')).startswith(BACKFILL_BRANCH))
+        limit = review_start_limit(c)
+        atomic(c.STATE / 'repair' / 'fix-pr-backlog.json',
+               {'at': dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'open': open_count, 'limit': limit})
+    except Exception:
+        return None
+    TICK_BACKLOG.update(open=open_count, limit=limit)
+    return TICK_BACKLOG
+
+
+def backfill_slot_free(item):
+    """Hard cap: a backfill fix PR may be created only while open < limit this tick."""
+    if not str(item.get('id', '')).startswith(BACKFILL_ITEM):
+        return True
+    open_count, limit = TICK_BACKLOG['open'], TICK_BACKLOG['limit']
+    return open_count is not None and limit is not None and open_count < limit
+
+
 def publish(c, q, item, run, record, fixed):
     journal = c.STATE / 'repair' / record['jobs'][0] / 'publication.json'
     if journal.exists():
@@ -673,6 +733,9 @@ def recover_publication(c, q, item, run, record, publication):
 
 
 def finalize_publication(c, q, item, run, record, publication):
+    missing = object()
+    before = (record.get('publication', missing), record.get('published_commits', missing),
+              list(q.get('repair_own_commits', [])), 'repair_own_commits' in q)
     record['publication'] = publication
     translated, head, branch = publication['commits'], publication['head'], publication['branch']
     owned = q.setdefault('repair_own_commits', [])
@@ -696,6 +759,20 @@ def finalize_publication(c, q, item, run, record, publication):
                               error='fix PR creation never completed after ' + str(PR_CREATE_ATTEMPTS)
                                     + ' attempts; reconcile the PR for ' + branch + ' manually')
                 return
+            if not backfill_slot_free(item):
+                # Held, not failed: nothing changes, no attempt is counted, and
+                # the publication is retried on a later tick. Undo the
+                # bookkeeping done above so the record reads as it did before.
+                for key, value in (('publication', before[0]), ('published_commits', before[1])):
+                    if value is missing:
+                        record.pop(key, None)
+                    else:
+                        record[key] = value
+                if before[3]:
+                    owned[:] = before[2]
+                else:
+                    q.pop('repair_own_commits', None)
+                return
             body = ['Verified CodeRabbit repairs from ' + run, '', '| finding | verdict | reason |', '|---|---|---|']
             for v in record['verdicts']:
                 body.append('| ' + v['job'] + ' | ' + v['verdict'] + ' | ' + v['reason'].replace('|', r'\|').replace('\n', ' ') + ' |')
@@ -708,6 +785,8 @@ def finalize_publication(c, q, item, run, record, publication):
             c.save_queue(q)
             c.run(['gh', 'pr', 'create', '--repo', c.REPO, '--base', DEFAULT_BRANCH, '--head', branch,
                    '--title', 'fix: Address CodeRabbit findings from ' + run, '--body-file', str(path)])
+            if str(item.get('id', '')).startswith(BACKFILL_ITEM) and TICK_BACKLOG['open'] is not None:
+                TICK_BACKLOG['open'] += 1
             prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
         if len(prs) != 1:
             raise ValueError('fix PR identity is ambiguous')

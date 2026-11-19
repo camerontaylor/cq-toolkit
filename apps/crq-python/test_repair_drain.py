@@ -1642,6 +1642,8 @@ class RepairDrainTest(unittest.TestCase):
                {'status': 'delivered', 'receipt': {'repair_task': job_id}})
         atomic(path, job)
         atomic(self.root / 'state/queue.json', self.queue)
+        atomic(self.root / 'state/repair/fix-pr-backlog.json',
+               {'at': service.utc(), 'open': 0, 'limit': 36})
         with mock.patch.object(service, 'drain_order', return_value=[job_id, 'crq-run1-F1']), \
              mock.patch.object(service, 'blocked', return_value=False), \
              mock.patch.object(service, 'process_item') as process_item:
