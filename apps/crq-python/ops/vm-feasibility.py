@@ -26,6 +26,8 @@ See ``VM-FEASIBILITY.md`` for the recorded evidence and its limits.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -500,19 +502,53 @@ def tool(name: str, directory: pathlib.Path | None) -> str:
 # ------------------------------------------------------------- lifecycle
 
 
+@contextlib.contextmanager
+def locked(path: pathlib.Path):
+    """Hold an advisory exclusive lock so cache population serializes."""
+    with path.open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield handle
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def download(url: str, destination: pathlib.Path, timeout: float = 120) -> str:
-    """Download to a sibling ``.part`` and fsync before replacing."""
-    part = destination.with_name(destination.name + ".part")
-    with urllib.request.urlopen(url, timeout=timeout) as response, \
-            part.open("wb") as handle:
-        while True:
-            chunk = response.read(1 << 20)
-            if not chunk:
-                break
-            handle.write(chunk)
-        handle.flush()
-        os.fsync(handle.fileno())
+    """Download to a private sibling ``.part`` and fsync before replacing.
+
+    The staging name is unique to this invocation, so two concurrent fetches
+    never write the same file and a promotion can never be mutated by another
+    writer that still holds the old shared ``.part`` open.
+    """
+    part = destination.with_name(
+        destination.name + "." + uuid.uuid4().hex + ".part")
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response, \
+                part.open("wb") as handle:
+            while True:
+                chunk = response.read(1 << 20)
+                if not chunk:
+                    break
+                handle.write(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
     return str(part)
+
+
+def install_base(staging: pathlib.Path, base: pathlib.Path) -> None:
+    """Publish verified bytes without replacing an installed base image.
+
+    The hard link refuses to install over an existing file, so a base that
+    existing overlays reference is never replaced; the staging file is
+    private to this invocation, so nothing can change the base afterwards.
+    """
+    try:
+        os.link(staging, base)
+    finally:
+        staging.unlink(missing_ok=True)
 
 
 def fetch_sums(sums_path: pathlib.Path, recorder: Recorder) -> None:
@@ -529,35 +565,41 @@ def fetch_image(state: pathlib.Path, recorder: Recorder) -> dict:
     images.mkdir(parents=True, exist_ok=True)
     sums_path = images / SUMS_NAME
     image_path = images / IMAGE_NAME
-    if image_path.exists():
-        if not sums_path.exists():
-            fetch_sums(sums_path, recorder)
+    # Cache population holds the exclusive lock and the cache is rechecked
+    # under it, so two concurrent fetches against an empty state directory
+    # serialize: the loser finds the installed base instead of staging a
+    # second copy that could race the promotion while a run opens an overlay
+    # backed by it.
+    with locked(images / ".cache.lock"):
+        if image_path.exists():
+            if not sums_path.exists():
+                fetch_sums(sums_path, recorder)
+            text = sums_path.read_text()
+            expected = sums_digest(text, IMAGE_NAME)
+            actual = verify_image(image_path, expected)
+            return {"name": IMAGE_NAME, "path": str(image_path), "sha256": actual,
+                    "sums_sha256": sha256_file(sums_path),
+                    "sums_verified": True, "signature_verified": False,
+                    "downloaded": False}
+        # There is no verified image to pair with a cached manifest. Refreshing it
+        # on every retry prevents an interrupted image download from pinning a
+        # stale checksum while ``current/`` moves on. The manifest and image are
+        # each installed atomically, and the image is still verified before it is
+        # promoted, so a failed or incoherent fetch cannot overwrite a base image
+        # that existing overlays reference.
+        fetch_sums(sums_path, recorder)
         text = sums_path.read_text()
         expected = sums_digest(text, IMAGE_NAME)
-        actual = verify_image(image_path, expected)
+        started = time.time()
+        part = download(IMAGE_URL + IMAGE_NAME, image_path, timeout=1800)
+        actual = verify_image(pathlib.Path(part), expected)
+        install_base(pathlib.Path(part), image_path)
+        recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + IMAGE_NAME],
+                         "rc": 0, "bytes": image_path.stat().st_size,
+                         "seconds": round(time.time() - started, 3)})
         return {"name": IMAGE_NAME, "path": str(image_path), "sha256": actual,
-                "sums_sha256": sha256_file(sums_path),
-                "sums_verified": True, "signature_verified": False,
-                "downloaded": False}
-    # There is no verified image to pair with a cached manifest. Refreshing it
-    # on every retry prevents an interrupted image download from pinning a
-    # stale checksum while ``current/`` moves on. The manifest and image are
-    # each installed atomically, and the image is still verified before it is
-    # promoted, so a failed or incoherent fetch cannot overwrite a base image
-    # that existing overlays reference.
-    fetch_sums(sums_path, recorder)
-    text = sums_path.read_text()
-    expected = sums_digest(text, IMAGE_NAME)
-    started = time.time()
-    part = download(IMAGE_URL + IMAGE_NAME, image_path, timeout=1800)
-    actual = verify_image(pathlib.Path(part), expected)
-    pathlib.Path(part).replace(image_path)
-    recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + IMAGE_NAME],
-                     "rc": 0, "bytes": image_path.stat().st_size,
-                     "seconds": round(time.time() - started, 3)})
-    return {"name": IMAGE_NAME, "path": str(image_path), "sha256": actual,
-            "sums_sha256": sha256_file(sums_path), "sums_verified": True,
-            "signature_verified": False, "downloaded": True}
+                "sums_sha256": sha256_file(sums_path), "sums_verified": True,
+                "signature_verified": False, "downloaded": True}
 
 
 def prepare_run(state: pathlib.Path, image: dict, recorder: Recorder,
