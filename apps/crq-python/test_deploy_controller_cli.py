@@ -136,7 +136,7 @@ class CliTests(ControllerFixture):
         shim.mkdir(exist_ok=True)
         (shim / "systemctl").write_text(
             '#!/bin/sh\n'
-            'if [ "$1" = "--user" ] && { [ "$2" = "list-unit-files" ] || [ "$2" = "list-units" ]; }; then\n'
+            'if [ "$1" = "--user" ] && { [ "$2" = "list-unit-files" ] || [ "$2" = "list-units" ] || [ "$2" = "list-jobs" ]; }; then\n'
             '  exit 0\n'
             'fi\n'
             'echo inactive\n'

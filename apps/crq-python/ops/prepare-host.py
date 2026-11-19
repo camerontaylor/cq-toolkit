@@ -350,6 +350,29 @@ def inactive(root):
             if not name.startswith('crq-') or not re.fullmatch(r'[A-Za-z0-9_.@:-]+', name):
                 raise ValueError('unrecognized CRQ unit listing')
             names.add(name)
+    # A queued or running crq-* job (e.g. a manual `systemctl --user start
+    # crq-repair.service` waiting behind another job) keeps the unit's
+    # ActiveState `inactive`, so the state check below would pass while that
+    # job still starts during the checkout. The queue query covers the manual
+    # helper path and the approved driver alike: both must observe the same
+    # empty queue before units are stopped or HEAD moves.
+    try:
+        jobs = run(['systemctl', '--user', 'list-jobs', '--no-legend',
+                    '--no-pager', 'crq-*'])
+    except subprocess.CalledProcessError as exc:
+        # The same pattern-matches-nothing exit-1 quirk as list-unit-files;
+        # an unavailable user bus or any other failure still raises.
+        if exc.returncode != 1 or (exc.stderr or '').strip():
+            raise
+        jobs = ''
+    for line in jobs.splitlines():
+        fields = line.split()
+        if (len(fields) != 4 or not re.fullmatch(r'[0-9]+', fields[0])
+                or not fields[1].startswith('crq-')
+                or not re.fullmatch(r'[A-Za-z0-9_.@:-]+', fields[1])
+                or fields[3] not in {'waiting', 'running'}):
+            raise ValueError('unrecognized CRQ job listing')
+        raise ValueError('refusing queued or running crq job: ' + ' '.join(fields))
     for name in sorted(names):
         state = run(['systemctl', '--user', 'show', '--property=ActiveState', '--value', name]).strip()
         if state not in {'inactive', 'failed'}:
