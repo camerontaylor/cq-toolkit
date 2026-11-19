@@ -347,6 +347,26 @@ def remove_drain_runs():
         shutil.rmtree(STATE / "runs" / run_id, ignore_errors=True)
 
 
+def run_cleanup_steps(actions):
+    """Run every cleanup action even when an earlier one raises.
+
+    Each action runs independently; the first error is re-raised only after
+    all actions have run, so a process cleanup failure stays visible but
+    cannot skip queue restoration or run-metadata cleanup.
+    """
+    results = []
+    first = None
+    for action in actions:
+        try:
+            results.append(action())
+        except Exception as exc:
+            if first is None:
+                first = exc
+    if first is not None:
+        raise first
+    return results
+
+
 def drain_observation():
     """The actual controller drain_check bound to the actual runner liveness."""
     dc = load_controller()
@@ -942,10 +962,14 @@ def drain_refuse_phase(args):
                                         "after": unrelated_after}},
         }
     finally:
-        cleanup.append(stop_process(seeded["process"]))
-        cleanup.append(stop_process(unrelated))
-        restore_queue(saved_queue)
-        remove_drain_runs()
+        cleanup.extend(run_cleanup_steps([
+            lambda: stop_process(seeded["process"]),
+            lambda: stop_process(unrelated),
+        ]))
+        run_cleanup_steps([
+            lambda: restore_queue(saved_queue),
+            remove_drain_runs,
+        ])
     require(state_hashes() == saved["state"],
             "drain refusal cleanup did not restore the baseline queue")
     result["cleanup"] = cleanup
@@ -1058,9 +1082,13 @@ def drain_harvest_phase(args):
             "preserved": preserved,
         }
     finally:
-        cleanup.append(stop_process(unrelated))
-        restore_queue(saved_queue)
-        remove_drain_runs()
+        cleanup.extend(run_cleanup_steps([
+            lambda: stop_process(unrelated),
+        ]))
+        run_cleanup_steps([
+            lambda: restore_queue(saved_queue),
+            remove_drain_runs,
+        ])
     require(state_hashes() == saved["state"],
             "harvest proof cleanup did not restore the baseline queue")
     result["cleanup"] = cleanup
@@ -1156,10 +1184,14 @@ def recover_drain_refuse_phase(args):
                                         "after": unrelated_after}},
         }
     finally:
-        cleanup.append(stop_process(seeded["process"]))
-        cleanup.append(stop_process(unrelated))
-        restore_queue(saved_queue)
-        remove_drain_runs()
+        cleanup.extend(run_cleanup_steps([
+            lambda: stop_process(seeded["process"]),
+            lambda: stop_process(unrelated),
+        ]))
+        run_cleanup_steps([
+            lambda: restore_queue(saved_queue),
+            remove_drain_runs,
+        ])
     require(state_hashes() == saved["state"],
             "recovery drain proof cleanup did not restore the baseline queue")
     result["cleanup"] = cleanup
