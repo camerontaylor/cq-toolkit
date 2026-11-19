@@ -206,6 +206,16 @@ class NoChangeRefused(Refused):
         self.record = record
 
 
+class HeartbeatReadRefused(Refused):
+    """The completion heartbeat exists but cannot be read.
+
+    An unreadable file, invalid JSON or a non-object root is a failed
+    observation of the runner, not an argument or environment refusal: the
+    CLI health boundary reports it with the health failure exit code (1),
+    never the refusal exit code (2).
+    """
+
+
 class RecoveryRequired(Exception):
     """The helper was entered: mutation occurred or cannot be excluded.
 
@@ -286,22 +296,23 @@ class Effects:
         checkout's queue/state saves.
 
         Returns None only when no heartbeat exists yet; one that is present
-        but unreadable or not a JSON object refuses assessment.
+        but unreadable or not a JSON object refuses assessment
+        (HeartbeatReadRefused, an observation failure at the CLI boundary).
         """
         try:
             raw = self.completion_heartbeat_path().read_text()
         except FileNotFoundError:
             return None
         except OSError as exc:
-            raise Refused("completion heartbeat unreadable: "
-                          + str(exc)[:120]) from exc
+            raise HeartbeatReadRefused("completion heartbeat unreadable: "
+                                       + str(exc)[:120]) from exc
         try:
             payload = json.loads(raw)
         except ValueError as exc:
-            raise Refused("completion heartbeat is not valid JSON: "
-                          + str(exc)[:120]) from exc
+            raise HeartbeatReadRefused("completion heartbeat is not valid JSON: "
+                                       + str(exc)[:120]) from exc
         if not isinstance(payload, dict):
-            raise Refused("completion heartbeat is not a JSON object")
+            raise HeartbeatReadRefused("completion heartbeat is not a JSON object")
         return payload
 
     def unit_digests(self) -> dict:
@@ -2339,6 +2350,16 @@ def main(argv=None) -> int:
             print("refused: " + str(exc), file=sys.stderr)
         return 2
     except Refused as exc:
+        if args.operation == "health" and isinstance(exc, HeartbeatReadRefused):
+            # A present-but-unreadable heartbeat is a failed observation, so
+            # no health result exists: emit the I1 error artifact and keep the
+            # health exit-1 contract (a failed observation is never a refusal).
+            message = str(exc)[:400]
+            print(json.dumps(_error_artifact("thrown", args.operation, message, 1),
+                             indent=2, sort_keys=True))
+            if not parser.json_mode:
+                print("health observation failed: " + message, file=sys.stderr)
+            return 1
         print(json.dumps(_error_artifact("refused", args.operation, str(exc), 2),
                          indent=2, sort_keys=True))
         if not parser.json_mode:
