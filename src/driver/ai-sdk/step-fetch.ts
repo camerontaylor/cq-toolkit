@@ -56,7 +56,7 @@ export function createStepFetch(
   marginMs: number = STEP_FETCH_MARGIN_MS,
   transport?: Dispatcher,
 ): typeof globalThis.fetch {
-  return (input, init) => {
+  return async (input, init) => {
     const dispatcher = new TimedDispatcher(
       transport ?? getGlobalDispatcher(),
       stepTimeoutMs + marginMs,
@@ -71,13 +71,20 @@ export function createStepFetch(
       // contract; a plain spread of `base` would overwrite the unpacked
       // Request's signal with undefined, so it must be handled separately.
       const { signal: initSignal, ...baseRest } = base;
+      // A native Request body is a one-shot stream, which undici cannot
+      // re-send when following a 307/308 redirect. Recover the payload as a
+      // replayable buffer before constructing the request; an explicit init
+      // body still wins below, as in the fetch contract.
+      const body =
+        baseRest.body === undefined && input.body !== null
+          ? await input.arrayBuffer()
+          : undefined;
       return undiciFetch(input.url, {
         method: input.method,
         headers: input.headers as unknown as UndiciInit['headers'],
         signal: (initSignal ?? input.signal) as UndiciInit['signal'],
-        ...(input.body !== null
-          ? { body: input.body as unknown as UndiciInit['body'], duplex: 'half' as const }
-          : {}),
+        ...(input.body !== null ? { duplex: 'half' as const } : {}),
+        ...(body !== undefined ? { body } : {}),
         ...baseRest,
       } as UndiciInit) as unknown as Promise<Response>;
     }
