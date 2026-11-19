@@ -1234,13 +1234,9 @@ def run(argv=None):
     if repair.get('enabled') is not True or not isinstance(authorization, str) or not authorization.strip():
         narrate('repair dispatch disabled: repair.enabled and a recorded spend_authorization are required')
         return 0, {'status': 'disabled', 'reason': 'repair.enabled and a recorded spend_authorization are required'}
-    if args.triage_dry_run:
-        # triage_phase writes its own JSON result only when triage is configured
-        # and has a rollout; otherwise it returns None having written nothing,
-        # so report that explicitly to keep one JSON artifact per exit.
-        if triage_phase(config, dry_run=True) is None:
-            return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
-        return 0, None
+    # Selector conflicts are validated before routing to any operation,
+    # including the dry-run branch below, so a conflicting combination is
+    # never silently ignored.
     selectors = (args.job, args.source_sha, args.finding_sha256)
     if args.recover_job and (any(selectors) or args.triage_dry_run):
         narrate('repair dispatch refused: recovery selects exactly one job')
@@ -1248,6 +1244,13 @@ def run(argv=None):
     if any(selectors) and not all(selectors):
         narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
         return 2, {'status': 'refused', 'reason': '--job, --source-sha and --finding-sha256 go together'}
+    if args.triage_dry_run:
+        # triage_phase writes its own JSON result only when triage is configured
+        # and has a rollout; otherwise it returns None having written nothing,
+        # so report that explicitly to keep one JSON artifact per exit.
+        if triage_phase(config, dry_run=True) is None:
+            return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
+        return 0, None
     # Validate all configured paid lanes before any A0 spend. Missing hard
     # budget support is an activation prerequisite, never a soft prompt promise.
     drivers = {role['driver'] for role in repair['roles'].values()}
