@@ -2276,6 +2276,24 @@ class RepairDrainTest(unittest.TestCase):
             service.rate_limit_pause({}, 'old-global-marker')
             self.assertIsNone(service.dispatch_paused(self.config))
 
+    def test_non_cq_rate_limit_records_provider_cooldown_against_the_global_pause(self):
+        codex_fixer = {'driver': 'codex', 'model': 'codex/gpt-5.1'}
+        self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
+        self.config['repair']['roles'] = {'fixer': codex_fixer, 'judge_critical': dict(codex_fixer)}
+        limited = {'stop': 'rate-limit', 'summary': 'codex dispatch failed'}
+        with mock.patch.object(service, '_dispatch', return_value=limited) as dispatch, \
+             mock.patch.object(service, 'provider_ready',
+                               side_effect=lambda role: role['model'].split('/', 1)[0] == 'codex'):
+            self.assertEqual(service.dispatch(self.config, codex_fixer, {'run': 'r', 'job': 'j'},
+                                              self.clone, self.root / 'attempt')['stop'], 'rate-limit')
+            # The stop writes the global pause; the provider must not read as
+            # available in dispatch_paused's override until that pause ends.
+            service.rate_limit_pause(limited, 'j')
+            until = json.loads((self.root / 'state/repair/rate-limited-until').read_text())['until']
+            self.assertGreater(service.provider_cooldowns()['codex'],
+                               (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=29)).strftime('%Y-%m-%dT%H:%M:%SZ'))
+            self.assertEqual(service.dispatch_paused(self.config), until)
+
     def test_reset_offset_is_stored_as_utc(self):
         now = dt.datetime.now(dt.timezone.utc)
         reset = (now + dt.timedelta(days=2)).astimezone(dt.timezone(dt.timedelta(hours=-8)))

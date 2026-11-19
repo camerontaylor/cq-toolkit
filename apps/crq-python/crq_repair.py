@@ -277,7 +277,16 @@ def dispatch_paused(config):
 def dispatch(config, role, job, wt, directory, judge=False):
     if role['driver'] != 'cq' or not config.get('repair', {}).get('fallback_models'):
         with correlation(job, judge):
-            return _dispatch(config, role, job, wt, directory, judge)
+            report = _dispatch(config, role, job, wt, directory, judge)
+            if report.get('stop') == 'rate-limit':
+                # The CQ fallback loop records each provider's own cooldown;
+                # this branch is a non-CQ provider's only chance. Without a
+                # stamp the provider reads as available (a missing entry
+                # compares expired), so dispatch_paused's override returns None
+                # and the next item relaunches it during the global pause this
+                # stop wrote.
+                remember_provider_limit(role['model'].split('/', 1)[0], report)
+            return report
     deadline = time.monotonic() + config['repair']['budget']['wall_clock_min'] * 60
     waits = []
     baseline = git(wt, 'rev-parse', 'HEAD') if not judge else None
