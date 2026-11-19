@@ -28,7 +28,8 @@ BACKFILL_ITEM = 'backfill-finding-'
 BACKFILL_BRANCH = 'crq/fix-backfill-'
 BACKLOG_WINDOW_HOURS = 72
 BACKLOG_HOURS_OF_CAPACITY = 4
-# This tick's view of open backfill fix PRs; None means unread this tick.
+# The tick's view of open backfill fix PRs, set by refresh_fix_pr_backlog and
+# cleared by crq.tick before and after its harvest pass; None means unread.
 TICK_BACKLOG = {'open': None, 'limit': None}
 
 
@@ -587,7 +588,7 @@ def refresh_fix_pr_backlog(c):
     the rest of this tick.
     """
     import datetime as dt
-    TICK_BACKLOG.update(open=None, limit=None)
+    reset_fix_pr_backlog()
     try:
         prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--state', 'open', '--limit', '1000',
                          '--json', 'headRefName'])
@@ -600,6 +601,18 @@ def refresh_fix_pr_backlog(c):
         return None
     TICK_BACKLOG.update(open=open_count, limit=limit)
     return TICK_BACKLOG
+
+
+def reset_fix_pr_backlog():
+    """Forget the count: creation holds until this tick's refresh reads it."""
+    TICK_BACKLOG.update(open=None, limit=None)
+
+
+def backfill_repair_present(q):
+    """True when a backfill item carries repair runs: only then can this tick
+    publish a backfill fix PR or the drain have a backfill group to budget."""
+    return any(str(item.get('id', '')).startswith(BACKFILL_ITEM) and item.get('repair_runs')
+               for item in q.get('items', []))
 
 
 def backfill_slot_free(item):
@@ -783,10 +796,21 @@ def finalize_publication(c, q, item, run, record, publication):
             publication['pr_create_attempts'] = attempts + 1
             atomic(c.STATE / 'repair' / record['jobs'][0] / 'publication.json', publication)
             c.save_queue(q)
-            c.run(['gh', 'pr', 'create', '--repo', c.REPO, '--base', DEFAULT_BRANCH, '--head', branch,
-                   '--title', 'fix: Address CodeRabbit findings from ' + run, '--body-file', str(path)])
-            if str(item.get('id', '')).startswith(BACKFILL_ITEM) and TICK_BACKLOG['open'] is not None:
+            # Reserve the slot before creating: a create that lands but then
+            # times out still counts for the rest of the tick, and the next
+            # tick's refresh recounts from GitHub. backfill_slot_free above
+            # guarantees the count was read. Only a create gh reports as
+            # failed (non-zero exit) releases it.
+            reserved = str(item.get('id', '')).startswith(BACKFILL_ITEM)
+            if reserved:
                 TICK_BACKLOG['open'] += 1
+            try:
+                c.run(['gh', 'pr', 'create', '--repo', c.REPO, '--base', DEFAULT_BRANCH, '--head', branch,
+                       '--title', 'fix: Address CodeRabbit findings from ' + run, '--body-file', str(path)])
+            except RuntimeError:
+                if reserved and TICK_BACKLOG['open'] is not None:
+                    TICK_BACKLOG['open'] -= 1
+                raise
             prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
         if len(prs) != 1:
             raise ValueError('fix PR identity is ambiguous')

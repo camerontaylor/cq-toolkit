@@ -3,6 +3,7 @@ import copy
 import datetime as dt
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -84,6 +85,29 @@ class PublishCapTest(unittest.TestCase):
         self.assertEqual(self.created, [])
         self.assertNotIn('pr_create_attempts', publication)
 
+    def test_slot_is_reserved_before_create_and_kept_when_create_times_out(self):
+        # The create may have landed: the slot stays taken for the rest of the
+        # tick, so the next backfill publication is held, not created.
+        repair_tick.TICK_BACKLOG.update(open=8, limit=10)
+        seen = []
+        def timeout(argv):
+            seen.append(repair_tick.TICK_BACKLOG['open'])
+            raise subprocess.TimeoutExpired(argv, 600)
+        self.c.run = timeout
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.finalize(self.publication('backfill-finding-a', 'a'))
+        self.assertEqual(seen, [9])
+        self.assertEqual(repair_tick.TICK_BACKLOG['open'], 9)
+
+    def test_slot_is_released_when_gh_reports_create_failed(self):
+        repair_tick.TICK_BACKLOG.update(open=9, limit=10)
+        def failed(argv):
+            raise RuntimeError('gh pr create exit 1')
+        self.c.run = failed
+        with self.assertRaises(RuntimeError):
+            self.finalize(self.publication('backfill-finding-a', 'a'))
+        self.assertEqual(repair_tick.TICK_BACKLOG['open'], 9)
+
     def test_pr_review_publication_is_created_regardless(self):
         repair_tick.TICK_BACKLOG.update(open=50, limit=10)
         record, publication = self.finalize(self.publication('pr77', 'p'))
@@ -132,6 +156,44 @@ class BacklogFileTest(unittest.TestCase):
         self.assertTrue(repair_tick.backfill_slot_free({'id': 'pr5'}))
 
 
+class TickScopeTest(unittest.TestCase):
+    def test_backlog_read_only_with_backfill_repair_work(self):
+        self.assertFalse(repair_tick.backfill_repair_present({'items': [
+            {'id': 'pr5', 'repair_runs': {'r': {}}}, {'id': 'backfill-finding-a'}]}))
+        self.assertTrue(repair_tick.backfill_repair_present({'items': [
+            {'id': 'backfill-finding-a', 'repair_runs': {'r': {}}}]}))
+
+    def test_tick_clears_the_count_before_and_after_its_harvest_pass(self):
+        import crq
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        repair_tick.TICK_BACKLOG.update(open=1, limit=36)
+        self.addCleanup(repair_tick.TICK_BACKLOG.update, open=None, limit=None)
+        seen = []
+        q = {'items': [{'id': 'backfill-finding-a', 'state': 'repairing', 'kind': 'merged',
+                        'repair_runs': {'r': {}}}]}
+        def refresh(c):
+            seen.append(('refresh', dict(repair_tick.TICK_BACKLOG), crq._FORGE_BUDGET.remaining))
+            repair_tick.TICK_BACKLOG.update(open=2, limit=36)
+        def harvest(c, queue, item):
+            seen.append(('harvest', dict(repair_tick.TICK_BACKLOG)))
+            raise KeyboardInterrupt  # leaves the pass early: the finally still clears
+        with mock.patch.object(crq, 'load_queue', return_value=q), \
+             mock.patch.object(crq, 'fetch'), mock.patch.object(crq, 'STATE', Path(tmp.name)), \
+             mock.patch.object(crq.backfill_runtime, 'publish'), \
+             mock.patch.object(crq.backfill_runtime, 'settings', return_value=None), \
+             mock.patch.object(crq.deferred_refresh, 'refresh_deferred', return_value=[]), \
+             mock.patch.object(crq.push_current, 'discover', return_value=[]), \
+             mock.patch.object(crq, 'CONFIG', {}), \
+             mock.patch.object(repair_tick, 'refresh_fix_pr_backlog', side_effect=refresh), \
+             mock.patch.object(repair_tick, 'harvest', side_effect=harvest):
+            with self.assertRaises(KeyboardInterrupt):
+                crq.tick(only='x')
+        self.assertEqual(seen, [('refresh', {'open': None, 'limit': None}, 1),
+                                ('harvest', {'open': 2, 'limit': 36})])
+        self.assertEqual(repair_tick.TICK_BACKLOG, {'open': None, 'limit': None})
+
+
 class DrainBudgetTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -171,6 +233,25 @@ class DrainBudgetTest(unittest.TestCase):
         self.assertEqual(self.held()[0], ['pr-review'])
         (self.root / 'state/repair/fix-pr-backlog.json').write_text('{')
         self.assertEqual(self.held()[0], ['pr-review'])
+
+    def test_future_dated_file_holds(self):
+        self.backlog(0, 36, age=-60)
+        self.assertEqual(self.held()[0], ['pr-review'])
+
+    def test_non_dispatchable_groups_take_no_slot(self):
+        # a is retained but cannot run: b gets the one free slot, c is held,
+        # and a passes through to drain_item untouched as before.
+        self.backlog(35, 36)
+        with mock.patch.object(service, 'narrate'):
+            kept = service.hold_backfill_groups(dict(self.groups),
+                                                lambda item: item != 'backfill-finding-a')
+        self.assertEqual(list(kept), ['pr-review', 'backfill-finding-a', 'backfill-finding-b'])
+
+    def test_at_limit_non_dispatchable_groups_are_held_too(self):
+        self.backlog(36, 36)
+        with mock.patch.object(service, 'narrate'):
+            kept = service.hold_backfill_groups(dict(self.groups), lambda item: False)
+        self.assertEqual(list(kept), ['pr-review'])
 
     def test_fresh_file_with_room_admits_all(self):
         self.backlog(0, 36, age=3599)
