@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import random
 import re
+import signal
 import sys
 import time
 from zoneinfo import ZoneInfo
@@ -958,10 +959,24 @@ def drain_items(config, groups, order):
                 # as the backfill triage report) are written again per child.
                 sys.stdout.flush()
                 sys.stderr.flush()
-                pid = os.fork()
+                # An interrupt after fork returns in this parent but before the
+                # registration below would strand an admitted child outside
+                # active: the cleanup would release the lock beneath a working
+                # child. Hold SIGINT across fork and registration (the child
+                # restores its own mask inside its guard); the deferred
+                # interrupt is delivered right after registration, where the
+                # finally reaps the registered child without killing it.
+                deferred = {signal.SIGINT}
+                signal.pthread_sigmask(signal.SIG_BLOCK, deferred)
+                try:
+                    pid = os.fork()
+                except BaseException:
+                    signal.pthread_sigmask(signal.SIG_UNBLOCK, deferred)
+                    raise
             if pid == 0:
                 try:
                     global _REFUSAL_CHANNEL
+                    signal.pthread_sigmask(signal.SIG_UNBLOCK, deferred)
                     os.close(refused_r)
                     for _pid, (_item, _rfd) in list(active.items()):
                         os.close(_rfd)  # never hold another child's pipe
@@ -999,6 +1014,9 @@ def drain_items(config, groups, order):
             # lands in the barrier must still find this admitted child in
             # active, or the cleanup releases service.lock beneath it.
             active[pid] = (item, refused_r)
+            # The interrupt held across fork and registration lands here, after
+            # the child is registered: the finally below reaps it (never kills).
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, deferred)
             # Barrier: the child publishes its item-gate result before any work.
             # Accepted means the child passed the gate; refused or a dead child
             # (EOF) latches the coordinator stop.
