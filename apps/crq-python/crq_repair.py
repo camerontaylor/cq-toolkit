@@ -1106,10 +1106,24 @@ def process_item(config, jobs):
             if p.returncode:
                 raise RuntimeError('repair worktree creation failed')
         try:
+            artifact = json.loads((ROOT / 'state/repair' / job['job'] / 'result.json').read_text())
+            malformed = not isinstance(artifact, dict) or 'verdict' not in artifact
+        except (OSError, ValueError):
+            malformed = False  # absent or unreadable keeps process()'s own handling below
+        if malformed:
+            # A shape-broken artifact (a JSON list, an empty object) is terminal
+            # like pending(): skip only this job without rerunning the fixer,
+            # leaving the artifact on disk for the tick's harvest.
+            narrate('repair ' + job['job'] + ': skipped: malformed result artifact')
+            continue
+        try:
             res = process(config, job, wt)
         except (OSError, ValueError) as exc:
             # a malformed result.json ends only its own job, not its siblings
             narrate('repair ' + job['job'] + ': unreadable result: ' + str(exc))
+            continue
+        if not isinstance(res, dict) or 'verdict' not in res:
+            narrate('repair ' + job['job'] + ': skipped: malformed result artifact')
             continue
         if dispatch_paused(config):
             return 'rate-limit'
