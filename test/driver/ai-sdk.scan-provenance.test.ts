@@ -2,6 +2,7 @@
 // executor-provenance normalization on the upload scan (under the
 // "ai-sdk driver specifics" describe) and the raw-scan vs persisted-display
 // stripping contract.
+import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,8 +19,15 @@ const rgUsable = rgProbe.ok === true;
 // INSTALLED, not usable: an rg older than RG_MINIMUM_VERSION still RUNS (the
 // provenance leg below injects resolveRg, so the driver offers grep, and the
 // tool spawns `rg` from PATH with no fallback) — old-rg is exactly the case
-// that leg covers. Only an ABSENT rg binary breaks it.
-const rgInstalled = rgUsable || (rgProbe.ok === false && rgProbe.reason === 'old');
+// that leg covers. Only a MISSING rg binary breaks it. probeRgVersion folds a
+// missing binary, a nonzero exit and unparseable output into 'absent', so
+// detect a missing executable directly (spawn ENOENT); an rg that is present
+// but neither usable nor 'old' is a visible failure, not a silent skip.
+const rgMissing =
+  (spawnSync('rg', ['--version'], { timeout: 5_000 }).error as NodeJS.ErrnoException | undefined)
+    ?.code === 'ENOENT';
+const rgInstalled = !rgMissing;
+const rgBroken = rgInstalled && !rgUsable && !(rgProbe.ok === false && rgProbe.reason === 'old');
 
 describe('ai-sdk driver specifics (mock model)', () => {
   test('read upload scanning uses normalized executor provenance for file_path', async () => {
@@ -66,55 +74,60 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
-  test('grep upload scanning uses normalized executor provenance for matched files', async () => {
-    // Prerequisite: an INSTALLED rg (not merely a usable one). The injected
-    // resolveRg only decides whether the driver SERVES grep; the tool then
-    // spawns `rg` from PATH with no fallback, so with an ABSENT rg the spawn
-    // fails and no secret.ts content ever reaches beforeRequest. An rg older
-    // than RG_MINIMUM_VERSION still runs — that is exactly this leg's case.
-    if (!rgInstalled) return;
-    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-grep-provenance-'));
-    const workspace = join(scratchDir, 'workspace');
-    await mkdir(workspace);
-    await writeFile(join(workspace, 'secret.ts'), 'api_key = "fixture-secret"\n', 'utf8');
-    let calls = 0;
-    const mock = new MockLanguageModelV4({
-      modelId: 'mock-1',
-      doGenerate: async (options) => {
-        calls += 1;
-        if (calls === 1 && offeredToolCount(options) > 0) {
-          return toolCallResult('grep', { pattern: 'fixture-secret' });
-        }
-        return textResult('search complete');
-      },
-    });
-    const guarded: { text: string; path?: string }[] = [];
-    try {
-      const driver = new AiSdkDriver({
-        providers: { mock: () => mock },
-        sessionsDir: join(scratchDir, 'sessions'),
-        // The provenance test needs grep SERVED: inject an ok rg (the host's
-        // rg may be older than the documented minimum).
-        resolveRg: async () => ({ ok: true, version: '15.2.0' }),
-        beforeRequest: async (_text, contents = []) => {
-          guarded.push(...contents);
+  test.skipIf(!rgInstalled)(
+    'grep upload scanning uses normalized executor provenance for matched files',
+    async () => {
+      // An installed rg that fails the probe for any reason other than being too
+      // old (nonzero exit, timeout, unrecognized version text) must fail loudly.
+      expect(rgBroken, 'rg is installed but unusable (probe failed, not merely old)').toBe(false);
+      // Prerequisite: an INSTALLED rg (not merely a usable one). The injected
+      // resolveRg only decides whether the driver SERVES grep; the tool then
+      // spawns `rg` from PATH with no fallback, so with an ABSENT rg the spawn
+      // fails and no secret.ts content ever reaches beforeRequest. An rg older
+      // than RG_MINIMUM_VERSION still runs — that is exactly this leg's case.
+      const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-grep-provenance-'));
+      const workspace = join(scratchDir, 'workspace');
+      await mkdir(workspace);
+      await writeFile(join(workspace, 'secret.ts'), 'api_key = "fixture-secret"\n', 'utf8');
+      let calls = 0;
+      const mock = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async (options) => {
+          calls += 1;
+          if (calls === 1 && offeredToolCount(options) > 0) {
+            return toolCallResult('grep', { pattern: 'fixture-secret' });
+          }
+          return textResult('search complete');
         },
       });
-      const result = await driver.run(
-        invocation({
-          workspace: { path: workspace },
-          toolPolicy: { mode: 'allowlist', allow: ['grep'] },
-          sandboxPolicy: { level: 'read-only' },
-        }),
-      );
-      expect(result.stopReason).toBe('complete');
-      const guardedSecret = guarded.find((content) => content.path === 'secret.ts');
-      expect(guardedSecret).toBeDefined();
-      expect(guardedSecret?.text).toContain('fixture-secret');
-    } finally {
-      await rm(scratchDir, { recursive: true, force: true });
-    }
-  });
+      const guarded: { text: string; path?: string }[] = [];
+      try {
+        const driver = new AiSdkDriver({
+          providers: { mock: () => mock },
+          sessionsDir: join(scratchDir, 'sessions'),
+          // The provenance test needs grep SERVED: inject an ok rg (the host's
+          // rg may be older than the documented minimum).
+          resolveRg: async () => ({ ok: true, version: '15.2.0' }),
+          beforeRequest: async (_text, contents = []) => {
+            guarded.push(...contents);
+          },
+        });
+        const result = await driver.run(
+          invocation({
+            workspace: { path: workspace },
+            toolPolicy: { mode: 'allowlist', allow: ['grep'] },
+            sandboxPolicy: { level: 'read-only' },
+          }),
+        );
+        expect(result.stopReason).toBe('complete');
+        const guardedSecret = guarded.find((content) => content.path === 'secret.ts');
+        expect(guardedSecret).toBeDefined();
+        expect(guardedSecret?.text).toContain('fixture-secret');
+      } finally {
+        await rm(scratchDir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe('read/grep raw scan provenance + persist stripping', () => {
