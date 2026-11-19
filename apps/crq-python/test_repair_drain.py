@@ -2294,6 +2294,22 @@ class RepairDrainTest(unittest.TestCase):
                                (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=29)).strftime('%Y-%m-%dT%H:%M:%SZ'))
             self.assertEqual(service.dispatch_paused(self.config), until)
 
+    def test_direct_non_cq_dispatch_honors_its_recorded_cooldown(self):
+        codex_fixer = {'driver': 'codex', 'model': 'codex/gpt-5.1'}
+        self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
+        self.config['repair']['roles'] = {'fixer': codex_fixer, 'judge_critical': dict(ROLES['judge_critical'])}
+        service.remember_provider_limit('codex', {'retry_after_ms': 600000})
+        with mock.patch.object(service, '_dispatch') as dispatch:
+            held = service.dispatch(self.config, codex_fixer, {'run': 'r', 'job': 'j'},
+                                    self.clone, self.root / 'attempt')
+            self.assertEqual(held['stop'], 'rate-limit')
+            dispatch.assert_not_called()
+            (self.root / 'state/repair/provider-cooldowns.json').write_text('{not json')
+            held = service.dispatch(self.config, codex_fixer, {'run': 'r', 'job': 'j'},
+                                    self.clone, self.root / 'attempt')
+            self.assertEqual(held['stop'], 'rate-limit')
+            dispatch.assert_not_called()
+
     def test_reset_offset_is_stored_as_utc(self):
         now = dt.datetime.now(dt.timezone.utc)
         reset = (now + dt.timedelta(days=2)).astimezone(dt.timezone(dt.timedelta(hours=-8)))

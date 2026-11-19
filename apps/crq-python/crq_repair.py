@@ -274,8 +274,30 @@ def dispatch_paused(config):
     return paused()
 
 
+def direct_provider_hold(role):
+    """A rate-limit stop while this provider's recorded cooldown is in the
+    future, else None. Corrupt cooldown state fails closed."""
+    wait_ms = DEFAULT_RATE_LIMIT_PAUSE.total_seconds() * 1000
+    try:
+        stamp = provider_cooldowns().get(role['model'].split('/', 1)[0], '')
+    except CooldownStateError:
+        return {'stop': 'rate-limit', 'retry_after_ms': wait_ms, 'summary': OPERATOR_RECOVERY_PAUSE}
+    if stamp > utc():
+        end = dt.datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+        wait_ms = max(1000, (end - dt.datetime.now(dt.timezone.utc)).total_seconds() * 1000)
+        return {'stop': 'rate-limit', 'retry_after_ms': wait_ms,
+                'summary': 'provider cooldown recorded until ' + stamp}
+    return None
+
+
 def dispatch(config, role, job, wt, directory, judge=False):
     if role['driver'] != 'cq' or not config.get('repair', {}).get('fallback_models'):
+        if config.get('repair', {}).get('fallback_models'):
+            # dispatch_paused only pauses when every ready provider is cooling,
+            # so a mixed-role config must enforce this provider's own stamp here.
+            held = direct_provider_hold(role)
+            if held:
+                return held
         with correlation(job, judge):
             report = _dispatch(config, role, job, wt, directory, judge)
             if report.get('stop') == 'rate-limit':
