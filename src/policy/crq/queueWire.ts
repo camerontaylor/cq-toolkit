@@ -22,7 +22,7 @@ import {
   recordHas,
   type JsonRecordLike,
 } from './queueDoc.js';
-import { normalizeInterval } from './reconcileCheckpoint.js';
+import { ReconcileRefused, normalizeInterval } from './reconcileCheckpoint.js';
 
 /** `queue_transport.MAX_BYTES`: one request or response frame, including the newline. */
 export const QUEUE_WIRE_BYTES = 8192;
@@ -271,7 +271,15 @@ export function decodeInventoryBinding(value: unknown): QueueInventoryBinding {
   }
   const repo = recordGet(value, 'repo') as string;
   const targetSelector = selectorOf(recordGet(value, 'targetSelector'));
-  const interval = normalizeInterval(recordGet(value, 'after'), recordGet(value, 'before'));
+  // One refusal type across the wire layer: an empty or inverted interval is a
+  // wire refusal, not a ReconcileRefused escaping to callers that catch QueueRefused.
+  let interval: ReturnType<typeof normalizeInterval>;
+  try {
+    interval = normalizeInterval(recordGet(value, 'after'), recordGet(value, 'before'));
+  } catch (error) {
+    if (error instanceof ReconcileRefused) refuseQueue(error.message);
+    throw error;
+  }
   return { repo, targetSelector, after: interval.after, before: interval.before };
 }
 
