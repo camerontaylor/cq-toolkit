@@ -447,7 +447,22 @@ def render_service_text(template_name, template_text, runner_root, command=None)
         matches = [i for i, line in enumerate(lines) if line.startswith('ExecStart=')]
         if len(matches) != 1:
             raise ValueError('unit must have exactly one ExecStart: ' + template_name)
-        lines[matches[0]] = 'ExecStart=' + command + '\n'
+        end = matches[0] + 1
+        # systemd joins physical lines ending in an odd run of backslashes
+        # (an even run is escaped) into one logical directive, and skips
+        # comment lines without ending the continuation. Replacing only the
+        # first physical line would leave a stale fragment of the old command.
+        def continues(line):
+            body = line.rstrip('\r\n')
+            return (len(body) - len(body.rstrip('\\'))) % 2 == 1
+        pending = continues(lines[matches[0]])
+        while pending and end < len(lines):
+            line = lines[end]
+            end += 1
+            if line.lstrip().startswith(('#', ';')):
+                continue
+            pending = continues(line)
+        lines[matches[0]:end] = ['ExecStart=' + command + '\n']
         text = ''.join(lines)
     return text
 
