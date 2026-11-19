@@ -667,11 +667,14 @@ class Run:
                 + str(exc)[:200]) from exc
 
     def refuse_unfinished_controller_transactions(self):
-        """Run the controller's unfinished-transaction guard before a switch.
+        """Run the controller's unfinished-transaction guard before admission.
 
         deploy_plan runs this guard before its own switch; this runbook
         bypasses deploy_plan, so it runs the same guard itself, under the
-        controller lock this run holds. Controller journals
+        controller lock this run holds. The forward call runs before the hold
+        is claimed: an unresolved journal must refuse the deploy before this
+        run stops triggers and starts a drain it cannot finish, not after.
+        Controller journals
         (``controller-*.json``) live in ``--record-dir`` and, for unit
         transactions, in the overlay's ``record_dir``; the run's private
         directory never holds them, so both real directories are scanned.
@@ -765,6 +768,13 @@ class Run:
         # is stopped.
         self.require_unchanged_unit_templates()
 
+        # The unfinished-transaction guard runs here, under the controller lock
+        # and before the hold is claimed: an unresolved journal would otherwise
+        # be detected only after the hold and trigger stop, so a drain that
+        # never settles would keep this run's own hold and never reach the
+        # check. A clear journal still permits the normal drain and switch.
+        self.refuse_unfinished_controller_transactions()
+
         # The held phase rewrites phase.json, so the pre-admission evidence
         # must be copied to its own immutable receipt first: if this process
         # dies in the drain or the switch, the receipt is what recovery reads.
@@ -779,8 +789,6 @@ class Run:
         self.drain_queue()
         self.recheck_baseline()
         self.phase("drained")
-
-        self.refuse_unfinished_controller_transactions()
 
         self.narrate("switching to " + self.target)
         self.switch_attempted = True
