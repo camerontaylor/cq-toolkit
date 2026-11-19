@@ -741,7 +741,6 @@ class EvidenceTests(unittest.TestCase):
     def test_queued_setup_requires_success_and_a_waiting_fixture(self):
         phases = self._phases()
         phases["activation"]["queue_start"] = {"rc": 1}
-        phases["activation"]["jobs_before_mask"] = self._jobs()
         manager = {"before": self._snapshot(10, "i1", "boot-1"),
                    "after": self._snapshot(11, "i2", "boot-1"),
                    "after_phase": self._refusals()}
@@ -751,6 +750,10 @@ class EvidenceTests(unittest.TestCase):
                   "boot_id_before": "boot-1", "boot_id_after": "boot-2",
                   "qemu_pid_before": 99, "qemu_pid_after": 99,
                   "qemu_identity_verified": True}
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["queued_setup_proven"])
+        phases["activation"]["queue_start"] = {"rc": 0}
+        phases["activation"]["jobs_before_mask"] = self._jobs()
         checks = vm.build_checks(phases, manager, reboot)
         self.assertFalse(checks["queued_setup_proven"])
 
