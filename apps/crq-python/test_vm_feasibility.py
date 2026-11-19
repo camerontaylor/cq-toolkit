@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -469,6 +470,7 @@ class LifecycleTests(unittest.TestCase):
                  mock.patch.object(vm, "prepare_run", return_value={
                      "run_id": "r1", "path": str(run), "port": 2222,
                      "started_at": "now"}), \
+                 mock.patch.object(vm, "verify_source_scripts"), \
                  mock.patch.object(vm, "host_stamp",
                                    return_value={"kvm_writable": True}), \
                  mock.patch.object(vm, "boot", return_value={
@@ -492,6 +494,56 @@ class LifecycleTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     vm.cmd_run(args)
             fetch.assert_not_called()
+
+    def test_cmd_run_refuses_bytes_outside_the_source_commit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            args = type("Args", (), {"state_dir": str(state), "tools": None,
+                                     "keep": False,
+                                     "source_commit": "a" * 40})()
+            with mock.patch.object(vm, "fetch_image"), \
+                 mock.patch.object(vm, "prepare_run", return_value={
+                     "run_id": "r1", "path": str(run), "port": 2222,
+                     "started_at": "now"}), \
+                 mock.patch.object(vm, "commit_blob",
+                                   return_value=b"committed bytes"), \
+                 mock.patch.object(vm, "boot") as boot, \
+                 mock.patch.object(vm, "stop_owned_process",
+                                   return_value={"stopped": True}) as stop:
+                with self.assertRaises(ValueError):
+                    vm.cmd_run(args)
+            boot.assert_not_called()
+            stop.assert_called_once()
+            self.assertFalse((run / "executed-host-script.py").exists())
+            self.assertFalse((run / "executed-guest-probe.py").exists())
+
+    def test_verify_source_scripts_against_a_real_commit(self):
+        def git(cwd, *argv):
+            subprocess.run(["git", *argv], cwd=str(cwd), check=True,
+                           capture_output=True)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            host = root / "vm-feasibility.py"
+            guest = root / "vm-guest-probe.py"
+            host.write_bytes(b"host bytes\n")
+            guest.write_bytes(b"guest bytes\n")
+            git(root, "init", "-q")
+            git(root, "-c", "user.email=probe@example.com",
+                "-c", "user.name=probe", "add", ".")
+            git(root, "-c", "user.email=probe@example.com",
+                "-c", "user.name=probe", "commit", "-q", "--no-verify",
+                "-m", "probe")
+            commit = subprocess.run(["git", "rev-parse", "HEAD"],
+                                    cwd=str(root), check=True,
+                                    capture_output=True).stdout.decode().strip()
+            vm.verify_source_scripts(commit, host, guest,
+                                     b"host bytes\n", b"guest bytes\n")
+            with self.assertRaises(ValueError):
+                vm.verify_source_scripts(commit, host, guest,
+                                         b"host bytes\n", b"modified\n")
+            with self.assertRaises(ValueError):
+                vm.commit_blob("b" * 40, "./vm-feasibility.py", root)
 
     def test_boot_failure_does_not_stop_an_unverified_scope(self):
         class ExitedProcess:

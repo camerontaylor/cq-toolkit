@@ -126,6 +126,39 @@ def verify_image(path: pathlib.Path, expected: str) -> str:
     return actual
 
 
+def commit_blob(commit: str, path: str, cwd: pathlib.Path) -> bytes:
+    """Return the exact blob bytes git records for ``path`` in ``commit``."""
+    result = subprocess.run(["git", "show", "%s:%s" % (commit, path)],
+                            cwd=str(cwd), capture_output=True)
+    if result.returncode != 0:
+        raise ValueError("git cannot read %s from %s: %s"
+                         % (path, commit,
+                            result.stderr.decode("utf-8", "replace").strip()))
+    return result.stdout
+
+
+def verify_source_scripts(source_commit: str, host_source: pathlib.Path,
+                          guest_source: pathlib.Path, host_bytes: bytes,
+                          guest_bytes: bytes) -> None:
+    """Refuse a run whose executed script bytes differ from source_commit.
+
+    The artifact digests and the guest upload digest only prove that the
+    recorded bytes are the bytes that ran; neither ties those bytes to the
+    stated commit. Comparing each script against the blob recorded in
+    ``source_commit`` turns a modified working tree into a refusal before
+    any provenance is written.
+    """
+    for script, executed in ((host_source, host_bytes),
+                             (guest_source, guest_bytes)):
+        expected = commit_blob(source_commit, "./" + script.name,
+                               script.parent)
+        if executed != expected:
+            raise ValueError(
+                "%s differs from its blob in %s; provenance is only bound "
+                "to scripts that the stated commit actually contains"
+                % (script.name, source_commit))
+
+
 def render_user_data(public_key: str, *, user: str = GUEST_USER) -> str:
     key = public_key.strip()
     if not key.startswith(("ssh-ed25519 ", "ecdsa-sha2-", "ssh-rsa ")):
@@ -1213,10 +1246,13 @@ def cmd_run(args) -> int:
         run_dir = pathlib.Path(run["path"])
         host_source = pathlib.Path(__file__).resolve()
         guest_source = host_source.with_name("vm-guest-probe.py")
+        host_bytes = host_source.read_bytes()
         guest_bytes = guest_source.read_bytes()
+        verify_source_scripts(source_commit, host_source, guest_source,
+                              host_bytes, guest_bytes)
         host_artifact = run_dir / "executed-host-script.py"
         guest_artifact = run_dir / "executed-guest-probe.py"
-        shutil.copy2(host_source, host_artifact)
+        host_artifact.write_bytes(host_bytes)
         guest_artifact.write_bytes(guest_bytes)
         provenance = {
             "source_commit": source_commit,
