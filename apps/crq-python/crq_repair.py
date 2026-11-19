@@ -922,6 +922,7 @@ def drain(config):
         result['status'] = 'error'
         result['error'] = 'queue unreadable: ' + str(exc)[:300]
         return result
+    groups = hold_backfill_groups(groups, lambda item: dispatchable(config, queue, item, groups[item]))
     def priority(item):
         for job_id in groups[item]:
             status, job, _ = drain_job(ROOT, config, queue, job_id)
@@ -932,6 +933,65 @@ def drain(config):
         return 1
     drain_items(config, groups, sorted(groups, key=priority))
     return result
+
+
+BACKLOG_MAX_AGE_SECONDS = 3600
+
+
+def dispatchable(config, queue, item, job_ids):
+    """True when drain_item would run a repair for this group: a job of the
+    item is runnable, pending and has a readable result. Only such a group can
+    spend repair and end in a fix PR. Any other group costs drain_item nothing
+    but its existing stale marking and skip narration."""
+    for job_id in job_ids:
+        status, job, _ = drain_job(ROOT, config, queue, job_id)
+        if (status == 'run' and job and job.get('item') == item
+                and not unreadable_result(job_id) and pending(job_id)):
+            return True
+    return False
+
+
+def hold_backfill_groups(groups, dispatchable=lambda item: True):
+    """Soft budget: admit at most limit - open dispatchable backfill groups.
+
+    The drain never calls GitHub, so it reads the file the tick wrote. A
+    missing, unreadable, stale or future-dated file, or open >= limit, holds
+    every backfill group. Otherwise the first limit - open dispatchable groups
+    in drain order run; a group that cannot dispatch (its jobs are published,
+    completed or not queued) takes no slot and passes to drain_item as before.
+    Held jobs stay in the inbox: nothing is failed, marked stale or counted
+    as a retry.
+    """
+    held = [item for item in groups if item.startswith('backfill-finding-')]
+    if not held:
+        return groups
+    open_count = limit = None
+    try:
+        data = json.loads((ROOT / 'state/repair/fix-pr-backlog.json').read_text())
+        at = dt.datetime.fromisoformat(str(data['at']).replace('Z', '+00:00'))
+        age = (dt.datetime.now(dt.timezone.utc) - at).total_seconds()
+        if (0 <= age <= BACKLOG_MAX_AGE_SECONDS and not isinstance(data['open'], bool)
+                and not isinstance(data['limit'], bool)
+                and isinstance(data['open'], int) and isinstance(data['limit'], int)):
+            open_count, limit = data['open'], data['limit']
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    budget = 0 if open_count is None else max(0, limit - open_count)
+    if budget == 0:
+        drop = set(held)
+    else:
+        drop = set()
+        for item in held:
+            if not dispatchable(item):
+                continue
+            if budget > 0:
+                budget -= 1
+            else:
+                drop.add(item)
+    if drop:
+        shown = 'unknown' if open_count is None else str(open_count)
+        narrate('backfill repair held: %s open fix PRs, limit %s' % (shown, 'unknown' if limit is None else limit))
+    return {item: ids for item, ids in groups.items() if item not in drop}
 
 
 def drain_item(config, item, job_ids):

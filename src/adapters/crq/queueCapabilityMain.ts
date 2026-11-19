@@ -82,9 +82,13 @@ export async function runQueueCapabilityMain(deps: QueueCapabilityMainDeps): Pro
     if (command !== undefined && command !== QUEUE_CAPABILITY) return refuse(deps);
     const policyPath = envRequired(deps, 'CRQ_QUEUE_POLICY');
     const principal = envRequired(deps, 'CRQ_QUEUE_PRINCIPAL');
-    const config = await runnerConfig(deps.root);
     const raw = await deps.readStdin();
     const policy = parseJsonValue(await readFile(policyPath, 'utf8'), { duplicates: 'error' });
+    // `queue_main` imports `crq` (the runner) only for an enabled policy; a
+    // disabled one answers `unsupported` without any runner state. The empty
+    // repo can never equal a validated policy repo, so it reads as inactive.
+    const enabled = policy instanceof JsonObject && policy.get('enabled') === true;
+    const config = enabled ? await runnerConfig(deps.root) : { repo: '', projectFixed: false };
     const response = await runQueueCapability(
       { raw, principal, policy, runnerRepo: config.repo },
       createQueueEffects({

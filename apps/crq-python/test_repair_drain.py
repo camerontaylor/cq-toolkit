@@ -1642,6 +1642,8 @@ class RepairDrainTest(unittest.TestCase):
                {'status': 'delivered', 'receipt': {'repair_task': job_id}})
         atomic(path, job)
         atomic(self.root / 'state/queue.json', self.queue)
+        atomic(self.root / 'state/repair/fix-pr-backlog.json',
+               {'at': service.utc(), 'open': 0, 'limit': 36})
         with mock.patch.object(service, 'drain_order', return_value=[job_id, 'crq-run1-F1']), \
              mock.patch.object(service, 'blocked', return_value=False), \
              mock.patch.object(service, 'process_item') as process_item:
@@ -1657,6 +1659,33 @@ class RepairDrainTest(unittest.TestCase):
                       {'job': 'crq-a-F1', 'run': 'a', 'finding': {'severity': 'major'}}]
         self.assertEqual([j['job'] for j in sorted(same_class, key=service.finding_order)],
                          ['crq-a-F1', 'crq-a-F2', 'crq-z-F2'])
+
+    def test_backfill_budget_skips_retained_published_groups(self):
+        # One free slot. The oldest backfill group's run is already published
+        # (its inbox file is retained); it must not take the slot from the
+        # queued group behind it, or backfill repair never progresses.
+        self.queue['items'] = []
+        for name, state in (('old', 'published'), ('new', 'queued')):
+            job_id, item_id = 'crq-backfill-' + name, 'backfill-finding-' + name
+            self.queue['items'].append(self.item(item_id, 'backfill-' + name, [job_id], False, state=state))
+            self.job(job_id, item_id, 'backfill-' + name, 'src/kept.ts', severity='minor')
+            path = bounded.job_path(self.root, job_id)
+            job = json.loads(path.read_text())
+            canonical = ('a' if name == 'old' else 'b') * 64
+            job['canonical_finding_id'] = canonical
+            atomic(self.root / 'state/backfill/findings/triage' / (canonical + '.json'),
+                   {'status': 'delivered', 'receipt': {'repair_task': job_id}})
+            atomic(path, job)
+        atomic(self.root / 'state/queue.json', self.queue)
+        atomic(self.root / 'state/repair/fix-pr-backlog.json',
+               {'at': service.utc(), 'open': 35, 'limit': 36})
+        with mock.patch.object(service, 'drain_order',
+                               return_value=['crq-backfill-old', 'crq-backfill-new']), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'process_item') as process_item:
+            service.drain(self.config)
+        self.assertEqual([call.args[1][0]['job'] for call in process_item.call_args_list],
+                         ['crq-backfill-new'])
 
     def test_priority_uses_eligible_jobs_and_preserves_item_order(self):
         specs = [('minor-a', 'minor'), ('major-a', 'major'),
