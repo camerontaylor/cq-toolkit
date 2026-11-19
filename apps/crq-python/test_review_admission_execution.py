@@ -552,7 +552,8 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
         with mock.patch.multiple(crq, **patches), \
              mock.patch.object(crq, "secret_scan", return_value=(True, {})), \
              mock.patch.object(crq, "make_worktree", return_value=(worktree, "fixture-branch")), \
-             mock.patch.object(crq, "save_queue", side_effect=lambda q: saved.append(copy.deepcopy(q))), \
+             mock.patch.object(crq, "save_queue", side_effect=lambda q: saved.append(
+                 (copy.deepcopy(q), processes.Popen.call_count))), \
              mock.patch.object(crq, "append_work_record"), mock.patch.object(crq, "event"), \
              mock.patch.object(crq, "subprocess", SimpleNamespace(DEVNULL=-3, Popen=mock.Mock(return_value=SimpleNamespace(pid=12345)))) as processes:
             for generation in (1, 2, 3):
@@ -560,6 +561,7 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                     self.admit("repeat-" + str(generation), repeat=True)
                 item = self.q["items"][-1]
                 plan = runtime.prepare(self.c, self.q, item, False)
+                spawns_before = processes.Popen.call_count
                 run_id = crq.launch(self.q, item, plan)
                 meta = json.loads((self.runs / run_id / "meta.json").read_text())
                 self.assertEqual(item["run"]["band"], "interactive")
@@ -567,7 +569,14 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                 self.assertEqual(meta["cmd"], ["coderabbit", "review", *item["profile"]["flags"]])
                 self.assertIn("--committed", meta["cmd"])
                 self.assertEqual(meta["cmd"][-2:], ["--base-commit", self.base])
-                self.assertTrue(any(q["items"][-1].get("run", {}).get("launch_pending") for q in saved if q["items"][-1].get("run")))
+                reserved = [(q_item["run"]["run_id"], popen_count)
+                            for q, popen_count in saved for q_item in q["items"]
+                            if q_item.get("id") == item["id"]
+                            and (q_item.get("run") or {}).get("launch_pending")]
+                # This generation -- not an earlier one -- reserved its own run,
+                # and it did so before spawning the child.
+                self.assertEqual([run for run, _ in reserved], [run_id])
+                self.assertEqual([popen_count - spawns_before for _, popen_count in reserved], [0])
                 reserved_band = item["run"]["band"]
                 (self.runs / run_id / "review.ndjson").write_text(self.raw)
                 with mock.patch.object(backfill_runtime, "settings", return_value=None):
