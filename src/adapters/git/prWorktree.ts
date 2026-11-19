@@ -166,6 +166,13 @@ export interface PrWorktreeOpts {
   /** The PR → worktree registry (persistence seam). */
   registry: SlotWorktreeRegistry;
   isBookkeepingPath?: (path: string, root: string) => Promise<boolean>;
+  /**
+   * Read-only ownership check for the ignored-file guard that runs before a
+   * checkout is removed. Unlike `isBookkeepingPath` it must NOT import or
+   * fingerprint bookkeeping (that would taint the run's in-memory state for a
+   * tree about to be deleted). Falls back to `isBookkeepingPath` when absent.
+   */
+  isRetirableIgnoredPath?: (path: string, root: string) => Promise<boolean>;
   /** Caller clock retained for resolver API compatibility. */
   nowMs: number;
   /** Root for created worktrees; defaults to `<git-common-dir>/cq-review-worktrees`. */
@@ -904,7 +911,8 @@ async function assertNoIgnoredFiles(opts: PrWorktreeOpts, path: string): Promise
   ]);
   if (files.code !== 0) throw new Error('checkout ignored state unavailable');
   for (const file of files.stdout.split('\0').filter(Boolean)) {
-    if (!(await opts.isBookkeepingPath?.(file, path)))
+    const owns = opts.isRetirableIgnoredPath ?? opts.isBookkeepingPath;
+    if (!(await owns?.(file, path)))
       throw new Error(`unowned ignored checkout path would be deleted: ${file}`);
   }
 }
