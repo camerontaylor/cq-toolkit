@@ -195,7 +195,10 @@ the root-move section above adds only the legacy overlay, `.bak` removal and
    the tick lock, checks out the target detached and atomically writes
    the target's rendered config. It installs no unit files and starts
    and enables nothing.
-3. Only then run `prepare --tag crq-runner/YYYYMMDD-N --units-output
+3. Save copies of the prior installed unit definitions privately before
+   anything else here: the prepare run below replaces the installed
+   files, and the prior bytes cannot be recovered from the replaced
+   install. Then run `prepare --tag crq-runner/YYYYMMDD-N --units-output
    "$HOME/.config/systemd/user"`. Prepare renders from HEAD, so this is
    the step that applies the template delta, and its `--tag` must peel
    to the target HEAD. It refuses active units, verifies the rendered
@@ -203,12 +206,13 @@ the root-move section above adds only the legacy overlay, `.bak` removal and
    the inert `state/runner-disabled` marker and the rendered config,
    and reloads the user manager. It starts and enables nothing. If the
    target removes a template, prepare refuses the leftover installed
-   file outside the rendered set; keep it with the prior definitions,
-   remove it, and re-run prepare.
-4. Review the installed unit diff against the prior definitions and keep
-   the prior definitions for rollback; the runbook cannot restore them.
-   Rollback is those definitions plus the same helper `switch` back to
-   the prior SHA; no automatic rollback runs here.
+   file outside the rendered set; keep it with the saved prior
+   definitions, remove it, and re-run prepare.
+4. Compare the installed target definitions with the saved prior
+   definitions from step 3 — never rely on the replaced files — and keep
+   the saved definitions for rollback; the runbook cannot restore them.
+   Rollback is those saved definitions plus the same helper `switch`
+   back to the prior SHA; no automatic rollback runs here.
 5. Verify and approve the recorded evidence (rendered config, unit
    hashes, Git status), then remove the inert marker and start the
    tick/watchdog timers and records service; accept only after
