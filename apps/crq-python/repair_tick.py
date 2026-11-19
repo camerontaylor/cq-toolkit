@@ -616,7 +616,14 @@ def publish(c, q, item, run, record, fixed):
         atomic(journal, publication)
         record['publication'] = publication
         c.save_queue(q)  # durable identity before any remote mutation
-        c.git('push', 'origin', 'HEAD:refs/heads/' + remote_branch, cwd=wt)
+        # The update must land on the exact remote tip checked above: a
+        # maintainer reset to an ancestor would otherwise still fast-forward
+        # and resurrect the commits they removed.
+        expected = target if info else ''
+        if expected and not c.is_ancestor(expected, head):
+            raise ValueError('publication would not fast-forward the checked remote head')
+        c.git('push', 'origin', '--force-with-lease=refs/heads/' + remote_branch + ':' + expected,
+              'HEAD:refs/heads/' + remote_branch, cwd=wt)
         finalize_publication(c, q, item, run, record, publication)
     finally:
         c.remove_worktree(wt, branch)
@@ -648,7 +655,13 @@ def recover_publication(c, q, item, run, record, publication):
         raise ValueError('existing fix branch differs from prepared publication')
     if remote_head != head:
         # Immutable publication SHA survives retries via refs/crq/publication.
-        c.git('push', 'origin', head + ':refs/heads/' + branch)
+        # Lease the update on the tip observed above and require it to
+        # fast-forward from that exact SHA, so a maintainer reset to an
+        # ancestor cannot be silently resurrected by this push.
+        if remote_head and not c.is_ancestor(remote_head, head):
+            raise ValueError('publication would not fast-forward the observed remote head')
+        c.git('push', 'origin', '--force-with-lease=refs/heads/' + branch + ':' + (remote_head or ''),
+              head + ':refs/heads/' + branch)
     finalize_publication(c, q, item, run, record, publication)
 
 
