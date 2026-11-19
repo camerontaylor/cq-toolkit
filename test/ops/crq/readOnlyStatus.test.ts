@@ -15,6 +15,7 @@
  * document before comparison because Python does not emit them.
  */
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -788,6 +789,68 @@ describe('read-only invariants', () => {
     const blank = await runCli(['summary-core'], roots, FIXED_NOW);
     expect(blank.exitCode).toBe(1);
     expect(blank.stderr).toMatch(/^events-invalid: events\.jsonl line 2:/u);
+  });
+});
+
+describe('commit-subject labels for PR-less pending items (#1420)', () => {
+  function pendingMerged(sha: string): JsonObject {
+    return withItemIds(
+      requireObject(
+        parseJsonValue(
+          compact({
+            items: [
+              {
+                kind: 'merged-current',
+                state: 'pending',
+                order: 0,
+                pr: 5,
+                merge_commit: sha,
+                subject: { repo: 'owner/repo', pr: 5 },
+              },
+            ],
+          }),
+          { duplicates: 'last' },
+        ),
+        'queue',
+      ),
+    );
+  }
+
+  function labelOf(stdout: string): unknown {
+    const items = toPlainJson(parseOutput(stdout)) as { pending_items: { label?: string }[] };
+    return items.pending_items[0]?.label;
+  }
+
+  test('the primary clone supplies the subject; a missing sha keeps the fallback', async () => {
+    const roots = await makeRoots();
+    const clone = join(roots.runnerRoot, 'clone');
+    await mkdir(clone, { recursive: true });
+    const git = (...args: string[]): string =>
+      execFileSync('git', ['-C', clone, ...args], { encoding: 'utf8' }).trim();
+    git('init', '-q');
+    git(
+      '-c',
+      'user.name=t',
+      '-c',
+      'user.email=t@t',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      'feat: the real subject',
+    );
+    const sha = git('rev-parse', 'HEAD');
+    const config = new JsonObject([...DEFAULT_CONFIG.entries, ['clone', clone]]);
+
+    await writeState(roots, { queue: pendingMerged(sha), config, events: [] });
+    const hit = await runCli(['summary-core'], roots, FIXED_NOW);
+    expect(hit.stderr).toBe('');
+    expect(labelOf(hit.stdout)).toBe('feat: the real subject');
+
+    await writeState(roots, { queue: pendingMerged('b'.repeat(40)), config, events: [] });
+    const miss = await runCli(['summary-core'], roots, FIXED_NOW);
+    expect(miss.exitCode).toBe(0);
+    expect(labelOf(miss.stdout)).toBeUndefined();
   });
 });
 
