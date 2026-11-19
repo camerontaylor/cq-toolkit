@@ -1046,7 +1046,8 @@ class ControllerLockModeTests(ControllerFixture):
         path.parent.mkdir(parents=True)
         path.write_text("retained\n")
         path.chmod(0o600)
-        with self.assertRaises(RuntimeError):
+        blocked = RuntimeError("block failed")
+        with self.assertRaises(RuntimeError) as caught:
             with self.effects.controller_lock():
                 descriptor = os.open(path, os.O_RDONLY)
                 try:
@@ -1054,7 +1055,8 @@ class ControllerLockModeTests(ControllerFixture):
                         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 finally:
                     os.close(descriptor)
-                raise RuntimeError("block failed")
+                raise blocked
+        self.assertIs(caught.exception, blocked)
         descriptor = os.open(path, os.O_RDONLY)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
