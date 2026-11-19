@@ -26,6 +26,8 @@ See ``VM-FEASIBILITY.md`` for the recorded evidence and its limits.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import json
 import os
@@ -582,12 +584,54 @@ def prepare_run(state: pathlib.Path, image: dict, recorder: Recorder,
             "port": free_port(), "started_at": utc_now()}
 
 
+def live_identity(run: dict) -> dict | None:
+    """Return the run's recorded identity only while that process is alive.
+
+    The recorded pid counts as this run's live VM only when its start time and
+    command line still match -- the same proof ``stop_owned_process`` demands
+    before stopping anything.
+    """
+    run_dir = pathlib.Path(run["path"])
+    identity_path = run_dir / "process.json"
+    if not identity_path.exists():
+        return None
+    try:
+        identity = json.loads(identity_path.read_text())
+    except (OSError, ValueError):
+        return None
+    pid = identity.get("pid") if isinstance(identity, dict) else None
+    if not isinstance(pid, int) or not process_matches(
+            pid, identity.get("starttime"), str(run_dir / "overlay.qcow2")):
+        return None
+    return identity
+
+
+@contextmanager
+def run_lock(run: dict):
+    """Serialize lifecycle changes (boot, stop, destroy) for one run."""
+    handle = (pathlib.Path(run["path"]) / "lifecycle.lock").open("a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        handle.close()
+
+
 def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
          stamp: dict) -> dict:
     require_memory(pathlib.Path("/proc/meminfo").read_text())
     if not stamp["kvm_writable"]:
         raise ValueError("/dev/kvm is not writable; no KVM acceleration")
     run_dir = pathlib.Path(run["path"])
+    # A stopped run must leave no pid file or identity behind for this launch
+    # to misread: drop the stale files so the wait below and the identity write
+    # capture the process this launch actually starts. A live run never reaches
+    # this point -- cmd_boot refuses it under the run lock first.
+    for stale in ("process.json", "qemu.pid"):
+        try:
+            (run_dir / stale).unlink()
+        except FileNotFoundError:
+            pass
     unit = "crq-vm-" + run["run_id"]
     scope_unit = unit + ".scope"
     qemu = qemu_command(run_dir, run["port"])
@@ -1148,18 +1192,27 @@ def cmd_boot(args) -> int:
         save_json(pathlib.Path(run["path"]) / "run.json", run)
     recorder = Recorder(pathlib.Path(run["path"]))
     stamp = host_stamp()
-    try:
-        info = boot(run, recorder, args.tools, stamp)
-        info["ssh"] = wait_ssh(run, recorder)
-        upload_guest_probe(run, recorder)
-    except BaseException as exc:
+    with run_lock(run):
+        # Refuse a live run before anything is launched and before the cleanup
+        # path below: a repeated boot must neither race a second QEMU onto the
+        # overlay nor stop the running VM it does not own.
+        live = live_identity(run)
+        if live is not None:
+            raise ValueError(
+                "run %s already owns a live VM (pid %s); destroy it before "
+                "booting again" % (run["run_id"], live["pid"]))
         try:
-            stop_owned_process(run, purge=False)
-        except Exception as cleanup_error:
-            _cleanup_diagnostic(args, "cleanup after failed boot",
-                                cleanup_error, exc)
-        raise
-    print(json.dumps(info, indent=2, sort_keys=True))
+            info = boot(run, recorder, args.tools, stamp)
+            info["ssh"] = wait_ssh(run, recorder)
+            upload_guest_probe(run, recorder)
+        except BaseException as exc:
+            try:
+                stop_owned_process(run, purge=False)
+            except Exception as cleanup_error:
+                _cleanup_diagnostic(args, "cleanup after failed boot",
+                                    cleanup_error, exc)
+            raise
+        print(json.dumps(info, indent=2, sort_keys=True))
     return 0
 
 
@@ -1331,7 +1384,8 @@ def stop_owned_process(run: dict, *, purge: bool) -> dict:
 def cmd_destroy(args) -> int:
     state = pathlib.Path(args.state_dir).expanduser().resolve()
     run = load_run(state, args.run_id, require_process=False)
-    payload = stop_owned_process(run, purge=args.purge)
+    with run_lock(run):
+        payload = stop_owned_process(run, purge=args.purge)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if payload["stopped"] else 1
 

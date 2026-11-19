@@ -514,6 +514,47 @@ class LifecycleTests(unittest.TestCase):
                             recorder, None, {"kvm_writable": True})
             subprocess_run.assert_not_called()
 
+    def test_cmd_boot_refuses_a_live_run_before_launching_or_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            (run / "process.json").write_text(json.dumps(
+                {"pid": os.getpid(), "starttime": "1",
+                 "scope_unit": "crq-vm-r1.scope"}))
+            args = type("Args", (), {"state_dir": str(state), "run_id": "r1",
+                                     "tools": None})()
+            with mock.patch.object(vm, "process_matches", return_value=True), \
+                 mock.patch.object(vm, "boot") as boot, \
+                 mock.patch.object(vm, "stop_owned_process") as stop:
+                with self.assertRaises(ValueError):
+                    vm.cmd_boot(args)
+            boot.assert_not_called()
+            stop.assert_not_called()
+
+    def test_boot_drops_stale_identity_from_a_stopped_run(self):
+        class ExitedProcess:
+            pid = 4321
+
+            def poll(self):
+                return 1
+
+        with tempfile.TemporaryDirectory() as temporary:
+            run = pathlib.Path(temporary) / "r1"
+            run.mkdir()
+            (run / "qemu.pid").write_text("999999\n")
+            (run / "process.json").write_text(json.dumps(
+                {"pid": 999999, "starttime": "1",
+                 "scope_unit": "crq-vm-r1.scope"}))
+            recorder = vm.Recorder(run)
+            with mock.patch.object(vm, "require_memory"), \
+                 mock.patch.object(vm, "tool", return_value="/bin/true"), \
+                 mock.patch.object(vm.subprocess, "Popen",
+                                   return_value=ExitedProcess()):
+                with self.assertRaises(RuntimeError):
+                    vm.boot({"run_id": "r1", "path": str(run), "port": 2222},
+                            recorder, None, {"kvm_writable": True})
+            self.assertFalse((run / "qemu.pid").exists())
+            self.assertFalse((run / "process.json").exists())
+
     def test_timeout_output_is_text_and_json_safe(self):
         with tempfile.TemporaryDirectory() as temporary:
             recorder = vm.Recorder(pathlib.Path(temporary))
