@@ -375,6 +375,33 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertEqual(record["outcome"], "recovery_required")
         self.assertEqual(record["original_triggers"], self.original)
 
+    def test_drain_expiry_survives_failed_diagnostic_write_and_narration(self):
+        (self.runner / "state/queue.json").write_text(
+            '{"items": [{"id": "q1", "run": {"run_id": 7}}], "starts": []}\n')
+        real_write = rb.durable_write
+
+        def failing_write(path, payload):
+            if Path(path).name == "drain.json":
+                raise OSError("disk full")
+            return real_write(path, payload)
+
+        real_narrate = rb.narrate
+
+        def failing_narrate(message):
+            if "drain.json" in message:
+                raise OSError(28, "No space left")
+            return real_narrate(message)
+
+        run = self.build()
+        run.drain_fn = None
+        with mock.patch.object(rb, "durable_write", side_effect=failing_write), \
+                mock.patch.object(rb, "narrate", side_effect=failing_narrate):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                run.run()
+        self.assertIn("drain expired", str(caught.exception))
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.units.started, [])
+
     def test_incompatible_queue_refuses_before_hold(self):
         state = self.runner / "state/queue.json"
         state.write_text('{"schema_version": 2, "items": []}\n')

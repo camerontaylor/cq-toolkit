@@ -837,8 +837,13 @@ class Run:
                         # I/O error would reach recovery as an ordinary
                         # refusal that restarts the triggers and releases
                         # admission.
-                        self.narrate("drain.json could not be written ("
-                                     + repr(exc)[:200] + ")")
+                        try:
+                            self.narrate("drain.json could not be written ("
+                                         + repr(exc)[:200] + ")")
+                        except OSError:
+                            # Narration shares the failing filesystem; it
+                            # must not replace the FailStop either.
+                            pass
                     raise FailStop(
                         "queue drain expired after "
                         + str(self.args.drain_deadline_s)
