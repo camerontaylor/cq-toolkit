@@ -105,6 +105,8 @@ interface FakeGit {
   addFails?: { code: number; stderr: string };
   /** When set, `worktree remove` fails with this result. */
   removeFails?: { code: number; stderr: string };
+  /** Local branch refs with no checkout: branch name → head sha (absent = no such branch). */
+  branchHeads?: Record<string, string>;
   /** Worktree path → what HEAD is checked out there (absent = not a repo). */
   headOf: Record<string, { branch: string | null; head: string }>;
 }
@@ -183,6 +185,16 @@ export const fakeGit = (
         };
       }
       return { code: 0, stdout: '', stderr: '' };
+    }
+    if (sub === 'show-ref') {
+      const name = (args[args.length - 1] ?? '').replace(/^refs\/heads\//, '');
+      return { code: model.branchHeads?.[name] === undefined ? 1 : 0, stdout: '', stderr: '' };
+    }
+    if (sub === 'rev-list' && (args[4] ?? '').includes('..refs/heads/')) {
+      const head = model.branchHeads?.[(args[4] ?? '').split('..refs/heads/')[1] ?? ''];
+      if (head === undefined) return { code: 128, stdout: '', stderr: 'fatal: bad revision' };
+      const ancestor = head === SHA_A || head === (model.fetchHeadSha ?? SHA_B);
+      return { code: 0, stdout: `${ancestor ? '0' : '1'}\n`, stderr: '' };
     }
     if (sub === 'rev-list') {
       // argv shape: ['-C', <path>, 'rev-list', '--count', '<range>'] —

@@ -213,7 +213,11 @@ function capabilities(): JsonObject {
   ]);
 }
 
-/** `review_transport.decode`; duplicate keys and missing newline refuse. */
+/**
+ * `review_transport.decode`; duplicate keys refuse. A frame without its
+ * terminating LF also refuses: that check is TypeScript-only (Python's decode
+ * accepts it), kept as the stricter contract.
+ */
 export function decodeReviewRequest(raw: Uint8Array): JsonObject {
   if (raw.length > REVIEW_MAX_BYTES) {
     throw new ValueError('review request exceeds 6 MiB; reduce the commit range');

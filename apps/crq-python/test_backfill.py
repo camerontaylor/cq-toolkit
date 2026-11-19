@@ -64,6 +64,37 @@ class OperatorTest(unittest.TestCase):
                         self.assertEqual(saved[0]["backfill_idle_with_candidate"], 3)
                         self.assertEqual(saved[0]["backfill_last_manifest"]["target"], "a" * 40)
 
+    def test_inventory_applies_retirements_to_the_freshly_loaded_queue(self):
+        target = "b" * 40
+        job = {"id": "old", "kind": "backfill", "state": "pending", "target": "a" * 40, "job_id": "old:0",
+               "subject_id": "s", "generation": 0, "family": "f"}
+        for tripped in (False, True):
+            with self.subTest(tripped=tripped), tempfile.TemporaryDirectory() as td:
+                q = {"items": [copy.deepcopy(job)]}
+                saved, events = [], []
+                def prepare(c, snapshot, **kwargs):
+                    self.assertTrue(kwargs["enqueue"])
+                    snapshot["items"][0].update(state="skipped", last_error="superseded by inventory " + target)
+                    if tripped:
+                        q["items"][0]["state"] = "reviewing"  # tick launched it during slow inventory I/O
+                    return {"queue": snapshot, "manifest": {}, "ranked": {}, "report": {}, "event_items": [],
+                            "retired": ["old"], "target": target}
+                c = SimpleNamespace(STATE=Path(td), with_lock=lambda fn, **kw: fn(), load_queue=lambda: copy.deepcopy(q),
+                                    save_queue=saved.append, iso=lambda: AT)
+                with mock.patch.object(backfill.runtime, "settings", return_value={"enabled": True}), \
+                     mock.patch.object(backfill.runtime, "run_inventory", side_effect=prepare), \
+                     mock.patch.object(backfill.runtime, "state_event", side_effect=lambda *a: events.append(a[2]["id"])):
+                    if tripped:
+                        with self.assertRaisesRegex(ledger.IntegrityError, "snapshot stale"):
+                            backfill.inventory_unlocked(c, SimpleNamespace(report_only=False))
+                        self.assertFalse(saved)
+                        self.assertFalse(events)
+                    else:
+                        backfill.inventory_unlocked(c, SimpleNamespace(report_only=False))
+                        self.assertEqual(saved[0]["items"][0]["state"], "skipped")
+                        self.assertEqual(saved[0]["items"][0]["last_error"], "superseded by inventory " + target)
+                        self.assertEqual(events, ["old"])
+
     def test_inventory_skips_cleanly_when_queue_lock_stays_busy(self):
         with tempfile.TemporaryDirectory() as td:
             saved = []
