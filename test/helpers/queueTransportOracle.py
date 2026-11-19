@@ -1,27 +1,61 @@
 """Differential oracle for queue-v1: run apps/crq-python's `queue_transport.handle`.
 
 Test tooling only. Usage: python3 -I queueTransportOracle.py <apps/crq-python dir>
-Reads {"policy", "principal", "queue", "forge": {"<pr>": metadata}, "frames": [str]}
-on stdin and writes {"responses": [{"ok": true, "b64": ...} | {"ok": false,
-"error": ...}], "queue": <final queue>}. The runner and forge are in-memory and
-the clock is fixed; no network, git or child process is used.
+Reads {"policy", "principal", "queue", "forge": {"<pr>": metadata}, "frames": [step],
+"busy": bool, "reconcile": {"after", "before", "prs", "merge"} | null} on stdin. A step is
+a frame string ("$RID" is replaced by the last attached receipt id) or
+{"attach_receipt": doc}, which publishes doc (its source taken from the first queue
+item) and marks that item done. It writes {"responses": [{"ok": true, "b64": ...} |
+{"ok": false, "error": ...}], "queue": <final queue>, "receipts": {id: b64},
+"wrapper": <reconcile wrapper text> | null, "wrapperKey": ...}. The runner and forge
+are in-memory and the clock is fixed; no network, git or child process is used.
+`busy` makes every lock and read slot unavailable (the typed `busy` answer).
 """
 import base64
 import copy
 import json
 import sys
 import tempfile
+from contextlib import contextmanager
+from pathlib import Path
 
 sys.path.insert(0, sys.argv[1])
+import merged_reconcile  # noqa: E402
 import queue_transport  # noqa: E402
+import review_receipt  # noqa: E402
 
 NOW_SECONDS = 1_794_528_000
 queue_transport.time.time = lambda: NOW_SECONDS
 
 
+def build_wrapper(spec, state_dir):
+    interval = {"after": spec["after"], "before": spec["before"]}
+    checkpoint = merged_reconcile.reconcile(None, lambda cursor: {
+        "records": [{"number": pr, "mergedAt": "2026-11-12T00:00:00Z",
+                     "mergeCommit": {"oid": spec["merge"]}, "headRefOid": "b" * 40}
+                    for pr in spec["prs"]],
+        "has_next_page": False, "next_cursor": None},
+        repo="owner/repo", base=queue_transport.DISCOVERY_SELECTOR, **interval, page_budget=1)
+    key = review_receipt.digest(
+        {"repo": "owner/repo", "base": queue_transport.DISCOVERY_SELECTOR, **interval})
+    source = {"version": 1, "method": "all-number-slots-v1", "repo": "owner/repo",
+              "base": queue_transport.DISCOVERY_SELECTOR, "repository_id": "synthetic-repository",
+              "ceiling": 512, "window": merged_reconcile.NUMBER_WINDOW}
+    wrapper = {"source": source, "checkpoint": checkpoint}
+    wrapper["digest"] = review_receipt.digest(wrapper)
+    text = json.dumps(wrapper)
+    path = Path(state_dir) / "reconcile" / (key + ".json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return key, text, interval
+
+
 def main():
     case = json.load(sys.stdin)
     state = {"queue": case["queue"]}
+    busy = case.get("busy", False)
+    published = {}
+    wrapper_out = {"text": None, "key": None}
 
     class Runner:
         def load_queue(self):
@@ -34,22 +68,51 @@ def main():
             return "2026-11-13T00:00:00Z"
 
         def with_lock(self, fn):
-            return fn()
+            return None if busy else fn()
 
     def verify(repo, pr):
         return case["forge"][str(pr)]
 
+    @contextmanager
+    def read_slot(root):
+        yield not busy
+
+    queue_transport._read_slot = read_slot
     responses = []
+    last = {"rid": None}
     with tempfile.TemporaryDirectory() as receipts:
-        for frame in case["frames"]:
+        runner = Runner()
+        if case.get("reconcile"):
+            key, text, interval = build_wrapper(case["reconcile"], receipts)
+            wrapper_out.update(text=text, key=key)
+            runner.STATE = Path(receipts)
+            import crq
+
+            def read_wrapper(path, interval, budget):
+                crq.REPO = "owner/repo"
+                return crq._read_reconcile_wrapper(path, interval, budget)
+
+            runner._read_reconcile_wrapper = read_wrapper
+        for step in case["frames"]:
+            if isinstance(step, dict):
+                item = state["queue"]["items"][0]
+                doc = {**step["attach_receipt"], "source": item["subject"]}
+                rid = review_receipt.write_receipt(receipts, doc)
+                item.update(state="done", receipt_id=rid)
+                published[rid] = base64.b64encode(
+                    (Path(receipts) / (rid + ".json")).read_bytes()).decode()
+                last["rid"] = rid
+                continue
+            frame = step.replace("$RID", last["rid"] or "")
             try:
                 out = queue_transport.handle(
-                    frame.encode(), Runner(), principal=case["principal"],
+                    frame.encode(), runner, principal=case["principal"],
                     policy=case["policy"], verify_source=verify, receipt_root=receipts)
                 responses.append({"ok": True, "b64": base64.b64encode(out).decode()})
             except Exception as exc:  # the capability maps every raise to one refusal
                 responses.append({"ok": False, "error": type(exc).__name__})
-    print(json.dumps({"responses": responses, "queue": state["queue"]}))
+    print(json.dumps({"responses": responses, "queue": state["queue"], "receipts": published,
+                      "wrapper": wrapper_out["text"], "wrapperKey": wrapper_out["key"]}))
 
 
 main()
