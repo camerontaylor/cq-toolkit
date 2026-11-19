@@ -592,7 +592,11 @@ def fetch_image(state: pathlib.Path, recorder: Recorder) -> dict:
         expected = sums_digest(text, IMAGE_NAME)
         started = time.time()
         part = download(IMAGE_URL + IMAGE_NAME, image_path, timeout=1800)
-        actual = verify_image(pathlib.Path(part), expected)
+        try:
+            actual = verify_image(pathlib.Path(part), expected)
+        except BaseException:
+            pathlib.Path(part).unlink(missing_ok=True)
+            raise
         install_base(pathlib.Path(part), image_path)
         recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + IMAGE_NAME],
                          "rc": 0, "bytes": image_path.stat().st_size,

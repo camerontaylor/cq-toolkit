@@ -176,6 +176,7 @@ class FetchImageTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     vm.fetch_image(state, vm.Recorder(state))
             self.assertFalse((images / vm.IMAGE_NAME).exists())
+            self.assertEqual(sorted(p.name for p in images.glob("*.part")), [])
 
 
 class GuestJobObservationTests(unittest.TestCase):
