@@ -138,6 +138,37 @@ describe('createStepFetch', () => {
     expect(seen).toEqual({ url: '/p', method: 'POST', header: '1', body: 'hello' });
   });
 
+  test('aborting the original Request controller cancels the call when init passes signal: undefined', async () => {
+    // `{ signal: undefined }` means "not supplied" in the fetch contract: the
+    // unpacked Request's own signal must survive, not be erased by the spread
+    // of the init overrides.
+    let cancelled = false;
+    let arrived: () => void = () => {};
+    const arrivedPromise = new Promise<void>((resolve) => (arrived = resolve));
+    const server = createServer((request: IncomingMessage, response: ServerResponse) => {
+      request.resume();
+      request.on('close', () => {
+        if (!response.writableEnded) cancelled = true;
+      });
+      arrived();
+      // Never answer: only the Request's abort signal may end this request.
+    });
+    servers.push(server);
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    const { port } = server.address() as AddressInfo;
+    const controller = new AbortController();
+    const request = new Request(`http://127.0.0.1:${String(port)}/`, { signal: controller.signal });
+    const pending = createStepFetch(60_000, 0)(request, { signal: undefined });
+    await arrivedPromise;
+    controller.abort();
+    const failure = await pending.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect((failure as Error).name).toBe('AbortError');
+    await vi.waitFor(() => expect(cancelled).toBe(true));
+  });
+
   test('honors Node startup proxy settings in a fresh process', async () => {
     let connects = 0;
     const proxy = createServer();

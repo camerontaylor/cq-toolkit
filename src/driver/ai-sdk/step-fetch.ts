@@ -67,14 +67,18 @@ export function createStepFetch(
     // class) and would stringify it. Unpack it into url + init; explicit init
     // fields still win, as in the fetch contract.
     if (typeof Request !== 'undefined' && input instanceof Request) {
+      // An explicitly-undefined init signal means "not supplied" in the fetch
+      // contract; a plain spread of `base` would overwrite the unpacked
+      // Request's signal with undefined, so it must be handled separately.
+      const { signal: initSignal, ...baseRest } = base;
       return undiciFetch(input.url, {
         method: input.method,
         headers: input.headers as unknown as UndiciInit['headers'],
-        signal: input.signal as UndiciInit['signal'],
+        signal: (initSignal ?? input.signal) as UndiciInit['signal'],
         ...(input.body !== null
           ? { body: input.body as unknown as UndiciInit['body'], duplex: 'half' as const }
           : {}),
-        ...base,
+        ...baseRest,
       } as UndiciInit) as unknown as Promise<Response>;
     }
     return undiciFetch(
