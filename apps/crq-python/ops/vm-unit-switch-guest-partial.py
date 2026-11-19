@@ -494,6 +494,9 @@ def partial_activation_boundary(args):
         expected_delta = None
     require(path_state == "inactive",
             "after-path boundary path is not inactive")
+    require(after["repair_completions"][:len(before["repair_completions"])]
+            == before["repair_completions"],
+            "activation boundary completion log is not append-only")
     new = after["repair_completions"][len(before["repair_completions"]):]
     released = [item for item in new if item.get("runtime") == spec["runtime"]]
     require(all(item.get("runtime") in (PYTHON_RUNTIME, NODE_RUNTIME)
@@ -570,6 +573,9 @@ def partial_restore_boundary(args):
             == "inactive", "restore boundary timer is already restored")
     require((after["repair_units"].get(REPAIR_PATH_UNIT) or {}).get("ActiveState")
             == "inactive", "restore boundary path is not inactive")
+    require(after["repair_completions"][:len(drained["repair_completions"])]
+            == drained["repair_completions"],
+            "restore boundary completion log is not append-only")
     new = after["repair_completions"][len(drained["repair_completions"]):]
     released = [item for item in new
                 if item.get("runtime") == spec["prior_runtime"]]
