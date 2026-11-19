@@ -10,6 +10,7 @@ import {
   type QueueCapabilityEffects,
 } from '../../../src/ops/crq/queueCapability.js';
 import { queueBytes } from '../../../src/adapters/crq/queueEffects.js';
+import { withObjectKeys } from '../../../src/policy/crq/queueDoc.js';
 import { JsonObject, parseJsonValue, type JsonValue } from '../../../src/policy/crq/jsonValue.js';
 
 const REPO = 'owner/repo';
@@ -106,6 +107,7 @@ interface Case {
   readonly principal?: string;
   readonly queue?: Record<string, unknown>;
   readonly busy?: boolean;
+  readonly runnerRepo?: string;
   readonly reconcile?: Record<string, unknown>;
   readonly frames: readonly (string | AttachReceipt)[];
 }
@@ -142,6 +144,17 @@ const cases: readonly Case[] = [
     name: 'disabled policy answers unsupported',
     policy: { ...policy, enabled: false },
     frames: [frame('status', 'r1'), frame('enqueue', 'r2'), frame('retry-capability', 'r-retry')],
+  },
+  {
+    name: 'a runner serving another repository answers unsupported',
+    runnerRepo: 'owner/other',
+    frames: [frame('status', 'r1'), frame('enqueue', 'r2'), frame('retry-capability', 'r-retry')],
+  },
+  {
+    name: 'an unauthorized principal is refused before the runner gate',
+    principal: 'stranger',
+    runnerRepo: 'owner/other',
+    frames: [frame('status', 'r1'), frame('retry-capability', 'r-retry')],
   },
   {
     name: 'health needs its grant, then reports counts',
@@ -262,6 +275,7 @@ function json(value: unknown): JsonValue {
 interface Outcome {
   readonly responses: readonly (string | null)[];
   readonly queue: unknown;
+  readonly queueText: string;
   readonly receipts: Readonly<Record<string, string>>;
   readonly wrapper: string | null;
   readonly wrapperKey: string | null;
@@ -276,6 +290,7 @@ function pythonOutcome(item: Case): Outcome {
       forge: { '7': forge(7), '8': forge(8) },
       frames: item.frames,
       busy: item.busy ?? false,
+      runner_repo: item.runnerRepo ?? REPO,
       reconcile: item.reconcile ?? null,
     }),
     encoding: 'utf8',
@@ -283,6 +298,7 @@ function pythonOutcome(item: Case): Outcome {
   const parsed = JSON.parse(stdout) as {
     responses: ({ ok: true; b64: string } | { ok: false; error: string })[];
     queue: unknown;
+    queue_text: string;
     receipts: Record<string, string>;
     wrapper: string | null;
     wrapperKey: string | null;
@@ -292,6 +308,7 @@ function pythonOutcome(item: Case): Outcome {
       r.ok ? Buffer.from(r.b64, 'base64').toString('utf8') : null,
     ),
     queue: parsed.queue,
+    queueText: parsed.queue_text,
     receipts: parsed.receipts,
     wrapper: parsed.wrapper,
     wrapperKey: parsed.wrapperKey,
@@ -301,7 +318,7 @@ function pythonOutcome(item: Case): Outcome {
 async function tsOutcome(
   item: Case,
   oracle: Outcome,
-): Promise<Pick<Outcome, 'responses' | 'queue'>> {
+): Promise<Pick<Outcome, 'responses' | 'queue' | 'queueText'>> {
   let queue = json(item.queue ?? { items: [] }) as JsonObject;
   const receiptBytes = new Map(
     Object.entries(oracle.receipts).map(([id, b64]) => [
@@ -362,8 +379,11 @@ async function tsOutcome(
       lastReceipt = id;
       const items = queue.get('items') as JsonValue[];
       const first = items[0] as JsonObject;
-      const kept = first.entries.filter(([k]) => k !== 'state' && k !== 'receipt_id');
-      items[0] = new JsonObject([...kept, ['state', 'done'], ['receipt_id', id]]);
+      // Python's `dict.update`: an existing key keeps its place, a new one appends.
+      items[0] = withObjectKeys(first, [
+        ['state', 'done'],
+        ['receipt_id', id],
+      ]);
       continue;
     }
     const raw = step.replaceAll('$RID', lastReceipt);
@@ -373,7 +393,7 @@ async function tsOutcome(
           raw: new TextEncoder().encode(raw),
           principal: item.principal ?? 'p',
           policy: json(item.policy ?? policy),
-          runnerRepo: REPO,
+          runnerRepo: item.runnerRepo ?? REPO,
         },
         effects,
       );
@@ -382,7 +402,8 @@ async function tsOutcome(
       responses.push(null);
     }
   }
-  return { responses, queue: JSON.parse(queueBytes(queue)) as unknown };
+  const queueText = queueBytes(queue);
+  return { responses, queue: JSON.parse(queueText) as unknown, queueText };
 }
 
 describe('queue-v1 differential against the Python transport', () => {
@@ -392,6 +413,8 @@ describe('queue-v1 differential against the Python transport', () => {
       const actual = await tsOutcome(item, expected);
       expect(actual.responses).toEqual(expected.responses);
       expect(actual.queue).toEqual(expected.queue);
+      // The bytes the runner would store, not just the parsed document.
+      expect(actual.queueText).toBe(expected.queueText);
     });
   }
 

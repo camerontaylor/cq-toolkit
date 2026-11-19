@@ -206,10 +206,11 @@ const cases: readonly Case[] = [
   },
 ];
 
-// Decode and schema refusals are the same typed `invalid-input` answer, but the
-// message text is a library artefact on each side (Python's `json` and schema
-// validator against the TS parser and Zod). Both sides are folded to one marker
-// so the code, retryability and every other message still compare exactly.
+// Decode and schema refusals must coincide on refusal and on `code` (and every
+// other field, e.g. retryability), but their `message` text is explicitly exempt:
+// it is a library artefact on each side (Python's `json` and schema validator
+// against the TS parser and Zod). Only those messages are folded to one marker;
+// every other message still compares exactly.
 const DECODE_MESSAGES = new Set([
   'event does not match one schema variant',
   'duplicate JSON key',
@@ -324,7 +325,10 @@ describe('review-v1 differential against the Python transport', () => {
   }
 
   // Known divergences, pinned so a change on either side is noticed. In each,
-  // the TypeScript answer is the stricter one and is not changed here.
+  // the TypeScript answer is the stricter one and is the contract (decision on
+  // this PR): Python is not matched, and these pins name where they differ.
+  // Cancel owner-denied: added to the TS capability by PR 1713; Python's
+  // review_transport still answers "unknown review request".
   test('divergence: cancel is owner-checked in TypeScript only (PR 1713)', async () => {
     const item: Case = {
       name: 'cancel',
