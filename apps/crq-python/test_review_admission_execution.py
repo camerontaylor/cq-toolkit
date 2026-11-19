@@ -4,6 +4,7 @@ import contextlib
 import datetime as dt
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -400,15 +401,21 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
         pr = self.pr()
         info = dict(state="OPEN", isDraft=False, headRefOid=self.head,
                     baseRefName="main", headRefName="feature")
+        # The real crq.git calls below inherit this process env: strip caller
+        # GIT_* overrides exactly like the fixture helper so CLONE stays the
+        # repository Git opens while the production wrapper stays under test.
+        ambient = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         for pr_first in (False, True):
             self.q["items"] = [pr, self.item] if pr_first else [self.item, pr]
-            with mock.patch.multiple(crq, REPOS=[], CLONE=self.repo, STATE=self.state, RUNS=self.runs), \
+            with mock.patch.dict(os.environ, ambient, clear=True), \
+                 mock.patch.multiple(crq, REPOS=[], CLONE=self.repo, STATE=self.state, RUNS=self.runs), \
                  mock.patch.object(crq, "ensure_commit", return_value=True):
                 for planner in (crq.plan_open, crq.plan_delta):
                     with self.assertRaisesRegex(crq.NotReady, "equivalent-local-review"):
                         planner(pr, info, False, self.q)
         self.finish()
-        with mock.patch.multiple(crq, REPOS=[], CLONE=self.repo, STATE=self.state, RUNS=self.runs), \
+        with mock.patch.dict(os.environ, ambient, clear=True), \
+             mock.patch.multiple(crq, REPOS=[], CLONE=self.repo, STATE=self.state, RUNS=self.runs), \
              mock.patch.object(crq, "ensure_commit", return_value=True):
             with self.assertRaises(crq.NothingToReview):
                 crq.plan_open(pr, info, False, self.q)
