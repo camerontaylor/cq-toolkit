@@ -2,19 +2,6 @@
   "version": 1,
   "repo": "camerontaylor/cq-toolkit",
   "prs": {
-    "1919": {
-      "tuple": {
-        "head": "9d8191b7f7cfc8e5f5ece536ac8c969eda6f5a31",
-        "base": "4762f3644ae598fe712737d6ab950a394709b24d",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-20T04:54:24.988Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "1920": {
       "tuple": {
         "head": "a977d885fb051070354f1f0faa8f47392f153ab1",
@@ -37,19 +24,6 @@
       "observations": [
         {
           "observedAt": "2026-11-18T16:19:19.762Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "1991": {
-      "tuple": {
-        "head": "89f2601f28ca589a46bc312e2fbeca50d27ab4e8",
-        "base": "792aabcf18e4da30b6395310b288d724615325d4",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-20T05:02:52.257Z",
           "by": "self-merge-prs:observe"
         }
       ]
@@ -145,19 +119,6 @@
         }
       ]
     },
-    "2181": {
-      "tuple": {
-        "head": "59473742d1d2810890da73a48b5abed9bd41f2b2",
-        "base": "792aabcf18e4da30b6395310b288d724615325d4",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-20T05:02:15.182Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "2194": {
       "tuple": {
         "head": "a6fda1c608fb212e0ba08d54f344f4465c846018",
@@ -219,19 +180,6 @@
       "observations": [
         {
           "observedAt": "2026-11-20T01:04:51.202Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2229": {
-      "tuple": {
-        "head": "22ab33926aa6f0feb2265f26755c94f9cc9e9e7f",
-        "base": "792aabcf18e4da30b6395310b288d724615325d4",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-20T05:00:41.588Z",
           "by": "self-merge-prs:observe"
         }
       ]
