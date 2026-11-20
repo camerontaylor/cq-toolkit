@@ -82,7 +82,7 @@ describe('backfill enqueue policy', () => {
 
 describe('backfill admission and ownership', () => {
   const input = obj(
-    '{"unknown":1.0,"items":[{"id":"one","job_id":"job","kind":"backfill","state":"pending","vendor_state":"none","attempt":0,"family":"f","scope":[]},{"id":"two","kind":"backfill","state":"pending","vendor_state":"none","attempt":0,"family":"g","scope":[]}]}',
+    '{"unknown":1.0,"items":[{"id":"one","job_id":"job","kind":"backfill","created_at":"2026-10-30T00:00:00Z","state":"pending","vendor_state":"none","attempt":0,"family":"f","scope":[]},{"id":"two","kind":"backfill","created_at":"2026-10-30T00:00:00Z","state":"pending","vendor_state":"none","attempt":0,"family":"g","scope":[]}]}',
   );
   const usage = obj('{"successful":true,"remaining":2,"observed_at":"2026-10-30T00:00:00Z"}');
   test('reserves before launch and subtracts an unreflected reservation on the next decision', () => {
@@ -184,6 +184,18 @@ describe('backfill admission and ownership', () => {
         false,
       ).decision.get('decision'),
     ).toBe('rank4-inflight-cap');
+  });
+  test('a pending job is not eligible more than 24 h after it was enqueued', () => {
+    const job = obj('{"id":"j","state":"pending","vendor_state":"none","family":"f","scope":[]}');
+    const created = (value: string): JsonObject =>
+      obj(
+        `{"id":"j","state":"pending","vendor_state":"none","family":"f","scope":[],"created_at":"${value}"}`,
+      );
+    const queue = obj('{}');
+    expect(eligible(queue, created('2026-10-29T00:00:00Z'), at).eligible).toBe(true);
+    expect(eligible(queue, created('2026-10-28T23:59:59Z'), at).eligible).toBe(false);
+    expect(eligible(queue, job, at).eligible).toBe(false);
+    expect(eligible(queue, created('bad'), at).eligible).toBe(false);
   });
   test('eligibility observes cooldown, quarantine and persisted lineage histories', () => {
     const item = (input.get('items') as JsonObject[])[0];
