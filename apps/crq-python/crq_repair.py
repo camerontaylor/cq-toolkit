@@ -13,6 +13,7 @@ import re
 import shutil
 import signal
 import sys
+import tempfile
 import time
 from zoneinfo import ZoneInfo
 from crq_repair import DetectorUnavailable, atomic, command, git, hack_detector, utc, verify
@@ -320,8 +321,15 @@ def dispatch(config, role, job, wt, directory, judge=False):
                     nested = untracked_directories(wt)
                     if not nested:
                         raise
+                    # A rate-limit deferral re-runs this rung against the same
+                    # evidence directory, so every capture gets its own fresh
+                    # subdirectory: shutil.move treats an existing destination
+                    # directory as a container, which would nest or collide.
+                    holder = previous_directory / 'retained-nested'
+                    holder.mkdir(parents=True, exist_ok=True)
+                    capture = Path(tempfile.mkdtemp(prefix='capture-', dir=holder))
                     for name in nested:
-                        target = previous_directory / 'retained-nested' / name
+                        target = capture / name
                         target.parent.mkdir(parents=True, exist_ok=True)
                         shutil.move(os.fspath(Path(wt) / name), os.fspath(target))
                     retain(wt, baseline, previous_directory)
