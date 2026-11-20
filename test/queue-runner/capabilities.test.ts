@@ -1,16 +1,23 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
+import { UNIT_COMMANDS } from '../../src/ops/crq/deploy/unitRender.js';
 import {
   CAPABILITY_SCHEMA_VERSION,
   LIVE_UNIT_COMMANDS,
 } from '../../src/queue-runner/capabilities.js';
 
-const KNOWN = ['tick', 'slot', 'repair', 'publish', 'backfill inventory', 'watchdog', 'dispatch'];
+// The deploy-side allowlist `artifact_identity` applies to the emitted
+// declaration: a command outside it refuses every unit switch to the artifact.
+const KNOWN = Object.values(UNIT_COMMANDS);
 
 describe('queue-runner artifact capability declaration', () => {
   it('declares only known, unique live unit commands', () => {
     expect(new Set(LIVE_UNIT_COMMANDS).size).toBe(LIVE_UNIT_COMMANDS.length);
     for (const command of LIVE_UNIT_COMMANDS) expect(KNOWN).toContain(command);
+  });
+
+  it('never declares the dispatch forced command (not a unit)', () => {
+    expect(LIVE_UNIT_COMMANDS as readonly string[]).not.toContain('dispatch');
   });
 
   it('is emitted into the built artifact exactly as declared', async () => {

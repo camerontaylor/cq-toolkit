@@ -5,6 +5,11 @@
  *
  * This is advice for the operator, not a gate: nothing calls it at runtime.
  * It mirrors the line shape in docs/queue-client.md "Operator activation".
+ *
+ * Two roots, as the Node units already run on ceres: the runner takes its
+ * root (`config.json`, `state/`) from the working directory, so the line `cd`s
+ * to the deploy root, while `crq.js` comes from the packaged artifact, which
+ * holds `dist/` but no config or state. They may be the same directory.
  */
 
 export type DispatchIdentity = 'queue' | 'author';
@@ -22,6 +27,16 @@ const AUTHOR_ENV = [
   'CRQ_AUTHOR_FALLBACK_REVIEWER',
   'CRQ_AUTHOR_TARGET',
 ] as const;
+/** The roots the line names; both absolute with no trailing slash. */
+export interface DispatchRoots {
+  /** The `cd` target: holds the runner's `config.json` and `state/`. */
+  readonly deployRoot: string;
+  /** The packaged artifact holding `dist/queue-runner/crq.js`. */
+  readonly artifactRoot: string;
+}
+
+/** Shell metacharacters and expansion, including the `&` and `&&` separators. */
+const SHELL_META = /[$`;&|<>\n\r(){}*?!#~\\]/;
 const KEY_TYPE = /^(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+|sk-ssh-ed25519@openssh\.com)$/;
 
 /** Split `a,b="c,d",e` at commas outside double quotes; null when a quote is unbalanced. */
@@ -61,27 +76,31 @@ function optionsEnd(line: string): number {
 
 function checkCommand(
   command: string,
-  root: string,
+  roots: DispatchRoots,
   problems: string[],
 ): { identity: DispatchIdentity | null } {
-  if (/[$`;|<>\n\r(){}*?!#~\\]/.test(command.replace(/&&/g, ''))) {
-    problems.push('command contains shell metacharacters or expansion (no $SSH_ORIGINAL_COMMAND)');
-  }
   if (/SSH_ORIGINAL_COMMAND/.test(command)) {
     problems.push('command must not reference SSH_ORIGINAL_COMMAND');
   }
-  const prefix = `cd ${root} && /usr/bin/env `;
-  if (!command.startsWith(prefix)) {
-    problems.push(`command must start with "${prefix}" (the runner reads its root from cwd)`);
+  // The one `&&` allowed is the fixed separator inside the prefix; the rest
+  // (or the whole command, when the prefix is missing) is checked as written.
+  const prefix = `cd ${roots.deployRoot} && /usr/bin/env `;
+  const hasPrefix = command.startsWith(prefix);
+  if (SHELL_META.test(hasPrefix ? command.slice(prefix.length) : command)) {
+    problems.push('command contains shell metacharacters or expansion (no $SSH_ORIGINAL_COMMAND)');
+  }
+  if (!hasPrefix) {
+    problems.push(
+      `command must start with "${prefix}" (the runner reads config.json and state/ from cwd)`,
+    );
     return { identity: null };
   }
   const tokens = command.slice(prefix.length).split(' ').filter(Boolean);
   const tail = tokens.splice(-3);
   const [node, script, subcommand] = tail;
   if (!node?.startsWith('/')) problems.push('node must be an absolute path');
-  if (script !== `${root}/dist/queue-runner/crq.js`) {
-    problems.push(`script must be ${root}/dist/queue-runner/crq.js`);
-  }
+  const expectedScript = `${roots.artifactRoot}/dist/queue-runner/crq.js`;
+  if (script !== expectedScript) problems.push(`script must be ${expectedScript}`);
   if (subcommand !== 'dispatch') problems.push('the final argument must be exactly "dispatch"');
 
   const env = new Map<string, string>();
@@ -133,11 +152,21 @@ function checkCommand(
   return { identity };
 }
 
-/** Check one line; `root` is the deployed runner root (absolute, no trailing slash). */
-export function checkDispatchAuthorizedKeysLine(line: string, root: string): DispatchLineCheck {
+/** Check one line against the deploy root (`cd` target) and the artifact root (`crq.js`). */
+export function checkDispatchAuthorizedKeysLine(
+  line: string,
+  roots: DispatchRoots,
+): DispatchLineCheck {
   const problems: string[] = [];
-  if (!root.startsWith('/') || root.endsWith('/'))
-    problems.push('root must be absolute with no trailing slash');
+  for (const [name, root] of [
+    ['deployRoot', roots.deployRoot],
+    ['artifactRoot', roots.artifactRoot],
+  ] as const) {
+    if (!root.startsWith('/') || root.endsWith('/') || /\s/.test(root) || SHELL_META.test(root))
+      problems.push(
+        `${name} must be absolute with no trailing slash, whitespace or metacharacters`,
+      );
+  }
   if (/[\n\r]/.test(line.trimEnd())) problems.push('exactly one line expected');
   const text = line.trim();
   const end = optionsEnd(text);
@@ -176,6 +205,6 @@ export function checkDispatchAuthorizedKeysLine(line: string, root: string): Dis
     return { ok: false, identity: null, problems };
   }
   if (command.includes('\\"')) problems.push('command must not contain escaped quotes');
-  const { identity } = checkCommand(command, root, problems);
+  const { identity } = checkCommand(command, roots, problems);
   return { ok: problems.length === 0, identity, problems };
 }
