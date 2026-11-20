@@ -205,6 +205,9 @@ export async function recordUnpublishedSiblings(
 /**
  * `record_terminal_failure`: a deterministic repair artifact defect can never
  * pass on a later tick, so record the failure rather than retrying forever.
+ * `expected === null` marks a job whose inbox file could not be read as a
+ * dict: nothing derived from that file is trusted, so no finding outcome is
+ * written and the retained failure keeps its own non-replaying reason.
  */
 async function recordTerminalFailure(
   fx: RepairHarvestEffects,
@@ -212,7 +215,7 @@ async function recordTerminalFailure(
   item: Item,
   record: Rec,
   verdicts: Rec[],
-  expected: Rec,
+  expected: Rec | null,
   jobId: string,
   exc: unknown,
 ): Promise<void> {
@@ -221,8 +224,8 @@ async function recordTerminalFailure(
     job: jobId,
     item: pyReq(item, 'id'),
     verdict: 'FAILED',
-    reason: `invalid repair result: ${text}`,
-    finding: pyReq(expected, 'finding'),
+    reason: `${expected === null ? 'invalid repair inbox' : 'invalid repair result'}: ${text}`,
+    finding: expected === null ? null : pyReq(expected, 'finding'),
   };
   record.verdicts = [...verdicts, failure];
   record.state = 'failed';
@@ -236,7 +239,7 @@ async function recordTerminalFailure(
     item.last_error = 'repair_failed; needs human';
   }
   await fx.saveQueue(q); // terminal identity before authoritative write-back
-  await fx.markFindingOutcome(expected, failure);
+  if (expected !== null) await fx.markFindingOutcome(expected, failure);
   await recordUnpublishedSiblings(fx, record, new Set([jobId]));
 }
 
@@ -405,7 +408,17 @@ export async function repairHarvest(
     for (const jobId of jobs) {
       if (typeof jobId !== 'string') throw new TypeError('job id must be a str');
       if (!(await fx.resultExists(jobId))) break;
-      const expected = dict(await fx.readJob(jobId), 'inbox job');
+      let expected: Rec;
+      try {
+        expected = dict(await fx.readJob(jobId), 'inbox job');
+      } catch (e) {
+        // A malformed inbox can neither validate a result nor name a finding,
+        // so it fails this run alone: nothing derived from the file is written
+        // and the item's later runs still harvest.
+        if (!isPyError(e, 'OSError', 'ValueError') && !(e instanceof TypeError)) throw e;
+        if (!dry) await recordTerminalFailure(fx, q, item, record, verdicts, null, jobId, e);
+        break;
+      }
       // A swapped inbox file must not drive canonical delivery, result
       // validation or any finding write; reject it like the terminal replay.
       if (!pyEq(get(expected, 'job'), jobId) || !pyEq(get(expected, 'item'), pyReq(item, 'id'))) {
