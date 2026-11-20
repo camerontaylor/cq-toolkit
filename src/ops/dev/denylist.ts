@@ -462,7 +462,11 @@ export function diffGitHeaderPath(line: string, source: string): string | undefi
 }
 
 export function patchHeaderOperandPath(operand: string, source: string): string | undefined {
-  const candidate = decodeGitQuotedPath(operand, source);
+  // Git appends a literal tab to an UNQUOTED `---`/`+++` operand whose name
+  // contains a space; strip it so end-anchored path rules still match. A
+  // quoted operand has no raw tab (a tab inside the name is the `\t` escape).
+  const raw = operand.startsWith('"') ? operand : operand.replace(/\t.*$/, '');
+  const candidate = decodeGitQuotedPath(raw, source);
   return candidate === '/dev/null' ? undefined : candidate.replace(/^[ab]\//, '');
 }
 

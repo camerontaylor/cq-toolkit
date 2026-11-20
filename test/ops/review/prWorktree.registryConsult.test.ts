@@ -225,11 +225,6 @@ describe('registry consult', () => {
         ['-C', stalePath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
         ['-C', stalePath, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
         ['-C', repoRoot, 'worktree', 'remove', stalePath],
-        // The create's TWO show-ref probes: the branch-existence probe
-        // before the root mkdir, then the unpushed-label guard probe right
-        // before `add -B` (both miss here — no such branch — so neither
-        // rev-list guard fires).
-        ['-C', repoRoot, 'show-ref', '--verify', '--quiet', `refs/heads/${LABEL}`],
         ['-C', repoRoot, 'show-ref', '--verify', '--quiet', `refs/heads/${LABEL}`],
         ['-C', repoRoot, 'worktree', 'add', '-B', LABEL, stalePath, SHA_B],
         ['-C', stalePath, 'rev-parse', '--absolute-git-dir'],

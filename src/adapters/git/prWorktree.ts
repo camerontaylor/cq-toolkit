@@ -725,58 +725,6 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPh
     checkoutWriterContext()!.markCheckoutMutation();
     await mkdir(worktreeRoot, { recursive: true });
     const wtPath = targetPath;
-    // UNPUSHED-BRANCH GUARD: `-B` resets the label, so commits on an existing
-    // `refs/heads/<label>` that no tree holds and nothing else references
-    // would be orphaned. Commits reachable from the fetched head or any other
-    // ref are safe; refuse when the label carries unique ones.
-    const labelRef = `refs/heads/${reviewBranch}`;
-    const labelExists = await opts.run([
-      '-C',
-      repoRoot,
-      'show-ref',
-      '--verify',
-      '--quiet',
-      labelRef,
-    ]);
-    if (labelExists.code === 0) {
-      const aheadArgs = [
-        '-C',
-        repoRoot,
-        'rev-list',
-        '--count',
-        labelRef,
-        '--not',
-        expectedSha,
-        `--exclude=${labelRef}`,
-        '--all',
-      ];
-      const ahead = await opts.run(aheadArgs);
-      if (ahead.code !== 0) {
-        throw gitFail(
-          `rev-list --count on ${labelRef} failed — its relation to the fetched head is unknown`,
-          ahead.code,
-          ahead.stderr,
-          aheadArgs,
-        );
-      }
-      if (Number.parseInt(ahead.stdout.trim(), 10) > 0) {
-        throw gitFail(
-          `worktree add -B ${reviewBranch} withheld: ${labelRef} carries ${ahead.stdout.trim()} commit(s) not in the fetched PR head or any other ref (unpushed fixer work would be orphaned) — resolve by hand`,
-          1,
-          `${labelRef} is ${ahead.stdout.trim()} unique commit(s) ahead of ${expectedSha}`,
-          aheadArgs,
-        );
-      }
-    } else if (labelExists.code !== 1) {
-      throw gitFail(`show-ref ${labelRef} failed`, labelExists.code, labelExists.stderr, [
-        '-C',
-        repoRoot,
-        'show-ref',
-        '--verify',
-        '--quiet',
-        labelRef,
-      ]);
-    }
     const addArgs = ['-C', repoRoot, 'worktree', 'add', '-B', reviewBranch, wtPath, expectedSha];
     const add = await opts.run(addArgs);
     if (add.code !== 0) {
