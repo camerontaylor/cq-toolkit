@@ -13,8 +13,8 @@
  * It composes the merged C1 modules and changes none of them:
  * `prepareRepairGates` (read half, exact mutation bytes) and
  * `executeRepairPreparation` (write ordering). The operator command is not a
- * unit capability; `capabilities.json` held `['watchdog', 'publish']` after
- * the publish route landed (S3).
+ * unit capability; `capabilities.json` held `['watchdog', 'publish']` as of
+ * S3 (the publish route); later slices add their unit commands.
  *
  * Copied-state-root rule: never run this against live CRQ state before the
  * declared cutover. The first production-shaped run must be a copied state
