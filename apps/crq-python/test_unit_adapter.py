@@ -1636,6 +1636,9 @@ class AdapterTests(AdapterFixture):
                                ("TimeoutStartSec=20min30s", 1290),
                                ("TimeoutStartSec=20min 30s", 1290),
                                ("TimeoutStartSec=20min\nTimeoutSec=bogus", 1260),
+                               # NBSP is not systemd whitespace: the value is
+                               # garbage, so the earlier 20min stays.
+                               ("TimeoutStartSec=20min\nTimeoutSec=\u00a0", 1260),
                                ("TimeoutStartSec=" + "9" * 5000, 660)):
             with self.subTest(line=line):
                 self.setUp()
