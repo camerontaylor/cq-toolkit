@@ -10,13 +10,14 @@ import os
 from pathlib import Path
 import random
 import re
+import shutil
 import signal
 import sys
 import time
 from zoneinfo import ZoneInfo
 from crq_repair import DetectorUnavailable, atomic, command, git, hack_detector, utc, verify
 from crq_repair.drivers import cq, codex, paseo
-from crq_repair.retain import retain
+from crq_repair.retain import UnsupportedUntracked, retain, untracked_directories
 from crq_repair.bounded import drain_job, drain_order, require_canonical_delivery, select_job, source_snapshot
 
 ROOT = Path(__file__).resolve().parent
@@ -305,14 +306,34 @@ def dispatch(config, role, job, wt, directory, judge=False):
             if remaining < 0.001:
                 return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
             if attempted and not judge:
-                retain(wt, baseline, previous_directory)
+                try:
+                    retain(wt, baseline, previous_directory)
+                except UnsupportedUntracked:
+                    # A throttled fixer can leave an unignored nested repository
+                    # in the tree: retain() refuses to archive an untracked
+                    # entry that is not a regular file or symlink, and the
+                    # doubled -f below is what removes nested repositories.
+                    # Moving each such repository into the provider's evidence
+                    # directory preserves its contents unarchived, so the
+                    # capture retry succeeds and the cleanup can run; any other
+                    # unsupported entry still fails closed without a reset.
+                    nested = untracked_directories(wt)
+                    if not nested:
+                        raise
+                    for name in nested:
+                        target = previous_directory / 'retained-nested' / name
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(os.fspath(Path(wt) / name), os.fspath(target))
+                    retain(wt, baseline, previous_directory)
                 # Each fallback fixer gets a fresh checkout at the baseline:
                 # -x also removes ignored files, and the doubled -f removes
                 # nested git repositories, so nothing a throttled fixer left
                 # behind can reach the next provider's context. retain() above
                 # archived only the tracked and non-ignored state; ignored
-                # output (build output, caches, nested repos) is deliberately
-                # discarded here and is not recoverable.
+                # output (build output, caches) is deliberately discarded here
+                # and is not recoverable, but a nested repository retain()
+                # cannot archive was moved into the provider's evidence
+                # directory above, so its contents stay recoverable.
                 git(wt, 'reset', '--hard', baseline)
                 git(wt, 'clean', '-ffdx')
                 # Retention and reset consume the shared budget; remeasure so
