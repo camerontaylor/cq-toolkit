@@ -113,6 +113,8 @@ describe('repo registry parse', () => {
     ['feb 30 floor', [entry({ floor: '2026-02-30T00:00:00Z' })]],
     ['leap second floor', [entry({ floor: '2026-06-30T23:59:60Z' })]],
     ['year 0 floor', [entry({ floor: '0000-01-01T00:00:00Z' })]],
+    ['dot-leading branch segment', [entry({ default_branch: 'release/.hidden/stable' })]],
+    ['.lock branch segment', [entry({ default_branch: 'release.lock/stable' })]],
     ['zero quiet', [entry({ quiet_minutes: 0 })]],
     ['string quiet', [entry({ quiet_minutes: '30' })]],
     ['bool quiet', [entry({ quiet_minutes: true })]],
@@ -128,6 +130,12 @@ describe('repo registry parse', () => {
   ];
   it.each(bad)('refuses %s', (_why, repos) => {
     expect(() => parseRepos(config(repos))).toThrow(RepoRegistryError);
+  });
+
+  it('still accepts a hierarchical default branch', () => {
+    expect(parseRepos(config([entry({ default_branch: 'release/stable' })]))[0]?.defaultRef).toBe(
+      'origin/release/stable',
+    );
   });
 
   it('refuses a present null repos (Python get returns None, not the default)', () => {

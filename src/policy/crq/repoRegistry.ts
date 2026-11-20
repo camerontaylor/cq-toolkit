@@ -8,8 +8,11 @@
  * Deliberate differences, both stricter and never looser: Python's `\d` also
  * matches non-ASCII decimal digits in a `floor` timestamp (this port accepts ASCII
  * digits only), and Python accepts an arbitrary-precision `quiet_minutes` integer
- * where this port refuses one beyond +/-2^53 (it could not be a usable window).
+ * where this port refuses one beyond +/-2^53 (it could not be a usable window). A
+ * third: a `default_branch` that `branchPathFault` refuses (a dot-leading or
+ * `.lock` path segment) fails at parse time, as push and PR discovery would later.
  */
+import { branchPathFault } from '../../shared/refname.js';
 import { JsonObject, type JsonValue } from './jsonValue.js';
 import { isJsonInt, jsonIntValue } from './queueDoc.js';
 
@@ -172,7 +175,8 @@ export function parseRepoEntry(entry: JsonValue): RegistryRepo {
     !BRANCH.test(branch) ||
     branch.includes('..') ||
     branch.includes('//') ||
-    branch.endsWith('.lock')
+    branch.endsWith('.lock') ||
+    branchPathFault(branch) !== null
   ) {
     refuse(entry, 'invalid default_branch');
   }
