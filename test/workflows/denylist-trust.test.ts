@@ -78,6 +78,15 @@ describe.each(PATHS)('%s scans with a trusted scanner policy', (path) => {
     expect(policy).toBeGreaterThan(root);
     expect(commits).toBeGreaterThan(policy);
     expect(messages).toBeGreaterThan(policy);
+    // `gitleaks stdin` also reads the head-controlled .gitleaksignore, so the
+    // message scan must run after the step that removes it.
+    const executable = (step: string | undefined): string =>
+      (step ?? '')
+        .split('\n')
+        .filter((line) => !line.trim().startsWith('#'))
+        .join('\n');
+    expect(executable(steps[commits])).toContain('rm -f .gitleaksignore');
+    expect(messages).toBeGreaterThan(commits);
     // A later checkout could clean away trust/; it must be the final checkout.
     const checkouts = steps.flatMap((step, index) =>
       /uses: actions\/checkout@/.test(step) ? [index] : [],
