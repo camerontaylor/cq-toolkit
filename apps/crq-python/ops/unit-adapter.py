@@ -278,7 +278,9 @@ def _section_values(text: str, section: str, key: str) -> list[str]:
     for line in _logical_lines(text):
         stripped = line.strip(SYSTEMD_BLANKS)
         if stripped.startswith("[") and stripped.endswith("]"):
-            current = stripped[1:-1].strip(SYSTEMD_BLANKS)
+            # Blanks outside the brackets are already trimmed; the name inside
+            # is matched exactly, so "[ Service ]" is not "[Service]".
+            current = stripped[1:-1]
             continue
         if current != section or "=" not in stripped:
             continue
@@ -296,7 +298,9 @@ def _section_assignments(text: str, section: str, keys: tuple[str, ...]) -> list
     for line in _logical_lines(text):
         stripped = line.strip(SYSTEMD_BLANKS)
         if stripped.startswith("[") and stripped.endswith("]"):
-            current = stripped[1:-1].strip(SYSTEMD_BLANKS)
+            # Blanks outside the brackets are already trimmed; the name inside
+            # is matched exactly, so "[ Service ]" is not "[Service]".
+            current = stripped[1:-1]
             continue
         if current != section or "=" not in stripped:
             continue
