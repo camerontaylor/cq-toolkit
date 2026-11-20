@@ -23,6 +23,8 @@ import type { runAuthorCapability } from './authorCapability.js';
 import type { BackfillInventoryEffects, BackfillRouteResult } from './backfillInventory.js';
 import type { CoverageRunResult, runCoverageRefresh } from './coverageRefresh.js';
 import type { checkDispatchAuthorizedKeysLine } from './dispatchAuthorizedKeys.js';
+import type { recordClientHealth } from './clientHealthRecord.js';
+import type { publishLocalReviewPr } from './localReviewPrOutbox.js';
 import type { drainNotifications } from './notifyDrain.js';
 import type { runQueueCapability } from './queueCapability.js';
 import type { CommandResult, ReadOnlyStatusEffects } from './readOnlyStatus.js';
@@ -91,6 +93,17 @@ export const registry: OpRegistryEntry[] = [];
  * `./publishUnit.js`, which is Python's `backfill_publisher.main`.
  */
 export type { PublishRunResult };
+
+/**
+ * The tick's reporting phases (S6-e) are family surface, not dispatchable ops:
+ * `./localReviewPrOutbox.js` (Python's `local_review_pr.publish`) and
+ * `./clientHealthRecord.js` (`client_health.record`) are bound to effects by
+ * `src/adapters/crq/tickReportingSource.ts`.
+ */
+export type CrqPublishLocalReviewPr = typeof publishLocalReviewPr;
+
+/** The client-health recorder's callable surface, bound by tickReportingSource. */
+export type CrqRecordClientHealth = typeof recordClientHealth;
 
 /** The notification drain's callable surface, bound by publishSource. */
 export type CrqNotifyDrain = typeof drainNotifications;

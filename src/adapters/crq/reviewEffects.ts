@@ -32,6 +32,22 @@ import { SlotBusyError } from '../lock/slotLock.js';
 import { GitPool, gitCall, gitOk } from './gitExec.js';
 import { installAuthorSnapshot } from './authorSnapshotInstall.js';
 
+/**
+ * A retained receipt by content address: the id is a 64-hex sha256, the file is read inside
+ * `MAX_RECEIPT_BYTES`, and its bytes must hash to the id (`_ReceiptSnapshot`). Shared with the
+ * reporting phase's default reader so the two cannot drift.
+ */
+export async function readContentAddressedReceipt(
+  receiptRoot: string,
+  receiptId: string,
+): Promise<Uint8Array> {
+  if (!/^[0-9a-f]{64}$/.test(receiptId)) throw new ValueError('invalid receipt id');
+  const bytes = await readFile(join(receiptRoot, `${receiptId}.json`), { flag: 'r' });
+  if (bytes.length > MAX_RECEIPT_BYTES) throw new ValueError('receipt exceeds its read bound');
+  if (sha256Hex(bytes) !== receiptId) throw new ValueError('receipt digest mismatch');
+  return new Uint8Array(bytes);
+}
+
 export interface ReviewEffectsOptions {
   readonly root: string;
   readonly repo: string;
@@ -184,15 +200,7 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
         }
       }
     },
-    async readReceipt(receiptId) {
-      if (!/^[0-9a-f]{64}$/.test(receiptId)) throw new ValueError('invalid receipt id');
-      const bytes = await readFile(join(paths.receiptRoot, `${receiptId}.json`), {
-        flag: 'r',
-      });
-      if (bytes.length > MAX_RECEIPT_BYTES) throw new ValueError('receipt exceeds its read bound');
-      if (sha256Hex(bytes) !== receiptId) throw new ValueError('receipt digest mismatch');
-      return new Uint8Array(bytes);
-    },
+    readReceipt: (receiptId) => readContentAddressedReceipt(paths.receiptRoot, receiptId),
     async provisionRepo(repo) {
       if (sameRepo(repo, options.repo) || repoEntry(repo) !== null) return true;
       const path = manualClonePath(state, repo);
