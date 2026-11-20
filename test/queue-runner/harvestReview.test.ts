@@ -182,6 +182,37 @@ describe('harvestReview artifacts', () => {
   });
 });
 
+describe('harvestReview classification keys', () => {
+  const without = (key: string): Classification => {
+    const c = { ...cls() } as Rec;
+    delete c[key];
+    return c as Classification;
+  };
+
+  it.each(['outcome', 'findings', 'severity_counts'])(
+    'a classification missing %s aborts before review_finished and leaves the run intact',
+    async (key) => {
+      const h = harness(without(key));
+      const it = item();
+      await expect(harvestReview({}, it, false, h.fx)).rejects.toThrow(`classification.${key}`);
+      expect(h.events).toEqual([]);
+      expect(it.state).toBe('reviewing');
+      expect(it.run).not.toBeNull();
+    },
+  );
+
+  it.each(['review-receipt', 'push-current', 'open'])(
+    'a classification missing counted aborts the %s harvest without consuming the run',
+    async (kind) => {
+      const h = harness(without('counted'));
+      const it = captureItem({ kind });
+      await expect(harvestReview({}, it, false, h.fx)).rejects.toThrow('classification.counted');
+      expect(it.state).toBe('reviewing');
+      expect(it.run).not.toBeNull();
+    },
+  );
+});
+
 describe('harvestReview open/delta completed', () => {
   const stream = [
     'not json',

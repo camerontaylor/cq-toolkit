@@ -182,6 +182,17 @@ function req(o: Rec, key: string): unknown {
   if (!(key in o)) throw new TypeError(`${key} missing`);
   return o[key];
 }
+/**
+ * `cls["outcome"]` and its siblings: a classification missing a required key is a
+ * KeyError at the access, not an `undefined` that consumes the run.
+ */
+function creq<K extends 'outcome' | 'findings' | 'severity_counts' | 'counted'>(
+  cls: Classification,
+  key: K,
+): Classification[K] {
+  if (!(key in cls)) throw new TypeError(`classification.${key} missing`);
+  return cls[key];
+}
 /** `d.get(key, default)` as a value (a present key wins, even when null). */
 function getOr(o: Rec, key: string, fallback: unknown): unknown {
   return key in o ? o[key] : fallback;
@@ -358,9 +369,9 @@ export async function harvestReview(
   await fx.event('review_finished', {
     item: req(item, 'id'),
     run: runId,
-    outcome: cls.outcome,
-    findings: cls.findings,
-    severity: cls.severity_counts,
+    outcome: creq(cls, 'outcome'),
+    findings: creq(cls, 'findings'),
+    severity: creq(cls, 'severity_counts'),
   });
   const id = fmt(item.id);
   if (kind === fx.kinds.reviewReceipt) return harvestReceipt(q, item, r, runId, meta, cls, id, fx);
@@ -374,7 +385,7 @@ export async function harvestReview(
         run_id: runId,
         band: getOr(r, 'band', 'background'),
         started_at: getOr(r, 'started_at', null),
-        outcome: cls.outcome,
+        outcome: creq(cls, 'outcome'),
       });
       await fx.saveQueue(q);
     }
@@ -391,9 +402,9 @@ export async function harvestReview(
       const unresolved = 'legacy coverage lineage unresolved: ' + error.message;
       item.last_error = unresolved;
       if (py(item.attempt_id)) markReservationTerminal(q, item.attempt_id, fx.iso());
-      if (cls.outcome === 'auth' || cls.outcome === 'action_required')
-        pauseFor(q, cls.outcome, runId);
-      if (cls.outcome === 'rate_limited') await setRateCooldown(q, cls, runId, fx);
+      if (creq(cls, 'outcome') === 'auth' || creq(cls, 'outcome') === 'action_required')
+        pauseFor(q, creq(cls, 'outcome'), runId);
+      if (creq(cls, 'outcome') === 'rate_limited') await setRateCooldown(q, cls, runId, fx);
       await fx.saveQueue(q);
       await fx.removeWorktree(req(meta, 'worktree'), req(meta, 'wt_branch'), null);
       return unresolved;
@@ -425,13 +436,13 @@ async function harvestReceipt(
     run_id: runId,
     band: getOr(r, 'band', 'background'),
     started_at: getOr(r, 'started_at', null),
-    outcome: cls.outcome,
-    counted: cls.counted,
+    outcome: creq(cls, 'outcome'),
+    counted: creq(cls, 'counted'),
     receipt_id: receiptId,
   });
   item.run = null;
   if (outcome === 'terminal-with-findings') item.remediation_state = 'pending-merged-evidence';
-  if (cls.counted && py(cls.findings) && !partial && fx.mergedCurrentEnabled()) {
+  if (creq(cls, 'counted') && py(creq(cls, 'findings')) && !partial && fx.mergedCurrentEnabled()) {
     try {
       await fx.repairEnqueue(q, item, meta, runId);
     } catch (error) {
@@ -439,10 +450,11 @@ async function harvestReceipt(
     }
   }
   // Separate from cycles: backfill must never duplicate these jobs.
-  item.state = cls.counted ? 'done' : 'blocked';
+  item.state = creq(cls, 'counted') ? 'done' : 'blocked';
   item.last_error = getOr(cls, 'message', null);
-  if (cls.outcome === 'rate_limited') await setRateCooldown(q, cls, runId, fx);
-  if (cls.outcome === 'action_required' || cls.outcome === 'auth') pauseFor(q, cls.outcome, runId);
+  if (creq(cls, 'outcome') === 'rate_limited') await setRateCooldown(q, cls, runId, fx);
+  if (creq(cls, 'outcome') === 'action_required' || creq(cls, 'outcome') === 'auth')
+    pauseFor(q, creq(cls, 'outcome'), runId);
   await fx.saveQueue(q);
   await fx.removeWorktree(req(meta, 'worktree'), req(meta, 'wt_branch'), null);
   return `${id}: ${outcome}; receipt ${receiptId} (repair evidence tracked separately)`;
@@ -457,9 +469,9 @@ function partialScope(item: Item): boolean {
   });
 }
 function receiptOutcome(cls: Classification, partial: boolean): string {
-  if (!cls.counted) return cls.outcome;
+  if (!creq(cls, 'counted')) return creq(cls, 'outcome');
   if (partial) return 'partial-scope';
-  return py(cls.findings) ? 'terminal-with-findings' : 'terminal-clean';
+  return py(creq(cls, 'findings')) ? 'terminal-with-findings' : 'terminal-clean';
 }
 
 /** `iso(now() + timedelta(minutes=error_backoff_min * 2 ** (failures - 1)))` */
@@ -487,13 +499,13 @@ async function harvestPush(
     run_id: runId,
     band: getOr(r, 'band', 'background'),
     started_at: getOr(r, 'started_at', null),
-    outcome: cls.outcome,
-    counted: cls.counted,
+    outcome: creq(cls, 'outcome'),
+    counted: creq(cls, 'counted'),
     receipt_id: receiptId,
   });
   item.run = null;
   const repo = fx.itemRepo(item);
-  if (cls.counted) {
+  if (creq(cls, 'counted')) {
     // reviewed_tip advances ONLY on a counted review of the pinned range; a split
     // part covers a path subset and must never advance it.
     const record = setdefaultRec(setdefaultRec(q, 'push_discovery'), repo);
@@ -508,33 +520,33 @@ async function harvestPush(
     item.failures = 0;
     item.last_error = null;
     item.state = 'done';
-    if (py(cls.findings)) {
+    if (py(creq(cls, 'findings'))) {
       // Findings delivery debt: one idempotent issue, retried by later ticks.
       item.issue_request = {
         run_id: runId,
-        severity_counts: cls.severity_counts,
+        severity_counts: creq(cls, 'severity_counts'),
         findings_md: fx.runPath(runId, 'findings.md'),
         base: req(subject, 'base'),
         head: req(subject, 'head'),
       };
       item.issue_pending = true;
     }
-  } else if (cls.outcome === 'rate_limited') {
+  } else if (creq(cls, 'outcome') === 'rate_limited') {
     await setRateCooldown(q, cls, runId, fx);
     item.last_error = `rate limited (${fmt(cls.message)}); not counted`;
     item.state = 'pending';
-  } else if (cls.outcome === 'action_required' || cls.outcome === 'auth') {
-    pauseFor(q, cls.outcome, runId);
+  } else if (creq(cls, 'outcome') === 'action_required' || creq(cls, 'outcome') === 'auth') {
+    pauseFor(q, creq(cls, 'outcome'), runId);
     item.last_error = getOr(cls, 'message', null);
     item.state = 'pending';
   } else {
     const previous = getOr(item, 'failures', 0);
     const failures = num(previous, 'item.failures') + 1;
     item.failures = sameKind(previous, failures);
-    item.last_error = `${cls.outcome}: ${fmt(cls.message)}`;
+    item.last_error = `${creq(cls, 'outcome')}: ${fmt(cls.message)}`;
     if (
-      cls.outcome === 'skipped' ||
-      cls.outcome === 'too_large' ||
+      creq(cls, 'outcome') === 'skipped' ||
+      creq(cls, 'outcome') === 'too_large' ||
       failures >= fx.config.maxItemFailures
     ) {
       item.state = 'blocked';
@@ -570,8 +582,8 @@ async function harvestGeneric(
     run_id: runId,
     band: getOr(r, 'band', 'background'),
     started_at: getOr(r, 'started_at', null),
-    outcome: cls.outcome,
-    counted: cls.counted,
+    outcome: creq(cls, 'outcome'),
+    counted: creq(cls, 'counted'),
     at: fx.iso(),
     head: req(meta, 'head'),
     base: req(meta, 'base'),
@@ -579,7 +591,7 @@ async function harvestGeneric(
   };
   appendTo(item, 'attempts', attempt);
   item.run = null;
-  const o = cls.outcome;
+  const o = creq(cls, 'outcome');
   if (o === 'completed') return harvestCompleted(q, item, r, runId, meta, cls, id, fx);
   if (o === 'rate_limited') {
     await setRateCooldown(q, cls, runId, fx);
@@ -668,8 +680,8 @@ async function harvestCompleted(
     dirty_diff: 'clean tree',
     range_policy: getOr(meta, 'range_policy', null),
     ndjson: fx.runPath(runId, 'review.ndjson'),
-    findings: cls.findings,
-    severity_counts: cls.severity_counts,
+    findings: creq(cls, 'findings'),
+    severity_counts: creq(cls, 'severity_counts'),
     completed_at: fx.iso(),
   };
   if (py(meta.profile)) {
@@ -680,14 +692,14 @@ async function harvestCompleted(
     // Genuine cycle evidence, but NEVER repair debt and NEVER coverage credit.
     appendTo(item, 'author_cycles', record);
     item.state = 'done';
-    return `${id}: completed (${fmt(cls.findings)} findings) [author: no repair/coverage credit]`;
+    return `${id}: completed (${fmt(creq(cls, 'findings'))} findings) [author: no repair/coverage credit]`;
   }
   appendTo(item, 'cycles', record);
-  if (openOrDelta && py(item.pr) && py(cls.findings)) {
+  if (openOrDelta && py(item.pr) && py(creq(cls, 'findings'))) {
     // All repos use the same durable, bounded PR-review delivery.
     await fx.requestPrReview(item, runId, meta, cls);
   }
-  if (openOrDelta && py(item.pr) && !py(cls.findings)) {
+  if (openOrDelta && py(item.pr) && !py(creq(cls, 'findings'))) {
     // Clean receipts never replace undelivered findings debt.
     item.clean_review_request = {
       run_id: runId,
@@ -702,7 +714,7 @@ async function harvestCompleted(
   if (openOrDelta && !fx.isPrimaryRepo(fx.itemRepo(item))) {
     // Foreign cycles are real evidence; coverage and repair stay primary-only.
     item.state = 'done';
-    return `${id}: completed (${fmt(cls.findings)} findings)`;
+    return `${id}: completed (${fmt(creq(cls, 'findings'))} findings)`;
   }
   const paths = terminalPaths(await fx.readReviewText(runId));
   const reviewSha = py(meta.coverage_sha)
@@ -724,5 +736,5 @@ async function harvestCompleted(
     fx.coverage.recordLegacySuccess(q, item, paths);
   const repairPending = await fx.repairEnqueue(q, item, meta, runId);
   item.state = py(repairPending) ? 'repairing' : 'done';
-  return `${id}: completed (${fmt(cls.findings)} findings)`;
+  return `${id}: completed (${fmt(creq(cls, 'findings'))} findings)`;
 }
