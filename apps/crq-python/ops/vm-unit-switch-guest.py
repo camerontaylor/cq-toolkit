@@ -347,14 +347,17 @@ def remove_drain_runs():
         shutil.rmtree(STATE / "runs" / run_id, ignore_errors=True)
 
 
-def run_cleanup_steps(actions):
+def run_cleanup_steps(actions, results=None):
     """Run every cleanup action even when an earlier one raises.
 
     Each action runs independently; the first error is re-raised only after
     all actions have run, so a process cleanup failure stays visible but
-    cannot skip queue restoration or run-metadata cleanup.
+    cannot skip queue restoration or run-metadata cleanup. Results of actions
+    that succeeded are appended to ``results`` (when given) before the error
+    is re-raised, so a later failure does not drop them.
     """
-    results = []
+    if results is None:
+        results = []
     first = None
     for action in actions:
         try:
@@ -370,12 +373,13 @@ def run_cleanup_steps(actions):
 def finish_cleanup(cleanup, process_actions, restore_actions):
     """Stop processes, then always restore the queue and run metadata.
 
-    Process-stop results go into ``cleanup``; a stop failure is re-raised only
+    Process-stop results go into ``cleanup``, including those of stops that
+    succeeded before another one failed; a stop failure is re-raised only
     after the restore actions have run, and it wins over a restore failure.
     """
     first = None
     try:
-        cleanup.extend(run_cleanup_steps(process_actions))
+        run_cleanup_steps(process_actions, cleanup)
     except Exception as exc:
         first = exc
     try:
