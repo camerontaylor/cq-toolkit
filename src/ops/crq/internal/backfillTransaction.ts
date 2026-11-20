@@ -16,6 +16,8 @@ export interface PreparedInventory {
   readonly ranked: unknown;
   readonly report: unknown;
   readonly eventItems: readonly JsonValue[];
+  /** Jobs retired as superseded, each with the clock reading that retired it (tick inventory only). */
+  readonly retired?: readonly { readonly id: JsonValue; readonly at: string }[];
 }
 
 /** All queue and filesystem effects are supplied by the caller. A null lock result means busy. */
