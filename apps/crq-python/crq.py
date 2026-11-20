@@ -372,6 +372,74 @@ UNIVERSAL_SCAN_CLASSES = frozenset({"class:token-ssh-plumbing", "class:route-key
                                     "class:key-material-env", "class:inline-secret-assignments"})
 
 
+# Repo-owned exemptions for known-fake secret fixtures (e.g. an upstream's own
+# redaction tests). The file is read from the BASE commit only, so a PR can
+# never exempt its own additions. Only the generic shapes are exemptible:
+# denylist inline-secret-assignments and gitleaks generic-api-key. Every other
+# denylist class (private keys, route/env key material) and every
+# provider-specific gitleaks rule stays blocking, as does any line that a
+# provider-specific rule flags, wherever the exemption path points.
+SCAN_EXEMPTIONS_PATH = ".crq/scan-exemptions.toml"
+EXEMPTIBLE_RULES = frozenset({"class:inline-secret-assignments", "generic-api-key"})
+
+
+def _glob_regex(pattern: str) -> "re.Pattern[str]":
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("^" + "".join(out) + "$")
+
+
+def load_scan_exemptions(base: Optional[str], clone: Optional[Path] = None) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Read .crq/scan-exemptions.toml from the BASE commit. Returns (entries, error).
+
+    Absent file or no base -> no exemptions. A malformed file or entry, or an
+    entry naming a non-exemptible rule, yields no exemptions at all (fail
+    closed: the scan then behaves exactly as without the feature)."""
+    if not base:
+        return [], None
+    p = run(["git", "show", f"{base}:{SCAN_EXEMPTIONS_PATH}"], cwd=clone or CLONE, check=False)
+    if p.returncode != 0:
+        return [], None
+    try:
+        import tomllib
+        doc = tomllib.loads(p.stdout)
+        entries = []
+        for e in doc.get("exempt", []):
+            path, rule, reason = e.get("path"), e.get("rule"), e.get("reason")
+            if not all(isinstance(v, str) and v.strip() for v in (path, rule, reason)):
+                raise ValueError("entry needs non-empty string path, rule, reason")
+            if rule not in EXEMPTIBLE_RULES:
+                raise ValueError(f"rule is not exemptible: {rule}")
+            entries.append({"path": path, "rule": rule, "reason": reason, "rx": _glob_regex(path)})
+        return entries, None
+    except Exception as exc:  # noqa: BLE001 - any parse failure fails closed
+        return [], f"{SCAN_EXEMPTIONS_PATH}: {exc}"
+
+
+def _exempt(exemptions, rule, path) -> Optional[str]:
+    if rule not in EXEMPTIBLE_RULES or not path:
+        return None
+    for e in exemptions or ():
+        if e["rule"] == rule and e["rx"].match(path):
+            return e["reason"]
+    return None
+
+
 def _unquote(v: str) -> str:
     v = v.strip()
     if v.startswith("'") and v.endswith("'"):
@@ -425,16 +493,21 @@ def secret_scan(base: str, head: str, out: Path, *, classes: Optional[frozenset]
                 clone: Optional[Path] = None) -> Tuple[bool, Dict[str, Any]]:
     """Scan added AND removed lines of base..head. Never records matched content."""
     diff = git("diff", "--no-color", "--no-ext-diff", "--unified=0", base, head, cwd=clone)
-    return secret_scan_diff(diff, out, base=base, head=head, classes=classes)
+    exemptions, exemption_error = load_scan_exemptions(base, clone)
+    return secret_scan_diff(diff, out, base=base, head=head, classes=classes,
+                            exemptions=exemptions, exemption_error=exemption_error)
 
 
 def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
-                     classes: Optional[frozenset] = None) -> Tuple[bool, Dict[str, Any]]:
+                     classes: Optional[frozenset] = None, exemptions=None,
+                     exemption_error: Optional[str] = None) -> Tuple[bool, Dict[str, Any]]:
     """Use identical denylist/gitleaks policy for prepared source evidence."""
     rules = denylist_rules(classes)
     compiled = [(r["id"], re.compile(r["regex"]), re.compile(r["path"]) if "path" in r else None) for r in rules]
     allow = [re.compile(p) for p in ALLOWLIST_PATHS]
     hits: List[Dict[str, Any]] = []
+    exempted: List[Dict[str, Any]] = []
+    line_paths: Dict[int, str] = {}
     path = None
     in_header = False  # ---/+++ are headers only between "diff --git" and the first "@@"
     for n, line in enumerate(diff.splitlines(), 1):
@@ -456,14 +529,21 @@ def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
             continue
         if any(a.search(path) for a in allow):
             continue
+        line_paths[n] = path
         content = line[1:]
         for rid, rx, prx in compiled:
             if prx is not None and not prx.search(path):
                 continue
             if rx.search(content):
-                hits.append({"rule": rid, "file": path, "diff_line": n})
+                hit = {"rule": rid, "file": path, "diff_line": n}
+                reason = _exempt(exemptions, rid, path)
+                if reason is not None:
+                    exempted.append({**hit, "reason": reason})
+                else:
+                    hits.append(hit)
     # gitleaks default rules over the same patch (redacted, report to file).
     gl_hits: List[Dict[str, Any]] = []
+    gl_exempted: List[Dict[str, Any]] = []
     gl_status = "not-run"
     if shutil.which("gitleaks"):
         with tempfile.TemporaryDirectory() as td:
@@ -473,12 +553,29 @@ def secret_scan_diff(diff: str, out: Path, *, base=None, head=None,
                     check=False, input_text=diff)
             gl_status = f"exit {p.returncode}"
             if p.returncode == 0 and rep.exists():
-                for f in json.loads(rep.read_text() or "[]"):
-                    gl_hits.append({"rule": f.get("RuleID"), "diff_line": f.get("StartLine")})
+                findings = json.loads(rep.read_text() or "[]")
+                # A provider-specific rule on a line vetoes exempting any other
+                # finding on that line.
+                strict = {f.get("StartLine") for f in findings if f.get("RuleID") not in EXEMPTIBLE_RULES}
+                for f in findings:
+                    ln = f.get("StartLine")
+                    hit = {"rule": f.get("RuleID"), "diff_line": ln}
+                    fpath = line_paths.get(ln)
+                    if fpath:
+                        hit["file"] = fpath
+                    reason = None if ln in strict else _exempt(exemptions, hit["rule"], fpath)
+                    if reason is not None:
+                        gl_exempted.append({**hit, "reason": reason})
+                    else:
+                        gl_hits.append(hit)
             elif p.returncode != 0:
                 gl_hits.append({"rule": "gitleaks-error", "diff_line": None})
     result = {"base": base, "head": head, "denylist_rules": len(rules), "denylist_hits": hits,
               "gitleaks": gl_status, "gitleaks_hits": gl_hits, "diff_bytes": len(diff)}
+    if exempted or gl_exempted or exemption_error:
+        result["exempted"] = {"denylist": exempted, "gitleaks": gl_exempted}
+        if exemption_error:
+            result["exemption_error"] = exemption_error
     out.write_text(json.dumps(result, indent=2) + "\n")
     return (not hits and not gl_hits), result
 
@@ -1906,8 +2003,10 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
     if item["kind"] in (review_receipt.KIND, push_current.KIND):
         patch = git("diff", "--text", "--no-textconv", "--no-ext-diff", "--no-renames", "--no-color",
                     "--unified=0", plan["base"], plan["head"], cwd=repo_clone)
+        exemptions, exemption_error = load_scan_exemptions(plan["base"], repo_clone)
         ok, scan = secret_scan_diff(patch, rdir / "secret-scan.json", base=plan["base"], head=plan["head"],
-                                    classes=scan_classes)
+                                    classes=scan_classes, exemptions=exemptions,
+                                    exemption_error=exemption_error)
     else:
         ok, scan = secret_scan(plan["base"], plan["head"], rdir / "secret-scan.json",
                                classes=scan_classes, clone=repo_clone)
