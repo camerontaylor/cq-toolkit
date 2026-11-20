@@ -163,6 +163,40 @@ describe('fix-run report accounting', () => {
     });
   });
 
+  test('a failed round that retained no commit keeps its recorded outcome, gate and reason without a branch', () => {
+    const round = {
+      tier: 'worker',
+      attempt: 1,
+      invocation: 'edit',
+      model,
+      wallMs: 1,
+      reason: 'path refusal',
+      gate: 'path-policy',
+      outcome: 'escalated-to-human',
+    } as unknown as NonNullable<FixTaskReport['rounds']>[number];
+    // The task itself concluded `unfixed` with the budget reason; the refined
+    // fallback outcome must not rewrite the recorded round.
+    const report = task({
+      outcome: 'unfixed',
+      reason: 'token or wall budget exhausted',
+      rounds: [round],
+    });
+    const rows = failureRowsOf(report, 'tests-1/scratch-repo');
+    expect(rows).toEqual([
+      {
+        unit: 'tests-1/scratch-repo',
+        task: 'cases/a.test.cjs',
+        outcome: 'escalated-to-human',
+        gate: 'path-policy',
+        reason: 'path refusal',
+      },
+    ]);
+    expect('branch' in rows[0]!).toBe(false);
+    const planned = plannedTaskRowOf(report);
+    expect(planned.outcome).toBe('exhausted');
+    expect(planned.failures).toEqual(rows);
+  });
+
   test('never-dispatched, cancelled and budget-stopped siblings refine their outcomes', () => {
     const notStarted = plannedTaskRowOf(
       task({ outcome: 'escalated-to-human', reason: 'unit stopped for human review' }),

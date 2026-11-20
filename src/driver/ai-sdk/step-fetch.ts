@@ -116,6 +116,7 @@ export function createStepFetch(
           headers: input.headers,
           signal: input.signal,
           redirect: input.redirect,
+          integrity: input.integrity,
           ...(needsBodyBuffer ? { body: await bufferBody(input, bufferSignal) } : {}),
         }
       : {};

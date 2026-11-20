@@ -6,6 +6,7 @@ The real guest run is recorded separately and is not part of the unit suite.
 """
 import importlib.util
 import base64
+import contextlib
 import copy
 import io
 import json
@@ -3185,12 +3186,54 @@ class FinishCleanupTests(unittest.TestCase):
                  lambda: calls.append("c") or "c"],
                 [lambda: calls.append("queue"), lambda: calls.append("runs")])
         self.assertEqual(calls, ["a", "c", "queue", "runs"])
-        self.assertEqual(cleanup, [])
+        # 2149 P3: results of stops that succeeded are kept despite the failure.
+        self.assertEqual(cleanup, ["a", "c"])
+
+    def test_failed_phase_output_carries_the_retained_cleanup_results(self):
+        # Caller level: main() must emit the stop results that succeeded
+        # before a later stop failed, and keep the nonzero exit status.
+        def boom():
+            raise RuntimeError("second stop failed")
+
+        def phase(_args):
+            guest.finish_cleanup([], [lambda: {"stopped": 1}, boom],
+                                 [lambda: None])
+
+        out = io.StringIO()
+        with mock.patch.object(guest, "require", lambda *a, **k: None), \
+                mock.patch.object(guest, "phase_prepare", phase), \
+                contextlib.redirect_stdout(out):
+            status = guest.main(["prepare"])
+        self.assertEqual(status, 1)
+        failure = json.loads(out.getvalue())
+        self.assertEqual(failure["error"], "RuntimeError")
+        self.assertEqual(failure["cleanup"], [{"stopped": 1}])
 
     def test_process_results_are_collected_on_success(self):
         cleanup = []
         guest.finish_cleanup(cleanup, [lambda: 1, lambda: 2], [lambda: None])
         self.assertEqual(cleanup, [1, 2])
+
+    def test_every_phase_cleanup_site_goes_through_finish_cleanup(self):
+        # 2149 P3: the phases need a live VM, so pin the call sites structurally:
+        # stop_process / restore_queue / remove_drain_runs may be referenced
+        # only inside a finish_cleanup(...) call, never in an inline sequence.
+        import ast
+        tree = ast.parse((OPS / "vm-unit-switch-guest.py").read_text())
+        guarded = {"stop_process", "restore_queue", "remove_drain_runs"}
+        phases = {"drain_refuse_phase", "drain_harvest_phase", "recover_drain_refuse_phase"}
+        seen = set()
+        for fn in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in phases):
+            inside = {id(n) for call in ast.walk(fn)
+                      if isinstance(call, ast.Call) and getattr(call.func, "id", "") == "finish_cleanup"
+                      for n in ast.walk(call)}
+            self.assertTrue(any(isinstance(c, ast.Call) and getattr(c.func, "id", "") == "finish_cleanup"
+                                for c in ast.walk(fn)), fn.name)
+            seen.add(fn.name)
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Name) and node.id in guarded:
+                    self.assertIn(id(node), inside, "%s uses %s outside finish_cleanup" % (fn.name, node.id))
+        self.assertEqual(seen, phases)
 
 
 class RunBootLockTests(unittest.TestCase):

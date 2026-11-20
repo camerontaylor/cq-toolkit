@@ -1206,6 +1206,11 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
+/** A native session id must be non-empty: an empty frame value never replaces an earlier id. */
+function asNonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
 function asArray(value: unknown): unknown[] | undefined {
   return Array.isArray(value) ? value : undefined;
 }
@@ -1248,7 +1253,8 @@ export function foldMessage(observation: SdkRunObservation, message: unknown): v
   switch (event['type']) {
     case 'system': {
       if (event['subtype'] === 'init') {
-        observation.agentSessionId = asString(event['session_id']) ?? observation.agentSessionId;
+        observation.agentSessionId =
+          asNonEmptyString(event['session_id']) ?? observation.agentSessionId;
         observation.servedModel = asString(event['model']) ?? observation.servedModel;
         if (frameCarriesRefusal(event) && !observation.refusalSeen) {
           observation.refusalSeen = true;
@@ -1284,7 +1290,8 @@ export function foldMessage(observation: SdkRunObservation, message: unknown): v
         observation.narration.push(JSON.stringify(event));
         return;
       }
-      observation.agentSessionId = asString(event['session_id']) ?? observation.agentSessionId;
+      observation.agentSessionId =
+        asNonEmptyString(event['session_id']) ?? observation.agentSessionId;
       // The refusal stop reason rides the inner Anthropic Messages API
       // Message shape (`message.stop_reason`) — the D-E′ refusal void's
       // SDK-transport observation point.
@@ -1358,7 +1365,8 @@ export function foldMessage(observation: SdkRunObservation, message: unknown): v
     }
     case 'result': {
       observation.result = event;
-      observation.agentSessionId = asString(event['session_id']) ?? observation.agentSessionId;
+      observation.agentSessionId =
+        asNonEmptyString(event['session_id']) ?? observation.agentSessionId;
       // The result frame can carry the refusal stop reason too — observe it
       // wherever the substrate states it (the void is channel-agnostic).
       if (frameCarriesRefusal(event) && !observation.refusalSeen) {

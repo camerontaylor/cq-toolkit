@@ -70,6 +70,8 @@ interface Sc {
   runtime: unknown;
   adapterMode?: 'direct' | 'none' | 'factory' | 'factoryNull';
   queue?: string;
+  /** TS-only override of the fake git outputs; scenarios using it must stay out of `scenarios`. */
+  git?: Record<string, string>;
   live?: Record<string, string>;
   /** Raw JSON text: method -> steps ({ret} | {raise, cls} | {}). */
   script?: string;
@@ -651,7 +653,7 @@ function harness(root: string, sc: Sc): Harness {
     return v;
   };
   const effects: TransactionEffects = {
-    git: (...args) => (GIT[args.join(' ')] ?? '').trim(),
+    git: (...args) => ({ ...GIT, ...sc.git })[args.join(' ')]?.trim() ?? '',
     configSha256: () => sha(readFileSync(join(root, 'config.json'), 'utf8')),
     preservedDigest: digest,
     unitDigests: () => UNIT_DIGESTS,
@@ -820,5 +822,23 @@ describe.skipIf(!haveOracle)('unit transaction matches deploy-controller.py', ()
     ]) {
       expect(text).toContain(needle.replaceAll('": ', '":'));
     }
+  });
+});
+
+describe('switch refuses a prior head that is not 40 hex (TS-only; Python covers only the retained head)', () => {
+  const base = mkdtempSync(join(tmpdir(), 'unit-tx-head-'));
+  test.each([
+    ['short', 'a'.repeat(39)],
+    ['non-hex', 'g'.repeat(40)],
+    ['empty', ''],
+    ['uppercase', 'A'.repeat(40)],
+  ])('%s rev-parse HEAD is refused before anything is journalled', async (name, head) => {
+    const dir = join(base, name);
+    mkdirSync(dir);
+    const sc = sw(`bad head ${name}`, { git: { 'rev-parse HEAD': `${head}\n` } });
+    materialise(dir, sc);
+    const out = (await tsRun(dir, sc)) as { res: Record<string, unknown>; journal: unknown[] };
+    expect(out.res).toEqual({ refused: 'invalid prior head for unit switch' });
+    expect(out.journal).toEqual([]);
   });
 });

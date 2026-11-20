@@ -12,7 +12,7 @@
 //   1.7  SessionMessage usage + toolCalls optional fidelity fields.
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { homedir, tmpdir } from 'node:os';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { nativeTranscriptPath } from '../../src/driver/claude-code/cli.js';
 import { DEFAULT_CHILD_ENV_ALLOWLIST, buildChildEnv } from '../../src/shared/proc.js';
@@ -387,6 +387,27 @@ describe('1.5 native session id + transcript path', () => {
       await mkdir(join(homedir(), '.claude', 'projects', '-tmp-demo'), { recursive: true });
       await writeFile(path, '');
       expect(nativeTranscriptPath('abc-123', '/tmp/demo')).toBe(path);
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a workspace under a symlinked root finds the transcript keyed by its physical path', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cq-native-link-'));
+    try {
+      vi.stubEnv('HOME', root);
+      vi.stubEnv('USERPROFILE', root);
+      const real = join(root, 'real');
+      await mkdir(real);
+      const link = join(root, 'link');
+      await symlink(real, link);
+      const physical = await realpath(real);
+      const key = physical.replace(/[^A-Za-z0-9]/g, '-');
+      const path = join(homedir(), '.claude', 'projects', key, 'abc-123.jsonl');
+      await mkdir(join(homedir(), '.claude', 'projects', key), { recursive: true });
+      await writeFile(path, '');
+      expect(nativeTranscriptPath('abc-123', link)).toBe(path);
     } finally {
       vi.unstubAllEnvs();
       await rm(root, { recursive: true, force: true });

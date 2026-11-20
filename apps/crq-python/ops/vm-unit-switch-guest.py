@@ -347,14 +347,17 @@ def remove_drain_runs():
         shutil.rmtree(STATE / "runs" / run_id, ignore_errors=True)
 
 
-def run_cleanup_steps(actions):
+def run_cleanup_steps(actions, results=None):
     """Run every cleanup action even when an earlier one raises.
 
     Each action runs independently; the first error is re-raised only after
     all actions have run, so a process cleanup failure stays visible but
-    cannot skip queue restoration or run-metadata cleanup.
+    cannot skip queue restoration or run-metadata cleanup. Results of actions
+    that succeeded are appended to ``results`` (when given) before the error
+    is re-raised, so a later failure does not drop them.
     """
-    results = []
+    if results is None:
+        results = []
     first = None
     for action in actions:
         try:
@@ -370,12 +373,13 @@ def run_cleanup_steps(actions):
 def finish_cleanup(cleanup, process_actions, restore_actions):
     """Stop processes, then always restore the queue and run metadata.
 
-    Process-stop results go into ``cleanup``; a stop failure is re-raised only
+    Process-stop results go into ``cleanup``, including those of stops that
+    succeeded before another one failed; a stop failure is re-raised only
     after the restore actions have run, and it wins over a restore failure.
     """
     first = None
     try:
-        cleanup.extend(run_cleanup_steps(process_actions))
+        run_cleanup_steps(process_actions, cleanup)
     except Exception as exc:
         first = exc
     try:
@@ -384,6 +388,9 @@ def finish_cleanup(cleanup, process_actions, restore_actions):
         if first is None:
             first = exc
     if first is not None:
+        # The phase never reaches ``result["cleanup"]`` on failure; carry the
+        # retained stop results on the exception so main() can emit them.
+        first.cleanup_results = list(cleanup)
         raise first
 
 
@@ -2926,8 +2933,11 @@ def main(argv=None):
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     except Exception as exc:  # noqa: BLE001 - the harness must see the failure
-        print(json.dumps({"phase": args.phase, "error": type(exc).__name__,
-                          "detail": str(exc)[:1000]}, sort_keys=True))
+        failure = {"phase": args.phase, "error": type(exc).__name__,
+                   "detail": str(exc)[:1000]}
+        if hasattr(exc, "cleanup_results"):
+            failure["cleanup"] = exc.cleanup_results
+        print(json.dumps(failure, sort_keys=True))
         return 1
 
 

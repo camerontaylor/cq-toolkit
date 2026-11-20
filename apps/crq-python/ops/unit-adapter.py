@@ -53,7 +53,7 @@ NODE_SCRIPT_RE = re.compile(
 MAX_SAVED_START_TIMEOUT_SECONDS = 7 * 24 * 3600
 # systemd.time(7) time-span units (case-sensitive: ``m`` is minutes, ``M`` months).
 DURATION_UNITS = {
-    "usec": 1e-6, "us": 1e-6, "\u00b5s": 1e-6,
+    "usec": 1e-6, "us": 1e-6, "\u00b5s": 1e-6, "\u03bcs": 1e-6,
     "msec": 0.001, "ms": 0.001,
     "seconds": 1, "second": 1, "sec": 1, "s": 1,
     "minutes": 60, "minute": 60, "min": 60, "m": 60,
@@ -65,7 +65,7 @@ DURATION_UNITS = {
 }
 # Longest spelling first so ``min`` never matches as ``m`` and ``ms`` never as ``m``.
 DURATION_RE = re.compile(
-    r"(?P<value>\d+)(?P<unit>"
+    r"(?P<value>\d+(?:\.\d+)?)(?P<unit>"
     + "|".join(sorted(map(re.escape, DURATION_UNITS), key=len, reverse=True))
     + ")?")
 UNIT_FILE_STATES = {"enabled", "disabled", "static", "masked", "alias",
@@ -323,9 +323,9 @@ def _duration_seconds(text: str) -> int | None:
             position += 1
         factor = DURATION_UNITS[match.group("unit") or "s"]
         try:
-            seconds += int(match.group("value")) * factor
+            seconds += float(match.group("value")) * factor
         except (OverflowError, ValueError):
-            # Too many digits for int() (ValueError) or float (OverflowError).
+            # Too many digits for float() (OverflowError) or a non-numeric value.
             return None
     if seconds <= 0 or seconds == float("inf"):
         return None
@@ -1412,7 +1412,8 @@ class ProductionUnitAdapter:
                 parsed = _duration_seconds(value)
                 if parsed is not None:
                     effective = parsed
-                # else: systemd rejects the value and keeps the earlier one.
+                # else: a value this parser cannot express (e.g. a fractional
+                # span) keeps the earlier one.
         if effective is None or effective > MAX_SAVED_START_TIMEOUT_SECONDS:
             return self._service_start_timeout(unit, inventory)
         return effective + COMPLETION_MARGIN_SECONDS

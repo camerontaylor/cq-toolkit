@@ -51,13 +51,26 @@ class StalePinInventoryTest(RuntimeTestBase):
             self.q["items"].append(item); keep[name] = item
         current = {**self.item, "id": "keep-current", "job_id": "keep-current", "target": tip}
         self.q["items"].append(current)
-        _, ranked, _ = self.inventory()
+        self.inventory()
         for name, item in keep.items():
             self.assertEqual(item["state"], name)
         self.assertEqual(current["state"], "pending")
         self.assertEqual(self.item["state"], "skipped")
-        # The reviewing/publication-pending jobs still own path "a" lines: none are eligible in the new ranking.
+
+    def test_owned_jobs_at_the_older_pin_alone_keep_their_lines_owned(self):
+        # 2210 F1: no pending job at the tip here, so only the owned jobs can
+        # hold path "a"; the same inventory without them ranks its lines.
+        self.advance()
+        for name in ("reviewing", "publication-pending", "launch-unknown", "quarantined"):
+            self.q["items"].append({**self.item, "id": "keep-" + name, "job_id": "keep-" + name, "state": name})
+        _, ranked, _ = self.inventory()
+        self.assertEqual(self.item["state"], "skipped")
         self.assertEqual(self.eligible_lines(ranked, "a"), [])
+
+    def test_without_owned_jobs_the_same_lines_are_eligible(self):
+        self.advance()
+        _, ranked, _ = self.inventory()
+        self.assertTrue(self.eligible_lines(ranked, "a"))
 
     def test_expired_jobs_at_the_current_pin_are_released_and_do_not_fill_the_cap(self):
         # Quiet main: 32 pending jobs at the tip are all past 24 h; a new inventory still enqueues.

@@ -2312,6 +2312,47 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(stdout.getvalue()), {'status': 'drained', 'triage': report})
 
+    def test_unreadable_queue_at_item_admission_skips_the_item_without_raising(self):
+        # 2116 P3-1: the per-item queue re-read is guarded like the drain's own.
+        (self.root / 'state/queue.json').write_text('{broken')
+        stderr = io.StringIO()
+        with mock.patch.object(service, 'ROOT', self.root), \
+             mock.patch.object(service, 'runner_disabled', return_value=False), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'process_item') as process_item, \
+             contextlib.redirect_stderr(stderr):
+            self.assertIsNone(service.drain_item(self.config, 'item-1', ['job-1']))
+        process_item.assert_not_called()
+        self.assertIn('queue unreadable', stderr.getvalue())
+
+    def test_real_triage_phase_leaves_stdout_to_main_for_one_json_artifact(self):
+        # 2116 P3-2: stub the phase, not triage_phase, so a restored print or
+        # write_result inside triage_phase would put a second value on stdout.
+        report = {'judged': 1, 'stopped': None}
+        self.config['repair'].update(enabled=True, spend_authorization='offline-test-fixture-only')
+        atomic(self.root / 'config.json', self.config)
+        (self.root / 'state/backfill/findings/triage').mkdir(parents=True, exist_ok=True)
+        import backfill_runtime
+        import finding_delivery
+        stdout = io.StringIO()
+        with mock.patch.object(service, 'ROOT', self.root), \
+             mock.patch.object(service, 'runner_disabled', return_value=False), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch_paused', return_value=None), \
+             mock.patch.object(service, 'fetch_clone', return_value=None), \
+             mock.patch.object(service, 'git', return_value='a' * 40), \
+             mock.patch.object(service, 'drain_items'), \
+             mock.patch('crq_repair.triage.phase', return_value=report), \
+             mock.patch.object(backfill_runtime, 'settings', return_value={'rollout': 1}), \
+             mock.patch.object(backfill_runtime, 'services', return_value=('repo', None, 'outbox', None)), \
+             mock.patch.object(finding_delivery, 'Inbox'), \
+             mock.patch.dict(os.environ, {'ZAI_API_KEY': 'unused-fixture'}), \
+             contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            code = service.main([])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout.getvalue()), {'status': 'drained', 'triage': report})
+
     def test_write_result_emits_one_single_line_json_document(self):
         stdout, stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -2549,6 +2590,22 @@ class RepairDrainTest(unittest.TestCase):
              mock.patch.object(service, 'process', side_effect=limited) as process:
             self.assertEqual(service.process_item(self.config, jobs), 'rate-limit')
         self.assertEqual(process.call_count, 1)
+
+    def test_rate_limit_with_nested_repository_left_behind_still_defers(self):
+        # The final (or only) provider is throttled after leaving an untracked
+        # nested repository; retaining the tree must not end the item.
+        def limited(config, role, job, wt, directory, *args, **kwargs):
+            nested = Path(wt) / 'scratch'
+            subprocess.run(['git', 'init', '-q', str(nested)], check=True)
+            (nested / 'note').write_text('leak')
+            return {'stop': 'rate-limit', 'retry_after_ms': 3600000}
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service.cq, 'invoke', side_effect=limited) as invoke:
+            service.drain(self.config)
+        self.assertEqual(invoke.call_count, 1)
+        marker = json.loads((self.root / 'state/repair/rate-limited-until').read_text())
+        self.assertEqual(self.result('crq-run1-F1')['retry_after'], marker['until'])
+        self.assertTrue(list(self.root.rglob('retained-nested/capture-*/scratch/note')))
 
     def test_rate_limit_pauses_every_item_until_the_window_ends(self):
         self.queue['items'].append(self.item('pr4-merged', 'run4', ['crq-run4-F1'], open_pr=False))
