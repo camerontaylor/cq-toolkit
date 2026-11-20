@@ -26,7 +26,14 @@ const foreign: PrDiscoveryRepo = {
   defaultBranch: 'trunk',
   branches: ['trunk'],
 };
-const pr: OpenPr = { number: 7, draft: false, base: 'main', headRef: 'feature', head };
+const pr: OpenPr = {
+  number: 7,
+  draft: false,
+  base: 'main',
+  headRef: 'feature',
+  head,
+  crossRepository: false,
+};
 function obj(value: unknown): JsonObject {
   return parseJsonValue(JSON.stringify(value)) as JsonObject;
 }
@@ -118,6 +125,20 @@ describe('open PR discovery', () => {
     expect(items(result.queue).map((item) => item.get('id'))).toContain('pr8');
     expect(items(result.queue).map((item) => item.get('id'))).not.toContain('pr9');
     expect(result.log.some((line) => line.includes('PR #9 target chain unavailable'))).toBe(true);
+  });
+  it('never lets a fork PR become a parent candidate for a stacked PR', async () => {
+    const parent = { ...pr, number: 1, headRef: 'parent' };
+    const fork = { ...parent, number: 2, base: 'elsewhere', crossRepository: true };
+    const child = { ...pr, number: 3, base: 'parent', headRef: 'child' };
+    const result = await discoverOpenPrs(
+      queue(),
+      [primary],
+      false,
+      'o/r',
+      effects({ list: async () => [parent, fork, child] }),
+    );
+    expect(items(result.queue).map((item) => item.get('id'))).toEqual(['pr1', 'pr3']);
+    expect(result.log.some((line) => line.includes('PR #3 target chain unavailable'))).toBe(false);
   });
   it('emits one enrollment event and none for associated or equivalent work', async () => {
     const events: string[][] = [];
@@ -321,6 +342,36 @@ describe('open PR discovery', () => {
       effects({ ownRange: async () => true }),
     );
     expect(items(owned.queue)).toHaveLength(1);
+  });
+  it('enrolls the full range when a retarget moved the base behind captured evidence', async () => {
+    const older = 'd'.repeat(40);
+    const cycles = [
+      {
+        base: older,
+        head: old,
+        range_policy: 'full-range-once-v1',
+        run_id: 'run',
+        completed_at: '2025',
+      },
+    ];
+    const item = { id: 'pr7', pr: 7, repo: 'o/r', kind: 'open', state: 'done', cycles };
+    let calls = 0;
+    const result = await discoverOpenPrs(
+      queue([item]),
+      [primary],
+      false,
+      'o/r',
+      effects({
+        ownRange: async () => {
+          calls++;
+          return true;
+        },
+      }),
+    );
+    expect(calls).toBe(0);
+    expect(items(result.queue)[1]?.get('id')).toBe(
+      `pr7-range-${base.slice(0, 10)}-${head.slice(0, 10)}`,
+    );
   });
   it('skips active nonoptional work, isolates repo reads, and respects dry event semantics', async () => {
     const active = queue([{ id: 'pr7', pr: 7, kind: 'open', state: 'reviewing', cycles: [] }]);

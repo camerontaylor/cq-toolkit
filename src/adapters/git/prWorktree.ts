@@ -166,6 +166,13 @@ export interface PrWorktreeOpts {
   /** The PR → worktree registry (persistence seam). */
   registry: SlotWorktreeRegistry;
   isBookkeepingPath?: (path: string, root: string) => Promise<boolean>;
+  /**
+   * Read-only ownership check for the ignored-file guard that runs before a
+   * checkout is removed. Unlike `isBookkeepingPath` it must NOT import or
+   * fingerprint bookkeeping (that would taint the run's in-memory state for a
+   * tree about to be deleted). Falls back to `isBookkeepingPath` when absent.
+   */
+  isRetirableIgnoredPath?: (path: string, root: string) => Promise<boolean>;
   /** Caller clock retained for resolver API compatibility. */
   nowMs: number;
   /** Root for created worktrees; defaults to `<git-common-dir>/cq-review-worktrees`. */
@@ -638,6 +645,7 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPh
       }
       const canonicalPath = await realpath(candidate.path);
       await bindCheckout(opts, canonicalPath, true, phase);
+      await assertNoIgnoredFiles(opts, canonicalPath);
       phase.checkoutMutation = true;
       checkoutWriterContext()!.markCheckoutMutation();
       const removeArgs = ['-C', repoRoot, 'worktree', 'remove', candidate.path];
@@ -682,6 +690,37 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPh
     // stderr (git's refusal names any foreign branch-holder) — nothing is
     // registered for a tree that does not exist, and any stale registry
     // entry was never pruned, so the pointer survives for the next run.
+    // `-B` force-resets an EXISTING review branch. No worktree holds it here
+    // (the checks above only inspect listed trees), but a removed clean tree
+    // can leave unpushed commits on the branch: refuse before the reset drops
+    // the only reference to them.
+    const branchRef = `refs/heads/${reviewBranch}`;
+    const branchProbeArgs = ['-C', repoRoot, 'show-ref', '--verify', '--quiet', branchRef];
+    const branchProbe = await opts.run(branchProbeArgs);
+    if (branchProbe.code === 0) {
+      const branchAheadArgs = [
+        '-C',
+        repoRoot,
+        'rev-list',
+        '--count',
+        `${expectedSha}..${branchRef}`,
+      ];
+      const branchAhead = await opts.run(branchAheadArgs);
+      if (branchAhead.code !== 0 || !/^0\s*$/.test(branchAhead.stdout))
+        throw gitFail(
+          `review branch ${reviewBranch} holds commits not in the fetched PR head (unpushed fixer work would be orphaned by worktree add -B) — preserve them on a rescue branch by hand`,
+          branchAhead.code || 1,
+          branchAhead.stderr,
+          branchAheadArgs,
+        );
+    } else if (branchProbe.code !== 1) {
+      throw gitFail(
+        `show-ref ${branchRef} failed — the review branch's relation to the fetched head is unknown`,
+        branchProbe.code,
+        branchProbe.stderr,
+        branchProbeArgs,
+      );
+    }
     phase.checkoutMutation = true;
     checkoutWriterContext()!.markCheckoutMutation();
     await mkdir(worktreeRoot, { recursive: true });
@@ -776,6 +815,7 @@ async function removeLockedPrWorktree(
   const metadata = await opts.registry.read(opts.pr);
   const entryPath = metadata?.state === 'bound' ? metadata.checkoutPath : undefined;
   const entryMatches = entryPath !== undefined && (await canonicalize(entryPath)) === canonicalPath;
+  await assertNoIgnoredFiles(opts, canonicalPath);
   phase.checkoutMutation = true;
   checkoutWriterContext()!.markCheckoutMutation();
   const removeArgs = ['-C', repoRoot, 'worktree', 'remove', requestedPath];
@@ -832,6 +872,30 @@ async function bindCheckout(
   if (register) await opts.registry.update(opts.pr, metadata);
   if (phase) phase.metadataWrite = false;
 }
+/**
+ * A non-forced `git worktree remove` deletes IGNORED files without complaint
+ * (it only refuses tracked changes and untracked, non-ignored files), so an
+ * ignored file the review tooling does not own would be lost silently. Refuse
+ * when any ignored path is not review bookkeeping.
+ */
+async function assertNoIgnoredFiles(opts: PrWorktreeOpts, path: string): Promise<void> {
+  const files = await opts.run([
+    '-C',
+    path,
+    'ls-files',
+    '--others',
+    '--ignored',
+    '--exclude-standard',
+    '-z',
+  ]);
+  if (files.code !== 0) throw new Error('checkout ignored state unavailable');
+  for (const file of files.stdout.split('\0').filter(Boolean)) {
+    const owns = opts.isRetirableIgnoredPath ?? opts.isBookkeepingPath;
+    if (!(await owns?.(file, path)))
+      throw new Error(`unowned ignored checkout path would be deleted: ${file}`);
+  }
+}
+
 async function assertCleanCheckout(opts: PrWorktreeOpts, path: string): Promise<void> {
   for (const args of [
     ['diff', '--quiet'],

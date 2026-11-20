@@ -97,6 +97,8 @@ function metadata(value: unknown): Metadata {
   return { kind: data.kind, worktree: data.worktree, cmd: data.cmd as string[] };
 }
 
+const KILL_AFTER_SECONDS = 60;
+
 /** Callable only from an already detached session leader, never a tick entrypoint. */
 export async function runReviewChild(options: {
   stateRoot: string;
@@ -105,6 +107,8 @@ export async function runReviewChild(options: {
   timeoutBinary?: string;
   env: NodeJS.ProcessEnv;
   now?: () => Date;
+  /** Monotonic milliseconds for elapsed-time decisions; wall time is for timestamps only. */
+  monotonicMs?: () => number;
 }): Promise<number> {
   if (process.platform === 'win32') throw new Error('review process groups require POSIX');
   if (!Number.isSafeInteger(options.timeoutMinutes) || options.timeoutMinutes <= 0)
@@ -139,6 +143,7 @@ export async function runReviewChild(options: {
   const save = (path: string, value: unknown) => atomicWrite(path, JSON.stringify(value) + '\n');
   await save(pidPath, identity);
   const now = options.now ?? (() => new Date());
+  const monotonicMs = options.monotonicMs ?? (() => performance.now());
   const iso = () => `${now().toISOString().slice(0, 19)}Z`;
   if (meta.kind === 'backfill') {
     await writeFile(
@@ -157,9 +162,10 @@ export async function runReviewChild(options: {
   try {
     const err = await open(join(dir, 'stderr.log'), 'w');
     try {
+      const startedAt = monotonicMs();
       const child = spawn(
         options.timeoutBinary ?? 'timeout',
-        ['--foreground', '--kill-after=60', `${options.timeoutMinutes}m`, ...meta.cmd],
+        [`--kill-after=${KILL_AFTER_SECONDS}`, `${options.timeoutMinutes}m`, ...meta.cmd],
         {
           cwd: meta.worktree,
           stdio: ['ignore', out.fd, err.fd],
@@ -185,12 +191,28 @@ export async function runReviewChild(options: {
         child.once('error', reject);
       });
       if (child.pid === undefined) throw new Error('review spawned without pid');
-      await save(pidPath, { ...identity, cli_pid: child.pid });
+      try {
+        await save(pidPath, { ...identity, cli_pid: child.pid });
+      } catch (error) {
+        // A failed identity write must not leave an unrecorded review running: stop the
+        // spawned wrapper itself and wait for it to exit. Never signal the process group;
+        // the wrapper shares the group recorded above, so a group signal also stops us.
+        child.kill('SIGTERM');
+        await finished.catch(() => {});
+        throw error;
+      }
       const exit = await finished;
+      // Without `--foreground`, timeout's `--kill-after` SIGKILL hits the whole group,
+      // including timeout itself, so Node sees a signal exit (-9) rather than 124/137.
+      // Count that as a timeout only when the deadline plus the --kill-after grace had
+      // elapsed on the monotonic clock; an earlier external SIGKILL stays a plain failure.
+      const forcedKill =
+        exit === -osConstants.signals.SIGKILL &&
+        monotonicMs() - startedAt >= options.timeoutMinutes * 60_000 + KILL_AFTER_SECONDS * 1000;
       await save(join(dir, 'exit.json'), {
         exit,
         ended_at: iso(),
-        timed_out: exit === 124 || exit === 137,
+        timed_out: exit === 124 || exit === 137 || forcedKill,
       });
       return 0;
     } finally {

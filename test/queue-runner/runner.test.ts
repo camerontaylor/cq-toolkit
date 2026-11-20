@@ -106,6 +106,40 @@ it('writes backfill wrapper JSON with Python sorted keys and separators', async 
   );
 });
 
+describe('dispatch route in the shipped runner', () => {
+  const cli = async (): Promise<string> =>
+    (await import('node:url')).fileURLToPath(
+      new URL('../../dist/queue-runner/crq.js', import.meta.url),
+    );
+
+  it('refuses a missing or unknown forced command with exit 2 and the opaque line', async () => {
+    const { spawnSync } = await import('node:child_process');
+    for (const command of [undefined, 'status', 'queue-v1 x']) {
+      const env = { ...process.env };
+      delete env.SSH_ORIGINAL_COMMAND;
+      if (command !== undefined) env.SSH_ORIGINAL_COMMAND = command;
+      const result = spawnSync(process.execPath, [await cli(), 'dispatch'], {
+        encoding: 'utf8',
+        env,
+      });
+      expect(result.status).toBe(2);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toBe('queue capability refused; no permission\n');
+    }
+  });
+
+  it('refuses extra argv silently, as capability_dispatcher.py does', async () => {
+    const { spawnSync } = await import('node:child_process');
+    const result = spawnSync(process.execPath, [await cli(), 'dispatch', 'extra'], {
+      encoding: 'utf8',
+      env: { ...process.env, SSH_ORIGINAL_COMMAND: 'queue-v1' },
+    });
+    expect(result.status).toBe(2);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+  });
+});
+
 describe('operator-live command seam (D1)', () => {
   it('keeps the operator-live set separate from the unit live set', async () => {
     const { LIVE_OPERATOR_COMMANDS } = await import('../../src/queue-runner/runner.js');
@@ -169,6 +203,27 @@ describe('operator-live command seam (D1)', () => {
       artifact: { status: 'failed', error: 'alert failed' },
       exitCode: 1,
     });
+  });
+
+  it('maps a needs-human live unit to exit 3, not the generic failure 1', async () => {
+    const result = await run(['watchdog'], {
+      shadowRoot: '/unused',
+      tick: 'x',
+      live: async () => ({ status: 'needs-human', reason: 'operator must confirm' }),
+    });
+    expect(result).toEqual({
+      artifact: { status: 'needs-human', reason: 'operator must confirm' },
+      exitCode: 3,
+    });
+  });
+
+  it('maps a budget-exhausted live unit to exit 3, like needs-human', async () => {
+    const result = await run(['watchdog'], {
+      shadowRoot: '/unused',
+      tick: 'x',
+      live: async () => ({ status: 'budget-exhausted' }),
+    });
+    expect(result.exitCode).toBe(3);
   });
 
   it('maps a publish reconciliation-pending artifact to exit 1 while keeping its value', async () => {

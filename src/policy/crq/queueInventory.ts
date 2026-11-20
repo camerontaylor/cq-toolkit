@@ -262,7 +262,7 @@ export async function projectInventory(input: InventoryInput): Promise<Inventory
           break;
         }
         const snapshot = await input.effects.snapshot(receiptId, receiptBudget);
-        receiptBudget -= snapshot.data.length;
+        receiptBudget -= snapshot.byteLength;
         const document = snapshot.document;
         const receiptSource = recordGet(document, 'source');
         const sourceMatches =

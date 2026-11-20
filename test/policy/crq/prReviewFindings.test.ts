@@ -284,7 +284,7 @@ function processCode(returncode: number): JsonValue {
 
 /** Python `str(subprocess.TimeoutExpired(argv, 60))`. */
 function timeoutDetail(argv: readonly string[]): string {
-  return `Command '['${argv.join("', '")}]' timed out after 60 seconds`;
+  return `Command '['${argv.join("', '")}']' timed out after 60 seconds`;
 }
 
 function inputValue(entry: PrReviewCase, key: string): JsonValue {
@@ -551,7 +551,16 @@ function expectValue(actual: unknown, expected: JsonValue, label: string): void 
         expect(actual.integer, `${label}: int value`).toBe(expected.integer);
       } else {
         expect(typeof actual, `${label}: int result type`).toBe('number');
-        expect(actual, `${label}: int value`).toBe(Number(expected.integer));
+        // A native number keeps an integer only within the safe range; rounding
+        // the expectation would let a wrong result pass, so anything larger
+        // must arrive as an exact JsonNumber.
+        expect(Number.isSafeInteger(actual), `${label}: int result is a safe integer`).toBe(true);
+        const integer = expected.integer;
+        const limit = BigInt(Number.MAX_SAFE_INTEGER);
+        if (integer === null || integer > limit || integer < -limit) {
+          throw new Error(`${label}: exact JsonNumber required beyond the safe range`);
+        }
+        expect(actual, `${label}: int value`).toBe(Number(integer));
       }
     } else {
       if (actual instanceof JsonNumber) {

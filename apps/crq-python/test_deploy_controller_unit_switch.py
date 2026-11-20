@@ -64,7 +64,7 @@ def pending_unit_switch():
         "prior_runtime": "python",
         "outcome": "pending",
         "at": "2026-10-27T00:00:00Z",
-        "snapshot": {},
+        "snapshot": {"runtime": "python", "running": True},
         "state": None,
         "phase": "snapshot",
     }
@@ -138,6 +138,49 @@ class UnitSwitchTests(ControllerFixture):
         self.assertEqual(final["phase"], "restore_activation_pending")
         self.assertEqual(final["outcome"], "rolled_back")
 
+    def test_recovery_rebaselines_state_the_activated_unit_advanced(self):
+        """An issuing unit that ran after activation may advance queue state;
+        the fenced recovery re-observes it instead of refusing."""
+        test = self
+
+        class Crash(BaseException):
+            pass
+
+        class RunningAdapter(Adapter):
+            def start(self, unit):
+                super().start(unit)
+                test.write_state("queue.json", {"items": [], "starts": ["ran"]})
+                raise Crash()
+
+        adapter = RunningAdapter("python")
+        with self.assertRaises(Crash):
+            dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
+        path = next(self.record_dir.glob("controller-*.json"))
+        before = json.loads(path.read_text())["state"]
+        recovered = dc.recover_unit(self.effects, adapter, path)
+        self.assertEqual(recovered["outcome"], "rolled_back")
+        self.assertEqual(recovered["rebaselined_from"]["preserved/queue.json"],
+                         before["preserved/queue.json"])
+        self.assertNotEqual(recovered["state"]["preserved/queue.json"],
+                            before["preserved/queue.json"])
+
+    def test_switch_rollback_rebaselines_after_activation_advanced_state(self):
+        test = self
+
+        class FailingAdapter(Adapter):
+            def start(self, unit):
+                super().start(unit)
+                test.write_state("queue.json", {"items": [], "starts": ["ran"]})
+                raise RuntimeError("start failed after the unit ran")
+
+        adapter = FailingAdapter("python")
+        with self.assertRaises(dc.RecoveryRequired):
+            dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
+        record = json.loads(next(self.record_dir.glob("controller-*.json")).read_text())
+        self.assertEqual(record["outcome"], "rolled_back")
+        self.assertEqual(record["failed_phase"], "activation_pending")
+        self.assertIn("preserved/queue.json", record["rebaselined_from"])
+
     def test_activation_recovery_drains_owned_work_before_restoring(self):
         class Crash(BaseException):
             pass
@@ -173,23 +216,39 @@ class UnitSwitchTests(ControllerFixture):
         class CrashingAdapter(Adapter):
             crashed = False
 
+            def __init__(self):
+                super().__init__("python")
+                self.events = []
+
             def install(self, unit, runtime):
                 raise RuntimeError("install failed")
 
+            def stop_and_drain(self, unit):
+                self.events.append(("drain", self.running))
+                super().stop_and_drain(unit)
+
             def restore_activation(self, unit, snapshot):
+                self.events.append(("release", self.running))
                 super().restore_activation(unit, snapshot)
                 if not self.crashed:
                     self.crashed = True
                     raise Crash()
 
-        adapter = CrashingAdapter("python")
+        adapter = CrashingAdapter()
         with self.assertRaises(Crash):
             dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
         path = next(self.record_dir.glob("controller-*.json"))
         self.assertEqual(json.loads(path.read_text())["phase"], "restore_activation_pending")
+        # The interrupted release already left the unit running, so the recovery
+        # must not be able to release again without fencing the unit first.
+        self.assertEqual(adapter.events[-1], ("release", False))
+        self.assertTrue(adapter.running)
+        before = len(adapter.events)
         recovered = dc.recover_unit(self.effects, adapter, path)
         self.assertEqual(recovered["outcome"], "rolled_back")
         self.assertEqual(recovered["failed_phase"], "drained")
+        self.assertEqual(adapter.events[before:],
+                         [("drain", True), ("release", False)])
         self.assertTrue(adapter.running)
         final = json.loads(path.read_text())
         self.assertEqual(final["phase"], "restore_activation_pending")
@@ -711,7 +770,7 @@ class RecoverFactoryTests(ControllerFixture):
                 events.append("validate_snapshot")
                 super().validate_snapshot(unit, snapshot)
 
-        def factory(unit, prior_runtime):
+        def factory(unit, prior_runtime, source_sha=None):
             events.append("factory")
             calls.append((unit, prior_runtime))
             self.assertNotIn("validate_snapshot", events)
@@ -728,7 +787,7 @@ class RecoverFactoryTests(ControllerFixture):
         calls = []
         adapters = []
 
-        def factory(unit, prior_runtime):
+        def factory(unit, prior_runtime, source_sha=None):
             calls.append((unit, prior_runtime))
             adapter = Adapter(prior_runtime)
             adapters.append(adapter)
@@ -751,12 +810,43 @@ class RecoverFactoryTests(ControllerFixture):
         factory.assert_not_called()
         self.assertEqual(path.read_bytes(), before)
 
+    def test_recover_factory_receives_the_retained_source_commit(self):
+        # The journal's retained commit must differ from the live checkout:
+        # otherwise this test would also pass if recovery composed the adapter
+        # at live HEAD instead of at the commit the record retained.
+        state = dc.captured_state(self.effects)
+        live = state["prior_head"]
+        retained = self.target
+        self.assertNotEqual(retained, live)
+        state["prior_head"] = retained
+        path = self.pending_record(state=state)
+        seen = []
+
+        def factory(unit, prior_runtime, source_sha=None):
+            seen.append(source_sha)
+            return Adapter(prior_runtime)
+
+        dc.recover_unit(self.effects, None, path, adapter_factory=factory)
+        self.assertEqual(seen, [retained])
+
+    def test_recover_refuses_a_malformed_retained_head_without_building_an_adapter(self):
+        path = self.pending_record()
+        record = json.loads(path.read_text())
+        record["state"]["prior_head"] = "not-a-sha"
+        path.write_text(json.dumps(record))
+        before = path.read_bytes()
+        factory = self.refusing_factory()
+        with self.assertRaisesRegex(dc.Refused, "invalid retained prior head"):
+            dc.recover_unit(self.effects, None, path, adapter_factory=factory)
+        factory.assert_not_called()
+        self.assertEqual(path.read_bytes(), before)
+
     def test_recover_factory_runs_under_the_controller_lock(self):
         path = self.pending_record()
         lock = self.runner / "state" / dc.LOCK_NAME
         observed = []
 
-        def factory(unit, prior_runtime):
+        def factory(unit, prior_runtime, source_sha=None):
             descriptor = os.open(lock, os.O_RDONLY)
             try:
                 with self.assertRaises(BlockingIOError):
@@ -847,15 +937,18 @@ class RecoverFactoryTests(ControllerFixture):
     def test_recover_factory_error_is_a_refusal(self):
         path = self.pending_record()
         before = path.read_bytes()
+        classes = {name: type(name, (RuntimeError,), {}) for name in
+                   ("LiveBindingRefused", "FactoryRefused", "CompletionError")}
         for name in ("LiveBindingRefused", "FactoryRefused", "CompletionError"):
             with self.subTest(error=name):
-                error = type(name, (RuntimeError,), {})
                 binding = SimpleNamespace(
-                    LiveBindingRefused=error,
-                    factory=SimpleNamespace(FactoryRefused=error),
-                    completion=SimpleNamespace(CompletionError=error),
+                    LiveBindingRefused=classes["LiveBindingRefused"],
+                    factory=SimpleNamespace(
+                        FactoryRefused=classes["FactoryRefused"]),
+                    completion=SimpleNamespace(
+                        CompletionError=classes["CompletionError"]),
                     production_adapter=mock.Mock(
-                        side_effect=error("compose failed")))
+                        side_effect=classes[name]("compose failed")))
                 code, stdout, stderr = self.run_recover_cli(
                     path, mock.Mock(return_value=binding))
                 self.assertEqual(code, 2)
@@ -882,7 +975,7 @@ class RecoverFactoryTests(ControllerFixture):
 
         adapters = []
 
-        def factory(unit, prior_runtime):
+        def factory(unit, prior_runtime, source_sha=None):
             adapter = OwnedWorkAdapter()
             adapters.append(adapter)
             return adapter
@@ -920,7 +1013,7 @@ class RecoverFactoryTests(ControllerFixture):
 
         adapters = []
 
-        def factory(unit, prior_runtime):
+        def factory(unit, prior_runtime, source_sha=None):
             adapter = UndrainedAdapter()
             adapters.append(adapter)
             return adapter
@@ -976,7 +1069,8 @@ class ControllerLockModeTests(ControllerFixture):
         path.parent.mkdir(parents=True)
         path.write_text("retained\n")
         path.chmod(0o600)
-        with self.assertRaises(RuntimeError):
+        blocked = RuntimeError("block failed")
+        with self.assertRaises(RuntimeError) as caught:
             with self.effects.controller_lock():
                 descriptor = os.open(path, os.O_RDONLY)
                 try:
@@ -984,7 +1078,8 @@ class ControllerLockModeTests(ControllerFixture):
                         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 finally:
                     os.close(descriptor)
-                raise RuntimeError("block failed")
+                raise blocked
+        self.assertIs(caught.exception, blocked)
         descriptor = os.open(path, os.O_RDONLY)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -1,4 +1,11 @@
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -37,6 +44,69 @@ describe('freezeStateRoot', () => {
     expect(frozen.liveDigest).toMatch(/^[0-9a-f]{64}$/);
     expect(liveUnchanged(live, frozen)).toBe(true);
     expect(readFileSync(join(live, 'queue.json'), 'utf8')).toBe('{"items":[]}');
+  });
+
+  it('preserves absence when the destination scratch root retains a stale file', () => {
+    const live = root({ 'queue.json': '{"items":[]}' });
+    const stale = scratch();
+    for (const side of ['a', 'b']) {
+      mkdirSync(join(stale, side), { recursive: true });
+      writeFileSync(join(stale, side, 'runner-disabled'), 'stale\n');
+    }
+    const frozen = freezeStateRoot(live, stale);
+    for (const dir of [frozen.a, frozen.b]) {
+      expect(existsSync(join(dir, 'runner-disabled'))).toBe(false);
+      expect(readFileSync(join(dir, 'queue.json'), 'utf8')).toBe('{"items":[]}');
+    }
+  });
+
+  it('rejects a scratch destination that overlaps the live root', () => {
+    const parent = scratch();
+    const live = join(parent, 'a');
+    mkdirSync(live);
+    writeFileSync(join(live, 'queue.json'), '{"items":[]}');
+    // `join(scratch, 'a')` would resolve to the live root itself.
+    expect(() => freezeStateRoot(live, parent)).toThrow(/overlaps the live root/);
+    expect(() => freezeStateRoot(live, live)).toThrow(/overlaps the live root/);
+    expect(() => freezeStateRoot(live, join(live, 'nested'))).toThrow(/overlaps the live root/);
+    // The live queue was never rewritten, and nothing was written into the live root.
+    expect(readFileSync(join(live, 'queue.json'), 'utf8')).toBe('{"items":[]}');
+    expect(existsSync(join(live, 'a'))).toBe(false);
+  });
+
+  it('rejects a scratch destination that aliases the live root through .. or a symlink', () => {
+    const parent = scratch();
+    const live = join(parent, 'live');
+    const elsewhere = join(parent, 'elsewhere');
+    mkdirSync(live);
+    mkdirSync(elsewhere);
+    writeFileSync(join(live, 'queue.json'), '{"items":[]}');
+    expect(() => freezeStateRoot(live, join(elsewhere, '..', 'live'))).toThrow(
+      /overlaps the live root/,
+    );
+    const alias = join(elsewhere, 'alias');
+    symlinkSync(live, alias);
+    expect(() => freezeStateRoot(live, alias)).toThrow(/overlaps the live root/);
+  });
+
+  it('refuses a symlinked scratch destination file without writing through it', () => {
+    const live = root({ 'queue.json': '{"items":[]}', 'config.json': '{"k":1}' });
+    const stale = scratch();
+    const outside = join(scratch(), 'victim.json');
+    writeFileSync(outside, 'untouched');
+    mkdirSync(join(stale, 'a'), { recursive: true });
+    symlinkSync(outside, join(stale, 'a', 'config.json'));
+    expect(() => freezeStateRoot(live, stale)).toThrow(/symbolic link/);
+    expect(readFileSync(outside, 'utf8')).toBe('untouched');
+  });
+
+  it('still accepts a sibling scratch root that merely shares a name prefix', () => {
+    const parent = scratch();
+    const live = join(parent, 'a');
+    mkdirSync(live);
+    writeFileSync(join(live, 'queue.json'), '{"items":[]}');
+    const frozen = freezeStateRoot(live, join(parent, 'ab'));
+    expect(readFileSync(join(frozen.a, 'queue.json'), 'utf8')).toBe('{"items":[]}');
   });
 
   it('notices a live queue change and treats an absent queue as stable', () => {

@@ -1893,10 +1893,16 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # set as push items. These reviews scan the raw base..head range — not a
         # projection — so the else branch below threads clone/classes instead.
         cfg = repo_registry.by_repo(REPOS, item_repo(item))
-        if cfg is None:
+        if cfg is None and item["kind"] == local_review_runtime.KIND:
+            # A manual review of an unconfigured repository runs in its
+            # on-demand clone with the universal secret-shape set only.
+            repo_clone = local_review_runtime.transport.clone_for(sys.modules[__name__], item_repo(item))
+            scan_classes = UNIVERSAL_SCAN_CLASSES
+        elif cfg is None:
             raise RuntimeError(f"{item['kind']} item names an unconfigured repo: {item_repo(item)}")
-        repo_clone = Path(cfg["clone"])
-        scan_classes = UNIVERSAL_SCAN_CLASSES | set(cfg["scan_extra_classes"])
+        else:
+            repo_clone = Path(cfg["clone"])
+            scan_classes = UNIVERSAL_SCAN_CLASSES | set(cfg["scan_extra_classes"])
     if item["kind"] in (review_receipt.KIND, push_current.KIND):
         patch = git("diff", "--text", "--no-textconv", "--no-ext-diff", "--no-renames", "--no-color",
                     "--unified=0", plan["base"], plan["head"], cwd=repo_clone)
@@ -2525,9 +2531,12 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         try:
             try:
                 clone = local_review_runtime.transport.clone_for(sys.modules[__name__], item_repo(item))
+                if not clone.is_dir():
+                    raise ValueError("review clone absent")
             except ValueError:
                 # Resolve the owning git directory before removing a worktree
-                # whose repo was removed from REPOS. Never use the primary clone.
+                # whose repo was removed from REPOS (its manual-review clone
+                # path then does not exist). Never use the primary clone.
                 clone = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir",
                                  cwd=Path(meta["worktree"])))
             remove_worktree(Path(meta["worktree"]), meta["wt_branch"], clone=clone)
@@ -2983,14 +2992,8 @@ def ordinary_review_eligible(q):
                for i in live_items(q))
 
 
-def coverage_fallback(q, log, dry, only, ordinary_eligible=None):
-    previous = q.get("backfill_ordinary_exhausted", False)
-    if ordinary_eligible is False:
-        q["backfill_ordinary_exhausted"] = True
-    try:
-        return _coverage_fallback(q, log, dry, only)
-    finally:
-        q["backfill_ordinary_exhausted"] = previous
+def coverage_fallback(q, log, dry, only):
+    return _coverage_fallback(q, log, dry, only)
 
 
 def _coverage_fallback(q, log, dry, only):
@@ -3070,15 +3073,11 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
     turn = not only and background_turn(q) and any(
         i["state"] == "pending" and rank(i) < 2 for i in selection)
     if turn:
-        # Try rank 2–3 plans in order; their ordinary gates establish eligibility.
+        # Try rank 2–3 plans first for fairness; rank-4 backfill is strictly
+        # lowest and never launches ahead of a pending rank 0–3 item.
         selection.sort(key=lambda i: (not bool(i.get("operator_priority")),
             0 if 2 <= rank(i) <= 3 else 1))
     for item in selection:
-        if turn and not item.get("operator_priority") and not 2 <= rank(item) <= 3:
-            turn = False
-            started, has_coverage = coverage_fallback(q, log, dry, only, ordinary_eligible=False)
-            if started or (dry and has_coverage):
-                break
         if only and item["id"] != only:
             continue
         if item["state"] != "pending":
@@ -3394,23 +3393,37 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         # State persists before admission so a crash cannot re-enroll a range.
         log += push_current.discover(sys.modules[__name__], q, dry)
     starts_before = len(q.get("starts", []))
-    for item in list(live_items(q)):
-        if not dry and item.get("kind") == local_review_runtime.KIND and item.get("publication_pending"):
-            local_review_runtime.republish(sys.modules[__name__], q, item)
-        if item["state"] == "reviewing":
-            msg = harvest_review(q, item, dry)
-            if msg:
-                log.append(msg)
-        if item["state"] == "addressing":
-            if not dry:
-                item["state"] = "repair_failed"
-                item["last_error"] = "legacy addressing retained for manual reconciliation; no new dispatch"
-        if not dry and item.get("repair_runs"):
-            try:
-                log.extend(repair_tick.harvest(sys.modules[__name__], q, item))
-            except Exception as exc:
-                key = "repair_error" if item["kind"] == review_receipt.KIND else "last_error"
-                item[key] = "repair harvest failed: " + str(exc)[:300]
+    # The backfill fix-PR count belongs to this tick's harvest pass alone: it is
+    # cleared before the read and after the pass, so a publication outside the
+    # pass never sees another tick's count (an unread count holds creation).
+    repair_tick.reset_fix_pr_backlog()
+    if not dry and repair_tick.backfill_repair_present(q):
+        # Before the first publish: the hard cap on backfill fix PRs reads this
+        # and the drain reads the file it writes. One forge request under its
+        # own allowance, like reconcile below; a tick with no backfill repair
+        # work makes no call.
+        with forge_window(ForgeBudget(requests=1, seconds=30)):
+            repair_tick.refresh_fix_pr_backlog(sys.modules[__name__])
+    try:
+        for item in list(live_items(q)):
+            if not dry and item.get("kind") == local_review_runtime.KIND and item.get("publication_pending"):
+                local_review_runtime.republish(sys.modules[__name__], q, item)
+            if item["state"] == "reviewing":
+                msg = harvest_review(q, item, dry)
+                if msg:
+                    log.append(msg)
+            if item["state"] == "addressing":
+                if not dry:
+                    item["state"] = "repair_failed"
+                    item["last_error"] = "legacy addressing retained for manual reconciliation; no new dispatch"
+            if not dry and item.get("repair_runs"):
+                try:
+                    log.extend(repair_tick.harvest(sys.modules[__name__], q, item))
+                except Exception as exc:
+                    key = "repair_error" if item["kind"] == review_receipt.KIND else "last_error"
+                    item[key] = "repair harvest failed: " + str(exc)[:300]
+    finally:
+        repair_tick.reset_fix_pr_backlog()
     if not dry:
         # Findings-issue retries (the review is terminal; only the issue upload
         # can still be outstanding) run after the harvest pass and are capped, so

@@ -24,8 +24,12 @@ only when the observed topology is within the declared shapes: no foreign
 prefix entries, enablement links, drop-ins, dependency references, or
 unexpected manager units. Socket activation is scanned too: ``[Socket]
 Service=`` names the unit its incoming traffic starts, so a co-installed
-socket naming the selected unit is a foreign dependency edge. The examined
-scope is the user unit directory plus
+socket naming the selected unit is a foreign dependency edge. Common ``[Unit]``
+dependencies apply to every unit type, so an entry is scanned whenever it
+carries any unit suffix rather than only the declared service/timer/path
+shapes; a co-installed ``ingress.slice`` naming the selected unit is therefore
+foreign even though its name is outside the manager-listing prefix. The
+examined scope is the user unit directory plus
 the user manager's installed and loaded lists. A non-CRQ unit that names a CRQ
 unit only in memory, transient or generated state, another namespace, or an
 activation created between the scan and the fence is outside this scope and
@@ -96,6 +100,16 @@ DEPENDENCY_RE = re.compile(
     r"WantedBy|RequiredBy|Also|Upholds|OnFailure|OnSuccess|Triggers|"
     r"TriggersBy|Unit|Service)\s*=\s*(?P<value>.*)")
 UNIT_SUFFIXES = {".service", ".timer", ".path"}
+# ``[Unit]`` dependency directives apply to every unit type, not only the
+# service/timer/path shapes the selected topology declares. A co-installed
+# ``ingress.slice`` with ``Wants=crq-tick.service`` starts the selected unit
+# even though its name is outside the manager-listing prefix, so the dependency
+# scan reads every loadable unit type as well as drop-in ``.conf`` files.
+# ``.device`` and ``.scope`` units cannot be loaded from a unit file, but
+# reading an entry that carries one of those suffixes is harmless.
+SCANNED_SUFFIXES = {".conf", ".device", ".automount", ".mount",
+                    ".path", ".scope", ".service", ".slice", ".socket",
+                    ".swap", ".target", ".timer"}
 
 
 def _expand_instance(path, value):
@@ -105,13 +119,23 @@ def _expand_instance(path, value):
     as ``Service=%i.service``; without expansion the CRQ name is invisible to
     the dependency scan. A drop-in directory carries the instance in its
     parent name (``ingress@crq-tick.socket.d``).
+
+    The instance runs from the ``@`` to the final unit-type suffix, so it may
+    itself contain dots: ``ingress@crq-tick.service.socket`` has the instance
+    ``crq-tick.service``, and leaving ``%i`` unexpanded there would hide the
+    activation edge.
+
+    A unit without an instance is not exempt: systemd expands ``%i``/``%I``
+    to the empty string there, so ``Service=crq%i-tick.service`` on
+    ``ingress.socket`` names ``crq-tick.service``. Leaving the specifier in
+    place would keep that CRQ reference invisible to the scan.
     """
     name = path.name
     if path.parent.name.endswith(".d"):
         name = path.parent.name[:-2]
-    found = re.match(r"[^@]*@(?P<instance>[^.]*)\.[^.]+\Z", name)
+    found = re.match(r"[^@]*@(?P<instance>.*)\.[^.]+\Z", name)
     if found is None:
-        return value
+        return value.replace("%i", "").replace("%I", "")
     instance = found.group("instance")
     return value.replace("%i", instance).replace("%I", instance)
 
@@ -638,8 +662,7 @@ class SubprocessSystemd:
                             continue
                         elif not entry.is_file(follow_symlinks=False):
                             continue
-                        if path.suffix not in {".service", ".timer", ".path",
-                                               ".socket", ".target", ".conf"}:
+                        if path.suffix not in SCANNED_SUFFIXES:
                             continue
                         try:
                             data = _read_file(path, max_bytes=MAX_UNIT_BYTES)
@@ -778,6 +801,12 @@ class SubprocessSystemd:
                     "paths": paths, "units": {name: {} for name in sorted(units)},
                     "foreign": foreign, "jobs": []}
         declared_set = {str(path) for path in declared}
+        declared_resolved = set()
+        for path in declared:
+            try:
+                declared_resolved.add(path.resolve())
+            except (OSError, RuntimeError):
+                declared_resolved.add(path)
         prefix = unit.split(".")[0]
         for entry in sorted(entries):
             name = entry.name
@@ -796,12 +825,34 @@ class SubprocessSystemd:
                 if dropin_error is not None:
                     foreign.append(dropin_error)
                 continue
+            # systemd lets a plain name of the same type alias a unit, and an
+            # alias can be used in dependency directives, so an undeclared
+            # top-level symlink that resolves to a declared unit would activate
+            # the verified unit through a name the prefix checks never see.
+            if entry.is_symlink() and str(entry) not in declared_set:
+                try:
+                    alias_target = entry.resolve(strict=False)
+                except (OSError, RuntimeError):
+                    alias_target = None
+                if alias_target in declared_resolved:
+                    foreign.append("undeclared alias of a declared unit: "
+                                   + str(entry))
+                    continue
             if name.startswith(prefix) and str(entry) not in declared_set:
                 foreign.append("unexpected installed entry: " + str(entry))
             is_dir, probe_failure = _directory_probe(entry)
             if probe_failure is not None \
                     and name.endswith((".d", ".wants", ".requires")):
                 error = error or probe_failure
+                continue
+            # systemd v257 resolves a symlinked .wants/.requires directory and
+            # loads the links inside it, while the no-follow probe above and
+            # the no-follow dependency scan both skip the directory, so its
+            # contents would go unexamined. Keep the no-follow policy and
+            # refuse rather than treat the dependency edges as absent.
+            if entry.is_symlink() and name.endswith((".wants", ".requires")):
+                error = error or ("dependency directory is a symlink that "
+                                  "discovery does not follow: " + str(entry))
                 continue
             # An inherited type-wide or dash-prefix drop-in directory is
             # merged into an expected unit even though it is not named after
@@ -995,6 +1046,7 @@ class HostLayout:
 
 
 def production_adapter(effects, overlay, *, unit, runtime, artifact_root=None,
+                       source_sha=None,
                        systemd=None, journal_source=None, identity=None,
                        queue_drain=None, require_journal_witness=True,
                        **options):
@@ -1014,11 +1066,14 @@ def production_adapter(effects, overlay, *, unit, runtime, artifact_root=None,
             "record directory is unavailable: " + str(exc)[:160]) from exc
     layout.validate()
     controller = _controller_module(effects)
-    try:
-        source_sha = effects.git("rev-parse", "HEAD")
-    except controller.Refused as exc:
-        raise LiveBindingRefused(
-            "deployment HEAD is unavailable: " + str(exc)[:300]) from exc
+    if source_sha is None:
+        # Recovery passes the commit its record retained; a fresh composition
+        # renders at the deployment HEAD.
+        try:
+            source_sha = effects.git("rev-parse", "HEAD")
+        except controller.Refused as exc:
+            raise LiveBindingRefused(
+                "deployment HEAD is unavailable: " + str(exc)[:300]) from exc
     systemd = systemd or SubprocessSystemd(unit_dir=layout.unit_dir)
     journal_source = journal_source or completion.SystemdJournalSource(user=True)
     identity = identity or ProcessIdentity()

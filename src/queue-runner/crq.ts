@@ -18,6 +18,11 @@ import { runStatusWriter } from '../adapters/crq/statusWriter.js';
 import { runBackfillUnit } from '../adapters/crq/backfillSource.js';
 import { pythonJsonText } from '../policy/crq/pythonJson.js';
 import { runReconcileMergedUnit } from '../adapters/crq/reconcileSource.js';
+import {
+  type Capability,
+  dispatchedRefusal,
+  runCapabilityDispatcher,
+} from '../adapters/crq/capabilityDispatcher.js';
 import { MAX_REQUEST_BYTES, runQueueCapabilityMain } from '../adapters/crq/queueCapabilityMain.js';
 import { REVIEW_MAX_BYTES } from '../ops/crq/reviewCapability.js';
 import { AUTHOR_MAX_SNAPSHOT_BYTES } from '../policy/crq/authorWire.js';
@@ -41,53 +46,82 @@ async function readFrame(limit: number = MAX_REQUEST_BYTES + 1): Promise<Uint8Ar
 
 const root = process.cwd();
 const [command, ...rest] = process.argv.slice(2);
-if (command === 'queue-capability') {
+/** The three forced-command capabilities, shared by their direct routes and `dispatch`. */
+const stdio = {
+  env: (name: string) => process.env[name],
+  stdout: (bytes: Uint8Array) => {
+    process.stdout.write(bytes);
+  },
+  stderr: (message: string) => {
+    process.stderr.write(`${message}\n`);
+  },
+};
+const serveQueue = (
+  argv: readonly string[],
+  stderr: (message: string) => void = stdio.stderr,
+): Promise<number> =>
   // The forced-command route: policy and identity come from the environment,
   // the request frame from stdin, and nothing else is accepted.
-  process.exitCode = await runQueueCapabilityMain({
-    argv: rest,
-    env: (name) => process.env[name],
+  runQueueCapabilityMain({
+    ...stdio,
+    stderr,
+    argv,
     readStdin: readFrame,
-    stdout: (bytes) => {
-      process.stdout.write(bytes);
-    },
-    stderr: (message) => {
-      process.stderr.write(`${message}\n`);
-    },
     // The deadline must end the process, not just the race: a pending stdin
     // read or a held queue lock would otherwise outlive the refusal.
     terminate: () => process.exit(2),
     root,
   });
-} else if (command === 'review-capability') {
-  process.exitCode = await runReviewCapabilityMain({
-    argv: rest,
-    env: (name) => process.env[name],
+const serveReview = (
+  argv: readonly string[],
+  stderr: (message: string) => void = stdio.stderr,
+): Promise<number> =>
+  runReviewCapabilityMain({
+    ...stdio,
+    stderr,
+    argv,
     readStdin: () => readFrame(REVIEW_MAX_BYTES + 1),
-    stdout: (bytes) => {
-      process.stdout.write(bytes);
-    },
-    stderr: (message) => {
-      process.stderr.write(`${message}\n`);
-    },
     terminate: (code = 2) => process.exit(code),
     root,
     deadlineMs: REVIEW_DEADLINE_MS,
   });
-} else if (command === 'author-capability') {
-  process.exitCode = await runAuthorCapabilityMain({
-    argv: rest,
-    env: (name) => process.env[name],
+const serveAuthor = (
+  argv: readonly string[],
+  stderr: (message: string) => void = stdio.stderr,
+): Promise<number> =>
+  runAuthorCapabilityMain({
+    ...stdio,
+    stderr,
+    argv,
     readStdin: () => readFrame(AUTHOR_MAX_SNAPSHOT_BYTES + 1),
-    stdout: (bytes) => {
-      process.stdout.write(bytes);
-    },
-    stderr: (message) => {
-      process.stderr.write(`${message}\n`);
-    },
     terminate: () => process.exit(2),
     root,
     deadlineMs: AUTHOR_DEADLINE_MS,
+  });
+
+/** Under `dispatch` every refusal line is the one the Python dispatcher prints. */
+const rewritten = (capability: Capability) => (): void => {
+  stdio.stderr(dispatchedRefusal(capability));
+};
+
+if (command === 'queue-capability') {
+  process.exitCode = await serveQueue(rest);
+} else if (command === 'review-capability') {
+  process.exitCode = await serveReview(rest);
+} else if (command === 'author-capability') {
+  process.exitCode = await serveAuthor(rest);
+} else if (command === 'dispatch') {
+  // `capability_dispatcher.py`: the one SSH forced command. The request text
+  // selects an exact capability and nothing else.
+  process.exitCode = await runCapabilityDispatcher({
+    argv: rest,
+    env: stdio.env,
+    stderr: stdio.stderr,
+    handlers: {
+      'author-v1': () => serveAuthor([], rewritten('author-v1')),
+      'queue-v1': () => serveQueue([], rewritten('queue-v1')),
+      'review-v1': () => serveReview([], rewritten('review-v1')),
+    },
   });
 } else {
   const stateHome = process.env.XDG_STATE_HOME;
@@ -138,8 +172,11 @@ if (command === 'queue-capability') {
       if (liveCommand === 'reconcile-merged') {
         // Python's `reconcile-merged` takes the tick lock, reads the persisted
         // wrapper under `<state>/reconcile` and stages enrollment in queue.json.
-        const repo = await readRunnerRepo(root);
-        if (repo === null) {
+        // The repository and the state root come from ONE config.json read: two
+        // reads could pair repository A with a state root rewritten in between
+        // (and the second read's default would hide an unreadable file).
+        const targets = await readReconcileTargets(root);
+        if (targets === null) {
           return {
             artifact: {
               status: 'failed' as const,
@@ -149,8 +186,8 @@ if (command === 'queue-capability') {
           };
         }
         return runReconcileMergedUnit(args, {
-          repo,
-          stateRoot: await publisherStateRoot(root),
+          repo: targets.repo,
+          stateRoot: targets.stateRoot,
         });
       }
       if (liveCommand === 'status') {
@@ -158,19 +195,27 @@ if (command === 'queue-capability') {
         if (!parsed.ok) return usageArtifact('status', parsed.message);
         // The queue-runner binary's stdout is exactly one JSON document for
         // every command; the operator-readable markdown travels in the
-        // artifact's `value` field, not the stdout channel.
+        // artifact's `value` field, not the stdout channel. The writer's
+        // refusal text rides the same artifact (the `error` field), so this
+        // route keeps stderr empty under doctrine I1.
         let statusMarkdown = '';
+        let statusError = '';
         const exitCode = await runStatusWriter(statusRoots(parsed.stateRoot), {
           write: (text) => {
             statusMarkdown = text;
           },
-          error: (text) => process.stderr.write(text),
+          error: (text) => {
+            statusError = text;
+          },
         });
         return {
           artifact:
             exitCode === 0
               ? { status: 'ok' as const, value: { markdown: statusMarkdown } }
-              : { status: 'failed' as const, error: 'status write failed' },
+              : {
+                  status: 'failed' as const,
+                  error: statusError.trimEnd() || 'status write failed',
+                },
           exitCode,
         };
       }
@@ -231,16 +276,36 @@ export async function publishLiveCommand(
   return runPublishUnit(validated);
 }
 
-/** `crq.REPO`: the runner's configured repository, or null when unusable. */
-async function readRunnerRepo(runnerRoot: string): Promise<string | null> {
+/**
+ * The reconcile route's two targets from ONE config.json read: `crq.REPO` and
+ * the state root the publisher would use. Returns null when the configuration
+ * is unusable (missing, malformed or without a repo) instead of falling back to
+ * a guessed state root, so the route can never pair repository A with a root
+ * derived from a rewritten file, or with `<runner>/state` after a read failure.
+ */
+async function readReconcileTargets(
+  runnerRoot: string,
+): Promise<{ readonly repo: string; readonly stateRoot: string } | null> {
+  let config: unknown;
   try {
-    const config = JSON.parse(await readFile(join(runnerRoot, 'config.json'), 'utf8')) as unknown;
-    if (typeof config !== 'object' || config === null || Array.isArray(config)) return null;
-    const repo = (config as Record<string, unknown>)['repo'];
-    return typeof repo === 'string' && repo !== '' ? repo : null;
+    config = JSON.parse(await readFile(join(runnerRoot, 'config.json'), 'utf8'));
   } catch {
     return null;
   }
+  if (typeof config !== 'object' || config === null || Array.isArray(config)) return null;
+  const record = config as Record<string, unknown>;
+  const repo = record['repo'];
+  if (typeof repo !== 'string' || repo === '') return null;
+  // Same derivation as {@link publisherStateRoot}/{@link readPublisherRoots},
+  // including resolving a relative configured root against the runner root.
+  const configuredStateRoot =
+    typeof record['state_root'] === 'string' && record['state_root'] !== ''
+      ? record['state_root']
+      : join(runnerRoot, 'state');
+  const stateRoot = isAbsolute(configuredStateRoot)
+    ? configuredStateRoot
+    : resolve(runnerRoot, configuredStateRoot);
+  return { repo, stateRoot };
 }
 
 /**

@@ -38,6 +38,31 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     ).toBe(false);
   });
 
+  test('config.mode is authoritative: the overlay cannot flip prep into a fixer run', () => {
+    // TYPE pin: `mode` is CONFIG-GRADE (it also gates the assembler) and is
+    // excluded from the overlay — an overlay carrying it is a compile error.
+    const overridden: SweepUnitJobOverlay = {
+      push: false,
+      // @ts-expect-error — mode is config-owned; prep must stay probe-only
+      mode: 'fix',
+    };
+    void overridden;
+    // RUNTIME pin: even an overlay that reaches the builder past the type
+    // (a JSON-authored plan) cannot replace the config's prep mode.
+    const hostile = { mode: 'fix' } as unknown as SweepUnitJobOverlay;
+    const plan = buildSweepPlan({ ...CONFIG, mode: 'prep' }, twoUnitReport(), undefined, hostile);
+    const inputs = plan.jobs
+      .slice(1, 3)
+      .map((job) => SweepUnitDispatchInputSchema.parse(job.input));
+    for (const input of inputs) expect(input.mode).toBe('prep');
+    // And the assembly gate agrees: a prep run assembles nothing.
+    expect(plan.jobs.map((job) => job.id)).toEqual([
+      'sweep-plan',
+      'sweep-alpha-fix',
+      'sweep-beta-fix',
+    ]);
+  });
+
   test('config.unitDispatch makes the enriched jobs dispatch-ready; absent leaves them unwired (jeDch)', () => {
     const driver = {
       provider: 'cq-e2e',

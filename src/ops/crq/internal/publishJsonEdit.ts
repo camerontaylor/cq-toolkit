@@ -14,7 +14,7 @@ export function setKeys(
       replacement.has(key) ? (replacement.get(key) as JsonValue) : value,
     ],
   );
-  for (const [key, value] of updates) {
+  for (const [key, value] of replacement) {
     if (!object.has(key)) entries.push([key, value]);
   }
   return new JsonObject(entries);

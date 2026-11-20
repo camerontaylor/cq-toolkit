@@ -111,6 +111,20 @@ describe('review.address candidate isolation', () => {
       await f.cleanup();
     }
   });
+  test('binary lockfiles with different bytes refuse dependency reuse', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      // 0x80 and 0x81 both decode to U+FFFD as UTF-8; they must still differ.
+      await writeFile(join(f.repo.root, 'bun.lockb'), Buffer.from([0x80]));
+      f.repo.commitAll('binary lockfile');
+      await writeFile(join(f.dependencyRoot, 'bun.lockb'), Buffer.from([0x81]));
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.reason).toContain('manifests/locks differ');
+      expect(f.calls()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
   test.each(['preinstall', 'install', 'postinstall', 'prepare', 'pnpm:devPreinstall'])(
     'changed %s lifecycle refuses dependency reuse before model dispatch',
     async (hook) => {

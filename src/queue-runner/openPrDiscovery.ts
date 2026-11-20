@@ -10,6 +10,8 @@ export interface OpenPr {
   readonly base: string;
   readonly headRef: string;
   readonly head: string;
+  /** True for a head branch that lives in a fork, never in the listed repository. */
+  readonly crossRepository: boolean;
 }
 export interface PrDiscoveryRepo {
   readonly repo: string;
@@ -64,9 +66,12 @@ function chain(pr: OpenPr, opened: readonly OpenPr[], branches: readonly string[
   let current: OpenPr | undefined = pr;
   for (let i = 0; i < 8 && current; i++) {
     if (branches.includes(current.base)) return true;
-    // Forks can have the same head name. Without proven repository identity,
-    // refuse ambiguity instead of letting inventory order pick a parent.
-    const parents = opened.filter((candidate) => candidate.headRef === current?.base);
+    // A fork's head ref names a branch in another repository, so it is never a
+    // parent here; the remaining same-repo heads can still collide by name, and
+    // that ambiguity is refused instead of letting inventory order pick a parent.
+    const parents = opened.filter(
+      (candidate) => !candidate.crossRepository && candidate.headRef === current?.base,
+    );
     current = parents.length === 1 ? parents[0] : undefined;
   }
   return false;
@@ -88,7 +93,10 @@ function equivalent(cycle: JsonValue, base: string, head: string): boolean {
     run.length > 0
   );
 }
-function newestHead(cycles: readonly JsonValue[]): string | null {
+/** Newest captured cycle with both its base and head, so callers can check the base. */
+function newestCycle(
+  cycles: readonly JsonValue[],
+): { readonly base: JsonValue | undefined; readonly head: string } | null {
   const records = cycles.filter(
     (c): c is JsonObject => c instanceof JsonObject && typeof c.get('completed_at') === 'string',
   );
@@ -98,7 +106,7 @@ function newestHead(cycles: readonly JsonValue[]): string | null {
   const last = records[0];
   if (!last) return null;
   const head = last.get('pr_head') || last.get('head');
-  return typeof head === 'string' ? head : null;
+  return typeof head === 'string' ? { base: last.get('base'), head } : null;
 }
 /** Returns replacement queue, including association updates; never dispatches. */
 export async function discoverOpenPrs(
@@ -192,10 +200,14 @@ export async function discoverOpenPrs(
         }
         const evidence = mine.flatMap((item) => list(item.get('cycles')));
         if (repo.primary) {
-          const previous = newestHead(evidence);
-          if (previous && previous !== pr.head) {
+          // Repair proof suppresses only the delta since the previous head. That is
+          // sound only while the captured range used today's pin as its base: a
+          // retarget to an older base adds commits the repair never covered, and
+          // those must reach the equivalence check below instead of being skipped.
+          const previous = newestCycle(evidence);
+          if (previous && previous.base === pin && previous.head !== pr.head) {
             try {
-              if (await effects.ownRange(queue, previous, pr.head)) continue;
+              if (await effects.ownRange(queue, previous.head, pr.head)) continue;
             } catch {
               /* without proof review remains owed */
             }

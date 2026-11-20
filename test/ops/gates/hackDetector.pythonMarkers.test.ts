@@ -72,6 +72,7 @@ describe('hackDetector: Python skip/xfail markers (#774)', () => {
     [['from pytest import mark'], '@mark.xfail', 'pytest.mark.xfail'],
     [['from pytest import mark as m'], '@m.skipif(True, reason="x")', 'pytest.mark.skipif'],
     [['from pytest import skip'], '    skip("x")', 'pytest.skip'],
+    [['from pytest import skip as s'], '    raise s.Exception("x")', 'pytest.skip'],
     [['from pytest import xfail as xf'], '    xf("x")', 'pytest.xfail'],
     [['import unittest as ut'], '@ut.skipIf(True, "x")', 'unittest.skipIf'],
     [['from unittest import skip'], '@skip("later")', 'unittest.skip'],
@@ -109,6 +110,18 @@ describe('hackDetector: Python skip/xfail markers (#774)', () => {
       ' from pytest import mark as m',
     ].join('\n');
     expect(await markersOf(reversed)).toEqual(['pytest.mark.xfail']);
+  });
+
+  test('importorskip in a test signature or its continuation is not a test body', async () => {
+    expect(await markersOf(pyDiff(['def test_np(np=pytest.importorskip("numpy")):']))).toEqual([]);
+    expect(
+      await markersOf(
+        pyDiff(['def test_np(', '    np=pytest.importorskip("numpy"),', '):', '    pass']),
+      ),
+    ).toEqual([]);
+    expect(
+      await markersOf(pyDiff(['    np = pytest.importorskip("numpy")'], ['def test_np():'])),
+    ).toEqual(['pytest.importorskip']);
   });
 
   test('pytest.importorskip flags only inside a visible test body (documented policy)', async () => {
@@ -376,6 +389,18 @@ describe('hackDetector: Python skip/xfail markers (#774)', () => {
     expect(await markersOf(diff)).toEqual(['pytest.skip']);
     const findings = await findingsOf(diff);
     expect(findings.map((f) => f.line)).toEqual([6]);
+  });
+
+  test('a short literal continued by an escaped newline keeps its state across lines', async () => {
+    expect(
+      await markersOf(
+        pyDiff(['def test_x():', '    text = "prefix \\', 'suffix"; pytest.skip("x")']),
+      ),
+    ).toEqual(['pytest.skip']);
+    // The continued literal is still string content, so a marker inside it is not code.
+    expect(
+      await markersOf(pyDiff(['msg = "prefix \\', 'pytest.mark.skip is prose"; assert True'])),
+    ).toEqual([]);
   });
 
   test('a docstring opened on a context line hides an added marker inside it', async () => {

@@ -219,7 +219,10 @@ export async function isolateAddressMany(
   options.onPartial?.(root);
   try {
     const origin = await git('git', ['-C', repoRoot, 'remote', 'get-url', 'origin']);
-    await git('git', ['clone', '--no-hardlinks', '--', repoRoot, root]);
+    // `--dissociate` copies any objects reachable only through a borrowed
+    // alternate store: without it, pruning that store or removing its reference
+    // repository would corrupt a clone holding unpushed fixes.
+    await git('git', ['clone', '--no-hardlinks', '--dissociate', '--', repoRoot, root]);
     await git('git', ['-C', root, 'remote', 'set-url', 'origin', origin.stdout.trim()]);
     // Clone-setup calls carry the caller's sshCommand only through this flow's
     // environment; later Git calls in the clone (fetch, addressing, push) run
@@ -251,6 +254,14 @@ export async function isolateAddressMany(
       'origin',
       `+refs/heads/${target}:refs/remotes/origin/${target}`,
     ]);
+    // A local clone does not copy objects the source reaches only through the
+    // caller's GIT_ALTERNATE_OBJECT_DIRECTORIES: the clone resolves them while
+    // that variable is set and loses them once the store goes away. Repack
+    // after the target fetch, while the variable is still visible, so the
+    // refreshed target's objects are pulled in too; without the variable the
+    // clone already owns its objects, so skip the cost.
+    if ((env.GIT_ALTERNATE_OBJECT_DIRECTORIES ?? '') !== '')
+      await git('git', ['-C', root, 'repack', '-a', '-d', '-q']);
     const modules = resolve(repoRoot, 'node_modules');
     try {
       await access(modules);
@@ -661,7 +672,20 @@ function makeReviewAddressManyCore(
                       ...(report?.costUSD === undefined ? {} : { costUSD: report.costUSD }),
                     })
                   : undefined;
-                const known = observation?.usage !== undefined && usage !== undefined;
+                // `report.usage` is an ADDITIVE total, so it cannot prove the
+                // leg's provider spend was fully measured: an unmeasured dispatch
+                // folds zero into that total while `report.usageSummary` records
+                // it as an unknown observation. A summary carrying any unknown
+                // observation therefore makes the leg's spend UNKNOWN, so it
+                // settles through the same unknown-usage path below and can never
+                // release its reservation as a known token amount. A report that
+                // predates the summary (absent) makes no unknown claim and keeps
+                // the measurement-only rule.
+                const unknownObservationInReport = (report?.usageSummary?.unknownCount ?? 0) > 0;
+                const known =
+                  observation?.usage !== undefined &&
+                  usage !== undefined &&
+                  !unknownObservationInReport;
                 // Exit spend is recorded EXACTLY ONCE per admitted leg, at its
                 // settlement point: the normalized observation when the settled
                 // report carried a valid measurement, an explicit unknown observation
@@ -671,7 +695,7 @@ function makeReviewAddressManyCore(
                 // refusal cannot invent spend. A telemetry failure degrades to
                 // unknown and never replaces the leg's settlement.
                 try {
-                  record(identity.id, observation ?? {});
+                  record(identity.id, known ? (observation ?? {}) : {});
                 } catch {
                   try {
                     record(identity.id, {});
