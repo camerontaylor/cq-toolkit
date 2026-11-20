@@ -110,6 +110,11 @@ class StopOwnedProcessTests(unittest.TestCase):
         result, still_there = self._stop("inactive")
         self.assertTrue(result["stopped"])
         self.assertFalse(still_there)
+        show = ["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
+                "-p", "ControlGroup", "crq-vm-r1.scope"]
+        stop = ["systemctl", "--user", "stop", "crq-vm-r1.scope"]
+        # Ownership proof first, then the stop, then the post-stop state query.
+        self.assertEqual(self.dispatched, [show, stop, show])
 
     def test_failed_scope_is_stopped(self):
         result, _ = self._stop("failed")
@@ -197,6 +202,9 @@ class StopOwnedProcessTests(unittest.TestCase):
                                                  cgroup_after=[])
         self.assertIsInstance(error, RuntimeError)
         self.assertFalse(any("stop" in argv for argv in calls))
+        self.assertEqual(
+            calls, [["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
+                     "-p", "ControlGroup", "crq-vm-r1.scope"]])
         self.assertTrue(still_there)
 
     def test_failed_scope_with_populated_cgroup_keeps_files(self):
