@@ -112,6 +112,17 @@ const IDENTICAL: readonly Vector[] = [
   { name: 'option-shaped value', argv: ['--job', '-x'] },
   { name: 'flag with explicit value', argv: ['--triage-dry-run=1'] },
   { name: 'abbreviated flag with explicit value', argv: ['--tri=1'] },
+  // Help with an explicit value, ambiguous prefixes and short-flag shapes (crq F1).
+  { name: 'short help with a value', argv: ['-h=1'] },
+  { name: 'long help with a value', argv: ['--help=1'] },
+  { name: 'help prefix with a value', argv: ['--he=1'] },
+  { name: 'help with an empty value', argv: ['-h='] },
+  { name: 'triage with an empty value', argv: ['--triage-dry-run='] },
+  { name: 'ambiguous long prefix', argv: ['--=x'] },
+  { name: 'ambiguous short prefix', argv: ['-=x'], disabled: true },
+  { name: 'ambiguous string as a missing value', argv: ['--job', '--=x'] },
+  { name: 'ambiguous after an unknown option', argv: ['--bogus', '--=x'] },
+  { name: 'unknown short options', argv: ['-t', '-j', 'x', '-xh'] },
   // Disabled configuration.
   { name: 'repair disabled', argv: [], config: off },
   { name: 'no repair section', argv: [], config: '{}' },
@@ -168,6 +179,38 @@ describe('crq repair: Node vs Python crq_repair admission', () => {
       expect(node).toEqual(python);
       expect(node.launched).toBe(false);
       expect(node.stdout.split('\n')).toHaveLength(2);
+    });
+  }
+
+  // Declared divergence: Python's help action prints help and exits 0 (no
+  // JSON); Node refuses with the usage artifact. Neither writes or launches.
+  for (const argv of [
+    ['-h'],
+    ['--he'],
+    ['-help'],
+    ['-hx'],
+    ['-h1'],
+    ['-hx=1'],
+    ['--job', 'x', '-hz'],
+    ['--bogus', '-h'],
+  ]) {
+    it(`help: ${argv.join(' ')}`, () => {
+      const vector: Vector = { name: '', argv, disabled: true };
+      const python = execute('python', vector);
+      const node = execute('node', vector);
+      expect(python.status).toBe(0);
+      expect(python.stdout.startsWith('usage: ')).toBe(true);
+      expect(node.status).toBe(2);
+      expect(JSON.parse(node.stdout)).toEqual({
+        error: {
+          kind: 'usage',
+          subcommand: null,
+          message: 'help is not available from the Node runtime',
+          exitCode: 2,
+        },
+      });
+      expect([node.tree, node.launched]).toEqual([python.tree, python.launched]);
+      expect(node.launched).toBe(false);
     });
   }
 

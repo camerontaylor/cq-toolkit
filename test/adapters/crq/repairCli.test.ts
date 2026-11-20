@@ -42,7 +42,7 @@ describe('parseRepairArgv', () => {
   });
 
   it('refuses help rather than print a non-JSON document', () => {
-    for (const flag of ['-h', '--help', '--he'])
+    for (const flag of ['-h', '--help', '--he', '-hx', '-help', '-h1'])
       expect(parseRepairArgv([flag])).toEqual({
         ok: false,
         message: 'help is not available from the Node runtime',

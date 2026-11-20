@@ -20,6 +20,12 @@
  * (exit 1) having written nothing, so `repair` is not a live unit command and
  * `crq-repair.service` stays on Python.
  *
+ * One declared divergence: wherever argparse runs its help action (`-h`,
+ * `--help` and its prefixes, and concatenated `-hx`, `-help`, `-h1`) Python
+ * prints help text and exits 0 with no JSON; Node refuses with the usage
+ * artifact ({@link HELP_REFUSAL}, exit 2). Help with `=value` (`-h=1`,
+ * `--he=1`) is argparse's own usage error in both.
+ *
  * Every path ends in exactly one JSON document on stdout, encoded as Python's
  * bare `json.dumps` (ASCII, `", "`/`": "` separators, insertion order).
  */
@@ -32,6 +38,7 @@ import {
   type JsonValue,
 } from '../../policy/crq/jsonValue.js';
 import { pythonJsonText } from '../../policy/crq/pythonJson.js';
+import { pythonRepr } from '../../policy/crq/prReviewFindings.js';
 import { gateMessage } from '../../ops/crq/internal/repairPassGates.js';
 
 export interface RepairArgs {
@@ -43,49 +50,98 @@ export interface RepairArgs {
 }
 
 type ValueOption = 'job' | 'sourceSha' | 'findingSha256' | 'recoverJob';
-const OPTIONS: readonly (readonly [string, ValueOption | 'triageDryRun'])[] = [
+type OptionKey = ValueOption | 'triageDryRun' | 'help';
+/** argparse's `_option_string_actions`, in registration order (ambiguity lists use it). */
+const OPTIONS: readonly (readonly [string, OptionKey])[] = [
+  ['-h', 'help'],
+  ['--help', 'help'],
   ['--triage-dry-run', 'triageDryRun'],
   ['--job', 'job'],
   ['--source-sha', 'sourceSha'],
   ['--finding-sha256', 'findingSha256'],
   ['--recover-job', 'recoverJob'],
 ];
-const HELP = ['-h', '--help'];
+const HELP_NAME = '-h/--help';
+/** The usage message Node gives where Python's help action would print help. */
+export const HELP_REFUSAL = 'help is not available from the Node runtime';
 
 export type ParsedRepairArgv =
   | { readonly ok: true; readonly args: RepairArgs }
   | { readonly ok: false; readonly message: string };
 
-/** The flag half of `--flag=value` (argparse splits long options only). */
-function flagPart(arg: string): string {
-  const equals = arg.indexOf('=');
-  return equals > 0 && arg.startsWith('--') ? arg.slice(0, equals) : arg;
+/** One of argparse's `(action, option_string, sep, explicit_arg)` interpretations. */
+interface OptionTuple {
+  readonly name: string;
+  readonly key: OptionKey;
+  readonly sep: string | null;
+  readonly explicit: string | null;
 }
 
-/** argparse's `_parse_optional`: does this string look like an option flag? */
-function optionLike(arg: string): boolean {
-  if (!arg.startsWith('-') || arg === '-') return false;
-  // A known option (exact, `=`-split or unique prefix) wins over the rules below.
-  if (resolveFlag(flagPart(arg)) !== null) return true;
+/** Python `str.partition('=')`: no separator leaves `sep`/`explicit` null. */
+function partitionEquals(arg: string): readonly [string, string | null, string | null] {
+  const at = arg.indexOf('=');
+  return at < 0 ? [arg, null, null] : [arg.slice(0, at), '=', arg.slice(at + 1)];
+}
+
+/** argparse `_get_option_tuples` (abbreviations on), for `-x...` and `--x...`. */
+function optionTuples(arg: string): OptionTuple[] {
+  const [prefix, sep, explicit] = partitionEquals(arg);
+  const tuples: OptionTuple[] = [];
+  const longForm = arg[1] === '-';
+  for (const [name, key] of OPTIONS) {
+    if (!longForm && name === arg.slice(0, 2))
+      tuples.push({ name, key, sep: '', explicit: arg.slice(2) });
+    else if (name.startsWith(prefix)) tuples.push({ name, key, sep, explicit });
+  }
+  return tuples;
+}
+
+/**
+ * argparse `_parse_optional`: the interpretations of an option-like string,
+ * `'unknown'` for an option-shaped string no option matches, or `null` for a
+ * positional (a value).
+ */
+function parseOptional(arg: string): OptionTuple[] | 'unknown' | null {
+  if (arg === '' || !arg.startsWith('-')) return null;
+  const exact = OPTIONS.find(([name]) => name === arg);
+  if (exact) return [{ name: exact[0], key: exact[1], sep: null, explicit: null }];
+  if (arg.length === 1) return null;
+  const [head, sep, explicit] = partitionEquals(arg);
+  const split = sep === null ? undefined : OPTIONS.find(([name]) => name === head);
+  if (split) return [{ name: split[0], key: split[1], sep, explicit }];
+  const tuples = optionTuples(arg);
+  if (tuples.length > 0) return tuples;
   // `_negative_number_matcher` (`-\.?\d`, a prefix match): with no option that
   // looks like a negative number, such a string is a value.
-  if (/^-\.?\d/.test(arg)) return false;
+  if (/^-\.?\d/.test(arg)) return null;
   // An unknown option-shaped string containing a space is a value.
-  if (arg.includes(' ')) return false;
-  return true;
+  return arg.includes(' ') ? null : 'unknown';
 }
 
-/** The long option `flag` names, by exact match or argparse's unique prefix. */
-function resolveFlag(
-  flag: string,
-): readonly [string, ValueOption | 'triageDryRun'] | 'help' | null {
-  if (!flag.startsWith('--') || flag === '--') return HELP.includes(flag) ? 'help' : null;
-  const exact = OPTIONS.find(([name]) => name === flag);
-  if (exact) return exact;
-  if ('--help'.startsWith(flag)) return 'help';
-  // Every option has a distinct third character, so a prefix is never ambiguous.
-  const matches = OPTIONS.filter(([name]) => name.startsWith(flag));
-  return matches.length === 1 ? matches[0]! : null;
+const ignored = (explicit: string): string =>
+  `argument ${HELP_NAME}: ignored explicit argument ${pythonRepr(explicit)}`;
+
+/**
+ * argparse `consume_optional`'s walk over `-h`'s concatenated tail (`-hx`,
+ * `-hh`, `-help`): the help action is queued and runs after the walk unless the
+ * walk raises first. A tail that is not another `-h` becomes an extra.
+ */
+function shortHelpTail(
+  first: { sep: string | null; explicit: string },
+  extras: string[],
+): string | null {
+  let { sep, explicit } = first;
+  for (;;) {
+    if (explicit === '' || sep === '=' || explicit.startsWith('-')) return ignored(explicit);
+    if (explicit[0] !== 'h') {
+      extras.push(`-${explicit}`);
+      return null;
+    }
+    explicit = explicit.slice(1);
+    if (explicit === '') return null;
+    sep = explicit[0] === '=' ? '=' : '';
+    if (sep === '=') explicit = explicit.slice(1);
+  }
 }
 
 /** The `crq_repair.run` argparse parser (Python 3.14 messages). */
@@ -104,26 +160,30 @@ export function parseRepairArgv(argv: readonly string[]): ParsedRepairArgv {
       extras.push(...argv.slice(index));
       break;
     }
-    if (!optionLike(arg)) {
+    const tuples = parseOptional(arg);
+    if (tuples === null || tuples === 'unknown') {
       extras.push(arg);
       continue;
     }
-    const flag = flagPart(arg);
-    const explicit = flag === arg ? null : arg.slice(flag.length + 1);
-    const option = resolveFlag(flag);
-    if (option === 'help') {
-      // Python prints help text and exits 0 with no JSON artifact; the Node
-      // runtime keeps its one-document contract and refuses instead.
-      return { ok: false, message: 'help is not available from the Node runtime' };
+    if (tuples.length > 1) {
+      const matches = tuples.map((tuple) => tuple.name).join(', ');
+      return { ok: false, message: `ambiguous option: ${arg} could match ${matches}` };
     }
-    if (option === null) {
-      extras.push(arg);
-      continue;
-    }
-    const [name, key] = option;
-    if (key === 'triageDryRun') {
-      if (explicit !== null)
-        return { ok: false, message: `argument ${name}: ignored explicit argument '${explicit}'` };
+    const { name, key, sep, explicit } = tuples[0]!;
+    if (key === 'help' || key === 'triageDryRun') {
+      const label = key === 'help' ? HELP_NAME : name;
+      if (explicit !== null) {
+        const error =
+          name === '-h'
+            ? shortHelpTail({ sep, explicit }, extras)
+            : `argument ${label}: ignored explicit argument ${pythonRepr(explicit)}`;
+        if (error !== null) return { ok: false, message: error };
+      }
+      if (key === 'help') {
+        // Python prints help text and exits 0 with no JSON artifact; the Node
+        // runtime keeps its one-document contract and refuses instead.
+        return { ok: false, message: HELP_REFUSAL };
+      }
       triageDryRun = true;
       continue;
     }
@@ -132,7 +192,7 @@ export function parseRepairArgv(argv: readonly string[]): ParsedRepairArgv {
       continue;
     }
     const next = argv[index + 1];
-    if (next === undefined || next === '--' || optionLike(next))
+    if (next === undefined || next === '--' || parseOptional(next) !== null)
       return { ok: false, message: `argument ${name}: expected one argument` };
     values[key] = next;
     index += 1;
