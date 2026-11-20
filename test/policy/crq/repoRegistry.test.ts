@@ -130,6 +130,18 @@ describe('repo registry parse', () => {
     expect(() => parseRepos(config(repos))).toThrow(RepoRegistryError);
   });
 
+  it('refuses a present null repos (Python get returns None, not the default)', () => {
+    // Differential vector: repo_registry.parse({'repo': 'o/p', 'repos': None}) -> ValueError
+    // 'repos must be a list of per-repo objects'; the same config without the key -> [].
+    expect(parseRepos(parseJsonValue(`{"repo":"${PRIMARY}"}`) as JsonObject)).toEqual([]);
+    expect(() => parseRepos(config(null))).toThrow('repos must be a list of per-repo objects');
+  });
+
+  it('refuses a quiet_minutes integer beyond 2^53 (documented, stricter than Python)', () => {
+    const raw = `{"repo":"${PRIMARY}","repos":[{"repo":"a/b","clone":"/c","quiet_minutes":100000000000000000000}]}`;
+    expect(() => parseRepos(parseJsonValue(raw) as JsonObject)).toThrow(RepoRegistryError);
+  });
+
   it('refuses a float rank even when integral (Python isinstance int)', () => {
     const raw = `{"repo":"${PRIMARY}","repos":[{"repo":"a/b","clone":"/c","rank_tier":3.0}]}`;
     expect(() => parseRepos(parseJsonValue(raw) as JsonObject)).toThrow(RepoRegistryError);

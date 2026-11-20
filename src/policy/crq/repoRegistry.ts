@@ -5,8 +5,10 @@
  * out-of-range rank refuses the whole config, so one typo cannot silently drop
  * a repository from discovery. Pure; the caller supplies the decoded config.
  *
- * Deliberate difference: Python's `\d` also matches non-ASCII decimal digits in a
- * `floor` timestamp; this port accepts ASCII digits only (stricter, never looser).
+ * Deliberate differences, both stricter and never looser: Python's `\d` also
+ * matches non-ASCII decimal digits in a `floor` timestamp (this port accepts ASCII
+ * digits only), and Python accepts an arbitrary-precision `quiet_minutes` integer
+ * where this port refuses one beyond +/-2^53 (it could not be a usable window).
  */
 import { JsonObject, type JsonValue } from './jsonValue.js';
 import { isJsonInt, jsonIntValue } from './queueDoc.js';
@@ -238,7 +240,8 @@ export function parseRepoEntry(entry: JsonValue): RegistryRepo {
 
 /** `repo_registry.parse(config)`: the whole `repos` list, duplicates and primary repeats refused. */
 export function parseRepos(config: JsonObject): RegistryRepo[] {
-  const entries = lookup(config, 'repos') ?? [];
+  // `config.get("repos", [])`: a present null is not the default and is refused below.
+  const entries = lookup(config, 'repos') === undefined ? [] : lookup(config, 'repos');
   if (!Array.isArray(entries))
     throw new RepoRegistryError('repos must be a list of per-repo objects');
   const repos: RegistryRepo[] = [];
