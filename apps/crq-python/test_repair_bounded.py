@@ -850,12 +850,14 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual((artifact['status'], artifact['job']), ('no-result', job_id))
 
     def test_every_cli_exit_emits_exactly_one_json_artifact(self):
-        def artifact(argv):
+        def artifact(argv, code=None):
             out = io.StringIO()
             with mock.patch.object(service, 'ROOT', self.root), \
                  mock.patch.object(service, 'runner_disabled', return_value=False), \
                  contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-                service.main(argv)
+                exit_code = service.main(argv)
+            if code is not None:
+                self.assertEqual(exit_code, code, argv)
             return json.loads(out.getvalue())['status']
         self.config['repair'].update(enabled=False)
         atomic(self.root / 'config.json', self.config)
@@ -867,6 +869,15 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(artifact(['--recover-job', 'x', '--job', OLD]), 'refused')
         # Mode validation precedes the dry run: recovery never combines with it.
         self.assertEqual(artifact(['--recover-job', 'x', '--triage-dry-run']), 'refused')
+        # A dry run never ignores a complete job selector.
+        self.assertEqual(artifact(['--triage-dry-run', '--job', OLD, '--source-sha', SOURCE,
+                                   '--finding-sha256', self.evidence['finding_sha256']], code=2),
+                         'refused')
+        # An empty recovery selector is still supplied: it conflicts with a dry run
+        # (exit 2) and alone refuses instead of draining the inbox.
+        self.assertEqual(artifact(['--triage-dry-run', '--recover-job', ''], code=2), 'refused')
+        self.assertEqual(artifact(['--recover-job', '', '--job', OLD], code=2), 'refused')
+        self.assertEqual(artifact(['--recover-job', ''], code=2), 'refused')
         # A dry run with no triage state writes nothing itself, so it reports that.
         self.assertEqual(artifact(['--triage-dry-run']), 'no-triage')
 

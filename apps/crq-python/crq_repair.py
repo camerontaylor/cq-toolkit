@@ -371,6 +371,27 @@ def dispatch(config, role, job, wt, directory, judge=False):
     return {'stop': 'rate-limit', 'retry_after_ms': max(1000, (end - dt.datetime.now(dt.timezone.utc)).total_seconds() * 1000)}
 
 
+def review_diff_sections(diff):
+    """Split a review diff into (path, text) per 'diff --git' section.
+
+    Text before the first header keeps the generic review-diff.txt path. A
+    header without a ' b/' separator (for example a git-quoted non-ASCII path)
+    is scanned under the whole header line, which still contains the real
+    path. An empty diff is one empty section so the scan still runs once."""
+    sections, path, lines = [], 'review-diff.txt', []
+    for line in str(diff).splitlines():
+        if line.startswith('diff --git '):
+            if lines:
+                sections.append((path, '\n'.join(lines)))
+            _, _, tail = line.rpartition(' b/')
+            path = tail.strip() or 'review-diff.txt'
+            lines = []
+        lines.append(line)
+    if lines or not sections:
+        sections.append((path, '\n'.join(lines)))
+    return sections
+
+
 def _dispatch(config, role, job, wt, directory, judge=False):
     directory.mkdir(parents=True, exist_ok=True)
     job = copy.deepcopy(job)
@@ -384,6 +405,14 @@ def _dispatch(config, role, job, wt, directory, judge=False):
     if not triage_context_safe(c, {'current_path': snapshot.get('path') or 'source-snapshot.txt', 'source': snapshot.get('source', '')},
                                directory / 'source-snapshot-scan.json'):
         raise ValueError('source snapshot secret scan rejected; refusing dispatch')
+    # The review diff rides in the job and is serialized into the judge prompt;
+    # it gets the identical scan before any driver or provider call.
+    # Each file section is scanned under its own path so path-gated rules
+    # (key-material-env) apply exactly as they do for the source snapshot.
+    for index, (section_path, section) in enumerate(review_diff_sections(job.get('review_diff', ''))):
+        if not triage_context_safe(c, {'current_path': section_path, 'source': section},
+                                   directory / ('review-diff-scan-' + str(index) + '.json')):
+            raise ValueError('review diff secret scan rejected; refusing dispatch')
     job['source_snapshot'] = snapshot
     atomic(directory / 'source-snapshot.json', snapshot)
     # The admission checks sample the clock before worktree retention and the
@@ -848,14 +877,16 @@ def triage_phase(config, dry_run=False):
     if role.get('driver') != 'cq':
         raise ValueError('triage requires cq structured judge bridge')
     def judge(row, context, remaining):
+        # phase() measured `remaining` before this call; the context scan below
+        # can outlive it, so pin the deadline at entry and recompute the
+        # provider budget immediately before dispatch.
+        deadline = time.monotonic() + remaining
         job = {'job': 'crq-triage-' + row['finding']['id'], 'run': row['review_id'],
                'triage_context': context}
         directory = state / 'repair/triage' / row['finding']['id']
         directory.mkdir(parents=True, exist_ok=True)
         if not triage_context_scan(c, context, directory / 'context-scan.json'):
             return {'stop': 'ok', 'verdict': 'unsure', 'context_scan_refused': True, 'reason': 'triage context secret scan rejected'}
-        bounded_config = copy.deepcopy(config)
-        bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
         selected = options.get('escalation_role', config['repair']['roles']['judge_critical']) if row.get('_escalate') else role
         if runner_disabled():
             # A handover can start while the phase runs; phase() keeps deferred
@@ -876,6 +907,11 @@ def triage_phase(config, dry_run=False):
             # pause defers this judgment instead of reaching the provider.
             return {'stop': 'deferred', 'errorClass': 'rate-limit',
                     'reason': 'provider dispatch paused until ' + until + '; triage judge deferred'}
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {'stop': 'deadline', 'reason': 'phase deadline elapsed before triage provider dispatch'}
+        bounded_config = copy.deepcopy(config)
+        bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
         return dispatch(bounded_config, selected, job, config['clone'],
                         state / 'repair/triage' / row['finding']['id'], judge=True)
     def transport(key, request):
@@ -1482,9 +1518,18 @@ def run(argv=None):
     # Mode validation before any alternate path runs: recovery selects exactly
     # one job and never combines with --job/--source-sha/--finding-sha256 or
     # --triage-dry-run.
-    if args.recover_job and (any(supplied) or args.triage_dry_run):
+    # Presence, not truthiness: `--recover-job ''` was still supplied.
+    if args.recover_job is not None and (any(supplied) or args.triage_dry_run):
         narrate('repair dispatch refused: recovery selects exactly one job')
         return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
+    if args.recover_job is not None and not args.recover_job.strip():
+        # An empty recovery selector must refuse, never fall through to the drain.
+        narrate('repair dispatch refused: --recover-job must not be empty')
+        return 2, {'status': 'refused', 'reason': '--recover-job must not be empty'}
+    if args.triage_dry_run and any(supplied):
+        # The dry run selects no job; a selector beside it would be ignored.
+        narrate('repair dispatch refused: --triage-dry-run takes no job selector')
+        return 2, {'status': 'refused', 'reason': '--triage-dry-run takes no job selector'}
     if args.triage_dry_run:
         # triage_phase returns its report only when triage is configured and
         # has a rollout; otherwise it returns None having written nothing, so
