@@ -986,6 +986,19 @@ class LifecycleTests(unittest.TestCase):
             stop.assert_not_called()
             self.assertTrue(result["replaced"])
 
+    def test_purge_with_launched_is_rejected_and_leaves_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            overlay = run / "overlay.qcow2"
+            overlay.write_text("x")
+            with mock.patch.object(vm, "_stop_owned_process") as stop:
+                with self.assertRaisesRegex(ValueError, "purge cannot be combined"):
+                    vm.stop_owned_process(
+                        {"run_id": "r1", "path": str(run)}, purge=True,
+                        launched={"pid": 111, "starttime": "5"})
+            stop.assert_not_called()
+            self.assertTrue(overlay.exists())
+
     def test_cmd_run_cleanup_skips_a_replacement_vm(self):
         with tempfile.TemporaryDirectory() as temporary:
             state, run = self._prepared(temporary)

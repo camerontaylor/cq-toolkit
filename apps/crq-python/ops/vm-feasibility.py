@@ -1481,7 +1481,15 @@ def stop_owned_process(run: dict, *, purge: bool,
     missing process.json also counts as a replacement: boot() deletes it before
     spawning, so no identity means this launch is gone and any scope member
     belongs to a boot still in its spawn-before-write window.
+
+    ``purge`` cannot be combined with ``launched``: a guarded stop may decide
+    the VM is a replacement and leave it alone, and purging would then move the
+    replacement's files. The combination is rejected up front rather than
+    silently skipping the purge.
     """
+    if purge and launched is not None:
+        raise ValueError("purge cannot be combined with launched: a guarded "
+                         "stop may leave a replacement VM running")
     with run_lock(pathlib.Path(run["path"])):
         if launched is not None:
             if not (pathlib.Path(run["path"]) / "process.json").exists():
