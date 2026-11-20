@@ -64,7 +64,7 @@ def pending_unit_switch():
         "prior_runtime": "python",
         "outcome": "pending",
         "at": "2026-10-27T00:00:00Z",
-        "snapshot": {},
+        "snapshot": {"runtime": "python", "running": True},
         "state": None,
         "phase": "snapshot",
     }

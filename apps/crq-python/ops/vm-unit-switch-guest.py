@@ -720,7 +720,7 @@ def prepare_history():
         "prior_runtime": PYTHON_RUNTIME,
         "outcome": "completed",
         "at": "2026-01-01T00:00:00Z",
-        "snapshot": {"proof": "historical"},
+        "snapshot": {"proof": "historical", "runtime": PYTHON_RUNTIME},
         "state": {
             "prior_head": "0" * 40,
             "prior_config_sha256": None,
