@@ -314,7 +314,11 @@ const SELECT_REASON: Readonly<Partial<Record<RepairSelectionRefusal, string>>> =
   'revalidation-lineage-mismatch': 'selected job revalidation lineage mismatch',
 };
 
-const CANONICAL_REASON = {
+/**
+ * `bounded.require_canonical_delivery`'s `ValueError` text per refusal. The
+ * repair item loop narrates it verbatim (`repair <job>: skipped: <text>`).
+ */
+export const CANONICAL_REASON = {
   'canonical-delivery-invalid': 'invalid canonical finding identity',
   'canonical-delivery-unavailable': 'canonical delivery state unavailable',
   'canonical-delivery-mismatch': 'canonical finding is not delivered to this repair task',
