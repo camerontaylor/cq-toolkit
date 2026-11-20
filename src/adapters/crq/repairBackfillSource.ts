@@ -74,17 +74,7 @@ export function fileRepairBackfillEffects(
       await mkdir(join(input.stateRoot, 'repair', 'inbox'), { recursive: true });
       await atomicWrite(path, atomicJsonText(doc));
     },
-    async resultExists(jobId) {
-      // Only a proven absence (ENOENT) reads as `false`; any other stat fault
-      // propagates so the caller can retry without rebinding the inbox job.
-      try {
-        await stat(join(input.stateRoot, 'repair', jobId, 'result.json'));
-        return true;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-        throw error;
-      }
-    },
+    resultExists: (jobId) => exists(join(input.stateRoot, 'repair', jobId, 'result.json')),
     async hasRunEvidence(run) {
       const dir = join(input.runsRoot, run);
       return (await exists(join(dir, 'meta.json'))) && (await exists(join(dir, 'review.ndjson')));
