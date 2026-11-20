@@ -29,6 +29,7 @@ import {
 } from '../../ops/dev/denylist.js';
 import { AuthorRefused } from '../../policy/crq/authorWire.js';
 import { decodeSnapshot, type SnapshotObject } from '../../policy/crq/authorSnapshot.js';
+import { decodeGitHeaderPath } from './gitPath.js';
 import { GitPool, gitCall, gitOk, killProcessTree } from './gitExec.js';
 
 const SNAPSHOT_REF_PREFIX = 'refs/crq/author-snapshots/v1/';
@@ -310,10 +311,9 @@ function scanPatch(diff: string, rules: ReturnType<typeof parseDenylistPatterns>
       if (line.startsWith('+++ ') || line.startsWith('--- ')) {
         const candidate = line.slice(4);
         if (candidate !== '/dev/null') {
-          path =
-            candidate.startsWith('a/') || candidate.startsWith('b/')
-              ? candidate.slice(2)
-              : candidate;
+          const decoded = decodeGitHeaderPath(candidate);
+          if (decoded === null) throw new AuthorRefused('snapshot secret scan refused');
+          path = decoded;
         }
       }
       continue;

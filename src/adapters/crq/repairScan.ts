@@ -17,6 +17,7 @@ import type {
   RepairScanReport,
   RepairScanResult,
 } from '../../ops/crq/internal/repairPrepareGates.js';
+import { decodeGitHeaderPath } from './gitPath.js';
 
 /** `crq.ALLOWLIST_PATHS`, verbatim. */
 const ALLOWLIST_PATHS: readonly RegExp[] = [
@@ -66,10 +67,8 @@ function patchLines(patch: string): PatchLine[] {
       if (line.startsWith('+++ ') || line.startsWith('--- ')) {
         const candidate = line.slice(4);
         if (candidate !== '/dev/null') {
-          path =
-            candidate.startsWith('a/') || candidate.startsWith('b/')
-              ? candidate.slice(2)
-              : candidate;
+          // Undecodable quoted names fall back to the raw header text.
+          path = decodeGitHeaderPath(candidate) ?? candidate;
         }
       }
       continue;

@@ -24,6 +24,10 @@ import finding_delivery
 import review_ledger as ledger
 
 ROOT = Path(__file__).resolve().parents[2]
+# One inventory keeps about one interval's launches queued (highest measured
+# backfill rate, 106 on 11-17 = 26.5 per 6 h, plus a fifth). A candidate's
+# partitions are enqueued together, so the count can exceed this by one candidate.
+INVENTORY_ENQUEUE_LIMIT = 32
 
 
 def policies():
@@ -542,6 +546,18 @@ def collect_required(repo, target, required, store, *, cache_dir=None):
     return paths, members
 
 
+def retire_superseded(item, target):
+    item["state"] = "skipped"
+    if item.get("target") != target:
+        item["last_error"] = "superseded by inventory " + target
+    else:
+        try:
+            ledger.timestamp(item.get("created_at"))
+            item["last_error"] = "expired: pending more than 24 h"
+        except ValueError:
+            item["last_error"] = "expired: unreadable created_at"
+
+
 def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, enqueue=True, prepare_only=False):
     config = settings(c.STATE)
     if not config:
@@ -559,6 +575,20 @@ def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, en
     if fetch:
         repo.git("fetch", "--no-tags", "--no-write-fetch-head", "origin", DEFAULT_FETCH_REFSPEC)
     target = repo.git("rev-parse", DEFAULT_REF + "^{commit}").decode().strip()
+    retired = []
+    if enqueue:
+        # Pending jobs at an older pin own their lines (jobs.scope_owner) and would hold
+        # them out of this ranking; retire them before capture so the lines re-rank at the tip.
+        # A job past the 24 h bound can never launch (jobs.eligible), so it is released too,
+        # even at the current pin, and does not count toward the enqueue cap.
+        for item in queue.get("items", []):
+            if (item.get("kind") == jobs.KIND and item.get("state") == "pending"
+                    and not jobs.is_execution_owner(item)
+                    and (item.get("target") != target or jobs.expired(item, c.iso()))):
+                retire_superseded(item, target)
+                retired.append(item["id"])
+                if not prepare_only:
+                    state_event(c, queue, item, c.iso(), "superseded by inventory")
     ledger_head, events = publisher.fetch()
     if required_paths is None:
         required_paths, members = collect_required(repo, target, required, store,
@@ -571,11 +601,18 @@ def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, en
     debt = []
     if enqueue:
         inventory.effective_limits(limits)  # Unknown deployed limits never enqueue live work.
+        pending_at_target = sum(1 for i in queue.get("items", [])
+                                if i.get("kind") == jobs.KIND and i.get("state") == "pending" and i.get("target") == target)
         for candidate in ranked["candidates"]:
+            if pending_at_target >= INVENTORY_ENQUEUE_LIMIT:
+                break
             construction = subjects.construct(repo, candidate, limits, [members[str(p)] for p in candidate["prs"] if str(p) in (members or {})])
             for partition in construction["partitions"]:
                 partition.update(tier_importance=partition["tier"], subject_kind=partition["kind"])
+                before = len(queue["items"])
                 item = jobs.enqueue(queue, partition, c.iso())
+                if len(queue["items"]) > before and item["state"] == "pending":
+                    pending_at_target += 1
                 event_items.append(item["id"])
                 if not prepare_only:
                     state_event(c, queue, item, item["created_at"], "inventory enqueue")
@@ -591,7 +628,8 @@ def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, en
     report = reporting.summary(repo, ranked, queue, original, findings_root=c.STATE / "backfill/findings")
     report["construction_debt"] = debt
     if prepare_only:
-        return {"queue": queue, "manifest": manifest, "ranked": ranked, "report": report, "event_items": event_items}
+        return {"queue": queue, "manifest": manifest, "ranked": ranked, "report": report, "event_items": event_items,
+                "retired": retired, "target": target}
     ledger.atomic(c.STATE / "backfill/latest-ranked.json", ledger.canonical(ranked))
     ledger.atomic(c.STATE / "backfill/latest-report.json", ledger.canonical(report))
     clear_operation_halt(queue, "inventory")
