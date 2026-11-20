@@ -3,6 +3,7 @@ import { parseDenylistPatterns } from '../ops/dev/denylist.js';
 import { pythonSplitlines } from '../policy/crq/repairGates.js';
 import { atomicJsonText } from '../policy/crq/pythonJson.js';
 import { ReviewScanRefusal, type ReviewScanDecision } from './reviewPreparation.js';
+import { EXEMPTIBLE_RULES, exemptReason, type ScanExemption } from './scanExemptions.js';
 
 const universal = [
   'class:token-ssh-plumbing',
@@ -128,6 +129,9 @@ export async function scanReviewDiff(
     foreign: boolean;
     extraClasses: readonly string[];
     artifactPath: string;
+    /** Base-commit exemptions; absent means none. */
+    exemptions?: readonly ScanExemption[];
+    exemptionError?: string | null;
   },
   effects: ReviewScannerEffects,
 ): Promise<ReviewScanDecision> {
@@ -147,6 +151,7 @@ export async function scanReviewDiff(
     path: rule.path ?? null,
   }));
   const hits: { rule: string; file: string; diff_line: number }[] = [];
+  const exempted: { rule: string; file: string; diff_line: number; reason: string }[] = [];
   const candidates: { path: string; text: string; diffLine: number }[] = [];
   let path: string | null = null;
   let header = false;
@@ -225,7 +230,10 @@ export async function scanReviewDiff(
       )
         throw new Error('invalid matcher result');
       previous = order;
-      hits.push({ rule: rule.id, file: candidate.path, diff_line: candidate.diffLine });
+      const hit = { rule: rule.id, file: candidate.path, diff_line: candidate.diffLine };
+      const reason = exemptReason(input.exemptions, rule.id, candidate.path);
+      if (reason === null) hits.push(hit);
+      else exempted.push({ ...hit, reason });
     }
   } catch {
     throw new Error('review scan matcher unavailable');
@@ -237,14 +245,16 @@ export async function scanReviewDiff(
     throw new Error('review gitleaks unavailable');
   }
   let status = 'not-run';
-  let glHits: { rule: string | null; diff_line: number | null }[] = [];
+  type GlHit = { rule: string | null; diff_line: number | null; file?: string };
+  let glHits: GlHit[] = [];
+  const glExempted: (GlHit & { reason: string })[] = [];
   if (gl.kind === 'exit') {
     if (!Number.isSafeInteger(gl.code)) throw new Error('invalid gitleaks result');
     status = `exit ${gl.code}`;
     if (gl.code !== 0) glHits = [{ rule: 'gitleaks-error', diff_line: null }];
     else {
       if (!Array.isArray(gl.hits)) throw new Error('gitleaks report unavailable');
-      glHits = gl.hits.map((hit: { rule: string | null; diffLine: number | null }) => {
+      const reported = gl.hits.map((hit: { rule: string | null; diffLine: number | null }) => {
         if (
           !hit ||
           (hit.rule !== null && typeof hit.rule !== 'string') ||
@@ -253,9 +263,27 @@ export async function scanReviewDiff(
           throw new Error('invalid gitleaks report');
         return { rule: hit.rule, diff_line: hit.diffLine };
       });
+      // A provider-specific rule on a line vetoes exempting any other finding on it.
+      const strict = new Set(
+        reported
+          .filter((hit) => hit.rule === null || !EXEMPTIBLE_RULES.has(hit.rule))
+          .map((hit) => hit.diff_line),
+      );
+      const linePaths = new Map<number, string>();
+      for (const candidate of candidates) linePaths.set(candidate.diffLine, candidate.path);
+      glHits = [];
+      for (const found of reported) {
+        const file = found.diff_line === null ? undefined : linePaths.get(found.diff_line);
+        const hit: GlHit = file ? { ...found, file } : found;
+        const reason = strict.has(found.diff_line)
+          ? null
+          : exemptReason(input.exemptions, found.rule, file);
+        if (reason === null) glHits.push(hit);
+        else glExempted.push({ ...hit, reason });
+      }
     }
   } else if (gl.kind !== 'not-run') throw new Error('invalid gitleaks result');
-  const report = {
+  const report: Record<string, unknown> = {
     base: input.base,
     head: input.head,
     denylist_rules: rules.length,
@@ -264,6 +292,10 @@ export async function scanReviewDiff(
     gitleaks_hits: glHits,
     diff_bytes: Array.from(input.diff).length,
   };
+  if (exempted.length > 0 || glExempted.length > 0 || input.exemptionError) {
+    report.exempted = { denylist: exempted, gitleaks: glExempted };
+    if (input.exemptionError) report.exemption_error = input.exemptionError;
+  }
   await effects.writeReport(atomicJsonText(report));
   return {
     clean: hits.length === 0 && glHits.length === 0,

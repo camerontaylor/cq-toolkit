@@ -151,7 +151,11 @@ describe('inactive detached review process', () => {
         base,
         attempt_id: 'attempt-1',
         submitted_scope: [
-          { path: 'a.txt', blob: expect.stringMatching(/^[0-9a-f]{40}$/), intervals: [[3, 3]] },
+          {
+            path: 'a.txt',
+            blob: expect.stringMatching(/^[0-9a-f]{40}$/) as unknown,
+            intervals: [[3, 3]],
+          },
         ],
       });
       expect(await readFile(join(root, 'executed'), 'utf8')).toBe('');
