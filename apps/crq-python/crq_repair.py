@@ -870,14 +870,16 @@ def triage_phase(config, dry_run=False):
     if role.get('driver') != 'cq':
         raise ValueError('triage requires cq structured judge bridge')
     def judge(row, context, remaining):
+        # phase() measured `remaining` before this call; the context scan below
+        # can outlive it, so pin the deadline at entry and recompute the
+        # provider budget immediately before dispatch.
+        deadline = time.monotonic() + remaining
         job = {'job': 'crq-triage-' + row['finding']['id'], 'run': row['review_id'],
                'triage_context': context}
         directory = state / 'repair/triage' / row['finding']['id']
         directory.mkdir(parents=True, exist_ok=True)
         if not triage_context_scan(c, context, directory / 'context-scan.json'):
             return {'stop': 'ok', 'verdict': 'unsure', 'context_scan_refused': True, 'reason': 'triage context secret scan rejected'}
-        bounded_config = copy.deepcopy(config)
-        bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
         selected = options.get('escalation_role', config['repair']['roles']['judge_critical']) if row.get('_escalate') else role
         if runner_disabled():
             # A handover can start while the phase runs; phase() keeps deferred
@@ -898,6 +900,11 @@ def triage_phase(config, dry_run=False):
             # pause defers this judgment instead of reaching the provider.
             return {'stop': 'deferred', 'errorClass': 'rate-limit',
                     'reason': 'provider dispatch paused until ' + until + '; triage judge deferred'}
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {'stop': 'deadline', 'reason': 'phase deadline elapsed before triage provider dispatch'}
+        bounded_config = copy.deepcopy(config)
+        bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
         return dispatch(bounded_config, selected, job, config['clone'],
                         state / 'repair/triage' / row['finding']['id'], judge=True)
     def transport(key, request):
