@@ -47,7 +47,7 @@ import backfill_jobs
 import admission_history
 import local_review_runtime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 ROOT = Path(__file__).resolve().parent
 RUNNER_ROOT = ROOT.parents[1]
@@ -383,33 +383,95 @@ SCAN_EXEMPTIONS_PATH = ".crq/scan-exemptions.toml"
 EXEMPTIBLE_RULES = frozenset({"class:inline-secret-assignments", "generic-api-key"})
 
 
-MAX_GLOBSTARS = 2  # bounds regex backtracking; more fails the file closed
+MAX_GLOBSTARS = 2  # more '**' fails the file closed (kept as a policy cap)
 
 
-def _glob_regex(pattern: str) -> "re.Pattern[str]":
+class _Glob:
+    """Glob matcher with ``re.Pattern.match`` semantics, in O(len(path) * tokens).
+
+    ``*`` is ``[^/]*``, ``?`` is ``[^/]``, ``**`` is ``.*`` and a run of
+    ``**/`` is an optional ``(?:.*/)?``, as before. A compiled regex backtracks
+    polynomially in the number of ``*`` in one segment (ten ``*`` took ~16 s
+    on a 60-character path), so the pattern is matched as an NFA instead: the
+    cost no longer depends on how many wildcards a base-side file declares.
+    """
+
+    def __init__(self, pattern: str) -> None:
+        toks: List[Tuple[str, str]] = []
+        i = 0
+        while i < len(pattern):
+            if pattern.startswith("**/", i):
+                # Consecutive "**/" segments match the same paths as one.
+                while pattern.startswith("**/", i):
+                    i += 3
+                toks.append(("opt", ""))  # epsilon: enter ``.*/`` or skip it
+                toks.append(("dstar", ""))
+                toks.append(("lit", "/"))
+            elif pattern.startswith("**", i):
+                toks.append(("dstar", ""))
+                i += 2
+            elif pattern[i] == "*":
+                # Adjacent single stars match the same paths as one.
+                if not toks or toks[-1][0] != "star":
+                    toks.append(("star", ""))
+                i += 1
+            elif pattern[i] == "?":
+                toks.append(("any1", ""))
+                i += 1
+            else:
+                toks.append(("lit", pattern[i]))
+                i += 1
+        self._toks = toks
+        self.pattern = pattern
+
+    def _closure(self, states: Set[int]) -> Set[int]:
+        toks, out, todo = self._toks, set(states), list(states)
+        while todo:
+            n = todo.pop()
+            if n >= len(toks):
+                continue
+            kind = toks[n][0]
+            nxt = []
+            if kind in ("star", "dstar", "opt"):
+                nxt.append(n + 1)
+            if kind == "opt":
+                nxt.append(n + 3)
+            for m in nxt:
+                if m not in out:
+                    out.add(m)
+                    todo.append(m)
+        return out
+
+    def match(self, path: str) -> bool:
+        toks = self._toks
+        states = self._closure({0})
+        for ch in path:
+            nxt: Set[int] = set()
+            for n in states:
+                if n >= len(toks):
+                    continue
+                kind, lit = toks[n]
+                if kind == "lit":
+                    if ch == lit:
+                        nxt.add(n + 1)
+                elif kind == "any1":
+                    if ch != "/":
+                        nxt.add(n + 1)
+                elif kind == "star":
+                    if ch != "/":
+                        nxt.add(n)
+                elif kind == "dstar" and ch != "\n":  # loop over ``.``
+                    nxt.add(n)
+            if not nxt:
+                return False
+            states = self._closure(nxt)
+        return len(toks) in states
+
+
+def _glob_regex(pattern: str) -> "_Glob":
     if pattern.count("**") > MAX_GLOBSTARS:
         raise ValueError(f"path has more than {MAX_GLOBSTARS} '**': {pattern}")
-    out, i = [], 0
-    while i < len(pattern):
-        if pattern.startswith("**/", i):
-            # Consecutive "**/" segments match the same paths as one; collapsing
-            # them keeps (?:.*/)? from repeating into exponential backtracking.
-            while pattern.startswith("**/", i):
-                i += 3
-            out.append("(?:.*/)?")
-        elif pattern.startswith("**", i):
-            out.append(".*")
-            i += 2
-        elif pattern[i] == "*":
-            out.append("[^/]*")
-            i += 1
-        elif pattern[i] == "?":
-            out.append("[^/]")
-            i += 1
-        else:
-            out.append(re.escape(pattern[i]))
-            i += 1
-    return re.compile("^" + "".join(out) + "$")
+    return _Glob(pattern)
 
 
 def load_scan_exemptions(base: Optional[str], clone: Optional[Path] = None) -> Tuple[List[Dict[str, Any]], Optional[str]]:

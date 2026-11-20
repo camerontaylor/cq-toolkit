@@ -4170,6 +4170,8 @@ def cmd_run(args):
     image = vm.fetch_image(state, recorder)
     run = prepare_run(state, image, recorder, args.tools)
     vm.save_json(pathlib.Path(run["path"]) / "run.json", run)
+    boot_lock_attempted = False
+    boot_lock_held = False
     try:
         run_dir = pathlib.Path(run["path"])
         host_source = pathlib.Path(__file__).resolve()
@@ -4197,7 +4199,14 @@ def cmd_run(args):
                              "sha256": vm.sha256_file(guest_artifact)},
         }
         recorder = vm.Recorder(run_dir)
-        boot = vm.boot(run, recorder, args.tools, vm.host_stamp())
+        # Boot under run.lock like vm-feasibility cmd_boot, so a concurrent
+        # destroy --purge cannot move the overlay while the guest launches.
+        boot_lock_attempted = True
+        with vm.run_lock(run_dir):
+            vm.refuse_live_run(run)
+            # Armed only after the live-run refusal: a refused run owns no guest.
+            boot_lock_held = True
+            boot = vm.boot(run, recorder, args.tools, vm.host_stamp())
         boot["ssh"] = vm.wait_ssh(run, recorder)
         uploads = upload_files(run, recorder, snapshot, commit, args.mode)
         provenance["uploads"] = uploads
@@ -4239,7 +4248,9 @@ def cmd_run(args):
         vm.save_json(run_dir / "report.json", report)
         problems = report["problems"]
     except BaseException:
-        if not args.keep:
+        # A boot rejected because another invocation holds run.lock owns no
+        # guest; cleaning up would stop that invocation's live guest.
+        if not args.keep and (boot_lock_held or not boot_lock_attempted):
             try:
                 vm.stop_owned_process(run, purge=False)
             except Exception as cleanup_error:
