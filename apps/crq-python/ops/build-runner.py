@@ -32,9 +32,11 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
+import time
 
 EXPECTED_NODE_MAJOR = 24
 EXPECTED_PLATFORM = 'linux'
@@ -45,6 +47,7 @@ VERSION_RE = re.compile(r'\d+\.\d+\.\d+')
 SHA_RE = re.compile(r'[0-9a-f]{40}')
 OUTPUT_TAIL = 8000
 COMMAND_TIMEOUT = 1800
+PROCESS_GROUP_REAP_TIMEOUT = 10
 DEPLOY_COMPAT_ERRORS = ('ERR_PNPM_DEPLOY_NONINJECTED_WORKSPACE',
                         'inject-workspace-packages')
 
@@ -70,23 +73,53 @@ def _tail(text):
     return text[-OUTPUT_TAIL:] if len(text) > OUTPUT_TAIL else text
 
 
+def _kill_process_group(process):
+    """Kill a timed-out command and every descendant, confirming they exited.
+
+    run_command starts each command in its own session, so SIGKILL to the
+    process group reaches the children and grandchildren pnpm forks. A caller
+    holding an advisory lock must not release it while a killed process may
+    still write to the guarded tree, so poll until every group member is
+    confirmed reaped before returning.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+    deadline = time.monotonic() + PROCESS_GROUP_REAP_TIMEOUT
+    while True:
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return
+        if time.monotonic() >= deadline:
+            raise BuildError('command descendants survived SIGKILL: process group '
+                             + str(process.pid))
+        time.sleep(0.01)
+
+
 def run_command(argv, cwd, env=None, timeout=COMMAND_TIMEOUT):
     try:
-        result = subprocess.run(argv, cwd=cwd, env=env, check=False,
-                                capture_output=True, text=True, timeout=timeout)
+        process = subprocess.Popen(argv, cwd=cwd, env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, start_new_session=True)
     except FileNotFoundError as exc:
         raise BuildError('command not found: ' + argv[0]) from exc
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
+        _kill_process_group(process)
         raise BuildError('command timed out after ' + str(timeout) + 's: '
                          + shlex.join(argv)) from exc
-    if result.returncode != 0:
-        detail = ['command failed (' + str(result.returncode) + '): ' + shlex.join(argv)]
-        if result.stdout:
-            detail.append('stdout tail:\n' + _tail(result.stdout))
-        if result.stderr:
-            detail.append('stderr tail:\n' + _tail(result.stderr))
+    if process.returncode != 0:
+        detail = ['command failed (' + str(process.returncode) + '): ' + shlex.join(argv)]
+        if stdout:
+            detail.append('stdout tail:\n' + _tail(stdout))
+        if stderr:
+            detail.append('stderr tail:\n' + _tail(stderr))
         raise BuildError('\n'.join(detail))
-    return result
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
 def _git(repo, *args, run=run_command):
