@@ -1996,6 +1996,41 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(reports[1].get('stop'), 'deferred')
         self.assertEqual(reports[1].get('errorClass'), 'runner-disabled')
 
+    def test_triage_budget_is_recomputed_after_context_scan(self):
+        # phase() measures `remaining` before the judge callback; the context
+        # scan can consume part of it, so the provider budget is recomputed
+        # immediately before dispatch and a spent deadline never dispatches.
+        (self.root / 'state/backfill/findings/triage').mkdir(parents=True, exist_ok=True)
+        clock = [1000.0]
+        reports = []
+
+        def scan(*args):
+            clock[0] += scan.advance
+            return True
+
+        def fake_phase(inbox, repo, tip, judge_cb, transport, now, maximum, seconds, dry_run):
+            row = {'finding': {'id': 'f' * 64}, 'review_id': 'r1'}
+            for advance in (50, 70):
+                scan.advance = advance
+                reports.append(judge_cb(row, {'context': []}, 60))
+            return {'judged': 1}
+
+        import backfill_runtime
+        import finding_delivery
+        with mock.patch('crq_repair.triage.phase', side_effect=fake_phase), \
+             mock.patch.object(service.time, 'monotonic', side_effect=lambda: clock[0]), \
+             mock.patch.object(service, 'dispatch', return_value={'stop': 'ok'}) as dispatch, \
+             mock.patch.object(service, 'triage_context_scan', side_effect=scan), \
+             mock.patch.object(service, 'git', return_value='a' * 40), \
+             mock.patch.object(backfill_runtime, 'settings', return_value={'rollout': 1}), \
+             mock.patch.object(backfill_runtime, 'services',
+                               return_value=('repo', None, 'outbox', None)), \
+             mock.patch.object(finding_delivery, 'Inbox'):
+            service.triage_phase(self.config)
+        self.assertEqual(dispatch.call_count, 1)  # the 70s scan outlived the 60s budget
+        self.assertAlmostEqual(dispatch.call_args.args[0]['repair']['budget']['wall_clock_min'], 10 / 60)
+        self.assertEqual(reports[1]['stop'], 'deadline')
+
     def test_marker_written_during_fetch_stops_before_triage(self):
         # The guard at pass start is sampled before the network fetch; a marker
         # written while the fetch runs must stop the pass before paid triage.
