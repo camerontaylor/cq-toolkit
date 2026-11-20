@@ -2,7 +2,7 @@
  * S6-f: the offline composition of every merged tick adapter into one
  * `TickPhases`, plus the slot's `collectFinished`. Inactive: nothing imports
  * this from a runtime entry point, `crq.ts` routes neither `tick` nor `slot`, and
- * `LIVE_UNIT_COMMANDS` stays `['watchdog', 'publish']`. `tick.lock` stays
+ * `LIVE_UNIT_COMMANDS` and the capabilities are untouched. `tick.lock` stays
  * caller-owned, as everywhere in the TS tick.
  *
  * `composeTickPhases` (composeTick.ts) takes the sixteen `RemainingPhaseNames`
@@ -296,7 +296,8 @@ export function composeFullTick(input: TickCompositionInput): TickComposition {
         ...(input.gh ? { gh: input.gh } : {}),
         ...(input.now ? { now: () => new Date(input.now?.() ?? Date.now()) } : {}),
         push: input.discovery.push,
-        enroll: input.discovery.enroll,
+        // The composed tick runs its `fetch` phase before enrollment (`crq.py:3550`).
+        enroll: { ...input.discovery.enroll, primaryFetched: true },
       })
     : null;
 

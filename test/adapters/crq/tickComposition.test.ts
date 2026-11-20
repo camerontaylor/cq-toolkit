@@ -225,6 +225,46 @@ describe('fix-PR backlog', () => {
   });
 });
 
+describe('discovery binding', () => {
+  const discoveryRig = (fetches: string[], gh: unknown) =>
+    rig(undefined, {
+      config: doc({
+        schedule_id: 'sched',
+        alerts: { alert_agent_id: 'a' },
+        repo: 'o/r',
+        clone: '/p',
+      }),
+      gh: gh as never,
+      discovery: {
+        push: { event: async () => undefined },
+        enroll: {
+          localReview: { facts: async () => null, retained: async () => false },
+          event: async () => undefined,
+          git: () => async (args) => {
+            if (args[0] === 'fetch') fetches.push(args.join(' '));
+            return { args, code: 0, stdout: new Uint8Array(), stderr: '' };
+          },
+        },
+      },
+    });
+
+  it('does not fetch the primary clone again after the tick fetch phase', async () => {
+    const fetches: string[] = [];
+    const s = discoveryRig(fetches, async () => ({ code: 0, stdout: '[]', stderr: '' }));
+    const c = composeFullTick(s.input);
+    const out = await c.phases.enrollPrimary(doc({ items: [] }), false);
+    expect(fetches).toEqual([]);
+    expect(out.log).toEqual([]);
+  });
+
+  it('logs the primary listing failure in Python wording (`enrollment skipped:`)', async () => {
+    const s = discoveryRig([], async () => ({ code: 1, stdout: '', stderr: 'down' }));
+    const c = composeFullTick(s.input);
+    const out = await c.phases.enrollPrimary(doc({ items: [] }), false);
+    expect(out.log).toEqual(['enrollment skipped: forge listing unavailable']);
+  });
+});
+
 describe('reconcile queue return', () => {
   it('returns the queue unchanged, with an empty log, when nothing needs reconciling', async () => {
     const c = composeFullTick(rig().input);
@@ -232,6 +272,29 @@ describe('reconcile queue return', () => {
     const out = await c.phases.reconcile(q);
     expect(plain(out.queue)).toEqual(plain(q));
     expect(out.log).toEqual([]);
+  });
+
+  it('returns the reconciled queue (the onSaved install path), not the stale input', async () => {
+    const fix = {
+      items: [{ id: 'i1', kind: 'promotion', repair_runs: { r1: { fix_pr: { number: 7 } } } }],
+      starts: [],
+    };
+    const s = rig(fix, {
+      gh: async () => ({ code: 0, stdout: '{"number":7,"state":"CLOSED"}', stderr: '' }),
+      runGit: async (args) => ({ args, code: 0, stdout: new Uint8Array(), stderr: '' }),
+    });
+    const c = composeFullTick(s.input);
+    const q = doc(fix);
+    const out = await c.phases.reconcile(q);
+    const record = (plain(out.queue).items[0] as { repair_runs: { r1: Record<string, unknown> } })
+      .repair_runs.r1;
+    expect(record.fix_closed).toMatch(/^2027-/);
+    // The input was immutable and untouched; the saved file and the returned queue agree.
+    expect(plain(q)).toEqual(fix);
+    expect(JSON.parse(readFileSync(s.queuePath, 'utf8'))).toEqual(plain(out.queue));
+    // A second tick-phase call starts from a clean slate: nothing to install, input returned.
+    const again = await c.phases.reconcile(out.queue);
+    expect(plain(again.queue)).toEqual(plain(out.queue));
   });
 });
 

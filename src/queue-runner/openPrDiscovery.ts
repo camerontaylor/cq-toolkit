@@ -126,7 +126,14 @@ export async function discoverOpenPrs(
     try {
       opened = await effects.list(repo);
     } catch {
-      log.push(`pr discovery skipped ${repo.repo}: forge listing unavailable`);
+      // Python's primary `enroll` logs `enrollment skipped: <exc>` (crq.py:3127); the
+      // configured repos log `pr discovery skipped <repo>: <exc>` (pr_enroll.py:31).
+      // The exception text stays opaque here.
+      log.push(
+        repo.primary
+          ? 'enrollment skipped: forge listing unavailable'
+          : `pr discovery skipped ${repo.repo}: forge listing unavailable`,
+      );
       continue;
     }
     if (!repo.primary) {

@@ -77,6 +77,8 @@ export interface TickDiscoveryBindingOptions extends MergedBindingOptions {
     readonly event: OpenPrSourceOptions['event'];
     readonly ownRange?: OpenPrSourceOptions['ownRange'];
     readonly git?: OpenPrSourceOptions['git'];
+    /** See `EnrollmentPhaseSourceOptions.primaryFetched`. */
+    readonly primaryFetched?: boolean;
   };
 }
 
@@ -113,6 +115,7 @@ export function tickDiscoveryBinding(options: TickDiscoveryBindingOptions): Tick
       event: options.enroll.event,
       ...(options.enroll.ownRange ? { ownRange: options.enroll.ownRange } : {}),
       ...(options.enroll.git ? { git: options.enroll.git } : {}),
+      ...(options.enroll.primaryFetched ? { primaryFetched: true } : {}),
       ...(options.gh ? { gh: options.gh } : {}),
       ...(options.now ? { now: options.now } : {}),
     }));
