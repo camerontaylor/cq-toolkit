@@ -14,13 +14,20 @@ const FID2 = 'b'.repeat(64);
 
 function job(
   id: string,
-  options: { run?: string; severity?: string; base?: string; canonical?: JsonValue } = {},
+  options: {
+    run?: string;
+    severity?: string;
+    base?: string;
+    item?: string;
+    omitBase?: boolean;
+    canonical?: JsonValue;
+  } = {},
 ): JsonObject {
   const entries: [string, JsonValue][] = [
     ['job', id],
-    ['item', 'pr1-merged'],
+    ['item', options.item ?? 'pr1-merged'],
     ['run', options.run ?? 'r1'],
-    ['repair_base', options.base ?? 'b'.repeat(40)],
+    ...(options.omitBase ? [] : [['repair_base', options.base ?? 'b'.repeat(40)] as const]),
     ['finding', obj(['severity', options.severity ?? 'major'])],
   ];
   if (options.canonical !== undefined) entries.push(['canonical_finding_id', options.canonical]);
@@ -519,12 +526,30 @@ describe('malformed input', () => {
     await expect(processRepairItem([], h.context, h.effects)).rejects.toThrow(RepairItemShapeError);
   });
 
-  test("the worktree name uses the first job's item as sorted input order does", async () => {
+  test('the item comes from the first job before the sort, not the sorted first job', async () => {
     const h = harness();
-    await processRepairItem([job('crq-r-F2'), job('crq-r-F1')], h.context, h.effects);
-    expect(h.processed.map((p) => p.worktree)).toEqual([
-      '/wt/crq-repair-pr1-merged-crq-r-F1',
-      '/wt/crq-repair-pr1-merged-crq-r-F2',
+    await processRepairItem(
+      [job('crq-r-F2', { item: 'input-first' }), job('crq-r-F1', { item: 'sorted-first' })],
+      h.context,
+      h.effects,
+    );
+    // F1 sorts ahead of F2, yet both worktrees are named for jobs[0]['item'] as read pre-sort.
+    expect(h.processed.map((p) => [p.job, p.worktree])).toEqual([
+      ['crq-r-F1', '/wt/crq-repair-input-first-crq-r-F1'],
+      ['crq-r-F2', '/wt/crq-repair-input-first-crq-r-F2'],
     ]);
+  });
+
+  test('repair_base is read eagerly: a job without it fails even when its run has a chained tip', async () => {
+    const h = harness({ results: { 'crq-r-F1': fixed('tip') } });
+    await expect(
+      processRepairItem(
+        [job('crq-r-F1'), job('crq-r-F2', { omitBase: true })],
+        h.context,
+        h.effects,
+      ),
+    ).rejects.toThrow("KeyError: 'repair_base'");
+    // The first job ran and chained; only the second tripped on its own missing key.
+    expect(h.processed.map((p) => p.job)).toEqual(['crq-r-F1']);
   });
 });

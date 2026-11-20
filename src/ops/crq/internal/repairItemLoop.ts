@@ -161,7 +161,12 @@ async function canonicalDeliveryReason(
  * `process_item`: each finding has its own worktree; successful commits chain by
  * base. Resolves with Python's admission outcome: `runner-disabled`,
  * `rate-limit`, or `null` when the item ran out of jobs or stopped quietly
- * (blackout, deferred retry). `jobs` is sorted and rebased in place.
+ * (blackout, deferred retry). `jobs` is sorted and rebased in place: each entry
+ * of the array is replaced by a copy carrying the chained `repair_base`. Python
+ * mutates the dict, but its only callers drop the jobs after the call or read
+ * only `job['job']` (`explicit_job_result`), so the array contents are the whole
+ * caller-visible contract; a caller that keeps an individual job object across
+ * the call must re-read it from the array.
  */
 export async function processRepairItem(
   jobs: JsonObject[],
