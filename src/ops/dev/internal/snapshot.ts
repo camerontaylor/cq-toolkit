@@ -1,6 +1,8 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstat, mkdtemp, readFile, readlink, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import type { Stats } from 'node:fs';
+import { lstat, mkdtemp, open, readlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -11,6 +13,9 @@ const MAX_WIRE = 6 * 1024 * 1024;
 
 /** Operator misconfiguration (not a runtime refusal): surfaces as needs-human, never indeterminate. */
 export class SnapshotConfigError extends Error {}
+
+/** A tracked descendant whose ancestor is now a regular file: the descendant is deleted. */
+class ReplacedAncestorError extends Error {}
 
 /** Private object-only capture: never changes HEAD, the index or working files. */
 export async function captureSnapshot(
@@ -236,7 +241,16 @@ export async function captureWorkingTree(repo: string, originalHead: string) {
     await new Promise<void>((resolve, reject) => {
       const child = execFile(
         'git',
-        ['--no-replace-objects', 'update-index', '-z', '--index-info'],
+        [
+          '--no-replace-objects',
+          '-c',
+          'core.hooksPath=/dev/null',
+          '-c',
+          'core.fsmonitor=false',
+          'update-index',
+          '-z',
+          '--index-info',
+        ],
         { cwd: repo, env, timeout: 30_000 },
         (error) => (error ? reject(error) : resolve()),
       );
@@ -273,12 +287,17 @@ export async function captureWorkingTree(repo: string, originalHead: string) {
         const parents = path.split('/').slice(0, -1);
         for (let end = 1; end <= parents.length; end++) {
           const parent = await lstat(join(repo, ...parents.slice(0, end)));
+          if (parent.isFile()) throw new ReplacedAncestorError(path);
           if (!parent.isDirectory())
             throw new Error(`working-tree snapshot refuses non-directory ancestor: ${path}`);
         }
         info = await lstat(join(repo, path));
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        if (
+          !(error instanceof ReplacedAncestorError) &&
+          (error as NodeJS.ErrnoException).code !== 'ENOENT'
+        )
+          throw error;
         await git('update-index', '--force-remove', '--', path);
         continue;
       }
@@ -286,6 +305,8 @@ export async function captureWorkingTree(repo: string, originalHead: string) {
         await git('update-index', '--force-remove', '--', path);
         continue;
       }
+      // An admitted directory is a gitlink. Keep its indexed commit unchanged.
+      if (info.isDirectory()) continue;
       const trackedLink = info.isSymbolicLink() && indexed.has(path);
       if (!info.isFile() && !trackedLink)
         throw new Error(`working-tree snapshot refuses non-regular path: ${path}`);
@@ -301,7 +322,7 @@ export async function captureWorkingTree(repo: string, originalHead: string) {
       }
       const content = trackedLink
         ? Buffer.from(await readlink(join(repo, path)))
-        : await readFile(join(repo, path));
+        : await readRegularFile(join(repo, path), info);
       const mode = trackedLink ? '120000' : info.mode & 0o111 ? '100755' : '100644';
       const digest = createHash('sha1')
         .update(Buffer.from(`blob ${content.length}\0`))
@@ -316,5 +337,21 @@ export async function captureWorkingTree(repo: string, originalHead: string) {
     return { head, tree, stagedTree };
   } finally {
     await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+/** Read exactly the inode the lstat check validated: never follow a swapped-in symlink. */
+async function readRegularFile(file: string, expected: Stats): Promise<Buffer> {
+  if (!constants.O_NOFOLLOW) throw new Error('working-tree snapshot: no-follow unavailable');
+  // O_NONBLOCK: a regular file swapped for a FIFO after the lstat must fail the
+  // isFile() check below instead of blocking the open until a writer appears.
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const actual = await handle.stat();
+    if (!actual.isFile() || actual.dev !== expected.dev || actual.ino !== expected.ino)
+      throw new Error(`working-tree snapshot file changed during capture: ${file}`);
+    return await handle.readFile();
+  } finally {
+    await handle.close();
   }
 }

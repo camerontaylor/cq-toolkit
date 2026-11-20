@@ -31,8 +31,8 @@ export interface UnitCliDeps {
   effects: TransactionEffects;
   /** `_load_helper` then `load_overlay`; throws as Python would (Refused, Error). */
   prepare(operation: 'switch' | 'recover'): Promise<void> | void;
-  /** `live.production_adapter(effects, overlay, unit=, runtime=)`. */
-  adapterFor(unit: string, runtime: string): UnitAdapter;
+  /** `live.production_adapter(effects, overlay, unit=, runtime=, source_sha=)`. */
+  adapterFor(unit: string, runtime: string, sourceSha?: string): UnitAdapter;
   /** Test seam: the transactions to dispatch to (default: the real ones). */
   transactions?: { switchUnit: typeof switchUnit; recoverUnit: typeof recoverUnit };
 }
@@ -135,9 +135,9 @@ export async function runUnitCli(argv: readonly string[], deps: UnitCliDeps): Pr
     };
   }
   const operation = parsed.kind;
-  const binding = (unit: string, runtime: string): UnitAdapter => {
+  const binding = (unit: string, runtime: string, sourceSha?: string): UnitAdapter => {
     try {
-      return deps.adapterFor(unit, runtime);
+      return deps.adapterFor(unit, runtime, sourceSha);
     } catch (error) {
       if (error instanceof AdapterBindingRefused) throw new RecordRefused(clip(error.message, 400));
       throw error;
@@ -167,7 +167,7 @@ export async function runUnitCli(argv: readonly string[], deps: UnitCliDeps): Pr
         deps.effects,
         null,
         parsed.record,
-        (unit, prior) => binding(unit, prior),
+        (unit, prior, sourceSha) => binding(unit, prior, sourceSha),
       );
     }
     return { exitCode: 0, stdout: dumps(record), stderr: '' };

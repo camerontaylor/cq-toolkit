@@ -175,6 +175,7 @@ def _payload(config, role, job, wt):
             mock.patch.object(service, "require_canonical_delivery", return_value=None), \
             mock.patch.object(service, "source_snapshot",
                               lambda config_, job_: copy.deepcopy(job_["source_snapshot"])), \
+            mock.patch.object(service, "triage_context_safe", return_value=True), \
             mock.patch.object(service, "atomic"):
         service._dispatch(config, copy.deepcopy(role), copy.deepcopy(job), wt, Path(directory))
     flags = {}

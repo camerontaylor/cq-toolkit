@@ -253,6 +253,10 @@ const boundRefusal = (input: NormalizedFixFindingInput): string | undefined => {
  */
 export function makeFixFinding(deps: FixFindingDeps): FixFindingOp {
   return async (input: FixFindingInput) => {
+    // Snapshot before the first await: the echoed binding must match the one
+    // the dispatched request carried, even if the caller replaces or mutates
+    // `input.binding` while the worker is pending.
+    const binding: FixFindingBinding = { ...input.binding };
     // Reuse the shared finding-item normalization rather than re-mapping.
     // The spread/identity in normalizeReviewFixInput preserves the op-only
     // `binding` and `instructions` fields, which ride the serialized bound.
@@ -331,7 +335,7 @@ export function makeFixFinding(deps: FixFindingDeps): FixFindingOp {
         summary: contract.summary,
         commits: contract.commits,
         evidence: contract.evidence,
-        binding: input.binding,
+        binding,
         denials: run.worker.denials,
         usage: run.worker.usage,
         ...(run.worker.costUSD !== undefined ? { costUSD: run.worker.costUSD } : {}),

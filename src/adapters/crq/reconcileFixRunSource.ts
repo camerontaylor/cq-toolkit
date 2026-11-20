@@ -128,6 +128,16 @@ const THREAD_QUERY =
   'reviewThreads(first:100,after:$endCursor){pageInfo{hasNextPage endCursor}' +
   'nodes{id comments(first:1){nodes{body path}}}}}}}';
 
+/** The bound of ONE single-page `gh` invocation (unchanged 30 s wall clock). */
+const GH_TIMEOUT_MS = 30_000;
+/** Bound of one `--paginate --slurp` invocation. gh walks every page inside a
+ * SINGLE process, so the 30 s single-page bound would time out on the whole
+ * walk — a large PR could never complete its first page — and a retry would
+ * restart from page one and fail the same way. Paginated lookups therefore get
+ * their own, longer, still bounded clock; single-page calls keep
+ * {@link GH_TIMEOUT_MS}. */
+const GH_PAGINATED_TIMEOUT_MS = 120_000;
+
 export function fileFixRunSeams(
   options: FixRunSeamsOptions,
 ): (item: JsonObject, run: string) => FixRunSeams {
@@ -135,10 +145,17 @@ export function fileFixRunSeams(
   if (!owner || !repoName || extra.length || !ghNameOk(owner) || !ghNameOk(repoName))
     throw new Error('invalid repo');
   const git = options.runGit ?? runGitIn(options.clone);
-  const rawGh = options.gh ?? makeGhRunner({ timeoutMs: 30_000 });
+  const rawGh = options.gh ?? makeGhRunner({ timeoutMs: GH_TIMEOUT_MS });
+  // An INJECTED runner carries its own bound, so both names resolve to it and
+  // only the budget charge is added (the injected seam stays the authority).
+  const rawPaginatedGh = options.gh ?? makeGhRunner({ timeoutMs: GH_PAGINATED_TIMEOUT_MS });
   const gh: GhFn = (args) => {
     options.take?.();
     return rawGh(args);
+  };
+  const paginatedGh: GhFn = (args) => {
+    options.take?.();
+    return rawPaginatedGh(args);
   };
   const now = options.now ?? (() => new Date());
   const repairDir = join(options.stateRoot, 'repair');
@@ -238,7 +255,7 @@ export function fileFixRunSeams(
   };
 
   const pages = async (args: string[], path: string): Promise<unknown[][]> =>
-    slurpedComments(await ghJson<unknown>(gh, [...args, '--paginate', '--slurp']), path);
+    slurpedComments(await ghJson<unknown>(paginatedGh, [...args, '--paginate', '--slurp']), path);
 
   const feedbackEffects: SourcePublishEffects = {
     ...proofEffects,
@@ -298,7 +315,7 @@ export function fileFixRunSeams(
       const want = sourceComment(job);
       if (want === null) return { kind: 'none' };
       const found = new Set<string>();
-      const graph = await ghJson<unknown>(gh, [
+      const graph = await ghJson<unknown>(paginatedGh, [
         'api',
         'graphql',
         '--paginate',

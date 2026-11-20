@@ -18,7 +18,9 @@
 //     GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_CONFIG_PARAMETERS/COUNT, ...),
 //     ignores the system config, never prompts, takes no optional locks, and
 //     disables replace refs (a `refs/replace/*` object would make `<rev>`
-//     silently read a DIFFERENT tree than its oid names).
+//     silently read a DIFFERENT tree than its oid names); GIT_GRAFT_FILE is
+//     pinned at devNull, because grafts substitute parents independently of
+//     replace refs and would otherwise reshape the range a gate walks.
 //   - Every revision is validated BEFORE spawn: a 40-hex oid or a
 //     conservative ref name (effects.ts's SAFE_REF rules). A value starting
 //     with `-` can never reach argv as an option; `--end-of-options` (git
@@ -60,8 +62,10 @@ const EXEC_TIMEOUT_MS = 120_000;
 
 /**
  * Ambient variables that could redirect git to a different repository,
- * index, object store, namespace or configuration — or run a program. All
- * are deleted from the child env so `-C <repo>` alone decides what is read.
+ * index, object store, namespace or configuration — or reshape the history it
+ * reports (a shallow/graft file makes an arbitrary commit look like a root,
+ * so range and ancestry answers would be wrong) — or run a program. All are
+ * deleted from the child env so `-C <repo>` alone decides what is read.
  */
 const SCRUBBED_ENV = [
   'GIT_DIR',
@@ -70,6 +74,8 @@ const SCRUBBED_ENV = [
   'GIT_COMMON_DIR',
   'GIT_OBJECT_DIRECTORY',
   'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_GRAFT_FILE',
+  'GIT_SHALLOW_FILE',
   'GIT_NAMESPACE',
   'GIT_REPLACE_REF_BASE',
   'GIT_EXTERNAL_DIFF',
@@ -99,10 +105,27 @@ function gitEnv(): NodeJS.ProcessEnv {
   ) {
     env['GIT_CONFIG_GLOBAL'] = devNull;
   }
+  // GIT_ALLOW_PROTOCOL overrides protocol.<name>.allow, so an inherited list
+  // naming `ext` would defeat the pinned protocol.ext.allow=never. Keep the
+  // caller's restriction but drop `ext` from it.
+  const allow = process.env['GIT_ALLOW_PROTOCOL'];
+  if (allow !== undefined)
+    env['GIT_ALLOW_PROTOCOL'] = allow
+      .split(':')
+      .filter((name) => name.toLowerCase() !== 'ext')
+      .join(':');
   env['GIT_CONFIG_NOSYSTEM'] = '1';
   env['GIT_TERMINAL_PROMPT'] = '0';
   env['GIT_OPTIONAL_LOCKS'] = '0';
   env['GIT_NO_REPLACE_OBJECTS'] = '1';
+  // GRAFTS ARE A SECOND, INDEPENDENT PARENT-SUBSTITUTION VECTOR: git loads the
+  // graft file regardless of GIT_NO_REPLACE_OBJECTS, and a graft naming a
+  // different parent for a commit silently rewrites the graph (A -> B -> C
+  // read as A -> C, so the range A..C omits B). The variable ALSO overrides
+  // git's default path ($GIT_DIR/info/grafts), so pinning it at devNull
+  // (empty, hence no grafts) blocks an ambient value and a repository-local
+  // info/grafts file at once — deleting the variable would restore the default.
+  env['GIT_GRAFT_FILE'] = devNull;
   return env;
 }
 
@@ -774,8 +797,10 @@ export interface LeasedUpdate {
  * argv (visible in the process table), never `.git/config` (persisted).
  * The same env resets any configured extra-header for that host
  * (actions/checkout's persisted credential would otherwise ride along),
- * empties `credential.helper` and `core.askPass` (both are programs) and
- * drops GIT_ASKPASS/SSH_ASKPASS, so no program is asked for a secret. A
+ * empties `credential.helper` and `core.askPass` (both are programs),
+ * refuses the `ext::` transport (an `insteadOf` rewrite is applied after
+ * {@link assertPushUrl} sees the URL) and drops GIT_ASKPASS/SSH_ASKPASS, so
+ * no program is asked for a secret. A
  * local path or `file:///` URL (tests push to a local bare repo) carries no
  * header. Returns the strings to redact from any child output.
  */
@@ -787,6 +812,12 @@ function gitRemoteEnv(url: string, token: string): { env: NodeJS.ProcessEnv; sec
   const config: [string, string][] = [
     ['credential.helper', ''],
     ['core.askPass', ''],
+    // `assertPushUrl` only sees the INPUT string: git applies
+    // `url.<base>.insteadOf` AFTER that check, so a repository or global
+    // rewrite could select the `ext::` transport and run a command. Pinning
+    // protocol.ext.allow=never blocks the rewritten transport; https and
+    // local-path remotes are unaffected.
+    ['protocol.ext.allow', 'never'],
   ];
   const secrets: string[] = [];
   if (url.startsWith('https://')) {
@@ -864,8 +895,11 @@ export async function gitLsRemoteRef(
 
 /**
  * Atomically push `updates` to `url` as a compare-and-swap: `push --atomic
- * --porcelain --no-verify` with one explicit `--force-with-lease=refs/heads/
- * <branch>:<expected>` per update, NEVER plain `--force` or a `+` refspec.
+ * --porcelain --no-verify --no-follow-tags` with one explicit `--force-with-
+ * lease=refs/heads/<branch>:<expected>` per update, NEVER plain `--force` or a
+ * `+` refspec. `--no-follow-tags` pins `push.followTags` OFF: an ambient
+ * `push.followTags=true` would otherwise send annotated tags reachable from
+ * the pushed branch — tags with no lease and outside the validated set.
  * Each lease names the exact oid the caller last read, so the remote ref
  * must still hold it — a ref that advanced OR was rewound (even to an
  * ancestor of the new value, which a plain fast-forward push would accept)
@@ -909,6 +943,12 @@ export async function gitPushAtomic(
       '--atomic',
       '--porcelain',
       '--no-verify',
+      // review crq-backfill-510beeb3: push.followTags=true would publish
+      // annotated tags reachable from the pushed branch. Those tags are not in
+      // `updates`, so they carry no lease, are not part of the validated set,
+      // and `--atomic` would send them in the same transaction. The sibling
+      // push in mergeEffects.ts pins the same flag.
+      '--no-follow-tags',
       ...leases,
       '--end-of-options',
       url,

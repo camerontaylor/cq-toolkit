@@ -579,6 +579,55 @@ def matrix_evidence():
     return phases_value, restarts, reboots
 
 
+class CompletionsReadTests(unittest.TestCase):
+    def _read(self, text, writes=(), on_sleep=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = pathlib.Path(tmp) / "completions.jsonl"
+            log.write_text(text)
+            pending = list(writes)
+
+            def sleep(seconds):
+                if on_sleep is not None:
+                    on_sleep(seconds)
+                if pending:
+                    log.write_text(pending.pop(0))
+
+            with mock.patch.object(guest, "COMPLETIONS", log), \
+                    mock.patch.object(guest.time, "sleep", sleep):
+                return guest.completions()
+
+    def test_partial_final_line_is_retried_until_complete(self):
+        self.assertEqual(
+            self._read('{"a": 1}\n{"b"', writes=['{"a": 1}\n{"b": 2}\n']),
+            [{"a": 1}, {"b": 2}])
+
+    def test_persistent_partial_line_is_never_accepted(self):
+        with self.assertRaisesRegex(RuntimeError, "line 2 is not JSON"):
+            self._read('{"a": 1}\n{"b"')
+
+    def test_unterminated_valid_json_is_retried_until_newline(self):
+        self.assertEqual(
+            self._read('{"a": 1}\n{"b": 2}', writes=['{"a": 1}\n{"b": 2}\n']),
+            [{"a": 1}, {"b": 2}])
+
+    def test_persistent_unterminated_valid_json_is_never_accepted(self):
+        with self.assertRaisesRegex(RuntimeError, "not JSON"):
+            self._read('{"a": 1}\n{"b": 2}')
+
+    def test_completion_evidence_requires_an_integer_sequence(self):
+        item = {"sequence": 1, "invocation": "a" * 32, "runtime": "python"}
+        entry = dict(item, unit=guest.UNIT, success=True)
+        self.assertTrue(guest.completion_logged(item, [entry]))
+        for bogus in (True, 1.0):
+            self.assertFalse(guest.completion_logged(item, [dict(entry, sequence=bogus)]))
+
+    def test_bad_interior_line_raises_without_retry(self):
+        sleep = mock.Mock()
+        with self.assertRaisesRegex(RuntimeError, "line 1 is not JSON"):
+            self._read('nope\n{"b": 2}\n', on_sleep=sleep)
+        sleep.assert_not_called()
+
+
 class HarnessCheckTests(unittest.TestCase):
     def test_complete_evidence_passes(self):
         checks, problems = harness.build_checks(phases())

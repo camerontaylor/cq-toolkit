@@ -66,9 +66,12 @@ clean result is the expected one):
    id that made the `chat → flash` alias necessary at all. Keep-or-retire is an
    owner decision. Former behavior (deleted with the W3.5 normalizer, see the
    Phase 0.2 note above): `deepseek-chat` requests were priced through the
-   declared alias set. Retained behavior, which is what prices them today: both
-   ids are direct keys in `./data.ts`, and `priceOf` prices each by exact
-   provider-handle + model-id match, never through a fabricated rate.
+   declared alias set. Current behavior: both ids are direct keys in
+   `./data.ts`, and `priceOf` prices each by exact provider-handle + model-id
+   match, never through a fabricated rate. The ai-sdk and acp drivers pass the
+   served model ID to the pricing lookup when the wire reports one. A
+   `deepseek-chat` request served as `deepseek-flash` is therefore priced at the
+   `deepseek-flash` rate, not the `deepseek-chat` rate.
 3. **Upstream is a community database, not a vendor.** It is acceptable as the
    vendoring source of record for `data.ts` (DD-3), but ADR-0003 §2.4 criterion 2
    requires `W_max` token limits from the PROVIDER's own Models API or model

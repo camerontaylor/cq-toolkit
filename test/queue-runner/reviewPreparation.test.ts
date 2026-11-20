@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { JsonNumber, JsonObject } from '../../src/policy/crq/jsonValue.js';
 import {
   ReviewCheckoutError,
+  ReviewScanRefusal,
   prepareOrdinaryReview,
   prepareAndPersistOrdinaryReview,
   type ReviewPreparationEffects,
@@ -114,6 +115,55 @@ describe('inactive ordinary review preparation', () => {
     );
     expect(f.saved()).toBe(result.queue);
   });
+  it.each([['--base'], ['--base=main'], ['--base-commit'], ['--base-commit=abc']])(
+    'refuses a profile flag %s that would override the runner base before effects',
+    async (flag) => {
+      const f = fixture();
+      const plan = new JsonObject([
+        ...f.plan.entries,
+        ['profile', new JsonObject([['flags', ['--agent', flag]]])],
+        ['config_digest', 'digest'],
+      ]);
+      await expect(
+        prepareOrdinaryReview(
+          f.queue,
+          { itemIndex: 0, plan, repo: 'o/r', band: 'background' },
+          f.effects,
+        ),
+      ).rejects.toThrow('base selector');
+      expect(f.calls).toEqual([]);
+    },
+  );
+  it.each([
+    ['--uncommitted'],
+    ['--committed'],
+    ['--all'],
+    ['--type'],
+    ['--type=uncommitted'],
+    ['-t'],
+    ['--untracked'],
+    ['--include-untracked'],
+    ['--dir'],
+    ['--dir=src'],
+  ])(
+    'refuses a profile flag %s that would select the review scope before effects',
+    async (flag) => {
+      const f = fixture();
+      const plan = new JsonObject([
+        ...f.plan.entries,
+        ['profile', new JsonObject([['flags', ['--agent', flag]]])],
+        ['config_digest', 'digest'],
+      ]);
+      await expect(
+        prepareOrdinaryReview(
+          f.queue,
+          { itemIndex: 0, plan, repo: 'o/r', band: 'background' },
+          f.effects,
+        ),
+      ).rejects.toThrow('review scope');
+      expect(f.calls).toEqual([]);
+    },
+  );
   it.each(['author', 'current', 'push', 'backfill', 'coverage', 'local-review'])(
     'refuses unsupported %s before effects',
     async (kind) => {
@@ -273,6 +323,24 @@ describe('ordinary preparation caller', () => {
     expect(result.queue.get('unknown')).toBe(f.queue.get('unknown'));
     expect((result.queue.get('items') as JsonObject[])[0]?.get('unknown')).toBe(
       (f.queue.get('items') as JsonObject[])[0]?.get('unknown'),
+    );
+  });
+  it('persists a scan refusal as blocked instead of leaving the review pending', async () => {
+    const f = fixture();
+    f.effects.scan = async () => {
+      f.calls.push('scan');
+      throw new ReviewScanRefusal('undecodable review scan path');
+    };
+    const result = await prepareAndPersistOrdinaryReview(
+      f.queue,
+      { itemIndex: 0, plan: f.plan, repo: 'o/r', band: 'background' },
+      f.effects,
+    );
+    expect(f.calls).toEqual(['allocate', 'scan', 'blocked', 'save']);
+    expect(result.outcome).toBe('blocked');
+    const item = (result.queue.get('items') as JsonObject[])[0]!;
+    expect(item.get('last_error')).toBe(
+      'review scan refused the diff: undecodable review scan path',
     );
   });
   it('persists a checkout failure after its event without reserving or spawning', async () => {

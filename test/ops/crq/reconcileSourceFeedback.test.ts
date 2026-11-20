@@ -242,6 +242,32 @@ describe('publishSource', () => {
     expect(log).toEqual(['comment:crq-j1', 'resolve:crq-j1:T1', 'journal:crq-j1:["crq-j1"]']);
     expect(plain((out.publication as JsonObject).get('source_resolutions'))).toEqual(['crq-j1']);
   });
+  test('a canonical job with current fixed evidence resolves its source thread', async () => {
+    const { e, log } = feedback({
+      threads: { 'crq-j1': { kind: 'found', id: 'T1' } },
+      jobs: { 'crq-j1': { canonical_finding_id: FINDING } },
+    });
+    const out = await publishSource(ctx, rec(), info(), plainProof, merge, e);
+    expect(out.pending).toBe(false);
+    expect(log).toEqual(['comment:crq-j1', 'resolve:crq-j1:T1', 'journal:crq-j1:["crq-j1"]']);
+  });
+  test('a superseded finding generation defers feedback instead of resolving the thread', async () => {
+    const { e, log } = feedback({
+      threads: { 'crq-j1': { kind: 'found', id: 'T1' } },
+      jobs: { 'crq-j1': { canonical_finding_id: FINDING } },
+      // The row still belongs to a newer generation: no fixed event of ours exists.
+      canonical: {
+        readJob: async (id) => obj({ job: id, canonical_finding_id: FINDING }),
+        triageExists: async () => true,
+        currentFixedEvent: async () => null,
+        isAncestor: async () => true,
+      },
+    });
+    const out = await publishSource(ctx, rec(), info(), plainProof, merge, e);
+    expect(out.pending).toBe(true);
+    expect(log).toEqual([]);
+    expect(plain((out.publication as JsonObject).get('source_resolutions'))).toEqual([]);
+  });
   test('an existing comment is not posted again', async () => {
     const { e, log } = feedback({ comments: new Set(['<!-- crq-repair-source:crq-j1 -->']) });
     await publishSource(ctx, rec(), info(), plainProof, merge, e);

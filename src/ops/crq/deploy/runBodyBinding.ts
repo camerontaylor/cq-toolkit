@@ -304,7 +304,7 @@ export function bindRun<E, H, C extends BoundController<E>>(deps: RunDeps<E, H, 
       cqBin = await measureCqBin(deps.live, state.originalConfig);
       state.cqBin = cqBin;
       state.preserved = await ctrl().preservedDigests(effects());
-      const record = await ctrl().compatibilityRecord(effects(), need(state.target, 'target'));
+      const record = await ctrl().compatibilityRecord(effects(), need(state.priorSha, 'priorSha'));
       const compatible = ctrl().rollbackCompatible(record);
       return { compatible, reason: compatible ? '' : compatibilityReason(record), cqBin };
     },
@@ -371,7 +371,7 @@ export function bindRun<E, H, C extends BoundController<E>>(deps: RunDeps<E, H, 
         root: cfg.root,
         originalConfig: need(state.originalConfig, 'originalConfig'),
         cqBin: need(cqBin, 'cqBin'),
-        target: need(state.target, 'target'),
+        priorSha: need(state.priorSha, 'priorSha'),
         phase: (name, extra) => {
           pending = [name, extra];
         },

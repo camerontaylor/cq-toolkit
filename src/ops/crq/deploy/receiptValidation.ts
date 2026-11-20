@@ -345,7 +345,7 @@ export function schemaProblem(value: JsonValue, rule: JsonValue, at = ''): strin
   if (oneOf !== undefined) {
     if (!Array.isArray(oneOf)) throw new PythonError('TypeError', 'oneOf is not a list');
     const matches = oneOf.filter((branch) => schemaProblem(value, branch, at) === null).length;
-    return matches === 1 ? null : `${where}: does not match exactly one variant`;
+    if (matches !== 1) return `${where}: does not match exactly one variant`;
   }
   const expected = rule.get('type');
   if (

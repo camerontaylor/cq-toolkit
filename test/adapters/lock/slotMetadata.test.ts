@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'vitest';
-import { mkdtemp, rm, writeFile, readFile, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, rm, writeFile, readFile, realpath, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -7,13 +7,14 @@ import {
   acquireFileLock,
   attachSlotMetadata,
   readSlotMetadata,
+  type SlotMetadata,
 } from '../../../src/adapters/lock/slotLock.js';
 const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 async function root() {
-  const path = await mkdtemp(join(tmpdir(), 'cq-metadata-'));
+  const path = await realpath(await mkdtemp(join(tmpdir(), 'cq-metadata-')));
   roots.push(path);
   return path;
 }
@@ -59,6 +60,51 @@ test('existing lock attachment uses persistent metadata sibling (mutation: attac
     });
   } finally {
     await recovered.close();
+  }
+});
+
+test('incomplete bound metadata survives a removed checkout; complete metadata must still resolve', async () => {
+  const base = await root();
+  const checkout = join(base, 'checkout');
+  const gitDir = join(base, 'admin');
+  await mkdir(checkout);
+  await mkdir(gitDir);
+  const slot = await acquireSlot(base, 1);
+  try {
+    const bound = { version: 1, state: 'bound', checkoutPath: checkout, checkoutGitDir: gitDir };
+    await slot.writeMetadata({ ...bound, incomplete: false } as SlotMetadata);
+    await rename(checkout, `${checkout}-gone`);
+    await rename(gitDir, `${gitDir}-gone`);
+    await expect(
+      slot.writeMetadata({ ...bound, incomplete: false } as SlotMetadata),
+    ).rejects.toThrow(/ENOENT/);
+    await slot.writeMetadata({ ...bound, incomplete: true } as SlotMetadata);
+    expect(await readSlotMetadata(slot.metadataPath)).toEqual({ ...bound, incomplete: true });
+  } finally {
+    await slot.close();
+  }
+});
+
+test('incomplete bound metadata survives a stored path whose parent became a file (ENOTDIR)', async () => {
+  const base = await root();
+  const parent = join(base, 'parent');
+  const checkout = join(parent, 'checkout');
+  const gitDir = join(base, 'admin');
+  await mkdir(checkout, { recursive: true });
+  await mkdir(gitDir);
+  const slot = await acquireSlot(base, 1);
+  try {
+    const bound = { version: 1, state: 'bound', checkoutPath: checkout, checkoutGitDir: gitDir };
+    await slot.writeMetadata({ ...bound, incomplete: false } as SlotMetadata);
+    await rm(parent, { recursive: true });
+    await writeFile(parent, 'now a file');
+    await expect(
+      slot.writeMetadata({ ...bound, incomplete: false } as SlotMetadata),
+    ).rejects.toThrow(/ENOTDIR/);
+    await slot.writeMetadata({ ...bound, incomplete: true } as SlotMetadata);
+    expect(await readSlotMetadata(slot.metadataPath)).toEqual({ ...bound, incomplete: true });
+  } finally {
+    await slot.close();
   }
 });
 

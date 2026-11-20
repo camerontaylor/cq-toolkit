@@ -38,6 +38,23 @@ describe('backfill terminal policy', () => {
       expect((row as JsonObject).get('quarantined')).toBe(true);
     }
   });
+  it('keeps the later of the stored and computed family cooldown', () => {
+    const stored = (cooldown: string) =>
+      obj(
+        `{"items":[{"id":"j","family":"f","scope":[],"state":"reviewing","vendor_state":"live","attempt_id":"x","run":{"run_id":"r"},"failures":0}],"backfill_reservations":{"x":{"quota_state":"reserved"}},"backfill_families":{"f":{"failures":0,"quarantined":false,"next_eligible_at":"${cooldown}"}}}`,
+      );
+    const kept = terminalBackfill(stored('2026-10-31T00:00:00Z'), 0, at, 'error', true, 0);
+    const keptFamily = kept.queue.get('backfill_families') as JsonObject;
+    expect((keptFamily.get('f') as JsonObject).get('next_eligible_at')).toBe(
+      '2026-10-31T00:00:00Z',
+    );
+    expect(kept.item.get('not_before')).toBe('2026-10-31T00:00:00Z');
+    const extended = terminalBackfill(stored('2026-10-30T00:00:00Z'), 0, at, 'error', true, 0);
+    const extendedFamily = extended.queue.get('backfill_families') as JsonObject;
+    expect((extendedFamily.get('f') as JsonObject).get('next_eligible_at')).toBe(
+      '2026-10-30T01:00:00Z',
+    );
+  });
   it('honors retry-after and immediate quarantine', () => {
     const result = terminalBackfill(input(), 0, at, 'auth', true, 7200, 'auth error');
     expect(result.item.get('state')).toBe('quarantined');

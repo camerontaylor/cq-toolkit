@@ -124,14 +124,17 @@ export type RunnerResult = {
 };
 
 /**
- * One live unit's exit code: the plain status mapping (`ok` → 0, anything
- * else → 1), except the publish unit. Python's publisher run exits 1 for
+ * One live unit's exit code: the status mapping (`ok` → 0, `needs-human` and
+ * `budget-exhausted` → 3, anything else → 1), except the publish unit. Both are
+ * doctrine I1's stop codes (`src/cli/exit.ts`), so they are mapped BEFORE the
+ * generic failure fallback and never downgraded to 1. Python's publisher run exits 1 for
  * reconciliation-pending — remote work succeeded and only local bookkeeping
  * waits — while its artifact stays an `ok` result that retains the
  * publication value, so only the publish branch inspects `value.publication`
  * here; every other live unit maps its status alone.
  */
 function liveUnitExitCode(command: string, result: OpResult<unknown>): number {
+  if (result.status === 'needs-human' || result.status === 'budget-exhausted') return 3;
   if (result.status !== 'ok') return 1;
   if (
     command === 'publish' &&

@@ -13,6 +13,9 @@ import admission_history
 
 KIND = "backfill"
 RANK4 = ("coverage", KIND)
+# A job is built at the tip its inventory resolved, so age since created_at bounds how far
+# its pin has fallen behind main. Reviews launched past 24 h produced every stale-pin finding.
+MAX_PENDING_AGE_SECONDS = 86400
 
 
 def is_execution_owner(item):
@@ -62,11 +65,21 @@ def enqueue(queue, partition, at):
     return job
 
 
+def expired(item, at):
+    """Pending past the age bound (or unreadable created_at): never launchable, so inventory releases it."""
+    try:
+        return (ledger.timestamp(at) - ledger.timestamp(item.get("created_at"))).total_seconds() > MAX_PENDING_AGE_SECONDS
+    except ValueError:
+        return True
+
+
 def eligible(queue, item, at):
     if item.get("state") != "pending" or is_execution_owner(item):
         return False
     current = ledger.timestamp(at)
     try:
+        if expired(item, at):
+            return False
         if any(deadline and ledger.timestamp(deadline) > current for deadline in (item.get("not_before"), queue.get("cooldown_until"))):
             return False
     except ValueError:

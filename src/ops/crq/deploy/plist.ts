@@ -23,7 +23,10 @@ const XML_ENTITIES: Readonly<Record<string, string>> = {
 };
 
 function unescapeXml(text: string): string {
-  return text.replace(/&(#x[0-9A-Fa-f]+|#[0-9]+|amp|lt|gt|quot|apos);/g, (_m, name: string) => {
+  // A bare `&` (one that starts no reference in the pattern below) is an
+  // undeclared reference, which XML requires to fail rather than pass through.
+  return text.replace(/&(#x[0-9A-Fa-f]+|#[0-9]+|amp|lt|gt|quot|apos);|&/g, (_m, name?: string) => {
+    if (name === undefined) throw new ValueError('unrecognized entity reference in plist');
     if (name[0] !== '#') return XML_ENTITIES[name] as string;
     const code = name[1] === 'x' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
     if (!(code === 9 || code === 10 || code === 13 || (code >= 0x20 && code <= 0x10ffff)))
@@ -68,7 +71,10 @@ export function parsePlist(source: string): PlistValue {
   const readText = (): string => {
     const end = source.indexOf('<', pos);
     if (end < 0) fail('unterminated element');
-    const text = source.slice(pos, end);
+    // XML 1.0 section 2.11: literal CRLF and lone CR in character data are
+    // normalized to LF before parsing. Normalize the raw text so that the
+    // character reference `&#13;` still decodes to CR afterwards.
+    const text = source.slice(pos, end).replace(/\r\n?/g, '\n');
     pos = end;
     return unescapeXml(text);
   };
@@ -147,7 +153,11 @@ function escapeXml(text: string): string {
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(text))
     throw new ValueError('strings can not contain control characters; encode as bytes instead');
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\r/g, '&#13;');
 }
 
 export function dumpPlist(root: PlistValue): string {
