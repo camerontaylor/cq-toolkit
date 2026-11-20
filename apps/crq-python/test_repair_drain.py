@@ -2591,6 +2591,22 @@ class RepairDrainTest(unittest.TestCase):
             self.assertEqual(service.process_item(self.config, jobs), 'rate-limit')
         self.assertEqual(process.call_count, 1)
 
+    def test_rate_limit_with_nested_repository_left_behind_still_defers(self):
+        # The final (or only) provider is throttled after leaving an untracked
+        # nested repository; retaining the tree must not end the item.
+        def limited(config, role, job, wt, directory, *args, **kwargs):
+            nested = Path(wt) / 'scratch'
+            subprocess.run(['git', 'init', '-q', str(nested)], check=True)
+            (nested / 'note').write_text('leak')
+            return {'stop': 'rate-limit', 'retry_after_ms': 3600000}
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service.cq, 'invoke', side_effect=limited) as invoke:
+            service.drain(self.config)
+        self.assertEqual(invoke.call_count, 1)
+        marker = json.loads((self.root / 'state/repair/rate-limited-until').read_text())
+        self.assertEqual(self.result('crq-run1-F1')['retry_after'], marker['until'])
+        self.assertTrue(list(self.root.rglob('retained-nested/capture-*/scratch/note')))
+
     def test_rate_limit_pauses_every_item_until_the_window_ends(self):
         self.queue['items'].append(self.item('pr4-merged', 'run4', ['crq-run4-F1'], open_pr=False))
         self.job('crq-run4-F1', 'pr4-merged', 'run4', 'src/kept.ts')

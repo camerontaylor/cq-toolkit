@@ -297,6 +297,35 @@ def dispatch_paused(config):
     return paused()
 
 
+def retain_preserving_nested(wt, base, directory):
+    try:
+        retain(wt, base, directory)
+    except UnsupportedUntracked:
+        # A throttled fixer can leave an unignored nested repository
+        # in the tree: retain() refuses to archive an untracked
+        # entry that is not a regular file or symlink, and the
+        # doubled -f below is what removes nested repositories.
+        # Moving each such repository into the provider's evidence
+        # directory preserves its contents unarchived, so the
+        # capture retry succeeds and the cleanup can run; any other
+        # unsupported entry still fails closed without a reset.
+        nested = untracked_directories(wt)
+        if not nested:
+            raise
+        # A rate-limit deferral re-runs this rung against the same
+        # evidence directory, so every capture gets its own fresh
+        # subdirectory: shutil.move treats an existing destination
+        # directory as a container, which would nest or collide.
+        holder = directory / 'retained-nested'
+        holder.mkdir(parents=True, exist_ok=True)
+        capture = Path(tempfile.mkdtemp(prefix='capture-', dir=holder))
+        for name in nested:
+            target = capture / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(os.fspath(Path(wt) / name), os.fspath(target))
+        retain(wt, base, directory)
+
+
 def dispatch(config, role, job, wt, directory, judge=False):
     if not config.get('repair', {}).get('fallback_models'):
         with correlation(job, judge):
@@ -327,32 +356,7 @@ def dispatch(config, role, job, wt, directory, judge=False):
             if remaining < 0.001:
                 return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
             if attempted and not judge:
-                try:
-                    retain(wt, baseline, previous_directory)
-                except UnsupportedUntracked:
-                    # A throttled fixer can leave an unignored nested repository
-                    # in the tree: retain() refuses to archive an untracked
-                    # entry that is not a regular file or symlink, and the
-                    # doubled -f below is what removes nested repositories.
-                    # Moving each such repository into the provider's evidence
-                    # directory preserves its contents unarchived, so the
-                    # capture retry succeeds and the cleanup can run; any other
-                    # unsupported entry still fails closed without a reset.
-                    nested = untracked_directories(wt)
-                    if not nested:
-                        raise
-                    # A rate-limit deferral re-runs this rung against the same
-                    # evidence directory, so every capture gets its own fresh
-                    # subdirectory: shutil.move treats an existing destination
-                    # directory as a container, which would nest or collide.
-                    holder = previous_directory / 'retained-nested'
-                    holder.mkdir(parents=True, exist_ok=True)
-                    capture = Path(tempfile.mkdtemp(prefix='capture-', dir=holder))
-                    for name in nested:
-                        target = capture / name
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.move(os.fspath(Path(wt) / name), os.fspath(target))
-                    retain(wt, baseline, previous_directory)
+                retain_preserving_nested(wt, baseline, previous_directory)
                 # Each fallback fixer gets a fresh checkout at the baseline:
                 # -x also removes ignored files, and the doubled -f removes
                 # nested git repositories, so nothing a throttled fixer left
@@ -602,7 +606,7 @@ def process(config, job, wt):
                     result['failure_class'] = 'exhausted'
                 result.pop('unchanged_evidence', None)
                 if report.get('stop') == 'rate-limit':
-                    retain(wt, base, attempt_dir)
+                    retain_preserving_nested(wt, base, attempt_dir)
                     result['next_rung'] = rung
                     return defer('provider rate limit; attempt deferred', rate_limit=report)
                 attempt = {'rung': 'A' + str(rung), 'role': 'fixer' if rung < 2 else 'fixer_escalation',
