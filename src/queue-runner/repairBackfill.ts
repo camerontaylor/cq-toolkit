@@ -188,8 +188,9 @@ const prHead = (meta: Rec): unknown =>
  * still drainable for the run.
  *
  * `evidenceRun` is the run directory the findings are read from (Python's
- * `rdir`): the backfill passes the cycle's own run, which is the meta's
- * `run_id` unless the two disagree. Job ids and the record use the meta's id.
+ * `rdir`): the backfill passes the cycle's own run after checking that the
+ * meta's `run_id` matches it, and skips the cycle when the two disagree. Job
+ * ids and the record use the meta's id.
  */
 export async function repairEnqueue(
   q: Queue,
@@ -422,6 +423,15 @@ export async function repairBackfill(q: Queue, fx: RepairBackfillEffects): Promi
       }
       const meta = dict(await fx.readMeta(run), 'meta');
       if (get(meta, 'kind') === LOCAL_REVIEW_KIND) continue;
+      if (!pyEq(get(meta, 'run_id'), run)) {
+        // The metadata names another run: enqueueing would file the verdict
+        // under that id and leave this cycle without a repair record of its
+        // own, so the ledger could archive while the cycle is unresolved.
+        // repairEnqueue stays available for matching metadata, where the
+        // other run's record serves its own evidence.
+        missing.push({ item: req(item, 'id'), run, reason: 'meta names another run' });
+        continue;
+      }
       const queued = await repairEnqueue(q, item, meta, fx, run);
       if (
         !queued &&

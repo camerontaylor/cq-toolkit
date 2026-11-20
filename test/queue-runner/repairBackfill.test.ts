@@ -597,15 +597,26 @@ describe('repairBackfill vs the real repair_tick.backfill', () => {
     );
   });
 
-  it('enqueues from a meta.json that names another run, and stamps (as Python does)', async () => {
-    const out = await same(
+  // crq review (PR #2241) flagged the next one as a defect. Python enqueues a
+  // cycle's findings under the meta's run id even when it names another run,
+  // leaving the cycle itself without a repair record, so the ledger could
+  // archive while it is unresolved. The port deliberately deviates: the meta
+  // must match the cycle or the debt is recorded and nothing is enqueued, and
+  // repairEnqueue stays available for matching metadata so the other run's
+  // record still serves its own evidence.
+  it('records unresolved debt when the meta names another run instead of enqueueing', async () => {
+    const out = await runTs(
       backfill({
         findings: { r1: rows(F1) },
         runs: { r1: evidence({ run_id: 'r2' }) },
       }),
     );
-    expect(Object.keys(out.files)).toContain('state/repair/inbox/crq-r2-F1.json');
-    expect(out.queue).toContain('legacy_repair_backfilled');
+    expect(out.error).toBe(false);
+    expect(JSON.parse(out.queue).legacy_repair_missing).toEqual([
+      { item: 'pr-5', run: 'r1', reason: 'meta names another run' },
+    ]);
+    expect(JSON.parse(out.queue).legacy_repair_backfilled).toBeUndefined();
+    expect(Object.keys(out.files)).toEqual(['runs/r1/meta.json', 'runs/r1/review.ndjson']);
   });
 
   it('raises on a cycle without a run_id and on unreadable meta', async () => {
