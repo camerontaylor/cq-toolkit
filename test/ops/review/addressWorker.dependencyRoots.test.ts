@@ -216,6 +216,323 @@ describe('review.address candidate isolation', () => {
       }
     },
   );
+  test.each([
+    'run-s build:*',
+    'run-s build:dep?',
+    'npm-run-all -p "build:*"',
+    'run-s build:**:deps',
+    'run-s "build:* --mode=production"',
+    'run-s "build":deps',
+    'run-s bu"ild:d"eps',
+    'run-s build::deps',
+    'run-s --max-parallel 2 build:deps',
+  ])(
+    'run-s pattern selection (%s) compares every script it names before dispatch',
+    async (build) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        const scripts = { postinstall: 'pnpm run build', build, 'build:deps': 'node deps.mjs' };
+        await f.repo.write('package.json', JSON.stringify({ scripts }));
+        f.repo.commitAll('pattern-selected install lifecycle metadata');
+        await writeFile(
+          join(f.dependencyRoot, 'package.json'),
+          JSON.stringify({ scripts: { ...scripts, 'build:deps': 'different installed files' } }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.commit).toBeUndefined();
+        expect(result.reason).toContain('manifests/locks differ');
+        expect(f.calls()).toBe(0);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test.each([
+    [
+      'a shell boundary ends the task list',
+      "run-s build:deps && printf '%s' 'docs:*'",
+      'docs:lint',
+    ],
+    ['-- ends the task list', "run-s build:deps -- 'docs:*'", 'docs:lint'],
+    ['a quoted -- ends the task list', "run-s build:deps '--' 'docs:*'", 'docs:lint'],
+    ['printf operands are not a runner', "printf '%s' run-s 'docs:*'", 'docs:lint'],
+    ['a redirection operand is not a task', "run-s build:deps > 'docs:*'", 'docs:lint'],
+    ['an attached redirection operand is not a task', "run-s build:deps>'docs:*'", 'docs:lint'],
+    ['fd redirections are not tasks', "run-s build:deps 2>&1 2> 'docs:*'", 'docs:lint'],
+    ['* stays inside one segment', "run-s 'build:*'", 'build:docs:html'],
+  ])(
+    'runner selection: %s reuses dependencies when an unselected script changes',
+    async (_name, postinstall, changed) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        const scripts = {
+          postinstall,
+          'build:deps': 'node deps.mjs',
+          'build:docs:html': 'node html.mjs',
+          'docs:lint': 'node lint.mjs',
+        };
+        await f.repo.write('package.json', JSON.stringify({ scripts }));
+        f.repo.commitAll('runner selection');
+        await writeFile(
+          join(f.dependencyRoot, 'package.json'),
+          JSON.stringify({ scripts: { ...scripts, [changed]: 'node different.mjs' } }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.commit, result.reason).toBeTruthy();
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test.each([
+    ['run-s build:deps', 'build::deps'],
+    ["sh -c 'run-s build:*'", 'build:deps'],
+    ["echo x\nrun-s 'build:*'", 'build:deps'],
+    ["sh -c 'echo x;run-s build:*'", 'build:deps'],
+    ["sh -c 'false || run-s build:*'", 'build:deps'],
+    ["sh -c 'true||run-s build:*'", 'build:deps'],
+    ["sh -c '(run-s build:*)'", 'build:deps'],
+    ["run-s 'build:*'>/dev/null", 'build:deps'],
+    ['run-s build:*>/dev/null', 'build:deps'],
+    ['run-s build:* 2>/dev/null', 'build:deps'],
+    ['run-s build:*&>/dev/null', 'build:deps'],
+    ['run-s build:*>&2', 'build:deps'],
+    ['sh -c \'"run-s" "build:*"\'', 'build:deps'],
+    ["sh -c 'echo `run-s build:*`'", 'build:deps'],
+    ['echo `run-s build:*`', 'build:deps'],
+    ['sh -c \'bash -c "run-s build:*"\'', 'build:deps'],
+    ['sh -c "sh -c \'run-s build:*\'"', 'build:deps'],
+    ["sh -c './node_modules/.bin/run-s build:*'", 'build:deps'],
+    ["run-s 'build:*'", 'build:other'],
+    ['run-s "build:*"', 'build:other'],
+    ['run-s build:**:other', 'build:other'],
+    // Fail closed: anything outside the understood grammar compares every script.
+    ['run\\-s build:deps', 'build:other'],
+    ["run\\-s 'build:*'", 'build:deps'],
+    ["x=run-s; $x 'build:*'", 'build:deps'],
+    ["r=run-s; ${r} 'build:*'", 'build:deps'],
+    ['x="run-s"; $x build:deps', 'build:other'],
+    ["sh -c 'x=run-s; $x build:*'", 'build:deps'],
+    ['A=1 run-s build:deps', 'build:other'],
+    ['run-s build:deps # build:*', 'build:other'],
+    ["env run-s 'build:*'", 'build:deps'],
+    ["npx run-s 'build:*'", 'build:deps'],
+    ['pnpm exec run-s build:deps', 'build:other'],
+    ['sh -c run-s', 'build:deps'],
+    ['pnpm run /build/', 'build:deps'],
+    ['npm run build:deps -- extra', 'build:other'],
+    ["concurrently 'npm:build:*'", 'build:deps'],
+    ["if true; then run-s 'build:*'; fi", 'build:deps'],
+    ['cd sub && run-s build:deps', 'build:other'],
+    ['run-s --unknown build:deps', 'build:other'],
+    ['run-s build:deps &', 'build:other'],
+    ['run-s build:{deps,other}', 'build:other'],
+    ['run-s build:deps <<EOF', 'build:other'],
+    // Unknown programs: a script, runner or package manager named in an option value.
+    ['node --run=build:deps', 'build:deps'],
+    ['node --run build:deps', 'build:deps'],
+    ['deno task build:deps', 'build:deps'],
+    ['wireit --tasks=build:other,build:deps', 'build:deps'],
+    ['node --run=npm:build:deps', 'build:deps'],
+    ['tool --exec=run-s build:deps', 'build:other'],
+    ['tool --exec=./node_modules/.bin/pnpm', 'build:deps'],
+  ])('runner selection %s refuses reuse when only %s changes', async (postinstall, changed) => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const scripts = {
+        postinstall,
+        'build:deps': 'node deps.mjs',
+        'build::deps': 'node deps2.mjs',
+        'build:other': 'node other.mjs',
+      };
+      await f.repo.write('package.json', JSON.stringify({ scripts }));
+      f.repo.commitAll('runner selection changed script');
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ scripts: { ...scripts, [changed]: 'node different.mjs' } }),
+      );
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit).toBeUndefined();
+      expect(result.reason).toContain('manifests/locks differ');
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test.each([
+    ['node --run=a=b', 'a=b'],
+    ['node --run=a,b', 'a,b'],
+    ['node --run a=b', 'a=b'],
+    ['wireit --tasks=x,a=b', 'a=b'],
+    ['node --run=a::b=c', 'a:b=c'],
+  ])(
+    'script named in %s refuses reuse when %s, whose name has = or , changes',
+    async (postinstall, changed) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        const scripts = {
+          postinstall,
+          a: 'node a.mjs',
+          b: 'node b.mjs',
+          [changed]: 'node selected.mjs',
+        };
+        await f.repo.write('package.json', JSON.stringify({ scripts }));
+        f.repo.commitAll('script name with = or ,');
+        await writeFile(
+          join(f.dependencyRoot, 'package.json'),
+          JSON.stringify({ scripts: { ...scripts, [changed]: 'node different.mjs' } }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.commit).toBeUndefined();
+        expect(result.reason).toContain('manifests/locks differ');
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test.each([
+    ["run-s 'build:[ab]'", 'build:a'],
+    ["run-s 'build:**'", 'build:docs:html'],
+  ])(
+    'runner pattern %s refuses reuse when a script it selects changes',
+    async (postinstall, changed) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        const scripts = {
+          postinstall,
+          'build:a': 'node a.mjs',
+          'build:docs:html': 'node html.mjs',
+        };
+        await f.repo.write('package.json', JSON.stringify({ scripts }));
+        f.repo.commitAll('runner pattern selection');
+        await writeFile(
+          join(f.dependencyRoot, 'package.json'),
+          JSON.stringify({ scripts: { ...scripts, [changed]: 'node different.mjs' } }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.commit).toBeUndefined();
+        expect(result.reason).toContain('manifests/locks differ');
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('a catastrophic-backtracking runner pattern still resolves and compares scripts', async () => {
+    // The changed script is selected only by the wildcard pattern (no literal task names
+    // it), so the mismatch exists only if wildcard matching resolves; the all-`a` name
+    // is the nonmatching input that makes backtracking matchers blow up.
+    const selected = `${'a'.repeat(64)}b`;
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const scripts = {
+        postinstall: `run-s *a*a*a*a*a*a*a*a*a*a*a*a*b`,
+        ['a'.repeat(64)]: 'node long.mjs',
+        [selected]: 'node selected.mjs',
+      };
+      await f.repo.write('package.json', JSON.stringify({ scripts }));
+      f.repo.commitAll('pathological runner pattern');
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ scripts: { ...scripts, [selected]: 'different installed files' } }),
+      );
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit).toBeUndefined();
+      expect(result.reason).toContain('manifests/locks differ');
+    } finally {
+      await f.cleanup();
+    }
+  }, 10_000);
+  test('adversarial quoting and redirection in a long command lexes in linear time', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const scripts = {
+        // Thousands of quoted words and redirections, then a real runner invocation.
+        postinstall: `echo ${'"a" \'b\' 2>&1 >x '.repeat(4000)}; run-s build:*`,
+        'build:deps': 'node deps.mjs',
+      };
+      await f.repo.write('package.json', JSON.stringify({ scripts }));
+      f.repo.commitAll('adversarial lexer input');
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ scripts: { ...scripts, 'build:deps': 'different deps' } }),
+      );
+      const started = Date.now();
+      const result = await f.engine.fix(finding(), 1);
+      expect(Date.now() - started).toBeLessThan(5000);
+      expect(result.commit).toBeUndefined();
+      expect(result.reason).toContain('manifests/locks differ');
+    } finally {
+      await f.cleanup();
+    }
+  }, 10_000);
+  test('a long simple command lexes in linear time and still narrows the selection', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const scripts = {
+        // Every fragment is inside the grammar, so the whole command is scanned and
+        // resolved: the runner selects build:*, and the unselected docs:lint may change.
+        postinstall: `echo ${'"a" \'b\' 2>&1 >x '.repeat(20000)}; run-s 'build:*'`,
+        'build:deps': 'node deps.mjs',
+        'docs:lint': 'node lint.mjs',
+      };
+      await f.repo.write('package.json', JSON.stringify({ scripts }));
+      f.repo.commitAll('long simple lexer input');
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ scripts: { ...scripts, 'docs:lint': 'node different.mjs' } }),
+      );
+      const started = Date.now();
+      const result = await f.engine.fix(finding(), 1);
+      expect(Date.now() - started).toBeLessThan(5000);
+      expect(result.commit, result.reason).toBeTruthy();
+    } finally {
+      await f.cleanup();
+    }
+  }, 10_000);
+  test('shell-expanded run-s tasks stay unresolved so every script is compared', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const scripts = {
+        postinstall: 'pnpm run build',
+        build: 'run-s build:$TASK*',
+        'build:deps': 'node deps.mjs',
+      };
+      await f.repo.write('package.json', JSON.stringify({ scripts }));
+      f.repo.commitAll('shell-expanded install task');
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ scripts: { ...scripts, 'build:deps': 'different deps' } }),
+      );
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit).toBeUndefined();
+      expect(result.reason).toContain('manifests/locks differ');
+      expect(f.calls()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('many globstars against a long nonmatching script name finish promptly', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const longName = `${'a:'.repeat(60)}x`;
+      const scripts = {
+        postinstall: 'pnpm run build',
+        build: 'run-s "**:**:**:**:**:**:b"',
+        [longName]: 'node long.mjs',
+      };
+      await f.repo.write('package.json', JSON.stringify({ scripts }));
+      f.repo.commitAll('many globstars');
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ scripts: { ...scripts, [longName]: 'different long' } }),
+      );
+      const started = Date.now();
+      const result = await f.engine.fix(finding(), 1);
+      expect(Date.now() - started).toBeLessThan(5000);
+      expect(result.commit, result.reason).toBeTruthy();
+    } finally {
+      await f.cleanup();
+    }
+  });
   test('a --check argument is not an invocation of the check script', async () => {
     const f = await fixture(undefined, '', { installedDependencies: 'matching' });
     try {
