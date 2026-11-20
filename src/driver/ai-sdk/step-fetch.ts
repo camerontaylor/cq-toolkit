@@ -63,7 +63,7 @@ async function bufferBody(request: Request, signal: AbortSignal | null): Promise
   signal?.throwIfAborted();
   const reader = (request.body as ReadableStream<Uint8Array>).getReader();
   const onAbort = (): void => {
-    void reader.cancel(signal.reason).catch(() => undefined);
+    void reader.cancel(signal?.reason).catch(() => undefined);
   };
   signal?.addEventListener('abort', onAbort, { once: true });
   const chunks: Uint8Array[] = [];
