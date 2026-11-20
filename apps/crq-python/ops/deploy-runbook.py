@@ -848,14 +848,25 @@ class Run:
             while True:
                 result = self.controller.drain_check(self.effects, liveness)
                 polls.append(result)
-                if result["drained"]:
+                # A drained answer only counts while the deadline holds: an
+                # observation taken at or after expiry fails closed, even if
+                # the queue settled while an over-long interval slept.
+                # One clock read decides both branches and the sleep, so a
+                # deadline that passes between reads cannot yield a negative
+                # sleep (time.sleep raises ValueError on one).
+                now = self.clock()
+                if result["drained"] and now < deadline:
                     break
-                if self.clock() >= deadline:
+                if now >= deadline:
+                    late_clean = bool(result["drained"])
+                    record = {"polls": polls,
+                              "drained": False,
+                              "deadline_s": self.args.drain_deadline_s}
+                    if late_clean:
+                        record["drained_after_deadline"] = True
                     try:
                         durable_write(Path(self.run_dir) / record_name,
-                                      {"polls": polls,
-                                       "drained": False,
-                                       "deadline_s": self.args.drain_deadline_s})
+                                      record)
                     except OSError as exc:
                         # A diagnostic that cannot be recorded must not
                         # replace the FailStop: live work may still be
@@ -874,8 +885,14 @@ class Run:
                         "queue drain expired after "
                         + str(self.args.drain_deadline_s)
                         + "s; hold retained, nothing killed: "
-                        + json.dumps(result.get("blocked"), sort_keys=True))
-                self.sleep(self.args.drain_interval_s)
+                        + ("the queue reported drained only after the "
+                           "deadline, so the answer was not accepted"
+                           if late_clean else
+                           json.dumps(result.get("blocked"), sort_keys=True)))
+                # Never wait past the deadline this loop enforces: cap the
+                # interval at the time that remains.
+                self.sleep(min(self.args.drain_interval_s,
+                               deadline - now))
         result = polls[-1]
         if self.drain_fn is None:
             durable_write(Path(self.run_dir) / record_name,
