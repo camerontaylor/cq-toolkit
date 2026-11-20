@@ -2,8 +2,9 @@
 
 Status: inventory at `main` `bace10728` plus this PR (S6-0). The TypeScript
 `tick` and `slot` are **not live**: `crq.ts` routes neither command, and
-`LIVE_UNIT_COMMANDS` (`src/queue-runner/capabilities.ts`) stays
-`['watchdog', 'publish']`. Do not switch `crq-tick.service` or
+`LIVE_UNIT_COMMANDS` (`src/queue-runner/capabilities.ts`) is
+`['watchdog', 'publish', 'backfill inventory']` on `main` and neither command
+is added to it. Do not switch `crq-tick.service` or
 `crq-slot.service` to a Node runtime until every row below is closed and the
 two commands are routed and declared together.
 
@@ -37,7 +38,61 @@ TypeScript, so the probe returns the marked queue. `runTick` threads it into
 admission, and `runScheduledSlot`/`composeSlot` continue from the probed copy,
 as Python's `slot(observed, observation)` does.
 
-## Missing, by area
+## S6-f: offline composition and what is still staged
+
+`composeFullTick` (`src/adapters/crq/tickComposition.ts`) binds the sixteen
+`RemainingPhaseNames` to the merged S6-a..e adapters and `composeSlot`'s
+`collectFinished` to `createHarvestPhases`. It is inactive: no runtime entry
+imports it, `crq.ts` routes neither `tick` nor `slot`, and `LIVE_UNIT_COMMANDS`
+(`['watchdog', 'publish', 'backfill inventory']`) and the capabilities are
+untouched.
+
+| Phase                                                           | Binding                                                                                                                                             |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `backfillPublish`, `backfillInventoryMode`, `backfillInventory` | `fileLocalReviewPublishEffects`, `tickBackfillInventory`; always bound (a gap there would be swallowed by `backfill_halted`)                        |
+| `discovery`, `enrollPrimary`, `enrollOthers`                    | `tickDiscoveryBinding`                                                                                                                              |
+| `resetFixPrBacklog`, `refreshFixPrBacklog`                      | `FixPrBacklog` (one `TICK_BACKLOG`, returned for the publisher) plus `fileFixPrBacklogEffects`                                                      |
+| `repairBackfill`, `archiveLegacy`                               | `fileRepairBackfillEffects` over a plain-queue bridge                                                                                               |
+| `harvestItems`, `reconcileCompleted`, `collectFinished`         | `createHarvestPhases`; run artifacts of a Python `_review` child (`review.pid`, `review.ndjson`, `exit.json`, `meta.json`) by `fileHarvestRunReads` |
+| `reconcile`                                                     | `fileReconcilePhaseEffects`; its new `onSaved` hook returns the reconciled queue                                                                    |
+| `writeStatus`, `publishLocalReviewPr`, `recordClientHealth`     | `fileReportingPhases`                                                                                                                               |
+
+A phase whose caller input is absent is bound to a function that rejects with
+`TickGapError` (never a no-op), because Python abandons a tick on a phase error
+and saves nothing. `TickComposition.unbound` lists those. `STAGED_GAPS` lists
+work no adapter does whatever the caller supplies; `complete` is true only when
+both are empty. `TICK_MISSING_EFFECTS` (`src/queue-runner/tick.ts`) repeats
+`STAGED_GAPS` (a test keeps them in step):
+
+- `harvest-review-effects`: `harvest_review` effects beyond the run-artifact reads (findings.md for non-local kinds, `removeWorktree`, `writeReceipt`, `repairEnqueue`, `backfillHarvest`, `requestPrReview`, coverage).
+- `repair-harvest-effects`: `repair_tick.harvest` queue side (worktree, verify, mechanical, `markFindingOutcome`, `cleanupHarvested`, publish); only the reads are file-backed.
+- `start-one-effects`: per-kind `LaunchEffects` and `CoverageEffects` for `admit.startOne`.
+- `usage-context`: `bindAdmit` never calls `usageContext`.
+- `review-child`: `_review` is not routed in the TS runner; Node needs `--foreground`, the tick kick and backfill proof, or the tick spawns the Python child.
+- `repair-parity`: repair-side tick passes have no seeded differential against Python.
+- `shadow-d2`: only the plan is shadowed, not the composed phases.
+
+Closed in S6-f, kept here as the record:
+
+- The primary clone was fetched twice per tick (`fetch`, then `discoverOpenPrs`).
+  `tickDiscoveryBinding` now passes `enroll.primaryFetched` and the enrollment
+  source skips its own primary fetch; a standalone caller still fetches. Python
+  fetches the primary once (`crq.py:3550`); non-primary repos fetch their default
+  branch in enrollment (`pr_enroll.py:44`), as before.
+- The primary listing-failure log now reads `enrollment skipped: <reason>`
+  (`crq.py:3127`); a configured repo keeps `pr discovery skipped <repo>: <reason>`
+  (`pr_enroll.py:31`).
+
+Intentional remaining difference: `<reason>` is the opaque `forge listing
+unavailable`, not Python's raw exception text. The raw text is a Python
+exception string (`gh` stderr, `OSError`) with no TS equivalent, and the ported
+discovery deliberately never logs forge or git error bodies. The log lines are
+informational; nothing parses them.
+
+The tables below are the S6-0 inventory and are historical for every row that
+S6-a..f bound.
+
+## Missing, by area (S6-0, historical)
 
 Sizes are rough estimates of adapter and glue code over the existing pure logic.
 
@@ -65,17 +120,17 @@ Sizes are rough estimates of adapter and glue code over the existing pure logic.
 
 ### Discovery, enrollment, delivery and reporting (about 1k–1.4k lines)
 
-| Gap                             | Python                                                                                              | TypeScript pieces                                                                                                                                                        | What is missing                                                                                                                                                                                                                                                                                                                                                                         |
-| ------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `backfillPublish`               | `backfill_runtime.publish` (`backfill_runtime.py:455`)                                              | writer inside `requestPublish` (`src/adapters/crq/localReviewPublish.ts:64`)                                                                                             | A `(queue) => queue` phase that also clears a `publication-request` halt.                                                                                                                                                                                                                                                                                                               |
-| `backfillInventoryMode`         | `backfill_runtime.settings` (`backfill_runtime.py:37`)                                              | `rolloutSettings` (`src/ops/crq/backfillInventory.ts:122`)                                                                                                               | `inventory_mode` is not parsed.                                                                                                                                                                                                                                                                                                                                                         |
-| `backfillInventory`             | `backfill_runtime.run_inventory` (`backfill_runtime.py:561`)                                        | `runBackfillInventory` (`backfillInventory.ts:219`, report-only, reads disk)                                                                                             | The in-tick enqueue path: capture, subjects, `jobs.enqueue`, supersede retirement, halt clearing.                                                                                                                                                                                                                                                                                       |
-| `discovery`                     | `crq.py` tick: deferred refresh, `discover_merged`, `push_current.discover` (`push_current.py:146`) | `runDiscoveryPhase` (`tickDiscoveryPhase.ts:29`), `fileDiscoveryPhaseEffects` (`tickDiscoveryPhaseSource.ts:21`), `runMergedDiscoveryStep` (`tickMergedDiscovery.ts:40`) | Composition. The `merged` seam, push repositories and `event` are caller-supplied; nothing calls `runMergedDiscoveryStep`.                                                                                                                                                                                                                                                              |
-| `enrollPrimary`, `enrollOthers` | `enroll` (`crq.py:3058`), `pr_enroll.enroll` (`pr_enroll.py:20`)                                    | `runEnrollmentPhase` (`tickDiscoveryPhase.ts:64`), `fileEnrollmentPhaseEffects` (`tickEnrollmentPhaseSource.ts:37`)                                                      | A builder from `config.json` to `OpenPrRepository[]`, local-review facts and `event`. `discoverOpenPrs` also fetches the primary clone (`openPrDiscovery.ts:124`), so with `fetch` bound the primary fetch runs twice per tick. The primary-repo skip log reads `pr discovery skipped <repo>: forge listing unavailable` where Python logs `enrollment skipped: <exc>` (`crq.py:3065`). |
-| Delivery env                    | `pr_review_findings.py`, `finding_issues.py`, `crq_review_identity.py`                              | `authenticatedGh` (`src/policy/crq/reviewIdentity.ts:114`), `nodeIdentityDeps`, `fileFindingIssue`                                                                       | The delivery `gh` port, `ReceiptFiles.readBytes`, `readText` and the `push.repoMode`/`readFindings`/`fileIssue` adapters.                                                                                                                                                                                                                                                               |
-| `writeStatus`                   | `write_status` (`crq.py:3654`)                                                                      | `writeStatusForDocuments` (`src/ops/crq/statusWriter.ts:1004`), `runStatusWriter` (`src/adapters/crq/statusWriter.ts:285`, re-reads disk)                                | An in-process write from the tick's queue. The adapter's schedule-failure text is fixed (`statusWriter.ts:67`), whereas Python embeds the exception.                                                                                                                                                                                                                                    |
-| `publishLocalReviewPr`          | `local_review_pr.publish` (`local_review_pr.py:100`)                                                | none (`review_pr_outbox` appears only in the schema)                                                                                                                     | Port.                                                                                                                                                                                                                                                                                                                                                                                   |
-| `recordClientHealth`            | `client_health.record` (`client_health.py:119`)                                                     | read side only: `clientHealthSnapshot` (`src/policy/crq/clientHealth.ts:36`)                                                                                             | Port of `record`/`advisory`/`checkout_sha`.                                                                                                                                                                                                                                                                                                                                             |
+| Gap                             | Python                                                                                              | TypeScript pieces                                                                                                                                                        | What is missing                                                                                                                                                                  |
+| ------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `backfillPublish`               | `backfill_runtime.publish` (`backfill_runtime.py:455`)                                              | writer inside `requestPublish` (`src/adapters/crq/localReviewPublish.ts:64`)                                                                                             | A `(queue) => queue` phase that also clears a `publication-request` halt.                                                                                                        |
+| `backfillInventoryMode`         | `backfill_runtime.settings` (`backfill_runtime.py:37`)                                              | `rolloutSettings` (`src/ops/crq/backfillInventory.ts:122`)                                                                                                               | `inventory_mode` is not parsed.                                                                                                                                                  |
+| `backfillInventory`             | `backfill_runtime.run_inventory` (`backfill_runtime.py:561`)                                        | `runBackfillInventory` (`backfillInventory.ts:219`, report-only, reads disk)                                                                                             | The in-tick enqueue path: capture, subjects, `jobs.enqueue`, supersede retirement, halt clearing.                                                                                |
+| `discovery`                     | `crq.py` tick: deferred refresh, `discover_merged`, `push_current.discover` (`push_current.py:146`) | `runDiscoveryPhase` (`tickDiscoveryPhase.ts:29`), `fileDiscoveryPhaseEffects` (`tickDiscoveryPhaseSource.ts:21`), `runMergedDiscoveryStep` (`tickMergedDiscovery.ts:40`) | Composition. The `merged` seam, push repositories and `event` are caller-supplied; nothing calls `runMergedDiscoveryStep`.                                                       |
+| `enrollPrimary`, `enrollOthers` | `enroll` (`crq.py:3058`), `pr_enroll.enroll` (`pr_enroll.py:20`)                                    | `runEnrollmentPhase` (`tickDiscoveryPhase.ts:64`), `fileEnrollmentPhaseEffects` (`tickEnrollmentPhaseSource.ts:37`)                                                      | A builder from `config.json` to `OpenPrRepository[]`, local-review facts and `event`. The double primary fetch and the primary skip-log wording were closed in S6-f (see above). |
+| Delivery env                    | `pr_review_findings.py`, `finding_issues.py`, `crq_review_identity.py`                              | `authenticatedGh` (`src/policy/crq/reviewIdentity.ts:114`), `nodeIdentityDeps`, `fileFindingIssue`                                                                       | The delivery `gh` port, `ReceiptFiles.readBytes`, `readText` and the `push.repoMode`/`readFindings`/`fileIssue` adapters.                                                        |
+| `writeStatus`                   | `write_status` (`crq.py:3654`)                                                                      | `writeStatusForDocuments` (`src/ops/crq/statusWriter.ts:1004`), `runStatusWriter` (`src/adapters/crq/statusWriter.ts:285`, re-reads disk)                                | An in-process write from the tick's queue. The adapter's schedule-failure text is fixed (`statusWriter.ts:67`), whereas Python embeds the exception.                             |
+| `publishLocalReviewPr`          | `local_review_pr.publish` (`local_review_pr.py:100`)                                                | none (`review_pr_outbox` appears only in the schema)                                                                                                                     | Port.                                                                                                                                                                            |
+| `recordClientHealth`            | `client_health.record` (`client_health.py:119`)                                                     | read side only: `clientHealthSnapshot` (`src/policy/crq/clientHealth.ts:36`)                                                                                             | Port of `record`/`advisory`/`checkout_sha`.                                                                                                                                      |
 
 ## Parity fixes made in S6-0
 
