@@ -155,6 +155,11 @@ export function fileStatusWriterEffects(
         readConfig: async () => configText,
         readEvents: readOnly.readEvents,
         readReceipt: readOnly.readReceipt,
+        // #1420: the published summary labels PR-less pending items exactly
+        // as the read-only `summary-core` route does.
+        ...(readOnly.readCommitSubjects === undefined
+          ? {}
+          : { readCommitSubjects: readOnly.readCommitSubjects }),
         now,
       };
       const core = await readSummaryCore(coreEffects);

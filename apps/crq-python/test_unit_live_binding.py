@@ -531,6 +531,23 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("not a real directory", " ".join(evidence["foreign"]))
 
+    def test_symlinked_dependency_directory_is_incomplete(self):
+        declared = self.declare()
+        held = self.base / "repos/held-wants"
+        held.mkdir(parents=True)
+        # systemd resolves a symlinked dependency directory and loads the
+        # links inside it, while the no-follow probe and dependency scan
+        # both skip the directory, so discovery must refuse instead of
+        # reporting the enablement edge as absent.
+        (held / "crq-tick.service").symlink_to(
+            self.unit_dir / "crq-tick.service")
+        (self.unit_dir / "ingress.target.wants").symlink_to(held)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn(str(self.unit_dir / "ingress.target.wants"),
+                      evidence["error"])
+
     def test_unreadable_enablement_entry_is_incomplete(self):
         declared = self.declare()
         wants = self.unit_dir / "timers.target.wants"
