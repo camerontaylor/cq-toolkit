@@ -204,7 +204,14 @@ export interface TickCompositionInput {
     options: InventoryPreparationOptions,
   ) => Promise<PreparedInventory>;
   readonly discovery?: Pick<TickDiscoveryBindingOptions, 'push' | 'enroll'>;
-  readonly fixPrBacklog?: { readonly listOpenPrs: () => Promise<unknown> };
+  /**
+   * `listOpenPrs` receives `ForgeBudget.take()`'s timeout in seconds (Python passes it as
+   * `gh_json`'s subprocess timeout); the tick also races the call against it, so a listing that
+   * never settles is a failed read that holds creation rather than a hung phase.
+   */
+  readonly fixPrBacklog?: {
+    readonly listOpenPrs: (timeoutSeconds: number) => Promise<unknown>;
+  };
   readonly repairBackfill?: Omit<
     FileRepairBackfillInput,
     'stateRoot' | 'primaryRepo' | 'iso' | 'runsRoot'
@@ -247,6 +254,29 @@ async function viaPlain(
   const plain = toPlain(queue);
   await work(plain);
   return fromPlainJson(plain) as JsonObject;
+}
+
+/**
+ * Run a forge read under the `ForgeBudget.take()` timeout. The seam gets the timeout (the
+ * subprocess limit Python passes to `gh_json`); the race is the backstop for a seam that
+ * ignores it, so a stalled read ends as the failed read `refreshFixPrBacklog` already handles.
+ */
+async function boundedListing(
+  list: (timeoutSeconds: number) => Promise<unknown>,
+  timeoutSeconds: number,
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`forge listing timed out after ${timeoutSeconds}s`)),
+      timeoutSeconds * 1000,
+    );
+  });
+  try {
+    return await Promise.race([list(timeoutSeconds), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 const isoSeconds = (ms: number): string => `${new Date(ms).toISOString().slice(0, 19)}Z`;
@@ -304,10 +334,13 @@ export function composeFullTick(input: TickCompositionInput): TickComposition {
   // --- fix-PR backlog: one TICK_BACKLOG shared with the publisher.
   const backlog = new FixPrBacklog();
   const rejectBacklog = input.fixPrBacklog ? null : open(INPUT_GAPS.fixPrBacklog);
-  const backlogEffects = input.fixPrBacklog
+  const listOpenPrs = input.fixPrBacklog?.listOpenPrs ?? null;
+  const backlogEffects = listOpenPrs
     ? fileFixPrBacklogEffects({
         stateRoot: input.stateRoot,
-        listOpenPrs: input.fixPrBacklog.listOpenPrs,
+        // Replaced per refresh below, which owns the budgeted call.
+        listOpenPrs: () =>
+          Promise.reject(new Error('fix-PR backlog listing is budgeted per refresh')),
         nowMs: now,
       })
     : null;
@@ -387,7 +420,7 @@ export function composeFullTick(input: TickCompositionInput): TickComposition {
       backlog.reset();
     },
     async refreshFixPrBacklog(queue) {
-      if (rejectBacklog || backlogEffects === null)
+      if (rejectBacklog || backlogEffects === null || listOpenPrs === null)
         return (rejectBacklog as () => Promise<never>)();
       // `if not dry and backfill_repair_present(q)`: a tick with no backfill repair work makes no call.
       if (!backfillRepairPresent(toPlain(queue))) return;
@@ -395,10 +428,7 @@ export function composeFullTick(input: TickCompositionInput): TickComposition {
       const budget = new ForgeBudget({ requests: 1, seconds: 30 });
       await refreshFixPrBacklog(backlog, {
         ...backlogEffects,
-        listOpenPrs: () => {
-          budget.take();
-          return backlogEffects.listOpenPrs();
-        },
+        listOpenPrs: () => boundedListing(listOpenPrs, budget.take()),
       });
     },
     harvestItems: harvest

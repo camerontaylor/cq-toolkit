@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { composeSlot } from '../../../src/adapters/crq/composeTick.js';
 import { fileHarvestRunReads } from '../../../src/adapters/crq/harvestRunReads.js';
 import {
@@ -13,6 +13,7 @@ import {
   type TickCompositionInput,
 } from '../../../src/adapters/crq/tickComposition.js';
 import { JsonObject, parseJsonValue, toPlainJson } from '../../../src/policy/crq/jsonValue.js';
+import { atomicJsonText } from '../../../src/policy/crq/pythonJson.js';
 import { TICK_MISSING_EFFECTS } from '../../../src/queue-runner/tick.js';
 import type { HarvestReviewEffects } from '../../../src/queue-runner/harvestReview.js';
 import { runTick, type TickInput } from '../../../src/queue-runner/tickOrchestrator.js';
@@ -222,6 +223,95 @@ describe('fix-PR backlog', () => {
     await expect(c.phases.refreshFixPrBacklog(withRepair)).resolves.toBeUndefined();
     expect(c.backlog.open).toBeNull();
     expect(c.backlog.slotFree({ id: 'backfill-finding-1' })).toBe(false);
+  });
+
+  describe('listing timeout (ForgeBudget.take)', () => {
+    afterEach(() => vi.useRealTimers());
+
+    it('hands the budget timeout to the listing seam (at most the 10 s per-request ceiling)', async () => {
+      const seen: number[] = [];
+      const s = rig(undefined, {
+        fixPrBacklog: {
+          listOpenPrs: async (timeoutSeconds) => (seen.push(timeoutSeconds), []),
+        },
+      });
+      const c = composeFullTick(s.input);
+      await c.phases.refreshFixPrBacklog(withRepair);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toBeGreaterThan(0);
+      expect(seen[0]).toBeLessThanOrEqual(10);
+      expect(c.backlog.open).toBe(0);
+    });
+
+    it('a listing that never settles is a failed read: the phase ends, creation holds, nothing is written', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const s = rig(undefined, {
+        fixPrBacklog: { listOpenPrs: () => new Promise<unknown>(() => undefined) },
+      });
+      const c = composeFullTick(s.input);
+      let settled = false;
+      const phase = c.phases.refreshFixPrBacklog(withRepair).then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(settled).toBe(false); // still inside the budget
+      await vi.advanceTimersByTimeAsync(1_500);
+      await phase;
+      expect(settled).toBe(true);
+      expect(c.backlog.open).toBeNull();
+      expect(c.backlog.slotFree({ id: 'backfill-finding-1' })).toBe(false);
+      expect(existsSync(join(s.root, 'repair', 'fix-pr-backlog.json'))).toBe(false);
+    });
+
+    it('a prompt listing leaves no pending timer behind', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const s = rig(undefined, { fixPrBacklog: { listOpenPrs: async () => [] } });
+      await composeFullTick(s.input).phases.refreshFixPrBacklog(withRepair);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+});
+
+describe('repair bridge over retained numbers', () => {
+  const legacy = (findings: string): JsonObject =>
+    parseJsonValue(
+      `{"items":[{"id":"i1","repo":"o/r","cycles":[{"run_id":"r-legacy","findings":${findings},"w":1.5}],"x":2.0}],"big":9007199254740993}`,
+    ) as JsonObject;
+  const bound = () =>
+    composeFullTick(
+      rig(undefined, {
+        repairBackfill: {
+          ledgerRoot: join(dir(), 'ledger'),
+          defaultRef: 'origin/main',
+          mergedCurrentEnabled: false,
+          maxRoundsPerPin: 2,
+          git: async () => '',
+          findings: async () => [],
+        },
+      }).input,
+    );
+
+  it.each(['0', '0.0', '-0.0'])(
+    'a legacy cycle with findings:%s and no run evidence owes no repair',
+    async (findings) => {
+      const out = plain(await bound().phases.repairBackfill(legacy(findings)));
+      expect(out.legacy_repair_missing).toEqual([]);
+      expect(out.legacy_repair_backfilled).toBe('2027-01-15T08:00:00Z');
+    },
+  );
+
+  it('a legacy cycle with non-zero findings and no run evidence is still owed', async () => {
+    const out = plain(await bound().phases.repairBackfill(legacy('3')));
+    expect(out.legacy_repair_missing).toEqual([{ item: 'i1', run: 'r-legacy' }]);
+    expect(out.legacy_repair_backfilled).toBeUndefined();
+  });
+
+  it('keeps int/float kind and big-int fidelity through the bridge', async () => {
+    const text = atomicJsonText(await bound().phases.repairBackfill(legacy('0')));
+    expect(text).toContain('"w": 1.5');
+    expect(text).toContain('"x": 2.0');
+    expect(text).toContain('"findings": 0');
+    expect(text).toContain('9007199254740993');
   });
 });
 

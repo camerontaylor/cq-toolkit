@@ -14,10 +14,13 @@ import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { fileRepairBackfillEffects } from '../../src/adapters/crq/repairBackfillSource.js';
+import { JsonNumber } from '../../src/policy/crq/jsonValue.js';
 import {
+  pyEq,
   repairArchiveLegacy,
   repairBackfill,
   repairEnqueue,
+  truthy,
   type Queue,
   type RepairBackfillEffects,
   type SourcedFinding,
@@ -691,5 +694,27 @@ describe('injected effects only', () => {
     expect(calls).toEqual(['has:r9']);
     expect(q.legacy_repair_missing).toEqual([]);
     expect(q.legacy_repair_backfilled).toBe(ISO);
+  });
+});
+
+describe('Python semantics over retained JsonNumber', () => {
+  it('truthiness: zero of either kind (and -0.0) is falsy, anything else truthy', () => {
+    expect(truthy(JsonNumber.int(0))).toBe(false);
+    expect(truthy(JsonNumber.float(0))).toBe(false);
+    expect(truthy(JsonNumber.float(-0))).toBe(false);
+    expect(truthy(JsonNumber.int(3))).toBe(true);
+    expect(truthy(JsonNumber.int(-1n))).toBe(true);
+    expect(truthy(JsonNumber.float(0.5))).toBe(true);
+  });
+
+  it('equality: 1 == 1.0 == True, exact for big ints, never equal to a string or null', () => {
+    expect(pyEq(JsonNumber.int(1), JsonNumber.float(1))).toBe(true);
+    expect(pyEq(JsonNumber.int(1), true)).toBe(true);
+    expect(pyEq(JsonNumber.int(0), 0)).toBe(true);
+    expect(pyEq(JsonNumber.int(9007199254740993n), JsonNumber.int(9007199254740992n))).toBe(false);
+    expect(pyEq(JsonNumber.int(9007199254740993n), JsonNumber.float(9007199254740992))).toBe(false);
+    expect(pyEq(JsonNumber.int(1), '1')).toBe(false);
+    expect(pyEq(JsonNumber.int(0), null)).toBe(false);
+    expect(pyEq([JsonNumber.int(2)], [JsonNumber.float(2)])).toBe(true);
   });
 });

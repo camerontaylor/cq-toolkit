@@ -9,6 +9,7 @@
  * the port throws at the same points instead of inventing a default.
  */
 import { receiptDigest } from '../policy/crq/ids.js';
+import { JsonNumber } from '../policy/crq/jsonValue.js';
 import { itemRepo, sameRepo } from '../policy/crq/tickSchedule.js';
 import { pySplitLines } from './fixPrBacklog.js';
 
@@ -74,6 +75,9 @@ export const isRec = (v: unknown): v is Rec =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
 export function truthy(v: unknown): boolean {
+  // A retained `JsonNumber` (an object, so it would otherwise be truthy) is a
+  // Python int/float: zero of either kind, including `-0.0`, is falsy.
+  if (v instanceof JsonNumber) return v.kind === 'int' ? v.integer !== 0n : v.float !== 0;
   if (v === undefined || v === null || v === false || v === 0 || v === '') return false;
   if (typeof v === 'bigint') return v !== 0n;
   if (Array.isArray(v)) return v.length > 0;
@@ -111,8 +115,14 @@ export function list(v: unknown, what: string): unknown[] {
 export function pyEq(a: unknown, b: unknown): boolean {
   const x = a === undefined ? null : a;
   const y = b === undefined ? null : b;
-  const num = (v: unknown): number | bigint | null =>
-    typeof v === 'number' || typeof v === 'bigint' ? v : typeof v === 'boolean' ? Number(v) : null;
+  const num = (v: unknown): number | bigint | null => {
+    if (v instanceof JsonNumber) return v.kind === 'int' ? v.integer : v.float;
+    return typeof v === 'number' || typeof v === 'bigint'
+      ? v
+      : typeof v === 'boolean'
+        ? Number(v)
+        : null;
+  };
   const nx = num(x);
   const ny = num(y);
   if (nx !== null || ny !== null) return nx !== null && ny !== null && nx <= ny && ny <= nx;
