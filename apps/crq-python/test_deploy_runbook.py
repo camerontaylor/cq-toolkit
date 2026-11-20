@@ -511,10 +511,56 @@ class DeployTests(DeployFixture, unittest.TestCase):
         record = json.loads(
             (Path(run.run_dir) / "drain.json").read_text())
         self.assertFalse(record["drained"])
+        # The late clean answer is named so an operator does not read the
+        # final poll's empty blocked list as "still blocked".
+        self.assertTrue(record["drained_after_deadline"])
+        self.assertIn("only after the deadline", str(caught.exception))
+        self.assertNotIn("[]", str(caught.exception))
         self.assertTrue(self.marker().exists())
         self.assertEqual(self.units.started, [])
         self.assertEqual(self.head(), self.prior)
         self.assertEqual(self.record(run)["outcome"], "recovery_required")
+
+    def test_drain_deadline_crossed_between_clock_reads_never_sleeps_negative(self):
+        # The deadline can pass between two clock reads (a descheduled
+        # process). The loop must read the clock once per iteration so the
+        # remaining time is never negative: production time.sleep raises
+        # ValueError on a negative value, which would escape FailStop.
+        (self.runner / "state/queue.json").write_text(
+            '{"items": [{"id": "q1", "run": {"run_id": 7}}], "starts": []}\n')
+        real_check = dc.drain_check
+        armed = []
+
+        def stepped_clock():
+            # Before the first poll the clock is the fixture clock, so the
+            # deadline is base + 10. After it, reads step 5s then 11s past
+            # base: inside the deadline, then beyond it.
+            if not armed:
+                return self.now[0]
+            if len(armed) > 1:
+                return armed[0] + 11.0
+            armed.append(armed[0])
+            return armed[0] + 5.0
+
+        def arming_check(effects, liveness):
+            if not armed:
+                armed.append(self.now[0])
+            return real_check(effects, liveness)
+
+        def strict_sleep(seconds):
+            if seconds < 0:
+                raise ValueError("sleep length must be non-negative")
+
+        run = self.build(drain_interval_s=600)
+        run.drain_fn = None
+        run.clock = stepped_clock
+        run.sleep = strict_sleep
+        with mock.patch.object(dc, "drain_check", side_effect=arming_check):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                run.run()
+        self.assertIn("drain expired", str(caught.exception))
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.units.started, [])
 
     def test_drain_first_poll_success_stays_immediate(self):
         # A queue already drained succeeds on the first poll even when the
