@@ -187,6 +187,12 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
+      # repair-parity.test.ts diffs against the Python runtime; the `--=x`
+      # vector differs on 3.13, so pin the production minor like crq-python.
+      - name: Set up production Python minor
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
       - name: Set up pnpm (version from package.json packageManager)
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - name: Set up Node {{NODE_VERSION}}
