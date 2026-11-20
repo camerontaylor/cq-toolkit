@@ -14,7 +14,7 @@ import {
   REVIEW_DEADLINE_MS,
   runReviewCapabilityMain,
 } from '../adapters/crq/reviewCapabilityMain.js';
-import { runStatusWriter } from '../adapters/crq/statusWriter.js';
+import { runStatusWriter, runSummaryWriter } from '../adapters/crq/statusWriter.js';
 import { runBackfillUnit } from '../adapters/crq/backfillSource.js';
 import { pythonJsonText } from '../policy/crq/pythonJson.js';
 import { runReconcileMergedUnit } from '../adapters/crq/reconcileSource.js';
@@ -190,19 +190,20 @@ if (command === 'queue-capability') {
           stateRoot: targets.stateRoot,
         });
       }
-      if (liveCommand === 'status') {
+      if (liveCommand === 'status' || liveCommand === 'summary') {
         const parsed = parseStatusArgv(args);
-        if (!parsed.ok) return usageArtifact('status', parsed.message);
+        if (!parsed.ok) return usageArtifact(liveCommand, parsed.message);
         // The queue-runner binary's stdout is exactly one JSON document for
         // every command; the operator-readable markdown travels in the
         // artifact's `value` field, not the stdout channel. The writer's
         // refusal text rides the same artifact (the `error` field), so this
         // route keeps stderr empty under doctrine I1.
-        let statusMarkdown = '';
+        let statusText = '';
         let statusError = '';
-        const exitCode = await runStatusWriter(statusRoots(parsed.stateRoot), {
+        const writer = liveCommand === 'summary' ? runSummaryWriter : runStatusWriter;
+        const exitCode = await writer(statusRoots(parsed.stateRoot), {
           write: (text) => {
-            statusMarkdown = text;
+            statusText = text;
           },
           error: (text) => {
             statusError = text;
@@ -211,10 +212,14 @@ if (command === 'queue-capability') {
         return {
           artifact:
             exitCode === 0
-              ? { status: 'ok' as const, value: { markdown: statusMarkdown } }
+              ? {
+                  status: 'ok' as const,
+                  value:
+                    liveCommand === 'summary' ? { path: statusText } : { markdown: statusText },
+                }
               : {
                   status: 'failed' as const,
-                  error: statusError.trimEnd() || 'status write failed',
+                  error: statusError.trimEnd() || `${liveCommand} write failed`,
                 },
           exitCode,
         };
