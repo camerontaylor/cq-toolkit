@@ -27,9 +27,9 @@ function job(
     ['job', id],
     ['item', options.item ?? 'pr1-merged'],
     ['run', options.run ?? 'r1'],
-    ...(options.omitBase ? [] : [['repair_base', options.base ?? 'b'.repeat(40)] as const]),
-    ['finding', obj(['severity', options.severity ?? 'major'])],
   ];
+  if (!options.omitBase) entries.push(['repair_base', options.base ?? 'b'.repeat(40)]);
+  entries.push(['finding', obj(['severity', options.severity ?? 'major'])]);
   if (options.canonical !== undefined) entries.push(['canonical_finding_id', options.canonical]);
   return new JsonObject(entries);
 }
