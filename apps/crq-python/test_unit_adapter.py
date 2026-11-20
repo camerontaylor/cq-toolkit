@@ -1671,7 +1671,8 @@ class AdapterTests(AdapterFixture):
                                ("1month", 2629800), ("1M", 2629800),
                                ("1y", 31557600), ("1year", 31557600),
                                ("1500msec", 1), ("2000000usec", 2),
-                               ("2000000us", 2), ("1d 2h", 93600)):
+                               ("2000000us", 2), ("2000000\u00b5s", 2),
+                               ("2000000\u03bcs", 2), ("1d 2h", 93600)):
             with self.subTest(text=text):
                 self.assertEqual(adapter_mod._duration_seconds(text), expected)
         self.assertIsNone(adapter_mod._duration_seconds("5mins"))
