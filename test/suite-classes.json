@@ -1,6 +1,7 @@
 {
   "test/adapters/crq/coverageSource.test.ts": "pure",
   "test/adapters/crq/notifyCoverageVectors.test.ts": "process",
+  "test/adapters/crq/repairFetchLock.test.ts": "process",
   "test/adapters/crq/repairPreparation.test.ts": "process",
   "test/adapters/crq/repairScan.test.ts": "pure",
   "test/adapters/crq/summarySource.test.ts": "process",
