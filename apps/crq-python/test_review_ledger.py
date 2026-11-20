@@ -143,7 +143,27 @@ class LedgerTest(unittest.TestCase):
         head = reader.git("rev-parse", "HEAD").decode().strip()
         with mock.patch.object(reader, "git", wraps=reader.git) as calls:
             self.assertEqual(reader.read(head), values)
-            self.assertEqual([c.args[0] for c in calls.call_args_list], ["rev-list", "diff-tree", "cat-file"])
+            self.assertEqual([c.args[0] for c in calls.call_args_list],
+                             ["rev-list", "diff-tree", "cat-file", "cat-file"])
+            self.assertEqual(calls.call_args_list[2].args[1], "--batch-check")
+            self.assertEqual(calls.call_args_list[3].args[1], "--batch")
+        # An oversized record is refused by size alone, before any body is read.
+        blob_repo = self.root / "oversized"; blob_repo.mkdir()
+        big_reader = ledger.GitLedger(blob_repo)
+        big_reader.git("init", "-q")
+        big_reader.git("config", "user.name", "fixture")
+        big_reader.git("config", "user.email", "fixture@localhost")
+        blob_path = blob_repo / "records/2026/10/oversized.json"
+        blob_path.parent.mkdir(parents=True)
+        blob_path.write_bytes(b"x" * (ledger.RECORD_BYTES + 1))
+        big_reader.git("add", "--", "records/2026/10/oversized.json")
+        big_reader.git("commit", "-qm", "Oversized")
+        with mock.patch.object(big_reader, "git", wraps=big_reader.git) as calls:
+            with self.assertRaisesRegex(ledger.IntegrityError, "exceeds validation bound"):
+                big_reader.read("HEAD")
+            self.assertEqual([c.args[0] for c in calls.call_args_list],
+                             ["rev-list", "diff-tree", "cat-file"])
+            self.assertEqual(calls.call_args_list[-1].args[1], "--batch-check")
         # A modification that is later restored must still be rejected.
         filename.write_bytes(b"{}")
         reader.git("commit", "-am", "Tamper")

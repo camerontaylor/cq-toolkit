@@ -43,8 +43,11 @@ over that window and passes their outputs together with it.
 - Every panel section states the observation window, and each cost/reader
   figure carries its availability beside it. Corrupt panel shapes are refused
   at render time, never rendered as fabricated figures; untrusted text renders
-  inert (line breaks collapse, pipes escape), and identical unknown rows
-  across the reader and outcome buckets render once.
+  inert (line breaks collapse and Markdown metacharacters — the backslash,
+  code-span, emphasis, link/image, table pipes and HTML delimiters — are
+  escaped, so a reference such as `![evidence](remote.png)` stays literal
+  text), and identical unknown rows across the reader and outcome buckets
+  render once.
 
 ## CLI
 

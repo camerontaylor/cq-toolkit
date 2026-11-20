@@ -713,6 +713,9 @@ export class ClaudeCodeSdkTransport implements Driver {
       outputSchema !== undefined &&
       !aborted &&
       observation.harnessFailure === undefined &&
+      // A dispatch throw outranks the schema judgment: a miss here would
+      // replace the real cause with an 'output-invalid' error.
+      observation.errorKind !== 'dispatch-threw' &&
       observation.result !== undefined
     ) {
       const judged = judgeStructuredOutput(
@@ -839,7 +842,14 @@ export class ClaudeCodeSdkTransport implements Driver {
       harnessFailure: observation.harnessFailure !== undefined,
       maxTokens: budget.maxTokens,
       usage,
-      resultStatus: resultStatusOf(observation.result),
+      // A caught dispatch throw is an honest failure even when the stream
+      // already yielded a success result: the retained frame must not turn
+      // that failure into 'complete'. A cap frame (max turns / max budget)
+      // keeps its status: abort/budget precedence is unchanged.
+      resultStatus:
+        observation.errorKind === 'dispatch-threw' && resultStatusOf(observation.result) !== 'cap'
+          ? 'error'
+          : resultStatusOf(observation.result),
     });
     // §2.3 verdict unification: a structured-output miss is an ERROR verdict
     // — except when a cap or the signal stopped the run first (the missing

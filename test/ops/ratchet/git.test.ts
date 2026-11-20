@@ -33,6 +33,7 @@ import {
   gitDiffText,
   gitListPaths,
   gitMergeBase,
+  gitLsRemoteRef,
   gitReadBlob,
   gitRevParse,
 } from '../../../src/adapters/git/ratchetGit.js';
@@ -504,5 +505,63 @@ describe('malformed Git plumbing fails closed', { timeout: 30_000 }, () => {
         error,
       );
     });
+  });
+});
+
+describe('remote transport env', { timeout: 30_000 }, () => {
+  test('an inherited GIT_ALLOW_PROTOCOL cannot re-enable an insteadOf-rewritten ext:: transport', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'cq-ratchet-ext-'));
+    const prior = process.env['GIT_ALLOW_PROTOCOL'];
+    const priorLocale = process.env['LC_ALL'];
+    try {
+      const bare = join(base, 'remote.git');
+      mkdirSync(bare);
+      git(bare, ['init', '-q', '--bare']);
+      const work = join(base, 'work');
+      initRepo(work);
+      const marker = join(base, 'ext-ran');
+      // `% ` is ext::'s literal space, so a temp path with spaces stays one argument.
+      const extMarker = marker.replaceAll(' ', '% ');
+      git(work, ['config', `url.ext::sh -c touch% ${extMarker}.insteadOf`, bare]);
+      process.env['GIT_ALLOW_PROTOCOL'] = 'ext:file';
+      process.env['LC_ALL'] = 'C';
+      await expect(gitLsRemoteRef(work, bare, 'main', 'unused')).rejects.toThrow(
+        /transport 'ext' not allowed/,
+      );
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      if (prior === undefined) delete process.env['GIT_ALLOW_PROTOCOL'];
+      else process.env['GIT_ALLOW_PROTOCOL'] = prior;
+      if (priorLocale === undefined) delete process.env['LC_ALL'];
+      else process.env['LC_ALL'] = priorLocale;
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test('a caller GIT_ALLOW_PROTOCOL restriction still applies to the remote child', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'cq-ratchet-allow-'));
+    const prior = process.env['GIT_ALLOW_PROTOCOL'];
+    const priorLocale = process.env['LC_ALL'];
+    try {
+      const bare = join(base, 'remote.git');
+      mkdirSync(bare);
+      git(bare, ['init', '-q', '--bare']);
+      const work = join(base, 'work');
+      initRepo(work);
+      process.env['LC_ALL'] = 'C';
+      process.env['GIT_ALLOW_PROTOCOL'] = 'https';
+      await expect(gitLsRemoteRef(work, bare, 'main', 'unused')).rejects.toThrow(
+        /transport 'file' not allowed/,
+      );
+      // The same call succeeds once the caller's allowlist admits file.
+      process.env['GIT_ALLOW_PROTOCOL'] = 'file';
+      expect(await gitLsRemoteRef(work, bare, 'main', 'unused')).toBeNull();
+    } finally {
+      if (prior === undefined) delete process.env['GIT_ALLOW_PROTOCOL'];
+      else process.env['GIT_ALLOW_PROTOCOL'] = prior;
+      if (priorLocale === undefined) delete process.env['LC_ALL'];
+      else process.env['LC_ALL'] = priorLocale;
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });

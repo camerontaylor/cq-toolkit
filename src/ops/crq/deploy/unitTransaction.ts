@@ -29,6 +29,7 @@ import {
 import {
   capturedState,
   preservationCheck,
+  preservedDigests,
   preservedSurfaces,
   queueDrainGate,
   type GuardEffects,
@@ -36,6 +37,32 @@ import {
 } from './unitGuards.js';
 
 type Dict = Record<string, unknown>;
+
+const SHA_RE = /^[0-9a-f]{40}$/;
+
+/**
+ * Python `rebaseline_preserved`: once activation was pending the target unit may
+ * have legitimately advanced preserved queue state, so after a successful fence
+ * the post-restore check compares against freshly observed digests. Returns
+ * `[state, rebasedFrom]` where `rebasedFrom` is the replaced digests or null.
+ */
+async function rebaselinePreserved(
+  effects: TransactionEffects,
+  state: Dict | null,
+  unit: string,
+  failedPhase: unknown,
+): Promise<[Dict | null, Dict | null]> {
+  if (
+    state === null ||
+    (failedPhase !== 'activation_pending' && failedPhase !== 'restore_activation_pending')
+  ) {
+    return [state, null];
+  }
+  const fresh = await preservedDigests(effects, preservedSurfaces(unit));
+  const prior: Dict = {};
+  for (const key of Object.keys(fresh)) prior[key] = key in state ? state[key] : null;
+  return [{ ...state, ...fresh }, prior];
+}
 
 /** The trusted host adapter (Python `adapter`). Methods may throw. */
 export interface UnitAdapter {
@@ -213,6 +240,17 @@ export async function switchUnit(
     }
     const snapshot = await adapter.snapshot(unit);
     await adapter.validateSnapshot(unit, snapshot);
+    // `recover_unit` rejects a record whose snapshot runtime is not the prior
+    // runtime, so journaling such a snapshot would strand the transaction.
+    if (!isDict(snapshot) || !jsonEqual(get(snapshot, 'runtime'), prior['runtime'])) {
+      throw new RecordRefused('snapshot runtime does not match prior runtime');
+    }
+    // Retain the render source before the durable intent: snapshot-phase
+    // recovery has no post-drain state from which to recover this commit.
+    const priorHead = await effects.git('rev-parse', 'HEAD');
+    if (typeof priorHead !== 'string' || !SHA_RE.test(priorHead)) {
+      throw new RecordRefused('invalid prior head for unit switch');
+    }
     let identity: Dict = {
       schema_version: JOURNAL_SCHEMA,
       transaction_id: effects.uuidHex(),
@@ -225,6 +263,7 @@ export async function switchUnit(
       snapshot,
       state: null,
       phase: 'snapshot',
+      prior_head: priorHead,
     };
     const path = await effects.journalAppend(identity);
     let record: Dict | undefined;
@@ -252,17 +291,25 @@ export async function switchUnit(
       try {
         const failedPhase = identity['phase'];
         const fence = await adapter.stopAndDrain(unit);
+        const [state, rebasedFrom] = await rebaselinePreserved(
+          effects,
+          identity['state'] as Dict | null,
+          unit,
+          failedPhase,
+        );
         await adapter.restore(unit, snapshot);
-        if (identity['state'] !== null) {
-          await preservationCheck(effects, identity['state'] as Dict, preservedSurfaces(unit));
+        if (state !== null) {
+          await preservationCheck(effects, state, preservedSurfaces(unit));
         }
         identity = {
           ...identity,
           phase: 'restore_activation_pending',
           failed_phase: failedPhase,
           fence,
+          state,
           reason: clip(exc, 400),
         };
+        if (rebasedFrom !== null) identity['rebaselined_from'] = rebasedFrom;
         await effects.journalReplace(path, identity);
         await adapter.restoreActivation(unit, snapshot);
         record = { ...identity, outcome: 'rolled_back' };
@@ -291,7 +338,7 @@ export async function recoverUnit(
   effects: TransactionEffects,
   adapter: UnitAdapter | null,
   path: string,
-  adapterFactory?: (unit: string, priorRuntime: string) => UnitAdapter | null,
+  adapterFactory?: (unit: string, priorRuntime: string, sourceSha?: string) => UnitAdapter | null,
 ): Promise<Dict> {
   if (adapter === null && adapterFactory === undefined) {
     throw new RecordRefused('no unit recovery adapter');
@@ -315,8 +362,16 @@ export async function recoverUnit(
     const unit = record['unit'] as string;
     await queueDrainGate(effects, unit, effects.liveness);
     let active = adapter;
-    if (adapterFactory !== undefined)
-      active = adapterFactory(unit, record['prior_runtime'] as string);
+    if (adapterFactory !== undefined) {
+      // Render the prior runtime at the commit the transaction retained, not at a
+      // HEAD that may have advanced; a malformed retained head fails closed.
+      const state = record['state'];
+      const retained = record['prior_head'] ?? (isDict(state) ? state['prior_head'] : null);
+      if (typeof retained !== 'string' || !SHA_RE.test(retained)) {
+        throw new RecordRefused('invalid retained prior head for unit recovery');
+      }
+      active = adapterFactory(unit, record['prior_runtime'] as string, retained);
+    }
     if (active === null) throw new RecordRefused('no unit recovery adapter');
     await active.validateSnapshot(unit, record['snapshot']);
     try {
@@ -324,11 +379,24 @@ export async function recoverUnit(
         ? record['failed_phase']
         : record['phase'];
       const fence = await active.stopAndDrain(unit);
+      const [state, rebasedFrom] = await rebaselinePreserved(
+        effects,
+        record['state'] as Dict | null,
+        unit,
+        failedPhase,
+      );
       await active.restore(unit, record['snapshot']);
-      if (record['state'] !== null) {
-        await preservationCheck(effects, record['state'] as Dict, preservedSurfaces(unit));
+      if (state !== null) {
+        await preservationCheck(effects, state, preservedSurfaces(unit));
       }
-      record = { ...record, phase: 'restore_activation_pending', failed_phase: failedPhase, fence };
+      record = {
+        ...record,
+        phase: 'restore_activation_pending',
+        failed_phase: failedPhase,
+        fence,
+        state,
+      };
+      if (rebasedFrom !== null) record['rebaselined_from'] = rebasedFrom;
       await effects.journalReplace(path, record);
       await active.restoreActivation(unit, record['snapshot']);
       const completed = { ...record, outcome: 'rolled_back' };

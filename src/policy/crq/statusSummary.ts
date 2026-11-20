@@ -484,8 +484,11 @@ export function mergedCurrent(queue: CrqRecord, readReceipt?: ReceiptReader): Me
           stagedExclusions[disposition] = (stagedExclusions[disposition] ?? 0) + 1;
         }
       }
+      // The target is validated with the rows: a non-string target must not leave the proven
+      // count behind before the catch below also counts the item as unverified.
+      const target = requireString(require(captureRecord, 'target'), 'target');
       counts[category] += 1;
-      targets.add(requireString(require(captureRecord, 'target'), 'target'));
+      targets.add(target);
       exclusions = stagedExclusions;
     } catch {
       counts.unverified += 1;

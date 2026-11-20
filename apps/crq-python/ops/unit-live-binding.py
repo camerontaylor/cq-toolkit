@@ -845,6 +845,15 @@ class SubprocessSystemd:
                     and name.endswith((".d", ".wants", ".requires")):
                 error = error or probe_failure
                 continue
+            # systemd v257 resolves a symlinked .wants/.requires directory and
+            # loads the links inside it, while the no-follow probe above and
+            # the no-follow dependency scan both skip the directory, so its
+            # contents would go unexamined. Keep the no-follow policy and
+            # refuse rather than treat the dependency edges as absent.
+            if entry.is_symlink() and name.endswith((".wants", ".requires")):
+                error = error or ("dependency directory is a symlink that "
+                                  "discovery does not follow: " + str(entry))
+                continue
             # An inherited type-wide or dash-prefix drop-in directory is
             # merged into an expected unit even though it is not named after
             # one, so its overrides would run outside the verified bytes.
@@ -1037,6 +1046,7 @@ class HostLayout:
 
 
 def production_adapter(effects, overlay, *, unit, runtime, artifact_root=None,
+                       source_sha=None,
                        systemd=None, journal_source=None, identity=None,
                        queue_drain=None, require_journal_witness=True,
                        **options):
@@ -1056,11 +1066,14 @@ def production_adapter(effects, overlay, *, unit, runtime, artifact_root=None,
             "record directory is unavailable: " + str(exc)[:160]) from exc
     layout.validate()
     controller = _controller_module(effects)
-    try:
-        source_sha = effects.git("rev-parse", "HEAD")
-    except controller.Refused as exc:
-        raise LiveBindingRefused(
-            "deployment HEAD is unavailable: " + str(exc)[:300]) from exc
+    if source_sha is None:
+        # Recovery passes the commit its record retained; a fresh composition
+        # renders at the deployment HEAD.
+        try:
+            source_sha = effects.git("rev-parse", "HEAD")
+        except controller.Refused as exc:
+            raise LiveBindingRefused(
+                "deployment HEAD is unavailable: " + str(exc)[:300]) from exc
     systemd = systemd or SubprocessSystemd(unit_dir=layout.unit_dir)
     journal_source = journal_source or completion.SystemdJournalSource(user=True)
     identity = identity or ProcessIdentity()

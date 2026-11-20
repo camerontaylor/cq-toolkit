@@ -18,6 +18,20 @@ from crq_repair.bounded import JOB_ID, identity, job_path, require_canonical_del
 # fixed counts on these rungs, so nothing else may be recorded as a fix.
 FIXED_RUNGS = ('A0', 'A1', 'A2')
 
+# Total `gh pr create` launches allowed per publication. A process that dies
+# after journaling pr_create_pending but before launching gh (or a transient
+# gh failure) is retried on later ticks up to this bound; exhausted attempts
+# park the run in 'stale' for manual reconciliation instead of failing every
+# future tick.
+PR_CREATE_ATTEMPTS = 3
+BACKFILL_ITEM = 'backfill-finding-'
+BACKFILL_BRANCH = 'crq/fix-backfill-'
+BACKLOG_WINDOW_HOURS = 72
+BACKLOG_HOURS_OF_CAPACITY = 4
+# The tick's view of open backfill fix PRs, set by refresh_fix_pr_backlog and
+# cleared by crq.tick before and after its harvest pass; None means unread.
+TICK_BACKLOG = {'open': None, 'limit': None}
+
 
 def scan_fix_instructions(c, instructions, source_sha, scan_path):
     """Validate and scan the exact bounded guidance before binding it to a job."""
@@ -543,6 +557,72 @@ def harvest(c, q, item, dry=False):
     return messages
 
 
+def review_start_limit(c, now=None):
+    """review_started events in the trailing 72 h, times four hours of capacity."""
+    import datetime as dt
+    now = now or dt.datetime.now(dt.timezone.utc)
+    cutoff = now - dt.timedelta(hours=BACKLOG_WINDOW_HOURS)
+    started = 0
+    try:
+        lines = c.EVENTS.read_text().splitlines()
+    except OSError:
+        return 0
+    for line in lines:
+        if '"review_started"' not in line:
+            continue
+        try:
+            row = json.loads(line)
+            at = dt.datetime.fromisoformat(str(row['at']).replace('Z', '+00:00'))
+        except (ValueError, KeyError, TypeError):
+            continue
+        if row.get('event') == 'review_started' and at.tzinfo and cutoff <= at <= now:
+            started += 1
+    return started * BACKLOG_HOURS_OF_CAPACITY // BACKLOG_WINDOW_HOURS
+
+
+def refresh_fix_pr_backlog(c):
+    """Write state/repair/fix-pr-backlog.json once per tick, before any publish.
+
+    Counts open fix PRs on GitHub, never the queue: its cached state lags. A
+    failed read leaves the previous file for the drain and holds creation for
+    the rest of this tick.
+    """
+    import datetime as dt
+    reset_fix_pr_backlog()
+    try:
+        prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--state', 'open', '--limit', '1000',
+                         '--json', 'headRefName'])
+        open_count = sum(1 for pr in prs if str(pr.get('headRefName', '')).startswith(BACKFILL_BRANCH))
+        limit = review_start_limit(c)
+        atomic(c.STATE / 'repair' / 'fix-pr-backlog.json',
+               {'at': dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'open': open_count, 'limit': limit})
+    except Exception:
+        return None
+    TICK_BACKLOG.update(open=open_count, limit=limit)
+    return TICK_BACKLOG
+
+
+def reset_fix_pr_backlog():
+    """Forget the count: creation holds until this tick's refresh reads it."""
+    TICK_BACKLOG.update(open=None, limit=None)
+
+
+def backfill_repair_present(q):
+    """True when a backfill item carries repair runs: only then can this tick
+    publish a backfill fix PR or the drain have a backfill group to budget."""
+    return any(str(item.get('id', '')).startswith(BACKFILL_ITEM) and item.get('repair_runs')
+               for item in q.get('items', []))
+
+
+def backfill_slot_free(item):
+    """Hard cap: a backfill fix PR may be created only while open < limit this tick."""
+    if not str(item.get('id', '')).startswith(BACKFILL_ITEM):
+        return True
+    open_count, limit = TICK_BACKLOG['open'], TICK_BACKLOG['limit']
+    return open_count is not None and limit is not None and open_count < limit
+
+
 def publish(c, q, item, run, record, fixed):
     journal = c.STATE / 'repair' / record['jobs'][0] / 'publication.json'
     if journal.exists():
@@ -616,7 +696,14 @@ def publish(c, q, item, run, record, fixed):
         atomic(journal, publication)
         record['publication'] = publication
         c.save_queue(q)  # durable identity before any remote mutation
-        c.git('push', 'origin', 'HEAD:refs/heads/' + remote_branch, cwd=wt)
+        # The update must land on the exact remote tip checked above: a
+        # maintainer reset to an ancestor would otherwise still fast-forward
+        # and resurrect the commits they removed.
+        expected = target if info else ''
+        if expected and not c.is_ancestor(expected, head):
+            raise ValueError('publication would not fast-forward the checked remote head')
+        c.git('push', 'origin', '--force-with-lease=refs/heads/' + remote_branch + ':' + expected,
+              'HEAD:refs/heads/' + remote_branch, cwd=wt)
         finalize_publication(c, q, item, run, record, publication)
     finally:
         c.remove_worktree(wt, branch)
@@ -648,11 +735,20 @@ def recover_publication(c, q, item, run, record, publication):
         raise ValueError('existing fix branch differs from prepared publication')
     if remote_head != head:
         # Immutable publication SHA survives retries via refs/crq/publication.
-        c.git('push', 'origin', head + ':refs/heads/' + branch)
+        # Lease the update on the tip observed above and require it to
+        # fast-forward from that exact SHA, so a maintainer reset to an
+        # ancestor cannot be silently resurrected by this push.
+        if remote_head and not c.is_ancestor(remote_head, head):
+            raise ValueError('publication would not fast-forward the observed remote head')
+        c.git('push', 'origin', '--force-with-lease=refs/heads/' + branch + ':' + (remote_head or ''),
+              head + ':refs/heads/' + branch)
     finalize_publication(c, q, item, run, record, publication)
 
 
 def finalize_publication(c, q, item, run, record, publication):
+    missing = object()
+    before = (record.get('publication', missing), record.get('published_commits', missing),
+              list(q.get('repair_own_commits', [])), 'repair_own_commits' in q)
     record['publication'] = publication
     translated, head, branch = publication['commits'], publication['head'], publication['branch']
     owned = q.setdefault('repair_own_commits', [])
@@ -664,8 +760,32 @@ def finalize_publication(c, q, item, run, record, publication):
     else:
         prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
         if not prs:
-            if publication.get('pr_create_pending'):
-                raise ValueError('previous PR creation outcome unknown; reconcile existing PR before retry')
+            # recover_publication reconciled the fix branch to the prepared
+            # head and adopts any PR matching that head before calling here,
+            # so an empty list with a journaled pr_create_pending means the
+            # create never landed: relaunch it a bounded number of times,
+            # then hand off to a stale record instead of failing every
+            # future tick.
+            attempts = publication.get('pr_create_attempts', 0)
+            if attempts >= PR_CREATE_ATTEMPTS:
+                record.update(state='stale',
+                              error='fix PR creation never completed after ' + str(PR_CREATE_ATTEMPTS)
+                                    + ' attempts; reconcile the PR for ' + branch + ' manually')
+                return
+            if not backfill_slot_free(item):
+                # Held, not failed: nothing changes, no attempt is counted, and
+                # the publication is retried on a later tick. Undo the
+                # bookkeeping done above so the record reads as it did before.
+                for key, value in (('publication', before[0]), ('published_commits', before[1])):
+                    if value is missing:
+                        record.pop(key, None)
+                    else:
+                        record[key] = value
+                if before[3]:
+                    owned[:] = before[2]
+                else:
+                    q.pop('repair_own_commits', None)
+                return
             body = ['Verified CodeRabbit repairs from ' + run, '', '| finding | verdict | reason |', '|---|---|---|']
             for v in record['verdicts']:
                 body.append('| ' + v['job'] + ' | ' + v['verdict'] + ' | ' + v['reason'].replace('|', r'\|').replace('\n', ' ') + ' |')
@@ -673,10 +793,24 @@ def finalize_publication(c, q, item, run, record, publication):
             path = c.STATE / 'repair' / record['jobs'][0] / 'fix-pr.md'
             path.write_text('\n'.join(body) + '\n')
             publication['pr_create_pending'] = True
+            publication['pr_create_attempts'] = attempts + 1
             atomic(c.STATE / 'repair' / record['jobs'][0] / 'publication.json', publication)
             c.save_queue(q)
-            c.run(['gh', 'pr', 'create', '--repo', c.REPO, '--base', DEFAULT_BRANCH, '--head', branch,
-                   '--title', 'fix: Address CodeRabbit findings from ' + run, '--body-file', str(path)])
+            # Reserve the slot before creating: a create that lands but then
+            # times out still counts for the rest of the tick, and the next
+            # tick's refresh recounts from GitHub. backfill_slot_free above
+            # guarantees the count was read. Only a create gh reports as
+            # failed (non-zero exit) releases it.
+            reserved = str(item.get('id', '')).startswith(BACKFILL_ITEM)
+            if reserved:
+                TICK_BACKLOG['open'] += 1
+            try:
+                c.run(['gh', 'pr', 'create', '--repo', c.REPO, '--base', DEFAULT_BRANCH, '--head', branch,
+                       '--title', 'fix: Address CodeRabbit findings from ' + run, '--body-file', str(path)])
+            except RuntimeError:
+                if reserved and TICK_BACKLOG['open'] is not None:
+                    TICK_BACKLOG['open'] -= 1
+                raise
             prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
         if len(prs) != 1:
             raise ValueError('fix PR identity is ambiguous')
@@ -960,6 +1094,64 @@ def diff_changed_lines(patch):
     return added, removed
 
 
+HUNK_HEADER = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
+
+
+def diff_changed_locations(patch):
+    """Changed lines of a -U0 diff keyed by position, not file-wide text.
+
+    Returns (added, removed_gaps, removed, added_gaps) as sets: added holds
+    (new_line, text); removed holds (old_line, text); removed_gaps holds
+    (new-side line preceding the deletion, text); added_gaps holds (old-side
+    line preceding the insertion, text). The gap forms let a deletion in one
+    diff be matched to a re-insertion in a diff that starts from its result.
+    'replaced' holds (old_start, old_count, added texts) for each hunk that
+    also removes lines: such a hunk stamps all of its insertions with one
+    gap anchor even though an insertion can really land inside the removed
+    span, so change_undone() matches those hunks by span overlap too.
+    """
+    added, removed, added_gaps, removed_gaps, replaced = set(), set(), set(), set(), set()
+    hunk_adds = []
+    old_no = new_no = old_anchor = new_anchor = 0
+    hunk_start = hunk_count = 0
+    in_hunk = False
+
+    def end_hunk():
+        if in_hunk and hunk_adds and hunk_count:
+            replaced.add((hunk_start, hunk_count, frozenset(hunk_adds)))
+        hunk_adds.clear()
+
+    for line in patch.splitlines():
+        if line.startswith('diff --git '):
+            end_hunk()
+            in_hunk = False
+        elif line.startswith('@@'):
+            end_hunk()
+            match = HUNK_HEADER.match(line)
+            in_hunk = match is not None
+            if not in_hunk:
+                continue
+            old_start, old_count, new_start, new_count = match.groups()
+            old_no, new_no = int(old_start), int(new_start)
+            hunk_start = old_no
+            hunk_count = 1 if old_count is None else int(old_count)
+            # git names the preceding line for an empty side, else the first.
+            old_anchor = old_no if old_count == '0' else old_no - 1
+            new_anchor = new_no if new_count == '0' else new_no - 1
+        elif in_hunk and line.startswith('+'):
+            added.add((new_no, line[1:]))
+            added_gaps.add((old_anchor, line[1:]))
+            hunk_adds.append(line[1:])
+            new_no += 1
+        elif in_hunk and line.startswith('-'):
+            removed.add((old_no, line[1:]))
+            removed_gaps.add((new_anchor, line[1:]))
+            old_no += 1
+    end_hunk()
+    return {'added': added, 'removed': removed, 'added_gaps': added_gaps,
+            'removed_gaps': removed_gaps, 'replaced': replaced}
+
+
 def path_diff(c, tmp, name, args):
     """Write a diff through --output so trailing whitespace is not stripped."""
     target = Path(tmp) / name
@@ -986,11 +1178,22 @@ def head_change_patch(c, tmp, name, published, actual_head, path):
 
 
 def change_undone(published, head):
-    """Lines the head diff undoes relative to the published changed lines."""
-    published_added, published_removed = published
-    head_added, head_removed = head
-    return (sorted(set(published_added) & set(head_removed)) +
-            sorted(set(published_removed) & set(head_added)))
+    """Changes the head diff undoes at the same location in the published tree.
+
+    Both arguments are diff_changed_locations() results. The published diff
+    maps parent->published and the head diff maps published->head, so
+    published new-line numbers and head old-line numbers share one coordinate
+    system. An identical line elsewhere in the file is not an undo. A head
+    replacement hunk that starts before a deletion gap gives the restored
+    line the hunk's earlier gap anchor, so a hunk whose replaced span covers
+    the gap is also matched on its added texts.
+    """
+    undone = set(published['added'] & head['removed'])
+    undone.update(published['removed_gaps'] & head['added_gaps'])
+    for old_start, old_count, adds in head['replaced']:
+        undone.update((gap, text) for gap, text in published['removed_gaps']
+                      if old_start <= gap < old_start + old_count and text in adds)
+    return sorted(undone)
 
 
 def extra_commits(c, published, actual_head):
@@ -1081,7 +1284,8 @@ def merge_head_evidence(c, record, actual_head):
             total_bytes += head_size
             if head_size > MAX_CONTAINMENT_PATCH_BYTES or total_bytes > MAX_CONTAINMENT_TOTAL_BYTES:
                 raise ValueError('published repair change too large to verify; needs revalidation: ' + path)
-            undone = change_undone(published_lines, diff_changed_lines(head_patch))
+            undone = change_undone(diff_changed_locations(published_patch),
+                                   diff_changed_locations(head_patch))
             if undone or (mode_changed and after[0] != before[0]):
                 raise ValueError('merged repair source changed; needs revalidation: ' + path)
             result.update(status='contained', published_parent=published_parent,
@@ -1349,17 +1553,26 @@ def reconcile_fix_prs(c, q):
                 if proof is not None:
                     record['validated_merge_head'] = {**proof, 'merge_commit': merge}
                 fixed = {v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED'}
-                for index, job in enumerate(record['jobs'], 1):
-                    if job in fixed:
-                        expected = json.loads((c.STATE / 'repair/inbox' / (job + '.json')).read_text())
-                        result = next(v for v in record['verdicts'] if v['job'] == job)
-                        if not projected:
-                            if expected.get('canonical_finding_id') and proof and 'fixed_revalidation' in proof:
-                                result = {**result, 'reason': proof['fixed_revalidation']['reason']}
-                            mark_finding_outcome(c, expected, result, merge, pr.get('url'))
-                        for blocker in item.get('blocking', []):
-                            if blocker.get('repair_job') == job:
-                                blocker['resolution'] = {'fix_pr': pr['number'], 'merge': merge, 'at': c.iso()}
+                try:
+                    for index, job in enumerate(record['jobs'], 1):
+                        if job in fixed:
+                            expected = json.loads((c.STATE / 'repair/inbox' / (job + '.json')).read_text())
+                            result = next(v for v in record['verdicts'] if v['job'] == job)
+                            if not projected:
+                                if expected.get('canonical_finding_id') and proof and 'fixed_revalidation' in proof:
+                                    result = {**result, 'reason': proof['fixed_revalidation']['reason']}
+                                mark_finding_outcome(c, expected, result, merge, pr.get('url'))
+                            for blocker in item.get('blocking', []):
+                                if blocker.get('repair_job') == job:
+                                    blocker['resolution'] = {'fix_pr': pr['number'], 'merge': merge, 'at': c.iso()}
+                except Exception as exc:
+                    # A failed ledger write stays with this record: outcomes already
+                    # written earlier in the record remain in place and the retry
+                    # replays them idempotently (`repair_outcome` dedupes), later
+                    # repairs still get examined, and the counters still return.
+                    record['source_publication_error'] = str(exc)[:300]
+                    swallowed(exc, item, run)
+                    continue  # The repair is left retryable (no fix_merged stamp).
                 try:
                     if projected and canonical_fixed_events(c, record, info) != proof:
                         raise ValueError('canonical fixed finding changed before source feedback')

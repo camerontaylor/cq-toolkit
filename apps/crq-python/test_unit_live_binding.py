@@ -531,6 +531,23 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("not a real directory", " ".join(evidence["foreign"]))
 
+    def test_symlinked_dependency_directory_is_incomplete(self):
+        declared = self.declare()
+        held = self.base / "repos/held-wants"
+        held.mkdir(parents=True)
+        # systemd resolves a symlinked dependency directory and loads the
+        # links inside it, while the no-follow probe and dependency scan
+        # both skip the directory, so discovery must refuse instead of
+        # reporting the enablement edge as absent.
+        (held / "crq-tick.service").symlink_to(
+            self.unit_dir / "crq-tick.service")
+        (self.unit_dir / "ingress.target.wants").symlink_to(held)
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], False)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn(str(self.unit_dir / "ingress.target.wants"),
+                      evidence["error"])
+
     def test_unreadable_enablement_entry_is_incomplete(self):
         declared = self.declare()
         wants = self.unit_dir / "timers.target.wants"
@@ -1220,6 +1237,13 @@ class ProductionAdapterTests(FactoryFixture):
         self.assertEqual(adapter.systemd.unit_dir, self.unit_dir)
         self.assertEqual(selection.source_sha, self.before)
         self.assertEqual(self.calls, [])
+
+    def test_explicit_source_sha_replaces_the_deployment_head(self):
+        retained = "e" * 40
+        self.assertNotEqual(retained, self.before)
+        with mock.patch.object(live.factory, "compose", return_value=("adapter", "selection")) as compose:
+            self.make_live_adapter(source_sha=retained)
+        self.assertEqual(compose.call_args.kwargs["source_sha"], retained)
 
     def test_unsupported_discovery_refuses_before_mutation(self):
         self.write("other.service",

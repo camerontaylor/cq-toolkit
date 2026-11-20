@@ -233,7 +233,7 @@ describe('recheckBaseline', () => {
     root: '/live',
     originalConfig: config,
     cqBin,
-    target: 't'.repeat(40),
+    priorSha: 'p'.repeat(40),
     phase: (n: string, e: Record<string, unknown>) =>
       void log.push(`phase:${n}:${JSON.stringify(e)}`),
     ...over,
@@ -244,7 +244,7 @@ describe('recheckBaseline', () => {
     expect(out).toEqual({ queue: 'q1', state: 's1' });
     expect(log).toEqual([
       'digests',
-      `compat:${'t'.repeat(40)}`,
+      `compat:${'p'.repeat(40)}`,
       'phase:remeasured:{"preserved":["queue","state"]}',
     ]);
   });
