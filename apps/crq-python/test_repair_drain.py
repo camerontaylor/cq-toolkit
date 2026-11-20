@@ -378,21 +378,42 @@ class RepairDrainTest(unittest.TestCase):
             repair_tick.reconcile_fix_prs(c, self.queue)
             self.assertEqual(mark.call_count, 1)
 
-    def test_closed_fix_pr_is_terminal_and_never_polled_again(self):
+    def test_closed_fix_pr_rechecks_on_a_bounded_cadence_and_observes_reopen(self):
         item = self.queue['items'][0]
         record = item['repair_runs']['run1']
         record.update(fix_pr={'number': 99, 'url': 'https://github.com/example/repo/pull/99'},
                       verdicts=[{'job': 'crq-run1-F1', 'verdict': 'FIXED', 'reason': 'verified'}])
-        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: 'now',
+        clock = {'now': dt.datetime.now(dt.timezone.utc)}
+        c = SimpleNamespace(STATE=self.root / 'state', iso=lambda: clock['now'].isoformat(),
                             pr_info=mock.Mock(return_value={'state': 'CLOSED'}),
                             git=lambda *args: self.tip, is_ancestor=lambda *args: True)
         repair_tick.reconcile_fix_prs(c, self.queue)
-        self.assertEqual(record['fix_closed'], 'now')
+        self.assertEqual(record['fix_closed'], clock['now'].isoformat())
         self.assertEqual(c.pr_info.call_count, 1)
         self.assertEqual(record['fix_pr']['state'], 'CLOSED')
-        repair_tick.reconcile_fix_prs(c, self.queue)
+        # A fresh closed marker costs no further forge calls...
+        clock['now'] += dt.timedelta(hours=1)
         repair_tick.reconcile_fix_prs(c, self.queue)
         self.assertEqual(c.pr_info.call_count, 1)
+        # ...but it expires on the bounded cadence and is refreshed while the
+        # PR is still closed upstream.
+        # closed_marker_due reads real time, so age the stored marker itself.
+        clock['now'] += repair_tick.CLOSED_FIX_RECHECK
+        record['fix_closed'] = (dt.datetime.now(dt.timezone.utc)
+                                - repair_tick.CLOSED_FIX_RECHECK).isoformat()
+        repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertEqual(c.pr_info.call_count, 2)
+        self.assertEqual(record['fix_closed'], clock['now'].isoformat())
+        # A closed PR can reopen upstream: the expired marker is invalidated
+        # instead of hiding the reopened PR from every later tick.
+        c.pr_info.return_value = {'state': 'OPEN'}
+        clock['now'] += repair_tick.CLOSED_FIX_RECHECK
+        record['fix_closed'] = (dt.datetime.now(dt.timezone.utc)
+                                - repair_tick.CLOSED_FIX_RECHECK).isoformat()
+        repair_tick.reconcile_fix_prs(c, self.queue)
+        self.assertEqual(c.pr_info.call_count, 3)
+        self.assertNotIn('fix_closed', record)
+        self.assertEqual(record['fix_pr']['state'], 'OPEN')
         self.assertNotIn('fix_merged', record)
 
     def test_source_failure_is_retained_without_aborting_reconciliation(self):
@@ -997,6 +1018,29 @@ class RepairDrainTest(unittest.TestCase):
                                       self.root / ('dispatch-' + driver), judge=False)
                 provider.assert_not_called()
             self.assertFalse((self.root / ('dispatch-' + driver) / 'source-snapshot.json').exists())
+
+    def test_review_diff_sections_are_scanned_under_their_own_paths(self):
+        diff = ('diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1 @@\n+x = 1\n'
+                'diff --git a/config/.env b/config/.env\n@@ -0,0 +1 @@\n+DATABASE_URL=db\n')
+        self.assertEqual([path for path, _ in service.review_diff_sections(diff)],
+                         ['src/a.py', 'config/.env'])
+        self.assertEqual([path for path, _ in service.review_diff_sections('')], ['review-diff.txt'])
+        self.worktree()
+        job = json.loads((self.root / 'state/repair/inbox/crq-run1-F1.json').read_text())
+        job['review_diff'] = diff
+        seen = []
+        def scan(c, context, output):
+            seen.append(context['current_path'])
+            return context['current_path'] != 'config/.env'
+        with mock.patch.object(service, 'require_canonical_delivery'), \
+             mock.patch.object(service, 'source_snapshot', return_value={'path': 'src/a.py', 'source': ''}), \
+             mock.patch.object(service, 'triage_context_safe', side_effect=scan), \
+             mock.patch.object(service.cq, 'invoke') as provider:
+            with self.assertRaisesRegex(ValueError, 'review diff secret scan rejected'):
+                service._dispatch(self.config, {'driver': 'cq'}, job, self.root,
+                                  self.root / 'dispatch', judge=False)
+            provider.assert_not_called()
+        self.assertEqual(seen, ['src/a.py', 'src/a.py', 'config/.env'])
 
     def test_child_refusal_stops_the_pass_before_the_child_exits(self):
         # The reviewer's interleaving: child A refuses, the marker is removed
@@ -2473,6 +2517,25 @@ class RepairDrainTest(unittest.TestCase):
             again = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root / 'again')
             self.assertEqual(dispatch.call_count, 3)
             self.assertEqual(again['stop'], 'rate-limit')
+
+    def test_repeated_nested_repository_capture_does_not_collide(self):
+        self.config['repair']['fallback_models'] = ['opencode-go/deepseek-v4.1-flash']
+        wt = self.worktree('crq-repair-pr1-merged-nested')
+        def dispatch(config, role, job, tree, directory, judge=False):
+            subprocess.run(['git', 'init', '-q', str(tree / 'scratch')], check=True)
+            (tree / 'scratch' / 'note').write_text(directory.name)
+            return {'stop': 'rate-limit', 'retry_after_ms': 1000}
+        future = '2999-01-01T00:00:00Z'
+        evidence = self.root / 'attempt'
+        with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'OPENCODE_GO_API_KEY': 'fixture', 'OPENCODE_GO_BASE_URL': 'https://fixture.invalid'}), \
+             mock.patch.object(service, 'provider_cooldowns', return_value={}), \
+             mock.patch.object(service, 'remember_provider_limit', return_value=future), \
+             mock.patch.object(service, '_dispatch', side_effect=dispatch):
+            for _ in range(3):
+                report = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, wt, evidence)
+                self.assertEqual(report['stop'], 'rate-limit')
+        kept = sorted(evidence.glob('*/retained-nested/capture-*/scratch/note'))
+        self.assertEqual(len(kept), 3)
 
     def test_non_quota_failure_does_not_spend_on_fallback(self):
         self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']

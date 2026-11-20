@@ -347,6 +347,46 @@ def remove_drain_runs():
         shutil.rmtree(STATE / "runs" / run_id, ignore_errors=True)
 
 
+def run_cleanup_steps(actions):
+    """Run every cleanup action even when an earlier one raises.
+
+    Each action runs independently; the first error is re-raised only after
+    all actions have run, so a process cleanup failure stays visible but
+    cannot skip queue restoration or run-metadata cleanup.
+    """
+    results = []
+    first = None
+    for action in actions:
+        try:
+            results.append(action())
+        except Exception as exc:
+            if first is None:
+                first = exc
+    if first is not None:
+        raise first
+    return results
+
+
+def finish_cleanup(cleanup, process_actions, restore_actions):
+    """Stop processes, then always restore the queue and run metadata.
+
+    Process-stop results go into ``cleanup``; a stop failure is re-raised only
+    after the restore actions have run, and it wins over a restore failure.
+    """
+    first = None
+    try:
+        cleanup.extend(run_cleanup_steps(process_actions))
+    except Exception as exc:
+        first = exc
+    try:
+        run_cleanup_steps(restore_actions)
+    except Exception as exc:
+        if first is None:
+            first = exc
+    if first is not None:
+        raise first
+
+
 def drain_observation():
     """The actual controller drain_check bound to the actual runner liveness."""
     dc = load_controller()
@@ -720,7 +760,7 @@ def prepare_history():
         "prior_runtime": PYTHON_RUNTIME,
         "outcome": "completed",
         "at": "2026-01-01T00:00:00Z",
-        "snapshot": {"proof": "historical"},
+        "snapshot": {"proof": "historical", "runtime": PYTHON_RUNTIME},
         "state": {
             "prior_head": "0" * 40,
             "prior_config_sha256": None,
@@ -995,10 +1035,13 @@ def drain_refuse_phase(args):
                                         "after": unrelated_after}},
         }
     finally:
-        cleanup.append(stop_process(seeded["process"]))
-        cleanup.append(stop_process(unrelated))
-        restore_queue(saved_queue)
-        remove_drain_runs()
+        finish_cleanup(cleanup, [
+            lambda: stop_process(seeded["process"]),
+            lambda: stop_process(unrelated),
+        ], [
+            lambda: restore_queue(saved_queue),
+            remove_drain_runs,
+        ])
     require(state_hashes() == saved["state"],
             "drain refusal cleanup did not restore the baseline queue")
     result["cleanup"] = cleanup
@@ -1115,9 +1158,12 @@ def drain_harvest_phase(args):
             "preserved": preserved,
         }
     finally:
-        cleanup.append(stop_process(unrelated))
-        restore_queue(saved_queue)
-        remove_drain_runs()
+        finish_cleanup(cleanup, [
+            lambda: stop_process(unrelated),
+        ], [
+            lambda: restore_queue(saved_queue),
+            remove_drain_runs,
+        ])
     require(state_hashes() == saved["state"],
             "harvest proof cleanup did not restore the baseline queue")
     result["cleanup"] = cleanup
@@ -1213,10 +1259,13 @@ def recover_drain_refuse_phase(args):
                                         "after": unrelated_after}},
         }
     finally:
-        cleanup.append(stop_process(seeded["process"]))
-        cleanup.append(stop_process(unrelated))
-        restore_queue(saved_queue)
-        remove_drain_runs()
+        finish_cleanup(cleanup, [
+            lambda: stop_process(seeded["process"]),
+            lambda: stop_process(unrelated),
+        ], [
+            lambda: restore_queue(saved_queue),
+            remove_drain_runs,
+        ])
     require(state_hashes() == saved["state"],
             "recovery drain proof cleanup did not restore the baseline queue")
     result["cleanup"] = cleanup
