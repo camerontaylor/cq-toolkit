@@ -1535,6 +1535,40 @@ class AdapterTests(AdapterFixture):
                 recovery.restore_activation("crq-tick.service", snapshot)
                 self.assertEqual(self.fake.active["crq-tick.service"], "active")
 
+    def test_restore_start_command_timeout_is_recorded_for_fallbacks(self):
+        for line, expected in (("TimeoutStartSec=192h", 660),
+                               ("TimeoutStartSec=infinity", 660),
+                               ("TimeoutStartSec=20min30s", 1290),
+                               ("TimeoutStartSec=20min 30s", 1290),
+                               ("TimeoutStartSec=20min\nTimeoutSec=bogus", 1260),
+                               ("TimeoutStartSec=" + "9" * 5000, 660)):
+            with self.subTest(line=line):
+                self.setUp()
+                recovery, snapshot = self._recovery_with_timeout_line(line)
+                seen = []
+                original = self.fake.run
+
+                def record(*args, timeout=60, _original=original, **kwargs):
+                    if "start" in args:
+                        seen.append(timeout)
+                    return _original(*args, timeout=timeout, **kwargs)
+
+                self.fake.run = record
+                recovery.restore_activation("crq-tick.service", snapshot)
+                self.assertIn(expected, seen)
+
+    def test_u2028_in_a_comment_is_not_an_assignment(self):
+        recovery, snapshot = self._recovery_with_timeout_line(
+            "TimeoutStartSec=20min\n# note\u2028TimeoutStartSec=1s")
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_duration_without_spaces_and_oversized_digits(self):
+        self.assertEqual(adapter_mod._duration_seconds("20min30s"), 1230)
+        self.assertEqual(adapter_mod._duration_seconds("20min 30s"), 1230)
+        self.assertIsNone(adapter_mod._duration_seconds("9" * 5000))
+
     def test_minute_unit_m_is_accepted(self):
         self.assertEqual(adapter_mod._duration_seconds("5m"), 300)
         self.assertIsNone(adapter_mod._duration_seconds("9" * 309 + "s"))

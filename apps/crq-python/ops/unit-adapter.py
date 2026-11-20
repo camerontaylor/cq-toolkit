@@ -232,7 +232,12 @@ def _logical_lines(text: str) -> list[str]:
     logical = []
     pending = ""
     # A leading UTF-8 BOM is not part of the first line, as systemd reads it.
-    for line in text.removeprefix("\ufeff").splitlines():
+    # systemd splits physical lines on LF (CRLF) only; str.splitlines() also
+    # breaks on U+2028 and similar, which would expose comment text as keys.
+    physical = re.split(r"\r?\n", text.removeprefix("\ufeff"))
+    if physical and physical[-1] == "":
+        physical.pop()
+    for line in physical:
         if line.lstrip()[:1] in ("#", ";"):
             # systemd skips standalone comments, and comments inside a
             # continuation, so a comment's trailing backslash never continues.
@@ -283,19 +288,25 @@ def _section_assignments(text: str, section: str, keys: tuple[str, ...]) -> list
 
 
 def _duration_seconds(text: str) -> int | None:
-    # systemd time spans may join several components with whitespace ("5min 20s").
-    pieces = text.split()
-    if not pieces:
+    # systemd time spans join components with optional whitespace
+    # ("5min 20s", "20min30s"); every component must parse.
+    value = text.strip()
+    if not value:
         return None
     seconds = 0.0
-    for piece in pieces:
-        match = DURATION_RE.fullmatch(piece)
+    position = 0
+    while position < len(value):
+        match = DURATION_RE.match(value, position)
         if match is None:
             return None
+        position = match.end()
+        while position < len(value) and value[position].isspace():
+            position += 1
         factor = {"ms": 0.001, "s": 1, "min": 60, "m": 60, "h": 3600}[match.group("unit") or "s"]
         try:
             seconds += int(match.group("value")) * factor
-        except OverflowError:
+        except (OverflowError, ValueError):
+            # Too many digits for int() (ValueError) or float (OverflowError).
             return None
     if seconds <= 0 or seconds == float("inf"):
         return None
@@ -1327,18 +1338,28 @@ class ProductionUnitAdapter:
                 validate=True).decode("utf-8")
         except (KeyError, ValueError, UnicodeEncodeError, UnicodeDecodeError):
             self.refuse("restored service is not readable unit text")
-        # systemd applies TimeoutStartSec= and TimeoutSec= in file order and the
-        # last assignment wins; an empty or unsupported value (``infinity``,
-        # garbage) keeps the pinned-derived default so a restore stays
-        # recoverable instead of refusing after the mask is already durable.
+        # systemd applies TimeoutStartSec= and TimeoutSec= in file order. A
+        # value it rejects (garbage) is ignored and the earlier one stays; an
+        # empty, ``infinity`` or over-cap result keeps the pinned-derived
+        # default so a restore stays recoverable instead of refusing after the
+        # mask is already durable.
         assignments = _section_assignments(
             text, "Service", ("TimeoutStartSec", "TimeoutSec"))
-        if not assignments:
+        effective = None
+        for _key, raw in assignments:
+            value = raw.strip()
+            if not value:
+                effective = None  # an empty assignment resets to the default
+            elif value == "infinity":
+                effective = None  # valid but unbounded
+            else:
+                parsed = _duration_seconds(value)
+                if parsed is not None:
+                    effective = parsed
+                # else: systemd rejects the value and keeps the earlier one.
+        if effective is None or effective > MAX_SAVED_START_TIMEOUT_SECONDS:
             return self._service_start_timeout(unit, inventory)
-        seconds = _duration_seconds(assignments[-1][1])
-        if seconds is None or seconds > MAX_SAVED_START_TIMEOUT_SECONDS:
-            return self._service_start_timeout(unit, inventory)
-        return seconds + COMPLETION_MARGIN_SECONDS
+        return effective + COMPLETION_MARGIN_SECONDS
 
     # -- seam: snapshot and validation ----------------------------------
     def snapshot(self, unit):
