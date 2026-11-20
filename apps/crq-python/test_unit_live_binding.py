@@ -618,8 +618,12 @@ class DiscoveryTests(PortFixture):
             link.symlink_to(real, target_is_directory=True)
             evidence = self.discover(declared)
             self.assertEqual(evidence["supported"], False, suffix)
-            self.assertIn("symlinked enablement directory: " + str(link),
-                          " ".join(evidence["foreign"]))
+            if suffix == ".upholds":
+                self.assertIn("symlinked enablement directory: " + str(link),
+                              " ".join(evidence["foreign"]))
+            else:
+                # .wants/.requires are refused as an incomplete discovery.
+                self.assertEqual(evidence["complete"], False, suffix)
             link.unlink()
 
     def test_listing_failure_is_incomplete(self):
