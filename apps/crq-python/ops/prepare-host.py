@@ -200,10 +200,28 @@ def require_outside_git(path):
     parent = Path(path).resolve()
     while not parent.is_dir():
         parent = parent.parent
+    # Fixed locale so the diagnostic below is matched untranslated, and no
+    # inherited repository-discovery override that could hide a checkout.
+    env = {key: value for key, value in os.environ.items()
+           if key not in ('GIT_CEILING_DIRECTORIES', 'GIT_COMMON_DIR', 'GIT_DIR',
+                          'GIT_OBJECT_DIRECTORY', 'GIT_WORK_TREE')}
+    env['LC_ALL'] = 'C'
+    env['GIT_DISCOVERY_ACROSS_FILESYSTEM'] = '1'
     result = subprocess.run(['git', '-C', str(parent), 'rev-parse', '--show-toplevel'],
-                            capture_output=True, text=True)
+                            capture_output=True, text=True, env=env)
     if result.returncode == 0:
         raise ValueError('private host artifacts must be outside every Git checkout')
+    # Only git's "not a git repository" answer proves the path is outside a
+    # checkout: a shared-checkout ownership refusal or any other probe failure
+    # says nothing about exclusion, and a record written inside a checkout on
+    # that evidence would be a private artifact in Git.
+    # Match the whole diagnostic line: a dubious-ownership refusal can quote a path
+    # that itself contains the phrase.
+    outside_line = 'fatal: not a git repository (or any of the parent directories): .git'
+    if result.returncode != 128 or not any(
+            line.strip().lower() == outside_line for line in result.stderr.splitlines()):
+        raise ValueError('cannot establish that the path is outside every Git checkout: '
+                         + 'git exited ' + str(result.returncode))
 
 
 def load_overlay(path):
@@ -350,6 +368,29 @@ def inactive(root):
             if not name.startswith('crq-') or not re.fullmatch(r'[A-Za-z0-9_.@:-]+', name):
                 raise ValueError('unrecognized CRQ unit listing')
             names.add(name)
+    # A queued or running crq-* job (e.g. a manual `systemctl --user start
+    # crq-repair.service` waiting behind another job) keeps the unit's
+    # ActiveState `inactive`, so the state check below would pass while that
+    # job still starts during the checkout. The queue query covers the manual
+    # helper path and the approved driver alike: both must observe the same
+    # empty queue before units are stopped or HEAD moves.
+    try:
+        jobs = run(['systemctl', '--user', 'list-jobs', '--no-legend',
+                    '--no-pager', 'crq-*'])
+    except subprocess.CalledProcessError as exc:
+        # The same pattern-matches-nothing exit-1 quirk as list-unit-files;
+        # an unavailable user bus or any other failure still raises.
+        if exc.returncode != 1 or (exc.stderr or '').strip():
+            raise
+        jobs = ''
+    for line in jobs.splitlines():
+        fields = line.split()
+        if (len(fields) != 4 or not re.fullmatch(r'[0-9]+', fields[0])
+                or not fields[1].startswith('crq-')
+                or not re.fullmatch(r'[A-Za-z0-9_.@:-]+', fields[1])
+                or fields[3] not in {'waiting', 'running'}):
+            raise ValueError('unrecognized CRQ job listing')
+        raise ValueError('refusing queued or running crq job: ' + ' '.join(fields))
     for name in sorted(names):
         state = run(['systemctl', '--user', 'show', '--property=ActiveState', '--value', name]).strip()
         if state not in {'inactive', 'failed'}:
@@ -424,7 +465,22 @@ def render_service_text(template_name, template_text, runner_root, command=None)
         matches = [i for i, line in enumerate(lines) if line.startswith('ExecStart=')]
         if len(matches) != 1:
             raise ValueError('unit must have exactly one ExecStart: ' + template_name)
-        lines[matches[0]] = 'ExecStart=' + command + '\n'
+        end = matches[0] + 1
+        # systemd joins physical lines ending in an odd run of backslashes
+        # (an even run is escaped) into one logical directive, and skips
+        # comment lines without ending the continuation. Replacing only the
+        # first physical line would leave a stale fragment of the old command.
+        def continues(line):
+            body = line.rstrip('\r\n')
+            return (len(body) - len(body.rstrip('\\'))) % 2 == 1
+        pending = continues(lines[matches[0]])
+        while pending and end < len(lines):
+            line = lines[end]
+            end += 1
+            if line.lstrip().startswith(('#', ';')):
+                continue
+            pending = continues(line)
+        lines[matches[0]:end] = ['ExecStart=' + command + '\n']
         text = ''.join(lines)
     return text
 
@@ -779,7 +835,9 @@ def switch(root, overlay, raw, target, tag=None):
         try:
             if git(root, 'status', '--porcelain', '--untracked-files=all'):
                 raise ValueError('checkout not clean after config restore')
-            git(root, 'checkout', '--detach', target)
+            # --no-overwrite-ignore aborts the checkout instead of silently
+            # replacing an ignored host-local file at a tracked path.
+            git(root, 'checkout', '--no-overwrite-ignore', '--detach', target)
             # Same tick lock spans drift check, checkout, render and audit.
             record(root, overlay, raw, destination, 'switch-render', previous_sha=previous, tag=tag)
             atomic_bytes(root / CONFIG, destination)
@@ -799,7 +857,7 @@ def switch(root, overlay, raw, target, tag=None):
                 # that local modification, so restore the committed bytes
                 # first; the previous rendering is reinstalled below.
                 git(root, 'restore', '--', CONFIG)
-                git(root, 'checkout', '--detach', previous)
+                git(root, 'checkout', '--no-overwrite-ignore', '--detach', previous)
             except BaseException as rollback:
                 # HEAD may still name the target commit, so reinstalling the
                 # previous rendering here would install config from a different
@@ -831,57 +889,120 @@ def legacy_check(root, overlay, raw):
     record(root, overlay, raw, data, 'legacy-drift-check', baseline_sha=LEGACY_SHA)
 
 
+def error_artifact(kind, subcommand, message, exit_code):
+    """The one JSON artifact for an error with no result (doctrine I1)."""
+    return {"error": {"kind": kind, "subcommand": subcommand,
+                      "message": message, "exitCode": exit_code}}
+
+
+class JsonArgumentParser(argparse.ArgumentParser):
+    """argparse parser that answers argument failures with the I1 artifact.
+
+    Machine mode (--json) is shared with the subparsers argparse derives from
+    this class, so every usage error -- on this parser or a subparser --
+    writes one error object to stdout with exit code 2 and keeps stderr
+    empty. Without --json, argparse's own stderr usage report still applies.
+    """
+
+    def __init__(self, *args, json_mode=False, subcommand=None, **kwargs):
+        # Abbreviations are off: argparse would otherwise accept `--js` as
+        # --json while the literal argv check below missed it, so the parse
+        # and the output mode could disagree.
+        kwargs.setdefault('allow_abbrev', False)
+        super().__init__(*args, **kwargs)
+        self.json_mode = json_mode
+        self.subcommand = subcommand
+
+    def error(self, message):
+        if not self.json_mode:
+            super().error(message)
+        print(json.dumps(error_artifact('usage', self.subcommand,
+                                        str(message)[:400], 2),
+                         indent=2, sort_keys=True))
+        raise SystemExit(2)
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    if argv is None:
+        argv = sys.argv[1:]
+    # The spelled-out form stays accepted; both spellings mean live-config.
+    argv = ['live-config' if arg == '--live-config' else arg for arg in argv]
+    # Machine mode is needed before the parse, because a usage error is the
+    # one failure that never produces a namespace to read --json from. With
+    # abbreviations off, the literal flag is the only spelling argparse accepts.
+    json_mode = '--json' in argv
+    parser = JsonArgumentParser(description=__doc__, json_mode=json_mode)
+    parser.add_argument('--json', action='store_true',
+                        help='machine mode: narration stays off stderr; every '
+                             'failure is one JSON error artifact on stdout '
+                             '(usage exit 2, operation exit 1)')
     parser.add_argument('--overlay', required=True, type=Path)
     sub = parser.add_subparsers(dest='operation', required=True)
-    sub.add_parser('live-config')
-    preparation = sub.add_parser('prepare')
+
+    def add(name):
+        return sub.add_parser(name, json_mode=json_mode, subcommand=name)
+
+    add('live-config')
+    preparation = add('prepare')
     preparation.add_argument('--units-output', required=True, type=Path)
     preparation.add_argument('--tag', required=True)
-    preview = sub.add_parser('preview')
+    preview = add('preview')
     preview.add_argument('--output', required=True, type=Path)
-    switching = sub.add_parser('switch')
+    switching = add('switch')
     switching.add_argument('--sha', required=True)
     switching.add_argument('--tag', default=None,
                            help='optional annotated runner tag; omitted for a '
                                 'merged main SHA')
-    legacy = sub.add_parser('legacy-check')
+    legacy = add('legacy-check')
     legacy.add_argument('--legacy-root', required=True, type=Path)
-    if argv is None:
-        argv = sys.argv[1:]
-    args = parser.parse_args(['live-config' if arg == '--live-config' else arg for arg in argv])
-    overlay, raw = load_overlay(args.overlay)
-    root = Path(overlay['deploy_root'])
-    if args.operation == 'legacy-check':
-        legacy_check(args.legacy_root, overlay, raw)
-    elif args.operation == 'switch':
-        switch(root, overlay, raw, args.sha, args.tag)
-    elif args.operation == 'prepare':
-        require_outside_git(args.units_output)
-        if not outside(args.units_output, root):
-            raise ValueError('rendered units must be outside checkout')
-        prepare(root, overlay, raw, args.units_output, args.tag)
-    elif args.operation == 'preview':
-        root_check(root, overlay)
-        require_outside_git(args.output)
-        if not outside(args.output, root):
-            raise ValueError('preview output must be outside checkout')
-        with tick_lock(root):
-            data = render(root, overlay)
-            record(root, overlay, raw, data, 'preview')
-            atomic_bytes(args.output / 'config.json', data)
-            render_units(root, args.output / 'systemd')
-            render_plists(root, args.output / 'launchd', args.overlay)
-    else:
-        live_render(root, overlay, raw)
+    args = parser.parse_args(argv)
+    try:
+        overlay, raw = load_overlay(args.overlay)
+        root = Path(overlay['deploy_root'])
+        if args.operation == 'legacy-check':
+            legacy_check(args.legacy_root, overlay, raw)
+        elif args.operation == 'switch':
+            switch(root, overlay, raw, args.sha, args.tag)
+        elif args.operation == 'prepare':
+            require_outside_git(args.units_output)
+            if not outside(args.units_output, root):
+                raise ValueError('rendered units must be outside checkout')
+            prepare(root, overlay, raw, args.units_output, args.tag)
+        elif args.operation == 'preview':
+            root_check(root, overlay)
+            # render_units and render_plists create and follow these children, so
+            # the resolved subdirectories need the same fences as the output root.
+            for output in (args.output, args.output / 'systemd', args.output / 'launchd'):
+                require_outside_git(output)
+                if not outside(output, root):
+                    raise ValueError('preview output must be outside checkout')
+            # Preview writes config.json, systemd/ and launchd/ under --output. An
+            # overlay inside that tree would be replaced by rendered bytes, so the
+            # next invocation would reject it for lacking the overlay schema.
+            if not outside(Path(args.overlay).resolve(), args.output):
+                raise ValueError('preview output must not hold the overlay')
+            with tick_lock(root):
+                data = render(root, overlay)
+                record(root, overlay, raw, data, 'preview')
+                atomic_bytes(args.output / 'config.json', data)
+                render_units(root, args.output / 'systemd')
+                render_plists(root, args.output / 'launchd', args.overlay)
+        else:
+            live_render(root, overlay, raw)
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        # CalledProcessError text only contains argv, not private captured output.
+        if not parser.json_mode:
+            print(str(exc), file=sys.stderr)
+        else:
+            print(json.dumps(error_artifact('failed', args.operation,
+                                            str(exc)[:400], 1),
+                             indent=2, sort_keys=True))
+        return 1
     print(json.dumps({'operation': args.operation, 'status': 'ok'}, indent=2, sort_keys=True))
-    print('completed ' + args.operation + '; no units started', file=sys.stderr)
+    if not parser.json_mode:
+        print('completed ' + args.operation + '; no units started', file=sys.stderr)
+    return 0
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
-        # CalledProcessError text only contains argv, not private captured output.
-        raise SystemExit(str(exc)) from None
+    sys.exit(main())

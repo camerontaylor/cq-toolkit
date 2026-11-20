@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { buildChildEnv } from '../../src/shared/proc.js';
-import { defaultHarnessConfig } from '../../src/harness/config.js';
+import { BashToolConfigSchema, defaultHarnessConfig } from '../../src/harness/config.js';
 import type { HarnessConfig } from '../../src/harness/config.js';
 import { runArgvCommand } from '../../src/harness/run.js';
 import { buildTools } from '../../src/harness/tools.js';
@@ -247,6 +247,77 @@ describe('no-shell run lifecycle', { timeout: 30_000 }, () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  test('a kill settles within a bounded grace despite an escaped pipe-holder', async () => {
+    // The descendant starts its OWN process group and inherits stdout/stderr,
+    // so the group kill cannot reach it and it keeps both pipes open. Without a
+    // bounded finalization the runner waits for a `close` that only the
+    // descendant could produce.
+    const dir = await mkdtemp(join(tmpdir(), 'cq-run-bounded-'));
+    const pidFile = join(dir, 'escaped.pid');
+    try {
+      const script = [
+        "const { spawn } = require('node:child_process');",
+        "const { writeFileSync } = require('node:fs');",
+        'const kid = spawn(process.execPath,',
+        "  ['-e', 'setTimeout(() => {}, 20000)'],",
+        "  { detached: true, stdio: 'inherit' });",
+        `writeFileSync(${JSON.stringify(pidFile)}, String(kid.pid));`,
+        'setInterval(() => {}, 1000);',
+      ].join(' ');
+      const startedAt = Date.now();
+      const outcome = await runArgvCommand(process.execPath, ['-e', script], {
+        cwd: tmpdir(),
+        env: buildChildEnv(process.env),
+        maxBytes: 1_024,
+        timeoutMs: 2_000,
+        // The post-kill wait is per-op config, passed through the options.
+        killGraceMs: 100,
+      });
+      const elapsed = Date.now() - startedAt;
+      expect(outcome).toMatchObject({ kind: 'killed' });
+      expect(elapsed).toBeLessThan(15_000);
+      // The pipe-holder must have really started, or this test proves nothing.
+      expect(Number((await readFile(pidFile, 'utf8').catch(() => '')).trim())).toBeGreaterThan(0);
+      expect(outcome).toMatchObject({ incomplete: true });
+    } finally {
+      const pid = Number((await readFile(pidFile, 'utf8').catch(() => '')).trim());
+      if (Number.isInteger(pid) && pid > 0) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('kill grace bounds and truncation', { timeout: 30_000 }, () => {
+  test('killGraceMs above the timer ceiling is rejected', () => {
+    const base = { enabled: true, commandPatterns: [] };
+    expect(BashToolConfigSchema.safeParse({ ...base, killGraceMs: 2_147_483_647 }).success).toBe(
+      true,
+    );
+    expect(BashToolConfigSchema.safeParse({ ...base, killGraceMs: 2_147_483_648 }).success).toBe(
+      false,
+    );
+  });
+
+  test('a grace-expired kill marks the bash result truncated', async () => {
+    // Perl `setsid()` (portable; util-linux `setsid` is absent on macOS) moves
+    // the sleeper out of the killed group while it keeps the pipes.
+    const holder = `perl -e 'use POSIX; if (fork) { exit 0 } setsid() >= 0 or die; sleep 3'`;
+    await withGitShim(`${holder} &\nsleep 30`, async (workspace) => {
+      const cfg = config(300);
+      const result = await run(workspace, {
+        ...cfg,
+        tools: { ...cfg.tools, bash: { ...cfg.tools.bash!, killGraceMs: 100 } },
+      }).execute({ command: 'git diff' });
+      expect(result).toMatchObject({ ok: true, killed: true, truncated: true });
+    });
   });
 });
 

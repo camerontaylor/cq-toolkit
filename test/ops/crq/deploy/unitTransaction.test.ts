@@ -122,6 +122,28 @@ const aliveQueue = JSON.stringify({ items: [{ id: 'a', run: { run_id: RID } }] }
 const longReason = 'é'.repeat(450);
 
 const scenarios: Sc[] = [
+  rc(
+    'legacy recovery uses post-drain prior head',
+    drained({
+      state: { ...GOOD_STATE, prior_head: 'b'.repeat(40) },
+    }),
+    { adapterMode: 'factory' },
+  ),
+  rc('snapshot recovery uses top-level prior head', rec({ prior_head: 'a'.repeat(40) }), {
+    adapterMode: 'factory',
+  }),
+  rc('recovery prefers top-level prior head', drained({ prior_head: 'a'.repeat(40) }), {
+    adapterMode: 'factory',
+  }),
+  rc(
+    'malformed top-level head refuses despite valid state head',
+    drained({
+      prior_head: 'bad',
+      state: { ...GOOD_STATE, prior_head: 'a'.repeat(40) },
+    }),
+    { adapterMode: 'factory' },
+  ),
+
   // ---- switch: success and entry refusals
   sw('switch success'),
   sw('switch success watchdog', { unit: WD }),
@@ -484,7 +506,7 @@ for d in sys.argv[5:]:
         completion_heartbeat_path=lambda r=root: r / "hb.json",
         config_path=root / "config.json",
         read_json=lambda rel, s=state: json.loads((s / rel).read_text()),
-        git=lambda *a: GIT[" ".join(a)], unit_digests=lambda: UD,
+        git=lambda *a: GIT[" ".join(a)].strip(), unit_digests=lambda: UD,
         controller_lock=contextlib.nullcontext, record_preflight=lambda: None,
         tick_lock=contextlib.nullcontext,
         journal_append=append, journal_replace=replace)
@@ -532,8 +554,8 @@ for d in sys.argv[5:]:
             return self._call("restore_activation", [unit, snapshot], None)
     mode = sc.get("adapterMode", "direct")
     adapter = A() if mode == "direct" else None
-    def factory(unit, prior):
-        log.append(["factory", unit, prior])
+    def factory(unit, prior, source_sha):
+        log.append(["factory", unit, prior, source_sha])
         return None if mode == "factoryNull" else A()
     kind = sc.get("pathKind", "normal")
     path = root / "controller-x.json" if kind == "outside" else (
@@ -626,7 +648,7 @@ function harness(root: string, sc: Sc): Harness {
     return v;
   };
   const effects: TransactionEffects = {
-    git: (...args) => GIT[args.join(' ')] ?? '',
+    git: (...args) => (GIT[args.join(' ')] ?? '').trim(),
     configSha256: () => sha(readFileSync(join(root, 'config.json'), 'utf8')),
     preservedDigest: digest,
     unitDigests: () => UNIT_DIGESTS,
@@ -716,8 +738,8 @@ async function tsRun(root: string, sc: Sc): Promise<unknown> {
     } else {
       const factory =
         mode === 'factory' || mode === 'factoryNull'
-          ? (unit: string, prior: string): UnitAdapter | null => {
-              h.log.push(['factory', unit, prior]);
+          ? (unit: string, prior: string, sourceSha?: string): UnitAdapter | null => {
+              h.log.push(['factory', unit, prior, sourceSha]);
               return mode === 'factoryNull' ? null : h.adapter();
             }
           : undefined;
