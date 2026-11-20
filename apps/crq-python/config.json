@@ -1,9 +1,121 @@
 {
   "repo": "camerontaylor/cq-toolkit",
-  "clone": "@HOST_CLONE@",
-  "worktree_root": "@HOST_WORKTREE_ROOT@",
-  "repos": [],
-  "notify": {"hosts": []},
+  "clone": "/home/ctaylor/repos/crq-toolkit-runtime",
+  "worktree_root": "/home/ctaylor/repos/worktrees",
+  "repos": [
+    {
+      "repo": "camerontaylor/infra",
+      "clone": "/home/ctaylor/repos/crq-clones/infra",
+      "default_branch": "main",
+      "discovery": {
+        "push": true,
+        "pr": true
+      },
+      "floor": "2026-11-03T22:31:54Z",
+      "quiet_minutes": 30,
+      "include": [
+        "**"
+      ],
+      "exclude": [
+        "compose/**/example.env",
+        "web/icons/**"
+      ],
+      "rank_tier": 3,
+      "findings": "issue"
+    },
+    {
+      "repo": "camerontaylor/hart",
+      "clone": "/home/ctaylor/repos/crq-clones/hart",
+      "default_branch": "main",
+      "discovery": {
+        "push": true,
+        "pr": true
+      },
+      "floor": "2026-11-03T22:31:54Z",
+      "quiet_minutes": 30,
+      "include": [
+        "**"
+      ],
+      "exclude": [],
+      "rank_tier": 3,
+      "findings": "issue"
+    },
+    {
+      "repo": "camerontaylor/agents",
+      "clone": "/home/ctaylor/repos/crq-clones/agents",
+      "default_branch": "main",
+      "discovery": {
+        "push": true,
+        "pr": true
+      },
+      "floor": "2026-11-03T22:31:54Z",
+      "quiet_minutes": 30,
+      "include": [
+        "**"
+      ],
+      "exclude": [],
+      "rank_tier": 3,
+      "findings": "issue"
+    },
+    {
+      "repo": "camerontaylor/encoding",
+      "clone": "/home/ctaylor/repos/crq-clones/encoding",
+      "default_branch": "main",
+      "discovery": {
+        "push": true,
+        "pr": true
+      },
+      "floor": "2026-11-03T22:31:54Z",
+      "quiet_minutes": 30,
+      "include": [
+        "**"
+      ],
+      "exclude": [],
+      "rank_tier": 3,
+      "findings": "issue"
+    },
+    {
+      "repo": "camerontaylor/toolkit-research",
+      "clone": "/home/ctaylor/repos/crq-clones/toolkit-research",
+      "default_branch": "main",
+      "discovery": {
+        "push": true,
+        "pr": true
+      },
+      "floor": "2026-11-03T22:31:54Z",
+      "quiet_minutes": 30,
+      "include": [
+        "**"
+      ],
+      "exclude": [],
+      "rank_tier": 3,
+      "findings": "issue"
+    },
+    {
+      "repo": "camerontaylor/jcode",
+      "clone": "/home/ctaylor/repos/crq-clones/jcode",
+      "default_branch": "custom",
+      "discovery": {
+        "push": true,
+        "pr": true
+      },
+      "floor": "2026-11-07T04:52:05Z",
+      "quiet_minutes": 30,
+      "include": [
+        "**"
+      ],
+      "exclude": [],
+      "rank_tier": 3,
+      "findings": "issue"
+    }
+  ],
+  "notify": {
+    "hosts": [
+      "triton:6767",
+      "uranus:6767",
+      "pluto:6767"
+    ]
+  },
   "_repos_note": "Per-repo review config for non-primary repositories; empty keeps single-repo behavior. Shape and semantics: docs/multi-repo.md. Host overlays supply entries with real clone paths at deploy time.",
   "worktree_prefix": "coderabbit-queue-",
   "max_starts_per_hour": 5,
@@ -23,18 +135,24 @@
   "merged_min_surviving_lines": 15,
   "merged_min_file_focus": 0.25,
   "alerts": {
-    "alert_agent_id": "00000000-0000-4000-8000-000000000004",
-    "alert_agent_host": null,
+    "alert_agent_id": "e04d77d7-2d5a-4681-9285-133a702c20d7",
+    "alert_agent_host": "triton:6767",
     "_alert_agent_host_note": "Host overlay supplies the alert endpoint; ops/HOST-DEPLOY.md."
   },
   "stale_alarm_min": 36,
-  "timeout_bin": "timeout",
-  "paseo_hosts": [],
+  "timeout_bin": "/usr/bin/timeout",
+  "paseo_hosts": [
+    "neptune.tail58546e.ts.net:6767",
+    "127.0.0.1:6767"
+  ],
   "repair": {
-    "max_concurrent_items": 1,
+    "max_concurrent_items": 10,
     "enabled": true,
     "spend_authorization": "owner 2026-11-08: cq fixers and judges; Z.ai with OpenCode Go and DeepSeek fallback",
-    "fallback_models": ["opencode-go/deepseek-v4.1-flash", "deepseek/deepseek-flash"],
+    "fallback_models": [
+      "opencode-go/deepseek-v4.1-flash",
+      "deepseek/deepseek-flash"
+    ],
     "max_rounds_per_pin": 2,
     "fix_pr_cycles": 1,
     "blackout": {
@@ -61,7 +179,7 @@
       "hack_detector": true
     },
     "judge_sample_rate": 0.0,
-    "cq_bin": "@HOST_CQ_BIN@",
+    "cq_bin": "/home/ctaylor/.local/state/crq-pr1253-preflight/1686-deploy-b21b/source-fetched/dist/cli.js",
     "roles": {
       "fixer": {
         "driver": "cq",
@@ -80,7 +198,7 @@
         "model": "zai/glm-5.3"
       }
     },
-    "paseo_host": null,
+    "paseo_host": "127.0.0.1:6767",
     "paseo_read_only_mode": null,
     "codex_budget_launcher": null,
     "codex_budget_launcher_verified": false,
