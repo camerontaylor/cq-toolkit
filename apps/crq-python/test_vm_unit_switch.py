@@ -3170,5 +3170,28 @@ class PartialHarnessCheckTests(unittest.TestCase):
                                 for item in problems), problems)
 
 
+class FinishCleanupTests(unittest.TestCase):
+    def test_restore_runs_after_a_process_stop_failure(self):
+        calls = []
+
+        def boom():
+            raise RuntimeError("stop failed")
+
+        cleanup = []
+        with self.assertRaisesRegex(RuntimeError, "stop failed"):
+            guest.finish_cleanup(
+                cleanup,
+                [lambda: calls.append("a") or "a", boom,
+                 lambda: calls.append("c") or "c"],
+                [lambda: calls.append("queue"), lambda: calls.append("runs")])
+        self.assertEqual(calls, ["a", "c", "queue", "runs"])
+        self.assertEqual(cleanup, [])
+
+    def test_process_results_are_collected_on_success(self):
+        cleanup = []
+        guest.finish_cleanup(cleanup, [lambda: 1, lambda: 2], [lambda: None])
+        self.assertEqual(cleanup, [1, 2])
+
+
 if __name__ == "__main__":
     unittest.main()
