@@ -2,28 +2,15 @@
   "version": 1,
   "repo": "camerontaylor/cq-toolkit",
   "prs": {
-    "2141": {
+    "2232": {
       "tuple": {
-        "head": "79f9cfa7d9da1f369c3df03cb9fe493725b12c89",
-        "base": "567ef624e4f41acfe6bbc1e3a080530ff2611633",
+        "head": "945c6fb69153d40ca030e165e638b18793112d71",
+        "base": "bace107280f82c31f176099526a68d3c6138c0d4",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-11-19T18:55:21.910Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "2223": {
-      "tuple": {
-        "head": "d8f96c9f11b1338dcff22d16d97e6acd717551de",
-        "base": "d0a3cae06a771b30cff6584b6e8046ce22f6508e",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-20T07:02:32.809Z",
+          "observedAt": "2026-11-20T10:32:11.659Z",
           "by": "self-merge-prs:observe"
         }
       ]
