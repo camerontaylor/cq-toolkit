@@ -688,6 +688,30 @@ class SavedServiceTypeTests(AdapterFixture):
         self.assertEqual(
             self._type("\ufeff[Service]\nType=oneshot\nExecStart=/bin/x\n"), "oneshot")
 
+    def test_unicode_whitespace_before_a_key_is_not_systemd_whitespace(self):
+        # systemd strips ASCII space/tab only, so an NBSP-prefixed Type is an unknown
+        # key and the unit defaults to simple; honouring it would admit oneshot.
+        body = "[Service]\n\u00a0Type=oneshot\nExecStart=/bin/x\n"
+        self.assertEqual(self._type(body), "simple")
+        self.assertEqual(
+            self._type("[Service]\n\t Type = oneshot \nExecStart=/bin/x\n"), "oneshot")
+
+    def test_saved_simple_under_pinned_oneshot_refuses_when_inactive(self):
+        # The post-start check follows the saved bytes, not the pinned template.
+        service = self.unit_dir / "crq-tick.service"
+        text = service.read_text()
+        self.assertIn("Type=oneshot", text)
+        _write(service, text.replace("Type=oneshot", "Type=simple").encode(), 0o600)
+        self.fake.active["crq-tick.service"] = "active"
+        current = self.make_adapter()
+        snapshot = current.snapshot("crq-tick.service")
+        current.validate_snapshot("crq-tick.service", snapshot)
+        current.stop_and_drain("crq-tick.service")
+        current.restore("crq-tick.service", snapshot)
+        self.fake.post_start_state["crq-tick.service"] = "inactive"
+        with self.assertRaisesRegex(dc.Refused, "restored simple service is not active"):
+            current.restore_activation("crq-tick.service", snapshot)
+
     def test_standalone_comment_ending_in_a_backslash_does_not_continue(self):
         body = "[Service]\n# note \\\nType=oneshot\nExecStart=/bin/x\n"
         self.assertEqual(self._type(body), "oneshot")

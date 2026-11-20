@@ -243,6 +243,11 @@ def _read_template(prepare, root: Path, source_sha: str, name: str):
     return oid, raw, raw.decode("utf-8")
 
 
+# systemd strips ASCII space and tab only (strstrip / skip_leading_chars); str.strip()
+# also strips Unicode whitespace such as NBSP, which systemd keeps as part of the key.
+SYSTEMD_BLANKS = " \t"
+
+
 def _logical_lines(text: str) -> list[str]:
     """Physical lines joined across trailing-backslash continuations, as systemd reads them."""
     logical = []
@@ -252,7 +257,7 @@ def _logical_lines(text: str) -> list[str]:
     # split at Unicode separators, which systemd keeps inside the line.
     body = text.removeprefix("\ufeff")
     for line in re.split(r"\r\n|\r|\n", body[:-1] if body.endswith(("\n", "\r")) else body):
-        if line.lstrip()[:1] in ("#", ";"):
+        if line.lstrip(SYSTEMD_BLANKS)[:1] in ("#", ";"):
             # systemd skips standalone comments, and comments inside a
             # continuation, so a comment's trailing backslash never continues.
             continue
@@ -271,16 +276,16 @@ def _section_values(text: str, section: str, key: str) -> list[str]:
     values = []
     current = None
     for line in _logical_lines(text):
-        stripped = line.strip()
+        stripped = line.strip(SYSTEMD_BLANKS)
         if stripped.startswith("[") and stripped.endswith("]"):
-            current = stripped[1:-1].strip()
+            current = stripped[1:-1].strip(SYSTEMD_BLANKS)
             continue
         if current != section or "=" not in stripped:
             continue
         name, value = stripped.split("=", 1)
         # systemd ignores whitespace around the key and the equals sign.
-        if name.strip() == key:
-            values.append(value.strip())
+        if name.strip(SYSTEMD_BLANKS) == key:
+            values.append(value.strip(SYSTEMD_BLANKS))
     return values
 
 
@@ -289,15 +294,15 @@ def _section_assignments(text: str, section: str, keys: tuple[str, ...]) -> list
     found = []
     current = None
     for line in _logical_lines(text):
-        stripped = line.strip()
+        stripped = line.strip(SYSTEMD_BLANKS)
         if stripped.startswith("[") and stripped.endswith("]"):
-            current = stripped[1:-1].strip()
+            current = stripped[1:-1].strip(SYSTEMD_BLANKS)
             continue
         if current != section or "=" not in stripped:
             continue
         name, value = stripped.split("=", 1)
-        if name.strip() in keys:
-            found.append((name.strip(), value.strip()))
+        if name.strip(SYSTEMD_BLANKS) in keys:
+            found.append((name.strip(SYSTEMD_BLANKS), value.strip(SYSTEMD_BLANKS)))
     return found
 
 
