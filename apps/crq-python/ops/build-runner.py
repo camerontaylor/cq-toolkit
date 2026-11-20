@@ -35,7 +35,6 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import tempfile
 
 EXPECTED_NODE_MAJOR = 24
 EXPECTED_PLATFORM = 'linux'
@@ -247,15 +246,19 @@ def _check_unchanged(checkout, lockfile_sha, run=run_command):
 
 
 @contextlib.contextmanager
-def _exclusive_checkout(repo):
+def _exclusive_checkout(repo, run=run_command):
     """Hold an exclusive advisory lock on one checkout for a whole build.
 
-    The lock file lives outside the checkout (keyed on its resolved path), so it
-    never shows up in the tracked-tree check. A second build of the same
+    The lock file lives in the checkout's own Git directory (per worktree, from
+    `git rev-parse --absolute-git-dir`), so every build of the same checkout
+    contends on the same file whatever its environment (TMPDIR included), and
+    it never shows up in the tracked-tree check. A second build of the same
     checkout fails fast instead of racing install, dist cleanup and compile.
     """
-    key = hashlib.sha256(str(Path(repo).resolve()).encode()).hexdigest()[:32]
-    lock_path = Path(tempfile.gettempdir()) / ('crq-build-' + key + '.lock')
+    git_dir = Path(_git(Path(repo).resolve(), 'rev-parse', '--absolute-git-dir', run=run))
+    if not git_dir.is_dir():
+        raise BuildError('cannot locate the Git directory of ' + str(repo))
+    lock_path = git_dir / 'crq-build.lock'
     with open(lock_path, 'a') as handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -269,7 +272,7 @@ def _exclusive_checkout(repo):
 
 def build(repo, sha, staging, output, node='node', pnpm='pnpm',
           run=run_command, keep_staging=False):
-    with _exclusive_checkout(repo):
+    with _exclusive_checkout(repo, run=run):
         return _build_locked(repo, sha, staging, output, node=node, pnpm=pnpm,
                              run=run, keep_staging=keep_staging)
 
