@@ -22,6 +22,7 @@ import type { OpRegistryEntry } from '../../kernel/types.js';
 import type { runAuthorCapability } from './authorCapability.js';
 import type { BackfillInventoryEffects, BackfillRouteResult } from './backfillInventory.js';
 import type { CoverageRunResult, runCoverageRefresh } from './coverageRefresh.js';
+import type { checkDispatchAuthorizedKeysLine } from './dispatchAuthorizedKeys.js';
 import type { drainNotifications } from './notifyDrain.js';
 import type { runQueueCapability } from './queueCapability.js';
 import type { CommandResult, ReadOnlyStatusEffects } from './readOnlyStatus.js';
@@ -125,3 +126,12 @@ export type { BackfillInventoryEffects, BackfillRouteResult };
 export type CrqReconcileMerged = typeof runReconcileMerged;
 export type CrqReconcileFixPrs = typeof runReconcileFixPrs;
 export type { ReconcileFixPrEffects, ReconcileMergedEffects, ReconcileRouteResult };
+
+/**
+ * The S2 dispatch switch's offline `authorized_keys` line check
+ * (`./dispatchAuthorizedKeys.js`) is operator advice, not a dispatchable op:
+ * the runbook docs/crq-dispatch-switch.md imports it from the built artifact.
+ * The type-only import above declares it so the family scan does not classify
+ * it as an orphan.
+ */
+export type CrqDispatchAuthorizedKeysCheck = typeof checkDispatchAuthorizedKeysLine;
