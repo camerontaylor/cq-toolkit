@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { getSystemErrorMap, promisify } from 'node:util';
 import { ReviewSpawnError } from '../../queue-runner/reviewLaunch.js';
 import { atomicWrite } from './atomic.js';
+import { backfillSubmissionProof, BackfillSubmissionRefused } from './backfillSubmission.js';
 import { launchDetached } from './process.js';
 
 const exec = promisify(execFile);
@@ -81,6 +82,7 @@ interface Metadata {
   kind: string;
   cmd: string[];
   worktree: string;
+  backfill?: { head: string; base: string; attemptId: string };
 }
 function metadata(value: unknown): Metadata {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
@@ -94,10 +96,47 @@ function metadata(value: unknown): Metadata {
     !data.cmd.every((part: unknown) => typeof part === 'string')
   )
     throw new Error('invalid review metadata');
-  return { kind: data.kind, worktree: data.worktree, cmd: data.cmd as string[] };
+  const meta: Metadata = { kind: data.kind, worktree: data.worktree, cmd: data.cmd as string[] };
+  if (data.kind === 'backfill') {
+    const attempt = (data.backfill as { attempt_id?: unknown } | null | undefined)?.attempt_id;
+    // A malformed backfill identity is a refusal at proof time, not a crash.
+    if (
+      typeof data.head === 'string' &&
+      typeof data.base === 'string' &&
+      typeof attempt === 'string'
+    )
+      meta.backfill = { head: data.head, base: data.base, attemptId: attempt };
+  }
+  return meta;
 }
 
 const KILL_AFTER_SECONDS = 60;
+
+/** `review_wrapper_argv`: `--foreground` keeps the review in the runner's own group. */
+export function reviewWrapperArgv(
+  cmd: readonly string[],
+  timeoutMinutes: number,
+  timeoutBinary = 'timeout',
+): string[] {
+  return [
+    timeoutBinary,
+    '--foreground',
+    `--kill-after=${KILL_AFTER_SECONDS}`,
+    `${timeoutMinutes}m`,
+    ...cmd,
+  ];
+}
+
+/** Ask systemd to run the tick now; the periodic timer remains the recovery path. */
+async function kickTick(): Promise<void> {
+  try {
+    await exec('systemctl', ['--user', '--no-block', 'start', 'crq-tick.service'], {
+      timeout: 10_000,
+    });
+  } catch {
+    // Non-systemd host, missing binary, non-zero exit or timeout: all tolerated.
+  }
+}
 
 /** Callable only from an already detached session leader, never a tick entrypoint. */
 export async function runReviewChild(options: {
@@ -106,9 +145,11 @@ export async function runReviewChild(options: {
   timeoutMinutes: number;
   timeoutBinary?: string;
   env: NodeJS.ProcessEnv;
+  /** Test seams for the backfill proof (version probe and git). */
+  backfillProof?: Pick<Parameters<typeof backfillSubmissionProof>[0], 'runGit' | 'version'>;
+  /** Test seam for the post-exit tick kick; defaults to `systemctl --user --no-block start`. */
+  kick?: () => Promise<void>;
   now?: () => Date;
-  /** Monotonic milliseconds for elapsed-time decisions; wall time is for timestamps only. */
-  monotonicMs?: () => number;
 }): Promise<number> {
   if (process.platform === 'win32') throw new Error('review process groups require POSIX');
   if (!Number.isSafeInteger(options.timeoutMinutes) || options.timeoutMinutes <= 0)
@@ -143,39 +184,58 @@ export async function runReviewChild(options: {
   const save = (path: string, value: unknown) => atomicWrite(path, JSON.stringify(value) + '\n');
   await save(pidPath, identity);
   const now = options.now ?? (() => new Date());
-  const monotonicMs = options.monotonicMs ?? (() => performance.now());
   const iso = () => `${now().toISOString().slice(0, 19)}Z`;
+  const reviewerEnv = {
+    ...options.env,
+    CODERABBIT_CLI_DISABLE_AUTO_UPDATE: 'true',
+    CODERABBIT_CLI_UPDATE_MANAGED: 'true',
+  };
   if (meta.kind === 'backfill') {
-    await writeFile(
-      join(dir, 'review.ndjson'),
-      JSON.stringify({ type: 'error', message: 'backfill submission proof is not bound' }) + '\n',
-    );
-    await save(join(dir, 'exit.json'), {
-      exit: 3,
-      ended_at: iso(),
-      timed_out: false,
-      pre_vendor_refusal: true,
-    });
-    return 3;
+    try {
+      if (meta.backfill === undefined)
+        throw new BackfillSubmissionRefused('backfill run metadata is incomplete');
+      const proof = await backfillSubmissionProof({
+        runId: options.runId,
+        worktree: meta.worktree,
+        cmd: meta.cmd,
+        head: meta.backfill.head,
+        base: meta.backfill.base,
+        attemptId: meta.backfill.attemptId,
+        env: reviewerEnv,
+        ...options.backfillProof,
+      });
+      await save(join(dir, 'submission.json'), proof);
+    } catch (error) {
+      // Python catches ValueError/RuntimeError/OSError/SubprocessError. Any Error is a
+      // refusal here: an uncaught crash would leave no exit.json and strand the run.
+      if (!(error instanceof Error)) throw error;
+      await writeFile(
+        join(dir, 'review.ndjson'),
+        JSON.stringify({ type: 'error', message: error.message }) + '\n',
+      );
+      await save(join(dir, 'exit.json'), {
+        exit: 3,
+        ended_at: iso(),
+        timed_out: false,
+        pre_vendor_refusal: true,
+      });
+      return 3;
+    }
   }
   const out = await open(join(dir, 'review.ndjson'), 'w');
   try {
     const err = await open(join(dir, 'stderr.log'), 'w');
     try {
-      const startedAt = monotonicMs();
-      const child = spawn(
-        options.timeoutBinary ?? 'timeout',
-        [`--kill-after=${KILL_AFTER_SECONDS}`, `${options.timeoutMinutes}m`, ...meta.cmd],
-        {
-          cwd: meta.worktree,
-          stdio: ['ignore', out.fd, err.fd],
-          env: {
-            ...options.env,
-            CODERABBIT_CLI_DISABLE_AUTO_UPDATE: 'true',
-            CODERABBIT_CLI_UPDATE_MANAGED: 'true',
-          },
-        },
+      const [wrapper, ...wrapperArgs] = reviewWrapperArgv(
+        meta.cmd,
+        options.timeoutMinutes,
+        options.timeoutBinary,
       );
+      const child = spawn(wrapper as string, wrapperArgs, {
+        cwd: meta.worktree,
+        stdio: ['ignore', out.fd, err.fd],
+        env: reviewerEnv,
+      });
       const finished = new Promise<number>((resolve, reject) => {
         child.once('error', reject);
         child.once('exit', (code, signal) => {
@@ -202,18 +262,16 @@ export async function runReviewChild(options: {
         throw error;
       }
       const exit = await finished;
-      // Without `--foreground`, timeout's `--kill-after` SIGKILL hits the whole group,
-      // including timeout itself, so Node sees a signal exit (-9) rather than 124/137.
-      // Count that as a timeout only when the deadline plus the --kill-after grace had
-      // elapsed on the monotonic clock; an earlier external SIGKILL stays a plain failure.
-      const forcedKill =
-        exit === -osConstants.signals.SIGKILL &&
-        monotonicMs() - startedAt >= options.timeoutMinutes * 60_000 + KILL_AFTER_SECONDS * 1000;
+      // GNU timeout exits 124 when it sends TERM at the deadline; a `--kill-after` SIGKILL
+      // (or an external KILL) can surface as 137. Both record as timed_out without inferring
+      // the cause. `--foreground` keeps timeout out of the group-wide KILL, so a signal
+      // exit (-9) is a plain failure, matching Python's negative returncode.
       await save(join(dir, 'exit.json'), {
         exit,
         ended_at: iso(),
-        timed_out: exit === 124 || exit === 137 || forcedKill,
+        timed_out: exit === 124 || exit === 137,
       });
+      await (options.kick ?? kickTick)();
       return 0;
     } finally {
       await err.close();

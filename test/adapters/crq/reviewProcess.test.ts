@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -35,9 +36,11 @@ async function waitFor(path: string): Promise<string> {
 const modulePath = fileURLToPath(
   new URL('../../../dist/adapters/crq/reviewProcess.js', import.meta.url),
 );
-async function start(root: string, timeoutBinary = 'timeout', clockStepMs = 0) {
+/** The child never reaches a real `systemctl`: the kick drops a marker file instead. */
+const kickMarker = (root: string) => join(root, 'kicked');
+async function start(root: string, timeoutBinary = 'timeout') {
   const moduleUrl = pathToFileURL(modulePath).href;
-  const code = `import {runReviewChild} from ${JSON.stringify(moduleUrl)}; await runReviewChild({stateRoot:${JSON.stringify(root)},runId:'run-1',timeoutMinutes:1,monotonicMs:(()=>{let t=0;return()=>t+=${clockStepMs}})(),timeoutBinary:${JSON.stringify(timeoutBinary)},env:{PATH:'/usr/bin:/bin'}});`;
+  const code = `import {writeFile} from 'node:fs/promises'; import {runReviewChild} from ${JSON.stringify(moduleUrl)}; await runReviewChild({stateRoot:${JSON.stringify(root)},runId:'run-1',timeoutMinutes:1,timeoutBinary:${JSON.stringify(timeoutBinary)},env:{PATH:'/usr/bin:/bin'},kick:()=>writeFile(${JSON.stringify(kickMarker(root))},'kick')});`;
   return spawnReviewWrapper({
     stateRoot: root,
     runId: 'run-1',
@@ -79,43 +82,104 @@ describe('inactive detached review process', () => {
       const result: unknown = JSON.parse(await waitFor(join(dir, 'exit.json')));
       expect(result).toMatchObject({ exit, timed_out: true });
       expect(await readFile(join(dir, 'review.ndjson'), 'utf8')).toBe(
-        '--kill-after=60\n1m\n/bin/echo\nhello\n',
+        '--foreground\n--kill-after=60\n1m\n/bin/echo\nhello\n',
       );
     },
   );
-  it.each([
-    ['after the deadline and grace', 3 * 60_000, true],
-    ['inside the grace period', 90_000, false],
-    ['before the deadline', 0, false],
-  ])('records a group SIGKILL exit %s with timed_out=%s', async (_label, clockStepMs, timedOut) => {
+  it('records a group SIGKILL exit as a plain failure under --foreground', async () => {
     const { root, dir } = await setup('open', ['/bin/echo', 'hello']);
     const timeout = join(root, 'fake-timeout');
     await writeFile(timeout, '#!/bin/sh\nkill -9 $$\n');
     await chmod(timeout, 0o700);
-    await start(root, timeout, clockStepMs);
+    await start(root, timeout);
     const result: unknown = JSON.parse(await waitFor(join(dir, 'exit.json')));
-    expect(result).toMatchObject({ exit: -9, timed_out: timedOut });
+    expect(result).toMatchObject({ exit: -9, timed_out: false });
   });
-  it('refuses backfill before invoking any command', async () => {
-    const { root, dir } = await setup('backfill', ['/bin/false']);
-    await writeFile(
-      join(dir, 'meta.json'),
-      JSON.stringify({
-        run_id: 'run-1',
-        kind: 'backfill',
-        cmd: ['/bin/sh', '-c', `touch ${join(root, 'executed')}`],
-        worktree: root,
-      }),
-    );
+  it('kicks the tick service only after exit.json is written', async () => {
+    const { root, dir } = await setup('open', ['/bin/sh', '-c', 'exit 0']);
     await start(root);
-    expect(JSON.parse(await waitFor(join(dir, 'exit.json')))).toMatchObject({
-      exit: 3,
-      pre_vendor_refusal: true,
+    await waitFor(kickMarker(root));
+    expect(JSON.parse(await readFile(join(dir, 'exit.json'), 'utf8'))).toMatchObject({ exit: 0 });
+  });
+  describe('backfill submission proof', () => {
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@e.x', ...args], {
+        encoding: 'utf8',
+      }).trim();
+    async function backfill(version: string, overrides: Record<string, unknown> = {}) {
+      const { root, dir } = await setup('backfill', ['/bin/false']);
+      const repo = join(root, 'repo');
+      await mkdir(repo);
+      git(repo, 'init', '-q', '-b', 'main');
+      await writeFile(join(repo, 'a.txt'), 'one\ntwo\n');
+      git(repo, 'add', '.');
+      git(repo, 'commit', '-q', '-m', 'base');
+      const base = git(repo, 'rev-parse', 'HEAD');
+      await writeFile(join(repo, 'a.txt'), 'one\ntwo\nthree\n');
+      git(repo, 'commit', '-qam', 'head');
+      const head = git(repo, 'rev-parse', 'HEAD');
+      const cli = join(root, 'coderabbit');
+      await writeFile(
+        cli,
+        `#!/bin/sh\nif [ "$1" = --version ]; then echo ${version}; exit 0; fi\ntouch ${join(root, 'executed')}\n`,
+      );
+      await chmod(cli, 0o700);
+      await writeFile(
+        join(dir, 'meta.json'),
+        JSON.stringify({
+          run_id: 'run-1',
+          kind: 'backfill',
+          cmd: [cli, 'review'],
+          worktree: repo,
+          head,
+          base,
+          backfill: { attempt_id: 'attempt-1' },
+          ...overrides,
+        }),
+      );
+      return { root, dir, repo, head, base };
+    }
+    it('writes submission.json for a clean pinned head, then runs the reviewer', async () => {
+      const { root, dir, head, base } = await backfill('0.8.2');
+      await start(root);
+      await waitFor(join(dir, 'exit.json'));
+      expect(JSON.parse(await readFile(join(dir, 'submission.json'), 'utf8'))).toEqual({
+        cli_version: '0.8.2',
+        format: 'coderabbit-agent-0.8.2',
+        run_id: 'run-1',
+        head,
+        base,
+        attempt_id: 'attempt-1',
+        submitted_scope: [
+          { path: 'a.txt', blob: expect.stringMatching(/^[0-9a-f]{40}$/), intervals: [[3, 3]] },
+        ],
+      });
+      expect(await readFile(join(root, 'executed'), 'utf8')).toBe('');
     });
-    expect(await readFile(join(dir, 'review.ndjson'), 'utf8')).toContain(
-      'submission proof is not bound',
-    );
-    await expect(readFile(join(root, 'executed'))).rejects.toMatchObject({ code: 'ENOENT' });
+    it.each([
+      ['an unknown CLI version', '9.9.9', {}, 'unknown CodeRabbit version'],
+      ['a head that moved', '0.8.2', { head: 'f'.repeat(40) }, 'clean pinned head'],
+    ])('refuses %s before invoking the reviewer', async (_label, version, overrides, message) => {
+      const { root, dir } = await backfill(version, overrides);
+      await start(root);
+      expect(JSON.parse(await waitFor(join(dir, 'exit.json')))).toMatchObject({
+        exit: 3,
+        timed_out: false,
+        pre_vendor_refusal: true,
+      });
+      expect(await readFile(join(dir, 'review.ndjson'), 'utf8')).toContain(message);
+      await expect(readFile(join(dir, 'submission.json'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(readFile(join(root, 'executed'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+    it('refuses a dirty worktree', async () => {
+      const { root, dir, repo } = await backfill('0.8.2');
+      await writeFile(join(repo, 'untracked.txt'), 'x');
+      await start(root);
+      expect(JSON.parse(await waitFor(join(dir, 'exit.json')))).toMatchObject({ exit: 3 });
+      expect(await readFile(join(dir, 'review.ndjson'), 'utf8')).toContain('clean pinned head');
+    });
   });
   it('retains managed pre-child identity if the timeout executable cannot start', async () => {
     const { root, dir } = await setup('open', ['/bin/true']);
