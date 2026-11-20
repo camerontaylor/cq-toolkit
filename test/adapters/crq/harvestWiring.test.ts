@@ -190,6 +190,17 @@ describe('harvestItems', () => {
     expect(dry.calls).toEqual([]);
   });
 
+  test('a non-record slot before a local item is kept, not copied as a record', async () => {
+    const r = rig();
+    const q = doc({
+      items: [null, { id: 'l', kind: LOCAL, state: 'reviewing', run: run('r-1') }],
+    });
+    const out = await createHarvestPhases(r.deps).harvestItems(q, false);
+    const items = plain(out.queue).items as unknown[];
+    expect(items[0]).toBeNull();
+    expect(r.calls).toEqual(['local.harvest']);
+  });
+
   test('a local port that changes the item count is rejected rather than silently desynced', async () => {
     const r = rig({
       local: {

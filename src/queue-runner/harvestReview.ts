@@ -218,7 +218,11 @@ function markReservationTerminal(q: Queue, attemptId: unknown, at: string): void
   const all = getOr(q, 'backfill_reservations', {});
   const reservations = rec(all, 'backfill_reservations');
   // JSON object keys are strings: a non-string id never matches.
-  const reservation = typeof attemptId === 'string' ? reservations[attemptId] : undefined;
+  // Own keys only: an inherited member (`constructor`, `toString`) is not a reservation.
+  const reservation =
+    typeof attemptId === 'string' && Object.hasOwn(reservations, attemptId)
+      ? reservations[attemptId]
+      : undefined;
   if (reservation === undefined) return;
   rec(reservation, 'reservation').terminal_at = at;
 }

@@ -13,7 +13,7 @@
  * Nothing here supplies a default for an unported step: the repair harvest and
  * every filesystem, registry and coverage effect arrive as required seams.
  */
-import { JsonObject, toPlainJsonRetainingNumbers } from '../../policy/crq/jsonValue.js';
+import { JsonNumber, JsonObject, toPlainJsonRetainingNumbers } from '../../policy/crq/jsonValue.js';
 import { fromPlainJson } from '../../policy/crq/queueDoc.js';
 import { liveItems } from '../../policy/crq/tickSchedule.js';
 import {
@@ -83,7 +83,14 @@ function syncInPlace(target: Queue, source: Queue): void {
   const next = source.items;
   if (!Array.isArray(items) || !Array.isArray(next) || items.length !== next.length)
     throw new Error('local-review harvest changed the queue items');
-  next.forEach((value, index) => replaceContents(items[index] as Item, value as Item));
+  const isRecord = (v: unknown): v is Item =>
+    typeof v === 'object' && v !== null && !Array.isArray(v) && !(v instanceof JsonNumber);
+  next.forEach((value, index) => {
+    const slot: unknown = items[index];
+    // Slots `liveItems` never visits (null, scalars) have no snapshot to keep: take the new value.
+    if (isRecord(slot) && isRecord(value)) replaceContents(slot, value);
+    else items[index] = value;
+  });
   replaceContents(target, { ...source, items });
 }
 

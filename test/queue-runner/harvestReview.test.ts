@@ -71,7 +71,7 @@ function harness(
     runPath: (id, name) => `/runs/${id}/${name}`,
     readReviewText: async () => (calls.push('stream'), ''),
     event: async (kind, data) => void events.push([kind, data]),
-    saveQueue: async () => void saved.push('save'),
+    saveQueue: async () => void (saved.push('save'), calls.push('save')),
     removeWorktree: async (wt, br, clone) =>
       void calls.push(`rm:${String(wt)}:${String(br)}:${String(clone)}`),
     nowMs: () => NOW,
@@ -486,9 +486,9 @@ describe('harvestReview review_receipt', () => {
     expect(it.remediation_state).toBe('pending-merged-evidence');
     expect(it.run).toBeNull();
     expect(h.calls).toContain('repair');
-    expect(h.calls.indexOf('receipt:terminal-with-findings')).toBeLessThan(
-      h.calls.indexOf('rm:/wt/r-1:wt/r-1:null'),
-    );
+    // Crash-recovery order: receipt, then the queue save, then worktree cleanup.
+    const trace = h.calls.filter((c) => /^(receipt:|save$|rm:)/.test(c));
+    expect(trace).toEqual(['receipt:terminal-with-findings', 'save', 'rm:/wt/r-1:wt/r-1:null']);
     expect(h.saved).toEqual(['save']);
     expect(it.attempts).toEqual([
       {
@@ -723,6 +723,13 @@ describe('harvestReview backfill and coverage', () => {
     expect(it.vendor_state).toBe('terminal');
     expect((q.backfill_reservations as Rec).att).toEqual({ terminal_at: iso() });
     expect(h.calls).toContain('legacy-ok:a.ts');
+  });
+
+  it('an inherited object member is not a reservation', async () => {
+    const q: Queue = { backfill_reservations: { att: {} } };
+    for (const id of ['constructor', 'toString', '__proto__'])
+      await harvestReview(q, item({ kind: 'coverage', attempt_id: id }), false, harness().fx);
+    expect(q.backfill_reservations).toEqual({ att: {} });
   });
 
   it('an unknown or non-string attempt id leaves reservations untouched', async () => {
