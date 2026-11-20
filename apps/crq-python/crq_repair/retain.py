@@ -11,6 +11,12 @@ import tempfile
 from crq_repair import atomic, command, git
 
 
+class UnsupportedUntracked(ValueError):
+    """An untracked entry is neither a regular file nor a symlink (typically a
+    nested git repository a fixer left behind): nothing was archived, so a
+    caller may preserve such entries aside and retry the capture."""
+
+
 def cleanup_harvested(clone, wt_root, directory, item, job_id, result, *, alternate=False):
     """Remove only a clean, job-owned tree whose current commit is archived."""
     if result.get('verdict') not in ('FIXED', 'NOT-FIXED'):
@@ -86,7 +92,7 @@ def retain(wt, base, directory, *, include_clean=False):
                 path = wt / name
                 mode = path.lstat().st_mode
                 if not (stat.S_ISREG(mode) or stat.S_ISLNK(mode)):
-                    raise ValueError('unsupported untracked file type; worktree retained')
+                    raise UnsupportedUntracked('unsupported untracked file type; worktree retained')
                 archive.add(path, arcname=name, recursive=False)
         hashes = {}
         for name in ('staged.patch', 'unstaged.patch', 'committed.patch', 'untracked.tar', 'commits.bundle'):
@@ -99,3 +105,15 @@ def retain(wt, base, directory, *, include_clean=False):
         if not target.exists():
             os.rename(temp, target)
         return target
+
+
+def untracked_directories(wt):
+    """Untracked entries git reports as directories: an untracked nested
+    repository is listed as the directory itself, never its contents, and is
+    exactly what retain() refuses to archive."""
+    wt = Path(wt)
+    raw = subprocess.run(['git', 'ls-files', '--others', '--exclude-standard', '-z'],
+                         cwd=wt, check=True, capture_output=True, timeout=120).stdout
+    names = [os.fsdecode(name).rstrip('/') for name in raw.split(b'\0') if name]
+    return [name for name in names
+            if (wt / name).is_dir() and not (wt / name).is_symlink()]

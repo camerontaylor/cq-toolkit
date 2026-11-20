@@ -275,8 +275,10 @@ class PhaseTest(FindingTest):
 
     def test_dry_run_preserves_every_byte_and_never_delivers(self):
         before = {str(p): p.read_bytes() for p in self.root.rglob('*.json')}
-        result, queue, _ = self.run_phase(dry=True)
+        result, queue, judge = self.run_phase(dry=True)
         self.assertEqual(result['judged'], 1)
+        self.assertEqual(result['judgment_candidates'], [self.fid])
+        judge.assert_not_called()
         self.assertEqual(queue['items'], [])
         self.assertEqual(before, {str(p): p.read_bytes() for p in self.root.rglob('*.json')})
 
@@ -585,7 +587,7 @@ class PhaseTest(FindingTest):
         tip = self.f.git('rev-parse', 'HEAD')
         result = phase(self.inbox, self.f.repo, tip,
                        lambda *_: {'stop': 'ok', 'verdict': 'fixed', 'reason': 'fixed by merge', 'fixing_commit': tip},
-                       None, AT, dry_run=True)
+                       None, AT)
         self.assertEqual(result['counts'], {'already-fixed': 1})
 
     def test_pathless_finding_is_needs_human_without_judge(self):
@@ -601,7 +603,7 @@ class PhaseTest(FindingTest):
         self.inbox.triage(self.fid, self.f.repo, self.t, 'confirmed', 'test', 'valid', AT)
         tip = self.f.commit({'b': b'unrelated\n'})
         judge = mock.Mock(return_value={'stop': 'ok', 'verdict': 'invalid', 'reason': 'now invalid'})
-        result = phase(self.inbox, self.f.repo, tip, judge, None, AT, dry_run=True)
+        result = phase(self.inbox, self.f.repo, tip, judge, None, AT)
         judge.assert_called_once()
         self.assertEqual(result['counts'], {'dismissed': 1})
 
@@ -611,7 +613,7 @@ class PhaseTest(FindingTest):
         tip = self.f.commit({'renamed': b'fixed\ntwo\n'})
         result = phase(self.inbox, self.f.repo, tip,
                        lambda *_: {'stop': 'ok', 'verdict': 'fixed', 'reason': 'fixed renamed path', 'fixing_commit': tip},
-                       None, AT, dry_run=True)
+                       None, AT)
         self.assertEqual(result['counts'], {'already-fixed': 1})
 
     def test_context_scan_sees_unescaped_source_before_dispatch(self):

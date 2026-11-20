@@ -26,7 +26,7 @@ See ``VM-FEASIBILITY.md`` for the recorded evidence and its limits.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -76,6 +76,9 @@ SCOPE_MEMORY = "3G"
 SSH_KEY = "id_ed25519"
 REPORT_SCHEMA = 2
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+# A run id becomes a path component and part of a systemd unit name, where
+# `systemctl stop` expands glob characters; accept only a plain name.
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 LIMITATIONS = [
@@ -88,6 +91,15 @@ LIMITATIONS = [
     "fixture shape, not generalized into a masking guarantee.",
     "No production host, ceres, signer, credential or CRQ checkout is touched.",
 ]
+
+
+class UsageRefusal(ValueError):
+    """A usage error or refusal: the invocation itself is unacceptable.
+
+    Only this dedicated exception is a usage error (exit 2, doctrine I1).
+    Every other ``ValueError`` -- e.g. ``verify_image`` rejecting a corrupted
+    cached image -- is a thrown runtime error (exit 1).
+    """
 
 
 # ------------------------------------------------------------------ pure
@@ -126,6 +138,39 @@ def verify_image(path: pathlib.Path, expected: str) -> str:
         raise ValueError("image digest mismatch: expected %s, got %s"
                          % (expected, actual))
     return actual
+
+
+def commit_blob(commit: str, path: str, cwd: pathlib.Path) -> bytes:
+    """Return the exact blob bytes git records for ``path`` in ``commit``."""
+    result = subprocess.run(["git", "show", "%s:%s" % (commit, path)],
+                            cwd=str(cwd), capture_output=True)
+    if result.returncode != 0:
+        raise ValueError("git cannot read %s from %s: %s"
+                         % (path, commit,
+                            result.stderr.decode("utf-8", "replace").strip()))
+    return result.stdout
+
+
+def verify_source_scripts(source_commit: str, host_source: pathlib.Path,
+                          guest_source: pathlib.Path, host_bytes: bytes,
+                          guest_bytes: bytes) -> None:
+    """Refuse a run whose executed script bytes differ from source_commit.
+
+    The artifact digests and the guest upload digest only prove that the
+    recorded bytes are the bytes that ran; neither ties those bytes to the
+    stated commit. Comparing each script against the blob recorded in
+    ``source_commit`` turns a modified working tree into a refusal before
+    any provenance is written.
+    """
+    for script, executed in ((host_source, host_bytes),
+                             (guest_source, guest_bytes)):
+        expected = commit_blob(source_commit, "./" + script.name,
+                               script.parent)
+        if executed != expected:
+            raise ValueError(
+                "%s differs from its blob in %s; provenance is only bound "
+                "to scripts that the stated commit actually contains"
+                % (script.name, source_commit))
 
 
 def render_user_data(public_key: str, *, user: str = GUEST_USER) -> str:
@@ -502,33 +547,56 @@ def tool(name: str, directory: pathlib.Path | None) -> str:
 # ------------------------------------------------------------- lifecycle
 
 
+def discard(part: pathlib.Path | str) -> None:
+    """Best-effort removal of a temporary file; never masks the error in flight."""
+    try:
+        pathlib.Path(part).unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"warning: could not remove {part}: {exc}", file=sys.stderr)
+
+
 def download(url: str, destination: pathlib.Path, timeout: float = 120) -> str:
     """Download to a sibling ``.part`` and fsync before replacing."""
-    part = destination.with_name(destination.name + ".part")
-    with urllib.request.urlopen(url, timeout=timeout) as response, \
-            part.open("wb") as handle:
-        while True:
-            chunk = response.read(1 << 20)
-            if not chunk:
-                break
-            handle.write(chunk)
-        handle.flush()
-        os.fsync(handle.fileno())
+    part = destination.with_name(f"{destination.name}.{uuid.uuid4().hex}.part")
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response, \
+                part.open("wb") as handle:
+            while True:
+                chunk = response.read(1 << 20)
+                if not chunk:
+                    break
+                handle.write(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        discard(part)
+        raise
     return str(part)
 
 
 def fetch_sums(sums_path: pathlib.Path, recorder: Recorder) -> None:
     started = time.time()
     part = download(IMAGE_URL + SUMS_NAME, sums_path)
-    recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + SUMS_NAME],
-                     "rc": 0, "bytes": pathlib.Path(part).stat().st_size,
-                     "seconds": round(time.time() - started, 3)})
-    pathlib.Path(part).replace(sums_path)
+    try:
+        recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + SUMS_NAME],
+                         "rc": 0, "bytes": pathlib.Path(part).stat().st_size,
+                         "seconds": round(time.time() - started, 3)})
+        pathlib.Path(part).replace(sums_path)
+    except BaseException:
+        discard(part)
+        raise
 
 
 def fetch_image(state: pathlib.Path, recorder: Recorder) -> dict:
+    """Fetch under an exclusive lock so manifest and image stay one transaction."""
     images = state / "images"
     images.mkdir(parents=True, exist_ok=True)
+    with (images / ".fetch.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return _fetch_image_locked(images, recorder)
+
+
+def _fetch_image_locked(images: pathlib.Path, recorder: Recorder) -> dict:
     sums_path = images / SUMS_NAME
     image_path = images / IMAGE_NAME
     if image_path.exists():
@@ -552,8 +620,12 @@ def fetch_image(state: pathlib.Path, recorder: Recorder) -> dict:
     expected = sums_digest(text, IMAGE_NAME)
     started = time.time()
     part = download(IMAGE_URL + IMAGE_NAME, image_path, timeout=1800)
-    actual = verify_image(pathlib.Path(part), expected)
-    pathlib.Path(part).replace(image_path)
+    try:
+        actual = verify_image(pathlib.Path(part), expected)
+        pathlib.Path(part).replace(image_path)
+    except BaseException:
+        discard(part)
+        raise
     recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + IMAGE_NAME],
                      "rc": 0, "bytes": image_path.stat().st_size,
                      "seconds": round(time.time() - started, 3)})
@@ -606,15 +678,14 @@ def live_identity(run: dict) -> dict | None:
     return identity
 
 
-@contextmanager
-def run_lock(run: dict):
-    """Serialize lifecycle changes (boot, stop, destroy) for one run."""
-    handle = (pathlib.Path(run["path"]) / "lifecycle.lock").open("a+")
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        yield
-    finally:
-        handle.close()
+def refuse_live_run(run: dict) -> None:
+    """Refuse to boot over a VM this run already owns. Call under run_lock and
+    before any cleanup path is armed, so a refusal can never stop that VM."""
+    live = live_identity(run)
+    if live is not None:
+        raise ValueError(
+            "run %s already owns a live VM (pid %s); destroy it before "
+            "booting again" % (run["run_id"], live["pid"]))
 
 
 def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
@@ -626,7 +697,7 @@ def boot(run: dict, recorder: Recorder, tools: pathlib.Path | None,
     # A stopped run must leave no pid file or identity behind for this launch
     # to misread: drop the stale files so the wait below and the identity write
     # capture the process this launch actually starts. A live run never reaches
-    # this point -- cmd_boot refuses it under the run lock first.
+    # this point -- the callers refuse it under the run lock first.
     for stale in ("process.json", "qemu.pid"):
         try:
             (run_dir / stale).unlink()
@@ -695,20 +766,32 @@ def guest_ssh(run: dict, remote: str, recorder: Recorder,
 
 
 def wait_ssh(run: dict, recorder: Recorder, timeout: float = 240) -> dict:
-    deadline = time.time() + timeout
+    # One monotonic deadline governs the whole readiness window: every SSH call
+    # and sleep is capped to the budget that remains, so a late first SSH reply
+    # cannot grant cloud-init a fresh 240s and double the stated timeout.
+    deadline = time.monotonic() + timeout
     attempts = 0
-    while time.time() < deadline:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         attempts += 1
-        result = guest_ssh(run, "true", recorder, timeout=15)
+        result = guest_ssh(run, "true", recorder, timeout=min(15, remaining))
         if result["rc"] == 0:
-            done = guest_ssh(run, "cloud-init status --wait", recorder, timeout=240)
-            if done["rc"] == 0:
-                return {"attempts": attempts, "at": utc_now()}
-            status = guest_ssh(run, "cloud-init status", recorder, timeout=15)
-            if "status: error" in (status.get("stdout") or ""):
-                raise RuntimeError("cloud-init reported an error: "
-                                   + (status.get("stdout") or ""))
-        time.sleep(2)
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                done = guest_ssh(run, "cloud-init status --wait", recorder,
+                                 timeout=remaining)
+                if done["rc"] == 0:
+                    return {"attempts": attempts, "at": utc_now()}
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                status = guest_ssh(run, "cloud-init status", recorder,
+                                   timeout=min(15, remaining))
+                if "status: error" in (status.get("stdout") or ""):
+                    raise RuntimeError("cloud-init reported an error: "
+                                       + (status.get("stdout") or ""))
+        time.sleep(max(0.0, min(2, deadline - time.monotonic())))
     raise RuntimeError("guest SSH/cloud-init did not become ready")
 
 
@@ -1032,7 +1115,11 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
             and (manager.get("before") or {}).get("manager", {}).get("invocation_id")
             != (manager.get("after") or {}).get("manager", {}).get("invocation_id")),
         "boot_id_changed": (
-            bool(reboot.get("boot_id_before"))
+            reboot.get("boot_id_before")
+            == (reboot.get("before") or {}).get("boot_id")
+            and reboot.get("boot_id_after")
+            == (reboot.get("after") or {}).get("boot_id")
+            and bool(reboot.get("boot_id_before"))
             and bool(reboot.get("boot_id_after"))
             and reboot.get("boot_id_before") != reboot.get("boot_id_after")),
         "metadata_equal": not restore_changes,
@@ -1115,7 +1202,11 @@ def load_run(state: pathlib.Path, run_id: str | None, *,
     runs = sorted((state / "runs").glob("*")) if (state / "runs").is_dir() else []
     if not runs:
         raise ValueError("no runs under " + str(state / "runs"))
+    if run_id is not None and (not RUN_ID_RE.fullmatch(run_id) or ".." in run_id):
+        raise ValueError("invalid run id: " + run_id)
     run = runs[-1] if run_id is None else state / "runs" / run_id
+    if not run.is_dir():
+        raise ValueError("no such run: " + str(run))
     if require_process and not (run / "process.json").exists():
         raise ValueError("run has no retained process identity: " + str(run))
     meta = {}
@@ -1192,27 +1283,25 @@ def cmd_boot(args) -> int:
         save_json(pathlib.Path(run["path"]) / "run.json", run)
     recorder = Recorder(pathlib.Path(run["path"]))
     stamp = host_stamp()
-    with run_lock(run):
-        # Refuse a live run before anything is launched and before the cleanup
-        # path below: a repeated boot must neither race a second QEMU onto the
-        # overlay nor stop the running VM it does not own.
-        live = live_identity(run)
-        if live is not None:
-            raise ValueError(
-                "run %s already owns a live VM (pid %s); destroy it before "
-                "booting again" % (run["run_id"], live["pid"]))
-        try:
+    entered_boot = False
+    try:
+        with run_lock(pathlib.Path(run["path"])):
+            refuse_live_run(run)
+            entered_boot = True
             info = boot(run, recorder, args.tools, stamp)
-            info["ssh"] = wait_ssh(run, recorder)
-            upload_guest_probe(run, recorder)
-        except BaseException as exc:
+        info["ssh"] = wait_ssh(run, recorder)
+        upload_guest_probe(run, recorder)
+    except BaseException as exc:
+        # A boot rejected because another invocation holds run.lock owns no
+        # guest; cleaning up would stop that invocation's live guest.
+        if entered_boot:
             try:
                 stop_owned_process(run, purge=False)
             except Exception as cleanup_error:
                 _cleanup_diagnostic(args, "cleanup after failed boot",
                                     cleanup_error, exc)
-            raise
-        print(json.dumps(info, indent=2, sort_keys=True))
+        raise
+    print(json.dumps(info, indent=2, sort_keys=True))
     return 0
 
 
@@ -1251,43 +1340,44 @@ def cmd_run(args) -> int:
     source_commit = (getattr(args, "source_commit", None)
                      or os.environ.get("CRQ_VM_SOURCE_COMMIT"))
     if not isinstance(source_commit, str) or not COMMIT_RE.fullmatch(source_commit):
-        raise ValueError("run requires --source-commit with the full git commit "
-                         "whose tree produced the executed scripts")
+        raise UsageRefusal("run requires --source-commit with the full git commit "
+                           "whose tree produced the executed scripts")
     recorder = Recorder(state)
     stamps = {"start": host_stamp()}
     image = fetch_image(state, recorder)
     run = prepare_run(state, image, recorder, args.tools)
     save_json(pathlib.Path(run["path"]) / "run.json", run)
-    run_dir = pathlib.Path(run["path"])
-    host_source = pathlib.Path(__file__).resolve()
-    guest_source = host_source.with_name("vm-guest-probe.py")
-    guest_bytes = guest_source.read_bytes()
-    host_artifact = run_dir / "executed-host-script.py"
-    guest_artifact = run_dir / "executed-guest-probe.py"
-    shutil.copy2(host_source, host_artifact)
-    guest_artifact.write_bytes(guest_bytes)
-    provenance = {
-        "source_commit": source_commit,
-        "host_script": {"artifact": host_artifact.name,
-                        "sha256": sha256_file(host_artifact)},
-        "guest_script": {"artifact": guest_artifact.name,
-                         "sha256": sha256_file(guest_artifact)},
-    }
-    recorder = Recorder(pathlib.Path(run["path"]))
-    stamp = host_stamp()
-    with run_lock(run):
-        # Same guard as cmd_boot, placed before the cleanup try below with the
-        # lock held through launch: a refusal must exit before any cleanup
-        # path, so it can never reach stop_owned_process and stop a VM this
-        # invocation does not own, while failures after this launch still
-        # clean up the VM this invocation started.
-        live = live_identity(run)
-        if live is not None:
-            raise ValueError(
-                "run %s already owns a live VM (pid %s); destroy it before "
-                "booting again" % (run["run_id"], live["pid"]))
-        boot_info = boot(run, recorder, args.tools, stamp)
+    skip_cleanup = False
+    launched = None
     try:
+        run_dir = pathlib.Path(run["path"])
+        host_source = pathlib.Path(__file__).resolve()
+        guest_source = host_source.with_name("vm-guest-probe.py")
+        host_bytes = host_source.read_bytes()
+        guest_bytes = guest_source.read_bytes()
+        verify_source_scripts(source_commit, host_source, guest_source,
+                              host_bytes, guest_bytes)
+        host_artifact = run_dir / "executed-host-script.py"
+        guest_artifact = run_dir / "executed-guest-probe.py"
+        host_artifact.write_bytes(host_bytes)
+        guest_artifact.write_bytes(guest_bytes)
+        provenance = {
+            "source_commit": source_commit,
+            "host_script": {"artifact": host_artifact.name,
+                            "sha256": sha256_file(host_artifact)},
+            "guest_script": {"artifact": guest_artifact.name,
+                             "sha256": sha256_file(guest_artifact)},
+        }
+        recorder = Recorder(pathlib.Path(run["path"]))
+        stamp = host_stamp()
+        # Until the lock is held and the live check has passed, this invocation
+        # owns no guest: a busy lock or a refusal must not stop another's VM.
+        skip_cleanup = True
+        with run_lock(pathlib.Path(run["path"])):
+            refuse_live_run(run)
+            skip_cleanup = False
+            boot_info = boot(run, recorder, args.tools, stamp)
+        launched = {"pid": boot_info["pid"], "starttime": boot_info["starttime"]}
         boot_info["ssh"] = wait_ssh(run, recorder)
         upload = upload_guest_probe(run, recorder, source=guest_bytes)
         provenance["guest_script"].update(upload)
@@ -1310,10 +1400,11 @@ def cmd_run(args) -> int:
         save_json(pathlib.Path(run["path"]) / "report.json", report)
         problems = report_problems(report, require_evidence=True)
     except BaseException as exc:
-        if not args.keep:
+        # A refused or lock-rejected boot owns no guest; cleaning up would stop
+        # the VM another invocation owns.
+        if not skip_cleanup and not args.keep:
             try:
-                with run_lock(run):
-                    stop_owned_process(run, purge=False)
+                stop_owned_process(run, purge=False, launched=launched)
             except Exception as cleanup_error:
                 _cleanup_diagnostic(args, "cleanup after failed run",
                                     cleanup_error, exc)
@@ -1321,8 +1412,7 @@ def cmd_run(args) -> int:
     cleanup = None
     if not args.keep:
         try:
-            with run_lock(run):
-                cleanup = stop_owned_process(run, purge=False)
+            cleanup = stop_owned_process(run, purge=False, launched=launched)
         except Exception as cleanup_error:
             # The diagnostic stays in the JSON result in machine mode (I1).
             _cleanup_diagnostic(args, "cleanup after run", cleanup_error)
@@ -1336,7 +1426,68 @@ def cmd_run(args) -> int:
     return 0 if not problems else 1
 
 
-def stop_owned_process(run: dict, *, purge: bool) -> dict:
+def _show_scope(unit: str) -> tuple[int, dict]:
+    shown = subprocess.run(["systemctl", "--user", "show", "-p", "ActiveState",
+                            "-p", "LoadState", "-p", "ControlGroup", unit],
+                           capture_output=True, text=True)
+    props = dict(line.split("=", 1) for line in (shown.stdout or "").splitlines()
+                 if "=" in line)
+    return shown.returncode, props
+
+
+def _cgroup_pids(control_group: str | None,
+                 root: pathlib.Path = pathlib.Path("/sys/fs/cgroup")) -> list[int] | None:
+    """PIDs still in a scope's cgroup; [] when it has none or is gone, None
+    when that cannot be determined."""
+    if not control_group:
+        return []
+    try:
+        text = (root / control_group.lstrip("/") / "cgroup.procs").read_text()
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return None
+    try:
+        return [int(line) for line in text.split()]
+    except ValueError:
+        return None
+
+
+@contextlib.contextmanager
+def run_lock(run_dir: pathlib.Path):
+    """Exclusive per-run lock so boot and destroy never interleave."""
+    handle = open(run_dir / "run.lock", "a")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise RuntimeError("run is busy: another boot or destroy holds "
+                               + str(run_dir / "run.lock")) from exc
+        yield
+    finally:
+        handle.close()
+
+
+def stop_owned_process(run: dict, *, purge: bool,
+                       launched: dict | None = None) -> dict:
+    """Stop the run's VM under the run lock.
+
+    ``launched`` is the {pid, starttime} this invocation started. When given,
+    the VM is stopped only if the recorded identity still matches it, so a
+    replacement VM another invocation booted afterwards is left alone.
+    """
+    with run_lock(pathlib.Path(run["path"])):
+        if launched is not None:
+            current = live_identity(run)
+            if current is not None and (current.get("pid"), current.get("starttime")) != (
+                    launched["pid"], launched["starttime"]):
+                return {"scope_unit": current.get("scope_unit"),
+                        "pid": current.get("pid"), "stop_rc": None,
+                        "stopped": True, "trash": None, "replaced": True}
+        return _stop_owned_process(run, purge=purge)
+
+
+def _stop_owned_process(run: dict, *, purge: bool) -> dict:
     run_dir = pathlib.Path(run["path"])
     identity_path = run_dir / "process.json"
     identity = None
@@ -1356,6 +1507,48 @@ def stop_owned_process(run: dict, *, purge: bool) -> dict:
     needle = str(run_dir / "overlay.qcow2")
     stopped = True
     stop_rc = None
+    if identity is None:
+        # boot() spawns QEMU before it writes process.json, so a failure or
+        # interruption before that write leaves a live guest with no recorded
+        # identity. The scope unit is derived from the run id, so the stop does
+        # not need the identity file; report stopped only once the unit is
+        # actually inactive, so --purge never moves a live guest's files.
+        if not RUN_ID_RE.fullmatch(str(run["run_id"])):
+            raise RuntimeError("invalid run id: " + str(run["run_id"]))
+        derived_unit = "crq-vm-" + run["run_id"] + ".scope"
+        # The unit name is derived from the run id alone, so prove the scope
+        # holds this run's QEMU before stopping it: another workspace under the
+        # same user manager can own a scope with the same name.
+        before_rc, before = _show_scope(derived_unit)
+        if before_rc != 0:
+            raise RuntimeError("cannot verify scope ownership: " + derived_unit)
+        if before.get("LoadState") != "not-found":
+            members = _cgroup_pids(before.get("ControlGroup"))
+            if members is None:
+                raise RuntimeError("cannot verify scope ownership: " + derived_unit)
+            if members:
+                def owns(pid: int) -> bool:
+                    try:
+                        command = pathlib.Path("/proc/%d/cmdline" % pid).read_bytes()
+                    except OSError:
+                        return False
+                    return needle.encode() in command
+                if not any(owns(pid) for pid in members):
+                    raise RuntimeError("refusing to stop a scope this run does not own: "
+                                       + derived_unit)
+        stop_rc = subprocess.run(["systemctl", "--user", "stop", derived_unit],
+                                 capture_output=True, text=True).returncode
+        # Only a successful stop (or a unit that is not loaded at all) plus an
+        # ActiveState of inactive or failed proves QEMU is gone. A scope that
+        # is deactivating is not active yet still holds the guest, and a
+        # failed query (for example a user-bus error) proves nothing. A scope
+        # can also enter failed while QEMU is still in its cgroup, so the
+        # cgroup must be confirmed empty too.
+        shown_rc, props = _show_scope(derived_unit)
+        stopped = (shown_rc == 0
+                   and props.get("ActiveState") in ("inactive", "failed")
+                   and (stop_rc == 0 or props.get("LoadState") == "not-found")
+                   and _cgroup_pids(props.get("ControlGroup")) == [])
     if identity is not None:
         alive = pathlib.Path("/proc/%d" % pid).exists()
         if alive:
@@ -1397,8 +1590,7 @@ def stop_owned_process(run: dict, *, purge: bool) -> dict:
 def cmd_destroy(args) -> int:
     state = pathlib.Path(args.state_dir).expanduser().resolve()
     run = load_run(state, args.run_id, require_process=False)
-    with run_lock(run):
-        payload = stop_owned_process(run, purge=args.purge)
+    payload = stop_owned_process(run, purge=args.purge)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if payload["stopped"] else 1
 
@@ -1407,7 +1599,7 @@ def cmd_verify(args) -> int:
     report_path = pathlib.Path(args.report).resolve()
     report = json.loads(report_path.read_text())
     if not isinstance(report, dict):
-        raise ValueError("report is not a JSON object: " + str(report_path))
+        raise UsageRefusal("report is not a JSON object: " + str(report_path))
     problems = verify_report(report, report_path.parent)
     print(json.dumps({"problems": problems}, indent=2, sort_keys=True))
     return 0 if not problems else 1
@@ -1500,20 +1692,22 @@ def main(argv=None) -> int:
                 "run": cmd_run, "destroy": cmd_destroy, "verify": cmd_verify}
     try:
         return commands[args.command](args)
-    except ValueError as exc:
-        # Refusals and missing arguments (e.g. run without --source-commit)
-        # stay usage errors (exit 2) but still write the one JSON artifact to
-        # stdout; stderr stays empty in machine mode.
+    except UsageRefusal as exc:
+        # Usage errors and refusals (e.g. run without --source-commit, or a
+        # report that is not a JSON object) stay usage errors (exit 2) but
+        # still write the one JSON artifact to stdout; stderr stays empty in
+        # machine mode.
         message = _error_message(exc)
-        print(json.dumps(_error_artifact("refused", args.command, message, 2),
+        print(json.dumps(_error_artifact("usage", args.command, message, 2),
                          indent=2, sort_keys=True))
         if not parser.json_mode:
             print("refused: " + message, file=sys.stderr)
         return 2
-    except (RuntimeError, OSError) as exc:
-        # A RuntimeError from QEMU or a guest phase, or an OSError from a
-        # missing report, a download or the filesystem, is a thrown error
-        # (exit 1), never an argument error.
+    except (ValueError, RuntimeError, OSError) as exc:
+        # A ValueError from runtime integrity (e.g. verify_image rejecting a
+        # corrupted cached image), a RuntimeError from QEMU or a guest phase,
+        # or an OSError from a missing report, a download or the filesystem,
+        # is a thrown error (exit 1), never an argument error.
         message = _error_message(exc)
         print(json.dumps(_error_artifact("thrown", args.command, message, 1),
                          indent=2, sort_keys=True))

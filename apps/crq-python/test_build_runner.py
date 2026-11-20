@@ -1,7 +1,10 @@
 """Locked build/staging route tests; no real pnpm, network or host mutation."""
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -46,6 +49,8 @@ def checkout_handler(repo, sha=SHA, status='', node_version='v24.21.0',
                 return Result(str(repo))
             if args == ['rev-parse', 'HEAD']:
                 return Result(sha)
+            if args == ['rev-parse', '--absolute-git-dir']:
+                return Result(str(repo / '.git'))
             if args == ['status', '--porcelain', '--untracked-files=normal']:
                 return Result(state['status'])
             raise AssertionError('unexpected git command: ' + repr(argv))
@@ -81,6 +86,7 @@ class BuildRunnerTests(unittest.TestCase):
         (self.repo / 'package.json').write_text(
             json.dumps({'packageManager': 'pnpm@12.8.1'}))
         (self.repo / 'pnpm-lock.yaml').write_text('lockfileVersion: 9.0\n')
+        (self.repo / '.git').mkdir()
 
     def fake(self, **kwargs):
         handler, state = checkout_handler(self.repo, **kwargs)
@@ -189,6 +195,51 @@ class BuildRunnerTests(unittest.TestCase):
             build_runner.deploy(self.repo, staging, 'pnpm', {}, run=run)
         self.assertFalse(any('--legacy' in call for call in run.calls))
 
+    def test_build_refuses_a_checkout_another_build_owns(self):
+        run, _ = self.fake()
+        with build_runner._exclusive_checkout(self.repo, run=run):
+            with self.assertRaisesRegex(build_runner.BuildError, 'another build owns'):
+                build_runner.build(self.repo, SHA, self.base / 'stage',
+                                   self.base / 'out/runner.tar.gz', run=run)
+        self.assertTrue(all(call[3:] == ['rev-parse', '--absolute-git-dir']
+                            for call in run.calls))
+        # The lock is released on exit, so the checkout can be owned again.
+        with build_runner._exclusive_checkout(self.repo, run=run):
+            pass
+
+    def test_lock_excludes_builds_with_different_temp_dirs(self):
+        # Two real processes, each with its own TMPDIR, on one real checkout:
+        # the lock must not follow the temp directory.
+        repo = self.base / 'real'
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        script = (
+            'import importlib.util, sys\n'
+            'spec = importlib.util.spec_from_file_location("b", sys.argv[1])\n'
+            'b = importlib.util.module_from_spec(spec); spec.loader.exec_module(b)\n'
+            'try:\n'
+            '    with b._exclusive_checkout(sys.argv[2]):\n'
+            '        print("acquired", flush=True); sys.stdin.read()\n'
+            'except b.BuildError as error:\n'
+            '    print("refused", error, flush=True)\n')
+        runner = str(Path(__file__).parent / 'ops/build-runner.py')
+
+        def spawn(name):
+            tmp = self.base / name
+            tmp.mkdir()
+            env = dict(os.environ, TMPDIR=str(tmp), TEMP=str(tmp), TMP=str(tmp))
+            return subprocess.Popen([sys.executable, '-c', script, runner, str(repo)],
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    text=True, env=env)
+
+        holder = spawn('tmpA')
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), 'acquired')
+            second = spawn('tmpB')
+            out, _ = second.communicate(timeout=30)
+            self.assertTrue(out.startswith('refused another build owns'), out)
+        finally:
+            holder.communicate(timeout=30)
+
     def test_build_rejects_pnpm_pin_mismatch(self):
         run, _ = self.fake(pnpm_version='12.18.0')
         with self.assertRaisesRegex(build_runner.BuildError, 'packageManager pin'):
@@ -228,6 +279,56 @@ class BuildRunnerTests(unittest.TestCase):
         install = next(call for call in run.calls if call[:2] == ['pnpm', 'install'])
         self.assertIn('--frozen-lockfile', install)
         self.assertIn('--offline', install)
+
+    def test_build_removes_a_stale_dist_directory_before_compile(self):
+        stale = self.repo / 'dist' / 'removed-source.js'
+        stale.parent.mkdir()
+        stale.write_text('obsolete')
+        inner, _ = self.fake(deploy=lambda argv: Result())
+        seen = {}
+
+        def run(argv, cwd=None, env=None, timeout=None):
+            if argv[:3] == ['pnpm', 'run', 'build']:
+                seen['dist_present'] = (self.repo / 'dist').exists()
+                raise RuntimeError('stop after build')
+            return inner(argv, cwd=cwd, env=env, timeout=timeout)
+
+        with self.assertRaisesRegex(RuntimeError, 'stop after build'):
+            build_runner.build(self.repo, SHA, self.base / 'stage',
+                               self.base / 'out/runner.tar.gz', run=run)
+        self.assertFalse(seen['dist_present'])
+
+    def test_build_fails_when_stale_dist_cleanup_fails(self):
+        (self.repo / 'dist').mkdir()
+        run, _ = self.fake(deploy=lambda argv: Result())
+        with mock.patch.object(build_runner.shutil, 'rmtree',
+                               side_effect=PermissionError('denied')):
+            with self.assertRaisesRegex(build_runner.BuildError,
+                                        'cannot remove stale dist/'):
+                build_runner.build(self.repo, SHA, self.base / 'stage',
+                                   self.base / 'out/runner.tar.gz', run=run)
+        self.assertNotIn(['pnpm', 'run', 'build'], run.calls)
+
+    def test_build_unlinks_a_stale_dist_symlink_without_touching_its_target(self):
+        target = self.base / 'elsewhere'
+        target.mkdir()
+        (target / 'keep.txt').write_text('keep')
+        (self.repo / 'dist').symlink_to(target, target_is_directory=True)
+        inner, _ = self.fake(deploy=lambda argv: Result())
+        seen = {}
+
+        def run(argv, cwd=None, env=None, timeout=None):
+            if argv[:3] == ['pnpm', 'run', 'build']:
+                seen['dist_present'] = (self.repo / 'dist').is_symlink() or (
+                    self.repo / 'dist').exists()
+                raise RuntimeError('stop after build')
+            return inner(argv, cwd=cwd, env=env, timeout=timeout)
+
+        with self.assertRaisesRegex(RuntimeError, 'stop after build'):
+            build_runner.build(self.repo, SHA, self.base / 'stage',
+                               self.base / 'out/runner.tar.gz', run=run)
+        self.assertFalse(seen['dist_present'])
+        self.assertEqual((target / 'keep.txt').read_text(), 'keep')
 
     def test_build_rejects_staging_inside_checkout(self):
         run, _ = self.fake(deploy=lambda argv: Result())
