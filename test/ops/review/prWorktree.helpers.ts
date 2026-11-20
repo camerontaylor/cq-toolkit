@@ -154,7 +154,17 @@ export const fakeGit = (
     }
     if (sub === 'show-ref') {
       const name = (args[5] ?? '').replace(/^refs\/heads\//, '');
-      return { code: model.localBranches?.[name] === undefined ? 1 : 0, stdout: '', stderr: '' };
+      // Branch-presence: a fixture may model the ref in EITHER representation
+      // (localBranches with unique counts, or branchHeads with a head sha);
+      // present in either → found, absent from both → the 1 miss.
+      return {
+        code:
+          model.localBranches?.[name] === undefined && model.branchHeads?.[name] === undefined
+            ? 1
+            : 0,
+        stdout: '',
+        stderr: '',
+      };
     }
     if (sub === 'rev-list' && args.includes('--not')) {
       const name = (args[4] ?? '').replace(/^refs\/heads\//, '');
@@ -185,10 +195,6 @@ export const fakeGit = (
         };
       }
       return { code: 0, stdout: '', stderr: '' };
-    }
-    if (sub === 'show-ref') {
-      const name = (args[args.length - 1] ?? '').replace(/^refs\/heads\//, '');
-      return { code: model.branchHeads?.[name] === undefined ? 1 : 0, stdout: '', stderr: '' };
     }
     if (sub === 'rev-list' && (args[4] ?? '').includes('..refs/heads/')) {
       const head = model.branchHeads?.[(args[4] ?? '').split('..refs/heads/')[1] ?? ''];
