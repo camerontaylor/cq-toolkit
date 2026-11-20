@@ -7,6 +7,8 @@ import {
   bindRun,
   cancelBeforeVendor,
   isExecutionOwner,
+  expired,
+  retireSuperseded,
   scopeOwner,
   units,
 } from '../../../src/policy/crq/backfillJobs.js';
@@ -293,5 +295,40 @@ describe('terminal quota deferral', () => {
     expect(() =>
       deferTerminalQuota(obj('{"items":[{"family":"f","scope":[],"attempt_id":"a"}]}'), 0, at, 1),
     ).toThrow('quota refusal requires retained reservation');
+  });
+});
+
+describe('inventory retirement policy', () => {
+  const pending = (created: string): JsonObject =>
+    obj(`{"id":"b","kind":"backfill","state":"pending","target":"t1","created_at":${created}}`);
+  const now = '2026-10-31T00:00:00Z';
+  test('expires only past the 24 h bound or with an unreadable created_at', () => {
+    expect(expired(pending('"2026-10-30T00:00:01Z"'), now)).toBe(false);
+    expect(expired(pending('"2026-10-30T00:00:00Z"'), now)).toBe(false);
+    expect(expired(pending('"2026-10-29T23:59:59Z"'), now)).toBe(true);
+    expect(expired(pending('"yesterday"'), now)).toBe(true);
+    expect(expired(pending('"2026-10-30T00:00:00+00:00"'), now)).toBe(true);
+    expect(expired(pending('17'), now)).toBe(true);
+  });
+  test('a missing created_at is unreadable (Python get -> ValueError), so it expires', () => {
+    expect(expired(obj('{"id":"b"}'), now)).toBe(true);
+  });
+  test('retires a job at another pin as superseded, keeping every other key', () => {
+    const item = obj(
+      '{"id":"b","state":"pending","target":"t1","created_at":"2026-10-30T12:00:00Z","x":1.0}',
+    );
+    const out = retireSuperseded(item, 't2');
+    expect(out.get('state')).toBe('skipped');
+    expect(out.get('last_error')).toBe('superseded by inventory t2');
+    expect(out.get('x')).toBe(item.get('x'));
+    expect(item.get('state')).toBe('pending');
+  });
+  test('a job at the current pin retires as expired, with the unreadable variant', () => {
+    expect(retireSuperseded(pending('"2026-10-01T00:00:00Z"'), 't1').get('last_error')).toBe(
+      'expired: pending more than 24 h',
+    );
+    expect(retireSuperseded(pending('"garbage"'), 't1').get('last_error')).toBe(
+      'expired: unreadable created_at',
+    );
   });
 });
