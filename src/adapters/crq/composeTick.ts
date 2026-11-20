@@ -34,6 +34,8 @@ export type RemainingPhaseNames =
   | 'backfillInventoryMode'
   | 'backfillInventory'
   | 'discovery'
+  | 'resetFixPrBacklog'
+  | 'refreshFixPrBacklog'
   | 'harvestItems'
   | 'reconcileCompleted'
   | 'repairBackfill'

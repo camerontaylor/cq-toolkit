@@ -80,6 +80,8 @@ function harness(over: Partial<TickPhases> = {}, queue: JsonObject = baseQueue()
     backfillInventoryMode: async () => (calls.push('backfillInventoryMode'), null),
     backfillInventory: async (q) => step('backfillInventory', q),
     discovery: async (q) => result('discovery', q, ['D']),
+    resetFixPrBacklog: async () => void calls.push('resetFixPrBacklog'),
+    refreshFixPrBacklog: async () => void calls.push('refreshFixPrBacklog'),
     harvestItems: async (q) => result('harvestItems', q, ['H']),
     reconcileCompleted: async (q) => step('reconcileCompleted', q),
     deliverIssues: async (q) => result('deliverIssues', q, ['I']),
@@ -140,7 +142,10 @@ const FULL_ORDER = [
   'backfillPublish',
   'backfillInventoryMode',
   'discovery',
+  'resetFixPrBacklog',
+  'refreshFixPrBacklog',
   'harvestItems',
+  'resetFixPrBacklog',
   'reconcileCompleted',
   'deliverIssues',
   'deliverPrReviews',
@@ -261,7 +266,9 @@ describe('runTick early exits and gating', () => {
       'runnerDisabled',
       'loadQueue',
       'fetch',
+      'resetFixPrBacklog',
       'harvestItems',
+      'resetFixPrBacklog',
       'enrollPrimary',
       'enrollOthers',
       'readSlotUsage',
@@ -298,7 +305,7 @@ describe('runTick early exits and gating', () => {
       'backfillPublish',
       'backfillInventory',
       'discovery',
-      'harvestItems',
+      'resetFixPrBacklog',
     ]);
     const other = harness({ backfillInventoryMode: async () => 'shadow' });
     await runTick(LIVE, other.p);
@@ -475,7 +482,8 @@ describe('a phase error abandons the rest of the tick', () => {
     'loadQueue',
     'fetch',
     'discovery',
-    'harvestItems',
+    'resetFixPrBacklog',
+    'refreshFixPrBacklog',
     'reconcileCompleted',
     'deliverIssues',
     'deliverPrReviews',
@@ -511,6 +519,35 @@ describe('a phase error abandons the rest of the tick', () => {
     expect(h.calls.slice(0, expected.length)).toEqual(expected);
     // The throwing stub does not record itself, so the recorded calls stop at the cut.
     expect(h.calls).toEqual(expected);
+  });
+
+  it('a harvest failure still runs the trailing reset, then abandons the tick', async () => {
+    const h = harness({
+      harvestItems: async () => {
+        throw new Error('harvest failed');
+      },
+    });
+    await expect(runTick(LIVE, h.p)).rejects.toThrow('harvest failed');
+    const cut = FULL_ORDER.indexOf('harvestItems');
+    expect(h.calls).toEqual([...FULL_ORDER.slice(0, cut), 'resetFixPrBacklog']);
+    expect(h.saved).toEqual([]);
+  });
+
+  it('a dry tick resets around the harvest but never refreshes the backlog', async () => {
+    const h = harness();
+    await runTick({ ...LIVE, dry: true }, h.p);
+    expect(h.calls.filter((c) => c.endsWith('FixPrBacklog'))).toEqual([
+      'resetFixPrBacklog',
+      'resetFixPrBacklog',
+    ]);
+  });
+
+  it('refreshes the backlog from the queue the harvest will see', async () => {
+    const seen: JsonObject[] = [];
+    const h = harness({ refreshFixPrBacklog: async (q) => void seen.push(q) });
+    await runTick(LIVE, h.p);
+    expect(seen).toHaveLength(1);
+    expect(seenN(seen[0] as JsonObject)).toBe(h.seen.get('harvestItems'));
   });
 
   it('a failed delivery before the launch means no launch and no save', async () => {
