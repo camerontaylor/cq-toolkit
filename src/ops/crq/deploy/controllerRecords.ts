@@ -189,6 +189,7 @@ function unitSwitchIdentity(record: JsonObject): boolean {
   const unit = record.get('unit');
   const runtime = record.get('runtime');
   const prior = record.get('prior_runtime');
+  const snapshot = record.get('snapshot');
   return (
     txId(record.get('transaction_id')) &&
     text(record.get('at')) &&
@@ -197,7 +198,8 @@ function unitSwitchIdentity(record: JsonObject): boolean {
     unitRuntime(runtime) &&
     unitRuntime(prior) &&
     runtime !== prior &&
-    record.has('snapshot') &&
+    isObject(snapshot) &&
+    snapshot.get('runtime') === prior &&
     (none(state) || isObject(state)) &&
     typeof phase === 'string' &&
     PHASES.includes(phase) &&
