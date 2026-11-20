@@ -328,6 +328,14 @@ describe('review.address candidate isolation', () => {
     ['run-s build:deps &', 'build:other'],
     ['run-s build:{deps,other}', 'build:other'],
     ['run-s build:deps <<EOF', 'build:other'],
+    // Unknown programs: a script, runner or package manager named in an option value.
+    ['node --run=build:deps', 'build:deps'],
+    ['node --run build:deps', 'build:deps'],
+    ['deno task build:deps', 'build:deps'],
+    ['wireit --tasks=build:other,build:deps', 'build:deps'],
+    ['node --run=npm:build:deps', 'build:deps'],
+    ['tool --exec=run-s build:deps', 'build:other'],
+    ['tool --exec=./node_modules/.bin/pnpm', 'build:deps'],
   ])('runner selection %s refuses reuse when only %s changes', async (postinstall, changed) => {
     const f = await fixture(undefined, '', { installedDependencies: 'matching' });
     try {

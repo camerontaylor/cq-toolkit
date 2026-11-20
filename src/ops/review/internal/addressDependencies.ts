@@ -463,15 +463,20 @@ const selectInvokedScripts = (
     }
     for (const argument of args) {
       if (!plainWord.test(argument)) return false;
-      const word = argument.split('/').at(-1) ?? '';
-      if (scriptRunners.has(word) || packageManagers.has(word)) return false;
-      if (argument.startsWith('npm:')) {
-        const name = argument.slice(4);
-        if (!Object.hasOwn(scripts, name)) return false;
-        literal.add(name);
+      // An option value can name what the program runs (`node --run=build:deps`,
+      // `--tasks=a,b`, `--exec=run-s`), so every `=`/`,` piece is read like a word.
+      for (const piece of new Set([argument, ...argument.split(/[=,]/)])) {
+        const word = piece.split('/').at(-1) ?? '';
+        if (scriptRunners.has(word) || packageManagers.has(word)) return false;
+        if (piece.startsWith('npm:')) {
+          const name = piece.slice(4);
+          if (!Object.hasOwn(scripts, name)) return false;
+          literal.add(name);
+        }
+        // An unknown task runner (`turbo run build`, `node --run build`, `deno task
+        // build`) may name scripts as plain words; over-selection only widens the check.
+        for (const name of byCollapsedName.get(collapseColons(piece)) ?? []) literal.add(name);
       }
-      // An unknown task runner (`turbo run build`) may name scripts as plain words.
-      for (const name of byCollapsedName.get(collapseColons(argument)) ?? []) literal.add(name);
     }
     return true;
   };
