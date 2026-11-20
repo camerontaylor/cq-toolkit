@@ -1100,7 +1100,13 @@ def drain_item(config, item, job_ids):
     # Re-read the queue per item: the tick may harvest or the tip may move
     # while an earlier item runs.
     queue_path = ROOT / 'state/queue.json'
-    queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
+    try:
+        queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
+    except (OSError, ValueError) as exc:
+        # An external write between the drain's read and this one must not
+        # abort the pass and lose the folded triage report: skip this item.
+        narrate('repair item ' + str(item) + ' skipped: queue unreadable: ' + str(exc)[:300])
+        return None
     jobs = []
     held_runs = set()
     for job_id in job_ids:
