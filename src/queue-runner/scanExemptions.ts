@@ -193,6 +193,19 @@ function parseString(text: string): { value: string; rest: string } {
   throw new Error('value is not a string');
 }
 
+/**
+ * TOML whitespace is space and tab only. JS `trim()` and `\s` also accept
+ * U+00A0, U+FEFF and line separators that `tomllib` rejects, which would let a
+ * malformed policy file suppress findings.
+ */
+function tomlTrim(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && (value[start] === ' ' || value[start] === '\t')) start += 1;
+  while (end > start && (value[end - 1] === ' ' || value[end - 1] === '\t')) end -= 1;
+  return value.slice(start, end);
+}
+
 /** Entries are validated like Python: the first bad entry fails the file. */
 export function parseScanExemptions(text: string): ScanExemption[] {
   const entries: Record<string, string>[] = [];
@@ -203,10 +216,10 @@ export function parseScanExemptions(text: string): ScanExemption[] {
   const headerKinds = new Map<string, 'table' | 'array'>();
   let ignoredKeys: Set<string> | null = null;
   for (const raw of text.split(/\r\n|\n/)) {
-    const line = raw.trim();
+    const line = tomlTrim(raw);
     if (line === '' || line.startsWith('#')) continue;
     if (line.startsWith('[')) {
-      const header = /^\[(\[)?\s*([A-Za-z0-9_-]+)\s*(\])?\](?:\s*#.*)?$/.exec(line);
+      const header = /^\[(\[)?[ \t]*([A-Za-z0-9_-]+)[ \t]*(\])?\](?:[ \t]*#.*)?$/.exec(line);
       if (header === null || (header[1] === '[') !== (header[3] === ']'))
         throw new Error('invalid table header');
       const name = header[2] as string;
@@ -229,10 +242,10 @@ export function parseScanExemptions(text: string): ScanExemption[] {
       }
       continue;
     }
-    const pair = /^([A-Za-z0-9_-]+)\s*=\s*(.*)$/.exec(line);
+    const pair = /^([A-Za-z0-9_-]+)[ \t]*=[ \t]*(.*)$/.exec(line);
     if (pair === null) throw new Error('invalid line');
-    const { value, rest } = parseString((pair[2] as string).trim());
-    const tail = rest.trim();
+    const { value, rest } = parseString(tomlTrim(pair[2] as string));
+    const tail = tomlTrim(rest);
     if (tail !== '' && !tail.startsWith('#')) throw new Error('invalid value');
     if (ignoring) {
       if (ignoredKeys?.has(pair[1] as string) === true) throw new Error('duplicate key');

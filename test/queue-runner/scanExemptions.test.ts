@@ -114,6 +114,31 @@ describe('matching cost is bounded', () => {
   });
 });
 
+describe('TOML whitespace is space and tab only', () => {
+  const entry = (sep: string): string =>
+    `[[exempt]]\npath${sep}=${sep}"a"\nrule = "generic-api-key"\nreason = "r"\n`;
+  it('accepts spaces and tabs around the equals sign', () => {
+    expect(loadScanExemptions(entry(' \t')).entries).toHaveLength(1);
+  });
+  it.each([
+    ['a no-break space', '\u00a0'],
+    ['a BOM', '\ufeff'],
+    ['an ideographic space', '\u3000'],
+  ])('rejects %s around the equals sign', (_name, ch) => {
+    const loaded = loadScanExemptions(entry(ch));
+    expect(loaded.entries).toEqual([]);
+    expect(loaded.error).not.toBeNull();
+  });
+  it('rejects a non-TOML space around a line, a header and a value tail', () => {
+    for (const text of [
+      '\u00a0[[exempt]]\npath = "a"\nrule = "generic-api-key"\nreason = "r"\n',
+      '[[\u00a0exempt]]\npath = "a"\nrule = "generic-api-key"\nreason = "r"\n',
+      '[[exempt]]\npath = "a"\u00a0\nrule = "generic-api-key"\nreason = "r"\n',
+    ])
+      expect(loadScanExemptions(text).error).not.toBeNull();
+  });
+});
+
 describe('raw control characters fail closed', () => {
   const doc = (reason: string, quote: string): string =>
     `[[exempt]]\npath = "a"\nrule = "generic-api-key"\nreason = ${quote}${reason}${quote}\n`;
