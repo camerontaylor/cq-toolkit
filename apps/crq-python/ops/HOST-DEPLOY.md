@@ -188,8 +188,24 @@ the new deployment root with the old checkout kept inert, the legacy overlay,
 `.bak` removal and `dispatch_after_min` steps; do not run a first root move
 from this general sequence.
 
-1. Stop every installed or loaded `crq-*.timer` and `crq-*.path` and the
-   records service: the tick and watchdog timers, and where present
+1. Hold admission first, before stopping anything: claim the
+   `apps/crq-python/state/runner-disabled` marker with `O_EXCL` (for
+   example `( set -o noclobber; printf 'held for owner handover\n' >
+   apps/crq-python/state/runner-disabled )`), and stop if it already
+   exists, because another handover holds it. Stopping timers does not
+   stop admission: a finishing review starts the tick itself
+   (`crq.py` `cmd_review_child`, an unconditional
+   `systemctl --user --no-block start crq-tick.service`), and `tick()`,
+   `slot()`, `scheduled_slot()` and `cmd_measure()` are gated only by
+   this marker. Without it, a review ending during the drain restarts
+   the tick, which can admit replacement work, and step 2's `switch`
+   then refuses the active `crq-tick.service`. `prepare` writes the
+   marker only at its end, after its own `inactive()` check, so it cannot
+   hold admission here; `deploy-runbook.py` likewise claims it before
+   `stop_triggers()`. Keep the marker in place through step 4; step 3's
+   `prepare` replaces its bytes with its own inert marker, and step 5's
+   removal releases this claim. Then stop every installed or loaded
+   `crq-*.timer` and `crq-*.path` and the records service: the tick and watchdog timers, and where present
    `crq-slot.timer`, `crq-publisher.path`, `crq-publisher.timer`,
    `crq-repair.timer`, `crq-repair.path` and `crq-backfill.timer`.
    `prepare` and `switch` refuse any active or loaded `crq-*` unit
@@ -243,7 +259,7 @@ from this general sequence.
    Rollback is those saved definitions plus the same helper `switch`
    back to the prior SHA; no automatic rollback runs here. To roll
    back, including after a failed health check in step 5 (which starts
-   the units): repeat step 1 in full — stop every `crq-*.timer`/`.path` and the
+   the units): repeat step 1 in full — claim the marker again first, then stop every `crq-*.timer`/`.path` and the
    records service again (including the repair and backfill triggers if
    they were active), because the helper refuses active units; wait for
    every `crq-*.service` to reach inactive or failed, and drain owned
