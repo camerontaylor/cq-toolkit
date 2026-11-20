@@ -114,6 +114,61 @@ class RollbackPlanTests(ControllerFixture):
         self.assertEqual({p.name: p.read_bytes() for p in self.record_dir.iterdir()}, records)
         self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.target)
 
+    def retained_deploy_journal(self):
+        with self.fake_switch():
+            dc.deploy_plan(self.effects, host, self.target, self.tag,
+                           self.overlay_path)
+        return json.loads(
+            next(self.record_dir.glob("controller-*.json")).read_text())
+
+    def write_record(self, record):
+        path = self.record_dir / ("controller-" + uuid.uuid4().hex + ".json")
+        path.write_text(json.dumps(record) + "\n")
+
+    def test_refused_deploy_attempt_is_not_retained_deployment_authority(self):
+        # A controller deploy to B that refused without changes records the
+        # target it attempted. If B was then installed by another route, that
+        # refusal must not become the record every supplied journal has to
+        # match, or it would block a rollback the journal-only contract allows.
+        def refuse(*_args):
+            raise ValueError("refusing active or unknown unit: crq-tick.service")
+
+        with mock.patch.object(host, "switch", side_effect=refuse):
+            with self.assertRaises(dc.Refused):
+                dc.deploy_plan(self.effects, host, self.target, self.tag,
+                               self.overlay_path)
+        [refusal] = [json.loads(p.read_text())
+                     for p in self.record_dir.glob("controller-*.json")]
+        self.assertEqual(refusal["operation"], "deploy_refused")
+        self.assertEqual(refusal["target"], self.target)
+        self.at_target()
+        self.assertEqual(
+            dc.retained_deploy_records(self.effects, self.target), [])
+
+    def test_newest_deploy_of_a_repeated_target_is_the_current_transaction(self):
+        # A to B, B to C, C to B: two retained deploys target B. Only the
+        # newest is the transaction for the current deployment; the older
+        # A to B journal would restore A instead of C.
+        first = self.retained_deploy_journal()
+        for path in self.record_dir.glob("controller-*.json"):
+            path.unlink()
+        older = {**first, "transaction_id": uuid.uuid4().hex,
+                 "at": "2026-11-01T00:00:00Z", "prior_head": "a" * 40}
+        newer = {**first, "transaction_id": uuid.uuid4().hex,
+                 "at": "2026-11-02T00:00:00Z", "prior_head": "c" * 40}
+        self.write_record(older)
+        self.write_record(newer)
+        self.assertEqual(
+            dc.retained_deploy_records(self.effects, self.target), [newer])
+        with self.assertRaisesRegex(dc.Refused, "locally retained transaction"):
+            dc.rollback_plan(self.effects, host, older, self.overlay_path)
+
+    def test_same_timestamp_repeated_deploys_refuse_as_unorderable(self):
+        first = self.retained_deploy_journal()
+        self.write_record({**first, "transaction_id": uuid.uuid4().hex})
+        with self.assertRaisesRegex(dc.Refused, "share the newest timestamp"):
+            dc.retained_deploy_records(self.effects, self.target)
+
     def test_missing_or_malformed_deployed_target_cannot_authorize_rollback(self):
         missing = dict(self.prior)
         missing.pop("target")

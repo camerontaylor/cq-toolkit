@@ -2225,23 +2225,39 @@ def rollback_target(prior: dict) -> dict:
 
 
 def retained_deploy_records(effects: Effects, deployed: str) -> list[dict]:
-    """This host's retained completed deploy journals whose ``target`` is
-    ``deployed``: the transactions this controller itself retained for the
-    current deployment. Empty when this checkout holds no such record (the
-    deployment was made outside this controller). Read-only; each retained
-    record is classified with the same producer-shape rules the
-    unfinished-transaction guard enforces, so unclassifiable history refuses
-    instead of being skipped."""
-    retained = []
+    """The one retained completed deploy journal that deployed ``deployed``:
+    the transaction this controller itself retained for the current
+    deployment, as a list of zero or one record. Empty when this checkout
+    holds no such record (the deployment was made outside this controller).
+    Read-only; each retained record is classified with the same
+    producer-shape rules the unfinished-transaction guard enforces, so
+    unclassifiable history refuses instead of being skipped.
+
+    Only finished ``deploy`` records count. Refusals also record the target
+    they attempted, but they changed nothing, so they never describe how the
+    host reached a deployment. When history deployed the same commit more
+    than once (A to B, B to C, C to B) the newest transaction is the current
+    one, ordered by the journal's own strict UTC ``at``; two newest records
+    with the same ``at`` cannot be ordered and refuse."""
+    candidates = []
     for path in sorted(effects.record_dir.glob("controller-*.json")):
-        _classify_record(path)
+        status, operation = _classify_record(path)
         try:
             entry = json.loads(path.read_text())
         except (OSError, ValueError) as exc:
             raise Refused("unreadable controller journal entry: " + path.name) from exc
-        if entry.get("target") == deployed:
-            retained.append(entry)
-    return retained
+        if (status == "finished" and operation == "deploy"
+                and entry.get("target") == deployed):
+            candidates.append(entry)
+    if not candidates:
+        return []
+    newest = max(entry["at"] for entry in candidates)
+    current = [entry for entry in candidates if entry["at"] == newest]
+    if len(current) > 1:
+        raise Refused("cannot identify the transaction for the current "
+                      "deployment: several retained deploy journals share "
+                      "the newest timestamp " + newest)
+    return current
 
 
 _RUNNER_PROBE = """import importlib.util, json, sys
