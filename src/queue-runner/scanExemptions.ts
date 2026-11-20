@@ -208,8 +208,10 @@ function tomlTrim(value: string): string {
 
 /** Entries are validated like Python: the first bad entry fails the file. */
 export function parseScanExemptions(text: string): ScanExemption[] {
-  const entries: Record<string, string>[] = [];
-  let current: Record<string, string> | null = null;
+  // Maps, not objects: a TOML key named `__proto__` must count as a key (and a
+  // duplicate must fail), not be swallowed by the object prototype setter.
+  const entries: Map<string, string>[] = [];
+  let current: Map<string, string> | null = null;
   let ignoring = false;
   // Unrelated tables are skipped, but a malformed one still voids the file (as
   // `tomllib` would): track header kinds and keys so duplicates fail closed.
@@ -234,7 +236,7 @@ export function parseScanExemptions(text: string): ScanExemption[] {
       headerKinds.set(name, kind);
       ignoredKeys = null;
       if (header[1] === '[' && header[2] === 'exempt') {
-        current = {};
+        current = new Map();
         ignoring = false;
         entries.push(current);
       } else {
@@ -257,12 +259,14 @@ export function parseScanExemptions(text: string): ScanExemption[] {
       continue;
     }
     if (current === null) throw new Error('key outside a table is not supported');
-    if (Object.hasOwn(current, pair[1] as string)) throw new Error('duplicate key');
-    current[pair[1] as string] = value;
+    if (current.has(pair[1] as string)) throw new Error('duplicate key');
+    current.set(pair[1] as string, value);
   }
   const out: ScanExemption[] = [];
   for (const entry of entries) {
-    const { path, rule, reason } = entry;
+    const path = entry.get('path');
+    const rule = entry.get('rule');
+    const reason = entry.get('reason');
     if (
       [path, rule, reason].some(
         (value) => typeof value !== 'string' || value === '' || pyStripEmpty(value),

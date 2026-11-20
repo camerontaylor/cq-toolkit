@@ -38,9 +38,9 @@ const modulePath = fileURLToPath(
 );
 /** The child never reaches a real `systemctl`: the kick drops a marker file instead. */
 const kickMarker = (root: string) => join(root, 'kicked');
-async function start(root: string, timeoutBinary = 'timeout') {
+async function start(root: string, timeoutBinary = 'timeout', graceMs?: number) {
   const moduleUrl = pathToFileURL(modulePath).href;
-  const code = `import {writeFile} from 'node:fs/promises'; import {runReviewChild} from ${JSON.stringify(moduleUrl)}; await runReviewChild({stateRoot:${JSON.stringify(root)},runId:'run-1',timeoutMinutes:1,timeoutBinary:${JSON.stringify(timeoutBinary)},env:{PATH:'/usr/bin:/bin'},kick:()=>writeFile(${JSON.stringify(kickMarker(root))},'kick')});`;
+  const code = `import {writeFile} from 'node:fs/promises'; import {runReviewChild} from ${JSON.stringify(moduleUrl)}; await runReviewChild({stateRoot:${JSON.stringify(root)},runId:'run-1',timeoutMinutes:1,timeoutBinary:${JSON.stringify(timeoutBinary)},env:{PATH:'/usr/bin:/bin'},${graceMs === undefined ? '' : `descendantGraceMs:${String(graceMs)},`}kick:()=>writeFile(${JSON.stringify(kickMarker(root))},'kick')});`;
   return spawnReviewWrapper({
     stateRoot: root,
     runId: 'run-1',
@@ -205,7 +205,55 @@ describe('inactive detached review process', () => {
       output = await readFile(join(dir, 'runner.log'), 'utf8');
     }
     expect(output).toContain('ENOENT');
-    await expect(readFile(join(dir, 'exit.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+    // A terminal record is left (127: executable not found) and the tick is kicked.
+    expect(JSON.parse(await waitFor(join(dir, 'exit.json')))).toMatchObject({
+      exit: 127,
+      timed_out: false,
+    });
+    expect(await waitFor(kickMarker(root))).toBe('kick');
+  });
+  describe('descendants left behind by --foreground', () => {
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    it('terminates a background descendant before writing exit.json', async () => {
+      const { root, dir } = await setup('open', []);
+      const bg = join(root, 'bg.pid');
+      await writeFile(
+        join(dir, 'meta.json'),
+        JSON.stringify({
+          run_id: 'run-1',
+          kind: 'open',
+          cmd: ['/bin/sh', '-c', `sleep 600 & echo $! > ${bg}; exit 0`],
+          worktree: root,
+        }),
+      );
+      await start(root, 'timeout', 300);
+      await waitFor(join(dir, 'exit.json'));
+      expect(alive(Number((await readFile(bg, 'utf8')).trim()))).toBe(false);
+      expect(await waitFor(kickMarker(root))).toBe('kick');
+    });
+    it('escalates to KILL for a descendant that ignores TERM', async () => {
+      const { root, dir } = await setup('open', []);
+      const bg = join(root, 'bg.pid');
+      await writeFile(
+        join(dir, 'meta.json'),
+        JSON.stringify({
+          run_id: 'run-1',
+          kind: 'open',
+          cmd: ['/bin/sh', '-c', `(trap '' TERM; exec sleep 600) & echo $! > ${bg}; exit 0`],
+          worktree: root,
+        }),
+      );
+      await start(root, 'timeout', 300);
+      await waitFor(join(dir, 'exit.json'));
+      expect(alive(Number((await readFile(bg, 'utf8')).trim()))).toBe(false);
+    });
   });
   it('reports a missing working directory rather than the executable', async () => {
     const { root } = await setup('open', ['/bin/true']);

@@ -80,11 +80,14 @@ export function makeStartOneEffects(
  * `fromPlainJson` reads an integral JS number as an int, and `JsonNumber.int`
  * rejects one beyond the safe range. Exact big integers already arrive as
  * bigints, so a remaining unsafe integral number can only be a float such as
- * `1e20`: keep it a float instead of failing the admission after it ran.
+ * `1e20`, and a non-finite number is a float by definition: keep both floats
+ * instead of failing the admission after it ran.
  */
 function keepUnsafeFloats(value: unknown): unknown {
   if (typeof value === 'number')
-    return Number.isInteger(value) && !Number.isSafeInteger(value)
+    // NaN and ±Infinity (Python `json` accepts them) round-trip as floats too:
+    // `fromPlainJson` would reject them after the admission already ran.
+    return !Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value))
       ? JsonNumber.float(value)
       : value;
   if (Array.isArray(value)) return value.map(keepUnsafeFloats);

@@ -127,6 +127,66 @@ export function reviewWrapperArgv(
   ];
 }
 
+/** Live (non-zombie) members of a process group other than `self`. */
+async function groupMembers(pgid: number, self: number): Promise<number[]> {
+  const listing = exec('ps', ['-e', '-o', 'pid=', '-o', 'pgid=', '-o', 'stat='], {
+    timeout: 20_000,
+  });
+  // The ps process is itself a member of this group while it runs.
+  const lister = listing.child.pid;
+  const { stdout } = await listing;
+  const members: number[] = [];
+  for (const line of stdout.split('\n')) {
+    const [pid, group, stat] = line.trim().split(/\s+/);
+    if (
+      Number(group) === pgid &&
+      Number(pid) !== self &&
+      Number(pid) !== lister &&
+      !(stat ?? '').startsWith('Z')
+    )
+      members.push(Number(pid));
+  }
+  return members;
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+function signalAll(pids: readonly number[], signal: NodeJS.Signals): void {
+  for (const pid of pids) {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // Already gone, or not ours to signal: the next poll decides.
+    }
+  }
+}
+
+/**
+ * `timeout --foreground` signals only its direct child, so descendants of the review
+ * command stay in the runner's group after it exits. The group cannot be signalled
+ * wholesale (that would stop this runner), so terminate every other live member
+ * individually: TERM, then KILL after the grace. Throws if one survives KILL, so the
+ * terminal record is never written over a still-running review. A descendant that
+ * left the group (its own `setsid`) stays outside this cleanup.
+ */
+async function reapGroup(pgid: number, self: number, graceMs: number): Promise<void> {
+  let members = await groupMembers(pgid, self);
+  if (members.length === 0) return;
+  signalAll(members, 'SIGTERM');
+  const wait = async (limitMs: number): Promise<void> => {
+    for (let waited = 0; waited < limitMs; waited += 100) {
+      await sleep(100);
+      members = await groupMembers(pgid, self);
+      if (members.length === 0) return;
+    }
+  };
+  await wait(graceMs);
+  if (members.length === 0) return;
+  signalAll(members, 'SIGKILL');
+  await wait(10_000);
+  if (members.length > 0) throw new Error('review descendants survived SIGKILL');
+}
+
 /** Ask systemd to run the tick now; the periodic timer remains the recovery path. */
 async function kickTick(): Promise<void> {
   try {
@@ -149,6 +209,8 @@ export async function runReviewChild(options: {
   backfillProof?: Pick<Parameters<typeof backfillSubmissionProof>[0], 'runGit' | 'version'>;
   /** Test seam for the post-exit tick kick; defaults to `systemctl --user --no-block start`. */
   kick?: () => Promise<void>;
+  /** Grace between TERM and KILL for leftover group members; defaults to the timeout's 60 s. */
+  descendantGraceMs?: number;
   now?: () => Date;
 }): Promise<number> {
   if (process.platform === 'win32') throw new Error('review process groups require POSIX');
@@ -246,10 +308,23 @@ export async function runReviewChild(options: {
       });
       // Attach failure handler immediately: a failed identity write must not create an unhandled rejection.
       void finished.catch(() => {});
-      await new Promise<void>((resolve, reject) => {
-        child.once('spawn', resolve);
-        child.once('error', reject);
-      });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          child.once('spawn', resolve);
+          child.once('error', reject);
+        });
+      } catch (error) {
+        // The reviewer never started: leave a terminal record (shell convention, 127 for
+        // a missing executable, 126 otherwise) so the run is not stranded without
+        // exit.json, kick the tick to reconcile it, then surface the failure.
+        await save(join(dir, 'exit.json'), {
+          exit: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 127 : 126,
+          ended_at: iso(),
+          timed_out: false,
+        });
+        await (options.kick ?? kickTick)();
+        throw error;
+      }
       if (child.pid === undefined) throw new Error('review spawned without pid');
       try {
         await save(pidPath, { ...identity, cli_pid: child.pid });
@@ -262,6 +337,8 @@ export async function runReviewChild(options: {
         throw error;
       }
       const exit = await finished;
+      // The terminal record and tick kick wait until no descendant is still running.
+      await reapGroup(pgid, process.pid, options.descendantGraceMs ?? KILL_AFTER_SECONDS * 1000);
       // GNU timeout exits 124 when it sends TERM at the deadline; a `--kill-after` SIGKILL
       // (or an external KILL) can surface as 137. Both record as timed_out without inferring
       // the cause. `--foreground` keeps timeout out of the group-wide KILL, so a signal

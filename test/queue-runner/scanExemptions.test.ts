@@ -61,6 +61,11 @@ describe('malformed unrelated tables still void the file', () => {
   const good = '[[exempt]]\npath = "a"\nrule = "generic-api-key"\nreason = "r"\n';
   it.each([
     ['a duplicate key', '[meta]\nk = "1"\nk = "2"\n'],
+    ['a duplicate __proto__ key in an ignored table', '[meta]\n__proto__ = "1"\n__proto__ = "2"\n'],
+    [
+      'a duplicate __proto__ key in an exempt entry',
+      '[[exempt]]\n__proto__ = "1"\n__proto__ = "2"\npath = "b"\nrule = "generic-api-key"\nreason = "r"\n',
+    ],
     ['a repeated table header', '[meta]\nk = "1"\n[meta]\nj = "2"\n'],
     ['a table redefined as an array', '[meta]\nk = "1"\n[[meta]]\nj = "2"\n'],
   ])('%s', (_name, tail) => {

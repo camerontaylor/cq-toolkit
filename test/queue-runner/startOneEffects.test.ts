@@ -151,6 +151,20 @@ describe('bindStartOne', () => {
     expect(out.queue.get('extension')).toEqual(JsonNumber.float(1e20));
   });
 
+  it('keeps NaN and infinite floats in untouched fields instead of failing', async () => {
+    const doc = queueDoc([pending()]);
+    const withFloats = new JsonObject([
+      ...doc.entries,
+      ['nan', JsonNumber.float(Number.NaN)],
+      ['inf', JsonNumber.float(Infinity)],
+      ['ninf', JsonNumber.float(-Infinity)],
+    ]);
+    const out = await bindStartOne({ bundle: bundle([]) })(withFloats, ctx);
+    expect(out.queue.get('nan')).toEqual(JsonNumber.float(Number.NaN));
+    expect(out.queue.get('inf')).toEqual(JsonNumber.float(Infinity));
+    expect(out.queue.get('ninf')).toEqual(JsonNumber.float(-Infinity));
+  });
+
   it('a dry run plans without launching or editing state', async () => {
     const calls: string[] = [];
     const out = await bindStartOne({ bundle: bundle(calls) })(queueDoc([pending()]), {
