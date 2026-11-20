@@ -5,7 +5,9 @@ test_host_config_overlay.py, test_host_config_policy.py, test_host_config_render
 test_host_config_switch.py, test_host_config_units.py, test_host_config_prepare.py
 and test_host_config_legacy.py.
 """
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import unittest
@@ -75,19 +77,40 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
 
     def test_prepare_stays_inert_verifies_before_install_and_reloads_without_start(self):
         calls = []
+        verified = []
+        rendered_paths = []
+        real_render = host.render_units
+        def capture_render(*args, **kwargs):
+            paths = real_render(*args, **kwargs)
+            rendered_paths.append([str(p) for p in paths])
+            return paths
         def stopped(argv):
             calls.append(argv)
             if argv[0] == 'systemd-analyze':
+                self.assertEqual(argv[:3], ['systemd-analyze', '--user', 'verify'])
                 self.assertTrue(all(Path(p).is_file() for p in argv[3:]))
                 self.assertFalse((self.base / 'installed').exists())
+                verified.append(argv[3:])
                 return ''
             if argv[:3] == ['systemctl', '--user', 'daemon-reload']:
                 return ''
             return self.stopped(argv)
         self.command('tag', '-a', 'crq-runner/20261016-7', self.before, '-m', 'owner fixture approval')
-        with mock.patch.object(host, 'run', side_effect=stopped):
+        with mock.patch.object(host, 'run', side_effect=stopped), \
+                mock.patch.object(host, 'render_units', side_effect=capture_render):
             host.prepare(self.root, self.overlay, self.raw, self.base / 'installed',
                          'crq-runner/20261016-7')
+        # verification must receive exactly the paths render_units returned,
+        # not the original template paths.
+        self.assertEqual(len(rendered_paths), 1)
+        self.assertEqual(verified, rendered_paths)
+        expected = [path.name for path in host.unit_files(self.root)]
+        # prepare must have verified the rendered units themselves: one
+        # systemd-analyze run carrying every rendered unit path, checked
+        # above while the units output did not yet exist.
+        self.assertTrue(expected)
+        self.assertEqual([sorted(Path(p).name for p in paths) for paths in verified],
+                         [expected])
         self.assertTrue((self.runner / 'state/runner-disabled').is_file())
         self.assertTrue((self.base / 'installed/crq-tick.service').is_file())
         self.assertIn(['systemctl', '--user', 'daemon-reload'], calls)
@@ -110,6 +133,91 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         self.assertEqual(sorted(p.name for p in output.iterdir()), ['crq-retired.timer'])
         self.assertFalse((self.base / 'records').exists())
         self.assertFalse((self.runner / 'state/runner-disabled').exists())
+
+    def test_preview_refuses_an_output_that_holds_the_overlay(self):
+        # preview writes config.json under --output; an overlay inside that tree
+        # would be replaced by the rendered runner config, so the next
+        # invocation would reject it for lacking the overlay schema.
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = host.main(['--overlay', str(self.overlay_path), 'preview', '--output', str(self.base)])
+        self.assertEqual(code, 1)
+        self.assertIn('must not hold the overlay', err.getvalue())
+        self.assertEqual(self.overlay_path.read_bytes(), self.raw)
+        self.assertFalse((self.base / 'config.json').exists())
+        self.assertFalse((self.base / 'systemd').exists())
+        self.assertFalse((self.base / 'records').exists())
+
+    def run_main(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = host.main(argv)
+            except SystemExit as exc:
+                code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_json_mode_usage_error_is_one_stdout_artifact_with_exit_2(self):
+        # I1: in machine mode a usage error, on the parser or a subparser, is
+        # one JSON error object on stdout and nothing on stderr.
+        for argv, subcommand in (
+                (['--json', '--overlay', str(self.overlay_path)], None),
+                (['--json', '--overlay', str(self.overlay_path), 'preview'], 'preview')):
+            with self.subTest(argv=argv):
+                code, out, err = self.run_main(argv)
+                self.assertEqual(code, 2)
+                self.assertEqual(err, '')
+                error = json.loads(out)['error']
+                self.assertEqual((error['kind'], error['subcommand'], error['exitCode']),
+                                 ('usage', subcommand, 2))
+
+    def test_json_mode_operation_failure_is_one_stdout_artifact_with_exit_1(self):
+        missing = self.base / 'missing-overlay.json'
+        code, out, err = self.run_main(['--json', '--overlay', str(missing), 'live-config'])
+        self.assertEqual(code, 1)
+        self.assertEqual(err, '')
+        error = json.loads(out)['error']
+        self.assertEqual((error['kind'], error['subcommand'], error['exitCode']),
+                         ('failed', 'live-config', 1))
+
+    def test_operation_failure_without_json_narrates_on_stderr_only(self):
+        missing = self.base / 'missing-overlay.json'
+        code, out, err = self.run_main(['--overlay', str(missing), 'live-config'])
+        self.assertEqual(code, 1)
+        self.assertEqual(out, '')
+        self.assertNotEqual(err, '')
+
+    def test_abbreviated_json_flag_is_a_usage_error_not_narrated_machine_mode(self):
+        # argparse would accept `--js` as --json while the output mode only
+        # recognises the literal flag; abbreviations are refused instead, so
+        # the operation never runs half in machine mode.
+        missing = self.base / 'missing-overlay.json'
+        for flag in ('--js', '--jso'):
+            with self.subTest(flag=flag):
+                code, out, err = self.run_main([flag, '--overlay', str(missing), 'live-config'])
+                self.assertEqual(code, 2)
+                self.assertEqual(out, '')
+                self.assertIn('unrecognized arguments: ' + flag, err)
+                self.assertNotIn('No such file', err)
+
+    def test_preview_refuses_a_rendered_child_linked_into_a_checkout(self):
+        # render_units and render_plists follow systemd/ and launchd/ under
+        # --output; a child linked into the deployment checkout must be refused
+        # before any preview byte is written, not followed by the renderer.
+        for child in ('systemd', 'launchd'):
+            with self.subTest(child=child):
+                output = self.base / ('preview-' + child)
+                output.mkdir()
+                (output / child).symlink_to(self.root, target_is_directory=True)
+                # main() reports the refusal (exit 1, narration on stderr) rather
+                # than raising it.
+                code, out, err = self.run_main(
+                    ['--overlay', str(self.overlay_path), 'preview', '--output', str(output)])
+                self.assertEqual(code, 1)
+                self.assertEqual(out, '')
+                self.assertRegex(err, 'outside every Git checkout|outside checkout')
+                self.assertEqual(sorted(p.name for p in output.iterdir()), [child])
+                self.assertFalse((self.base / 'records').exists())
 
     def test_prepare_rejects_worktree_drift_before_installing_units(self):
         self.command('checkout', '-q', '--detach', self.target)
