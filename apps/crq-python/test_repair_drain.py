@@ -2495,6 +2495,25 @@ class RepairDrainTest(unittest.TestCase):
             self.assertEqual(dispatch.call_count, 3)
             self.assertEqual(again['stop'], 'rate-limit')
 
+    def test_repeated_nested_repository_capture_does_not_collide(self):
+        self.config['repair']['fallback_models'] = ['opencode-go/deepseek-v4.1-flash']
+        wt = self.worktree('crq-repair-pr1-merged-nested')
+        def dispatch(config, role, job, tree, directory, judge=False):
+            subprocess.run(['git', 'init', '-q', str(tree / 'scratch')], check=True)
+            (tree / 'scratch' / 'note').write_text(directory.name)
+            return {'stop': 'rate-limit', 'retry_after_ms': 1000}
+        future = '2999-01-01T00:00:00Z'
+        evidence = self.root / 'attempt'
+        with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'OPENCODE_GO_API_KEY': 'fixture', 'OPENCODE_GO_BASE_URL': 'https://fixture.invalid'}), \
+             mock.patch.object(service, 'provider_cooldowns', return_value={}), \
+             mock.patch.object(service, 'remember_provider_limit', return_value=future), \
+             mock.patch.object(service, '_dispatch', side_effect=dispatch):
+            for _ in range(3):
+                report = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, wt, evidence)
+                self.assertEqual(report['stop'], 'rate-limit')
+        kept = sorted(evidence.glob('*/retained-nested/capture-*/scratch/note'))
+        self.assertEqual(len(kept), 3)
+
     def test_non_quota_failure_does_not_spend_on_fallback(self):
         self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
         with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture'}), \

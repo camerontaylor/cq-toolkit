@@ -868,10 +868,25 @@ class Run:
                 if result["drained"]:
                     break
                 if self.clock() >= deadline:
-                    durable_write(Path(self.run_dir) / record_name,
-                                  {"polls": polls,
-                                   "drained": False,
-                                   "deadline_s": self.args.drain_deadline_s})
+                    try:
+                        durable_write(Path(self.run_dir) / record_name,
+                                      {"polls": polls,
+                                       "drained": False,
+                                       "deadline_s": self.args.drain_deadline_s})
+                    except OSError as exc:
+                        # A diagnostic that cannot be recorded must not
+                        # replace the FailStop: live work may still be
+                        # running against this checkout, and an escaping
+                        # I/O error would reach recovery as an ordinary
+                        # refusal that restarts the triggers and releases
+                        # admission.
+                        try:
+                            self.narrate("drain.json could not be written ("
+                                         + repr(exc)[:200] + ")")
+                        except OSError:
+                            # Narration shares the failing filesystem; it
+                            # must not replace the FailStop either.
+                            pass
                     raise FailStop(
                         "queue drain expired after "
                         + str(self.args.drain_deadline_s)
