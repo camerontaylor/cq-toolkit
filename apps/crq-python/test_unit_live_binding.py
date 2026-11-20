@@ -776,6 +776,52 @@ class DiscoveryTests(PortFixture):
         self.assertIn("crq-worker@tenant\\x2dblue.service",
                       " ".join(evidence["foreign"]))
 
+    def test_also_single_backslash_is_dropped_before_matching(self):
+        declared = self.declare()
+        # extract_first_word drops a backslash before any character, so
+        # ``crq-slot\.service`` names crq-slot.service, outside the set.
+        self.write("crq-tick.service",
+                   "[Install]\nAlso=crq-slot\\.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Also names crq-slot.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_undeclared_also_with_escape_naming_expected_unit_is_foreign(
+            self):
+        declared = self.declare()
+        # ``crq-tick\.service`` in an undeclared unit names the expected
+        # crq-tick.service once systemd drops the backslash.
+        self.write("ingress.service",
+                   "[Install]\nAlso=crq-tick\\.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Also names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_also_odd_backslash_run_keeps_half(self):
+        declared = self.declare()
+        # Three backslashes: the first pair yields one backslash, the third
+        # escapes ``x``, so the name is crq-worker@tenant\x2dblue.service.
+        self.write("crq-tick.service",
+                   "[Install]\nAlso=crq-worker@tenant\\\\\\x2dblue.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Also names crq-worker@tenant\\x2dblue.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_also_trailing_backslash_is_refused(self):
+        declared = self.declare()
+        # A backslash followed only by trailing whitespace is not a line
+        # continuation; systemd strips the line, so the value ends in a lone
+        # backslash and extract_first_word rejects it (-EINVAL). Discovery
+        # cannot vouch for what the unit names.
+        self.write("crq-tick.service",
+                   "[Install]\nAlso=crq-tick.service \\ \n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("trailing backslash", " ".join(evidence["foreign"]))
+
     def test_quoted_install_argument_is_unquoted_before_matching(self):
         declared = self.declare()
         # systemd strips the quotes of a WantedBy argument, so the quoted
