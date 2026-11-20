@@ -243,20 +243,21 @@ def _read_template(prepare, root: Path, source_sha: str, name: str):
     return oid, raw, raw.decode("utf-8")
 
 
+# systemd strips ASCII space and tab only (strstrip / skip_leading_chars); str.strip()
+# also strips Unicode whitespace such as NBSP, which systemd keeps as part of the key.
+SYSTEMD_BLANKS = " \t"
+
+
 def _logical_lines(text: str) -> list[str]:
     """Physical lines joined across trailing-backslash continuations, as systemd reads them."""
     logical = []
     pending = ""
     # A leading UTF-8 BOM is not part of the first line, as systemd reads it.
-    # systemd's read_line also ends a line at a lone CR or NUL; this adapter
-    # splits on LF and CRLF only (a CR-only file reads as one line, finds no
-    # assignment and takes the pinned bound). str.splitlines() would also break
-    # on U+2028 and similar, which would expose comment text as keys.
-    physical = re.split(r"\r?\n", text.removeprefix("\ufeff"))
-    if physical and physical[-1] == "":
-        physical.pop()
-    for line in physical:
-        if line.lstrip()[:1] in ("#", ";"):
+    # Physical lines end at \n, \r\n or \r only: str.splitlines() would also
+    # split at Unicode separators, which systemd keeps inside the line.
+    body = text.removeprefix("\ufeff")
+    for line in re.split(r"\r\n|\r|\n", body[:-1] if body.endswith(("\n", "\r")) else body):
+        if line.lstrip(SYSTEMD_BLANKS)[:1] in ("#", ";"):
             # systemd skips standalone comments, and comments inside a
             # continuation, so a comment's trailing backslash never continues.
             continue
@@ -275,16 +276,16 @@ def _section_values(text: str, section: str, key: str) -> list[str]:
     values = []
     current = None
     for line in _logical_lines(text):
-        stripped = line.strip()
+        stripped = line.strip(SYSTEMD_BLANKS)
         if stripped.startswith("[") and stripped.endswith("]"):
-            current = stripped[1:-1].strip()
+            current = stripped[1:-1].strip(SYSTEMD_BLANKS)
             continue
         if current != section or "=" not in stripped:
             continue
         name, value = stripped.split("=", 1)
         # systemd ignores whitespace around the key and the equals sign.
-        if name.strip() == key:
-            values.append(value.strip())
+        if name.strip(SYSTEMD_BLANKS) == key:
+            values.append(value.strip(SYSTEMD_BLANKS))
     return values
 
 
@@ -293,15 +294,15 @@ def _section_assignments(text: str, section: str, keys: tuple[str, ...]) -> list
     found = []
     current = None
     for line in _logical_lines(text):
-        stripped = line.strip()
+        stripped = line.strip(SYSTEMD_BLANKS)
         if stripped.startswith("[") and stripped.endswith("]"):
-            current = stripped[1:-1].strip()
+            current = stripped[1:-1].strip(SYSTEMD_BLANKS)
             continue
         if current != section or "=" not in stripped:
             continue
         name, value = stripped.split("=", 1)
-        if name.strip() in keys:
-            found.append((name.strip(), value.strip()))
+        if name.strip(SYSTEMD_BLANKS) in keys:
+            found.append((name.strip(SYSTEMD_BLANKS), value.strip(SYSTEMD_BLANKS)))
     return found
 
 
@@ -1165,6 +1166,40 @@ class ProductionUnitAdapter:
             return "node:" + match.group("sha")
         self.refuse("installed unit interpreter is unsupported")
 
+    def _saved_service_type(self, path):
+        """The ``Type=`` the saved service bytes select, or a refusal.
+
+        The post-start check must follow the service file being restored, not
+        the pinned template's declared type. A saved ``Type=simple`` unit whose
+        pinned template is ``oneshot`` would otherwise be admitted by the
+        oneshot branch when it exits cleanly before the observation.
+        """
+        path = Path(path)
+        try:
+            text = path.read_text()
+        except OSError as exc:
+            self.refuse("saved service is unreadable: " + str(exc)[:160])
+        values = _section_values(text, "Service", "Type")
+        if len(values) > 1:
+            self.refuse("saved service must declare at most one Type")
+        if values:
+            service_type = values[0]
+        elif (_section_values(text, "Service", "ExecStart")
+              and not _section_values(text, "Service", "BusName")):
+            for key in ("SetCredential", "SetCredentialEncrypted", "LoadCredential",
+                        "LoadCredentialEncrypted", "ImportCredential"):
+                if _section_values(text, "Service", key):
+                    # systemd selects exec, not simple, when credentials are set.
+                    self.refuse("saved service implies Type=exec through " + key)
+            # systemd defaults a service with ExecStart and no Type or BusName
+            # to simple, so a prior install without Type= stays restorable.
+            service_type = "simple"
+        else:
+            self.refuse("saved service has no Type and does not default to simple")
+        if service_type not in {"simple", "oneshot"}:
+            self.refuse("saved service Type is unsupported: " + service_type)
+        return service_type
+
     def _observe_activators(self, unit, inventory):
         paths = self._unit_paths(unit, inventory)
         observed = {}
@@ -1225,6 +1260,9 @@ class ProductionUnitAdapter:
         prior = self._runtime_from_unit(paths["service"])
         if prior == runtime:
             self.refuse("unit already selects requested runtime")
+        # Restore will need the saved Type; refuse now rather than after the
+        # switch has masked the service and stopped its activators.
+        self._saved_service_type(paths["service"])
         observed = self._observe_activators(unit, inventory)
         completion_window = self._completion_budget(unit, inventory, observed)
         try:
@@ -1387,6 +1425,9 @@ class ProductionUnitAdapter:
         paths = self._unit_paths(unit, inventory)
         self._installed_entries(unit, inventory)
         self._discover(unit, inventory, paths)
+        # Refuse an unsupported saved Type before the snapshot records it, not
+        # at rollback after the unit is masked.
+        self._saved_service_type(paths["service"])
         self._snapshot_unit = unit
         path_states = {}
         for path in paths.values():
@@ -1939,6 +1980,10 @@ class ProductionUnitAdapter:
         self._compare_state(staged, service_state)
         if self._runtime_from_unit(staged) != snapshot["runtime"]:
             self.refuse("staged restore runtime changed before activation")
+        # The post-start check follows the service file being restored, not the
+        # pinned template's declared type; a saved simple unit under a pinned
+        # oneshot template must not be admitted by the oneshot branch.
+        saved_type = self._saved_service_type(staged)
         # Derive the start timeout while the mask and staged file are still in place, so an
         # unsupported TimeoutStartSec refuses before the service is released. Only a restore
         # that starts the service needs it; an inactive snapshot never does.
@@ -1983,7 +2028,7 @@ class ProductionUnitAdapter:
                 self.refuse("restored service did not remain loaded")
             if service_observed["ActiveState"] == "failed":
                 self.refuse("restored service is failed")
-            if inventory[unit]["service_type"] == "simple":
+            if saved_type == "simple":
                 if service_observed["ActiveState"] != "active":
                     self.refuse("restored simple service is not active: "
                                 + str(service_observed["ActiveState"]))

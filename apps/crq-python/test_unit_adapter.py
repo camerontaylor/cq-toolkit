@@ -653,10 +653,105 @@ class InventoryTests(unittest.TestCase):
             adapter_mod.declared_inventory(self.root, "f" * 40)
 
 
+class SavedServiceTypeTests(AdapterFixture):
+    def _type(self, body):
+        path = self.base / "saved.service"
+        path.write_text(body)
+        return self.adapter._saved_service_type(path)
+
+    def test_whitespace_around_equals_counts_as_a_duplicate_type(self):
+        with self.assertRaisesRegex(dc.Refused, "at most one Type"):
+            self._type("[Service]\nType=oneshot\nType = simple\nExecStart=/bin/x\n")
+
+    def test_continuation_swallows_a_type_inside_environment(self):
+        body = ("[Service]\nEnvironment=LABEL=value \\\nType=oneshot\n"
+                "ExecStart=/usr/bin/env python3 /w.py\n")
+        self.assertEqual(self._type(body), "simple")
+
+    def test_comment_inside_a_continuation_does_not_end_it(self):
+        body = ("[Service]\nEnvironment=LABEL=value \\\n# comment\nType=oneshot\n"
+                "ExecStart=/usr/bin/env python3 /w.py\n")
+        self.assertEqual(self._type(body), "simple")
+
+    def test_unicode_line_separator_stays_inside_a_comment(self):
+        body = ("[Service]\n# note\u2028Type=exec\nType=oneshot\n"
+                "ExecStart=/bin/x\n")
+        self.assertEqual(self._type(body), "oneshot")
+
+    def test_implicit_exec_through_credentials_refuses(self):
+        for key in ("SetCredential", "LoadCredential", "ImportCredential"):
+            with self.subTest(key=key), \
+                    self.assertRaisesRegex(dc.Refused, "implies Type=exec"):
+                self._type("[Service]\nExecStart=/bin/x\n" + key + "=a:b\n")
+
+    def test_utf8_bom_before_the_first_section_is_ignored(self):
+        self.assertEqual(
+            self._type("\ufeff[Service]\nType=oneshot\nExecStart=/bin/x\n"), "oneshot")
+
+    def test_unicode_whitespace_before_a_key_is_not_systemd_whitespace(self):
+        # systemd strips ASCII space/tab only, so an NBSP-prefixed Type is an unknown
+        # key and the unit defaults to simple; honouring it would admit oneshot.
+        body = "[Service]\n\u00a0Type=oneshot\nExecStart=/bin/x\n"
+        self.assertEqual(self._type(body), "simple")
+        self.assertEqual(
+            self._type("[Service]\n\t Type = oneshot \nExecStart=/bin/x\n"), "oneshot")
+
+    def test_saved_simple_under_pinned_oneshot_refuses_when_inactive(self):
+        # The post-start check follows the saved bytes, not the pinned template.
+        service = self.unit_dir / "crq-tick.service"
+        text = service.read_text()
+        self.assertIn("Type=oneshot", text)
+        _write(service, text.replace("Type=oneshot", "Type=simple").encode(), 0o600)
+        self.fake.active["crq-tick.service"] = "active"
+        current = self.make_adapter()
+        snapshot = current.snapshot("crq-tick.service")
+        current.validate_snapshot("crq-tick.service", snapshot)
+        current.stop_and_drain("crq-tick.service")
+        current.restore("crq-tick.service", snapshot)
+        self.fake.post_start_state["crq-tick.service"] = "inactive"
+        with self.assertRaisesRegex(dc.Refused, "restored simple service is not active"):
+            current.restore_activation("crq-tick.service", snapshot)
+
+    def test_standalone_comment_ending_in_a_backslash_does_not_continue(self):
+        body = "[Service]\n# note \\\nType=oneshot\nExecStart=/bin/x\n"
+        self.assertEqual(self._type(body), "oneshot")
+
+    def test_even_trailing_backslashes_do_not_continue(self):
+        body = "[Service]\nEnvironment=LABEL=value\\\\\nType=oneshot\nExecStart=/bin/x\n"
+        self.assertEqual(self._type(body), "oneshot")
+
+    def test_missing_type_with_execstart_defaults_to_simple(self):
+        self.assertEqual(self._type("[Service]\nExecStart=/bin/x\n"), "simple")
+
+    def test_missing_type_with_busname_is_refused(self):
+        with self.assertRaisesRegex(dc.Refused, "does not default to simple"):
+            self._type("[Service]\nBusName=a.b\nExecStart=/bin/x\n")
+
+    def test_explicit_oneshot_is_kept(self):
+        self.assertEqual(self._type("[Service]\nType = oneshot\nExecStart=/bin/x\n"),
+                         "oneshot")
+
+
 class AdapterTests(AdapterFixture):
     def test_preflight_refuses_same_runtime(self):
         with self.assertRaisesRegex(dc.Refused, "already selects"):
             self.adapter.preflight("crq-tick.service", "python")
+
+    def test_preflight_refuses_a_saved_type_restore_cannot_follow(self):
+        path = self.unit_dir / "crq-tick.service"
+        text = path.read_text()
+        self.assertIn("Type=oneshot", text)
+        path.write_text(text.replace("Type=oneshot", "Type=exec"))
+        before = _tree(self.unit_dir)
+        with self.assertRaisesRegex(dc.Refused, "Type is unsupported: exec"):
+            self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
+        self.assertEqual(_tree(self.unit_dir), before)
+
+    def test_snapshot_refuses_a_saved_type_restore_cannot_follow(self):
+        path = self.unit_dir / "crq-tick.service"
+        path.write_text(path.read_text().replace("Type=oneshot", "Type=exec"))
+        with self.assertRaisesRegex(dc.Refused, "Type is unsupported: exec"):
+            self.adapter.snapshot("crq-tick.service")
 
     def test_preflight_node_from_python_succeeds(self):
         prior = self.adapter.preflight("crq-tick.service", NODE_RUNTIME)
