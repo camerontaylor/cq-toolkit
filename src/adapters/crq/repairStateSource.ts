@@ -129,6 +129,26 @@ function isFsError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && typeof (error as NodeJS.ErrnoException).code === 'string';
 }
 
+/** CPython's default `int` string-conversion limit (`sys.get_int_max_str_digits`). */
+const MAX_INT_DIGITS = 4300;
+
+/**
+ * CPython `json.loads` converts a bare integer literal (no fraction or
+ * exponent) with `int()`, so one over 4300 digits raises `ValueError` even
+ * where a later duplicate key would overwrite it. Floats and string contents
+ * are exempt; the sign is not counted. Scoped to this adapter: the shared
+ * parser keeps arbitrary-precision integers.
+ */
+function hasOversizedInteger(text: string): boolean {
+  const tokens = text.matchAll(/"(?:\\[\s\S]|[^"\\])*"|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g);
+  for (const token of tokens) {
+    const literal = token[1];
+    if (literal === undefined || /[.eE]/.test(literal)) continue;
+    if (literal.replace('-', '').length > MAX_INT_DIGITS) return true;
+  }
+  return false;
+}
+
 /**
  * `json.loads(path.read_text())`: strict UTF-8, no BOM strip, Python parse.
  * Only the failures Python raises as `OSError` or `ValueError` become
@@ -148,6 +168,7 @@ async function readJsonValue(path: string): Promise<JsonValue> {
   } catch {
     throw new StateFileUnreadable('invalid utf-8');
   }
+  if (hasOversizedInteger(text)) throw new StateFileUnreadable('integer digit limit exceeded');
   try {
     // Python's json.loads accepts NaN/Infinity/-Infinity as floats; the port's default refuses them.
     return parseJsonValue(text, {

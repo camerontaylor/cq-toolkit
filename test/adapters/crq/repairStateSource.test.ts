@@ -1,4 +1,5 @@
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -102,6 +103,23 @@ describe('inboxOrder / inboxItem', () => {
     await symlink(inbox('crq-old.json'), inbox('crq-link.json'));
     await symlink(join(root, 'does-not-exist'), inbox('crq-dangling.json'));
     expect(await effects.inboxOrder()).toEqual(['crq-old', 'crq-dir', 'crq-a', 'crq-b', 'crq-new']);
+  });
+
+  it('orders by sub-second mtime, which a whole-second compare would tie', async () => {
+    // All four share second 2000; only the fractional part separates them, and
+    // name order (a < b < c < d) is the reverse of mtime order.
+    await touch('crq-a.json', 2000.75);
+    await touch('crq-b.json', 2000.5);
+    await touch('crq-c.json', 2000.25);
+    await touch('crq-d.json', 2000.125);
+    expect(await effects.inboxOrder()).toEqual(['crq-d', 'crq-c', 'crq-b', 'crq-a']);
+  });
+
+  it('breaks an exact mtime tie by name, after the sub-second compare', async () => {
+    await touch('crq-z.json', 2000.5);
+    await touch('crq-y.json', 2000.5);
+    await touch('crq-x.json', 2000.75);
+    expect(await effects.inboxOrder()).toEqual(['crq-y', 'crq-z', 'crq-x']);
   });
 
   it('reads the job item, and nothing for unreadable or non-object job files', async () => {
@@ -276,6 +294,112 @@ describe('result matrix: pending / unreadableResult', () => {
     for (const bad of ['', '..', '../x', 'crq-a/b', 'not-crq', 'crq-a\n']) {
       await expect(effects.pending(bad)).rejects.toThrow('invalid repair job id');
       await expect(effects.unreadableResult(bad)).rejects.toThrow('invalid repair job id');
+    }
+  });
+});
+
+describe('Python integer digit limit (4300)', () => {
+  const digits = (n: number, sign = ''): string => `${sign}${'1'.repeat(n)}`;
+
+  it('accepts 4300 digits and refuses 4301, for either sign', async () => {
+    await putResult('crq-r-F1', `{"retry_after": ${digits(4300)}}`);
+    expect(await effects.unreadableResult('crq-r-F1')).toBe(false);
+    expect(await effects.pending('crq-r-F1')).toBe(true);
+    await putResult('crq-r-F1', `{"retry_after": ${digits(4300, '-')}}`);
+    expect(await effects.unreadableResult('crq-r-F1')).toBe(false);
+    for (const literal of [digits(4301), digits(4301, '-'), digits(5000)]) {
+      await putResult('crq-r-F1', `{"retry_after": ${literal}}`);
+      expect(await effects.unreadableResult('crq-r-F1')).toBe(true);
+      await expect(effects.pending('crq-r-F1')).rejects.toBeInstanceOf(RepairResultUnreadableError);
+    }
+  });
+
+  it('refuses an oversized integer even when a later duplicate key overwrites it', async () => {
+    await putResult('crq-r-F1', `{"retry_after": ${digits(5000)}, "retry_after": 0}`);
+    expect(await effects.unreadableResult('crq-r-F1')).toBe(true);
+  });
+
+  it('exempts floats, exponents and string contents, as CPython does', async () => {
+    for (const literal of [`${digits(5000)}.5`, `${digits(5000)}e1`, `"${digits(5000)}"`]) {
+      await putResult('crq-r-F1', `{"retry_after": ${literal}}`);
+      expect(await effects.unreadableResult('crq-r-F1')).toBe(false);
+    }
+  });
+
+  it('makes an oversized queue integer a typed unreadable error', async () => {
+    await writeFile(join(root, 'queue.json'), `{"items": [{"n": ${digits(5000)}}]}`);
+    await expect(effects.readQueue()).rejects.toBeInstanceOf(RepairQueueUnreadableError);
+  });
+
+  it('makes an oversized backlog or job integer unreadable', async () => {
+    await mkdir(join(root, 'repair', 'inbox'), { recursive: true });
+    await writeFile(join(root, 'repair', 'fix-pr-backlog.json'), `{"open": ${digits(5000)}}`);
+    expect(await effects.readBacklog()).toBeUndefined();
+    await writeFile(inbox('crq-big.json'), `{"item": ${digits(5000)}}`);
+    expect(await effects.inboxItem('crq-big')).toBeUndefined();
+  });
+});
+
+// EACCES: Python 3.14 Path.exists() is False on a stat failure, but open() on an
+// existing unreadable file raises PermissionError (an OSError). Root bypasses mode bits.
+describe.skipIf(process.getuid?.() === 0)('EACCES (mode-000 paths)', () => {
+  it('treats an unreadable result.json as unreadable, and pending raises', async () => {
+    await putResult('crq-r-F1', '{}');
+    await chmod(resultFile('crq-r-F1'), 0o000);
+    try {
+      expect(await effects.unreadableResult('crq-r-F1')).toBe(true);
+      await expect(effects.pending('crq-r-F1')).rejects.toBeInstanceOf(RepairResultUnreadableError);
+    } finally {
+      await chmod(resultFile('crq-r-F1'), 0o600);
+    }
+  });
+
+  it('treats a result under an unsearchable job directory as missing (exists() is False)', async () => {
+    await putResult('crq-r-F1', '{"retry_after": 0}');
+    const dir = join(root, 'repair', 'crq-r-F1');
+    await chmod(dir, 0o000);
+    try {
+      expect(await effects.unreadableResult('crq-r-F1')).toBe(false);
+      expect(await effects.pending('crq-r-F1')).toBe(true);
+    } finally {
+      await chmod(dir, 0o700);
+    }
+  });
+
+  it('raises the typed error for an unreadable queue.json', async () => {
+    await writeFile(join(root, 'queue.json'), '{"items": []}');
+    await chmod(join(root, 'queue.json'), 0o000);
+    try {
+      await expect(effects.readQueue()).rejects.toBeInstanceOf(RepairQueueUnreadableError);
+    } finally {
+      await chmod(join(root, 'queue.json'), 0o600);
+    }
+  });
+
+  it('yields undefined for an unreadable backlog or job file', async () => {
+    await mkdir(join(root, 'repair', 'inbox'), { recursive: true });
+    const backlog = join(root, 'repair', 'fix-pr-backlog.json');
+    await writeFile(backlog, '{}');
+    await writeFile(inbox('crq-job.json'), '{"item": "x"}');
+    await chmod(backlog, 0o000);
+    await chmod(inbox('crq-job.json'), 0o000);
+    try {
+      expect(await effects.readBacklog()).toBeUndefined();
+      expect(await effects.inboxItem('crq-job')).toBeUndefined();
+    } finally {
+      await chmod(backlog, 0o600);
+      await chmod(inbox('crq-job.json'), 0o600);
+    }
+  });
+
+  it('treats an unlistable inbox as empty (glob swallows the scandir error)', async () => {
+    await mkdir(join(root, 'repair', 'inbox'), { recursive: true });
+    await writeFile(inbox('crq-a.json'), '{}');
+    await chmod(join(root, 'repair', 'inbox'), 0o000);
+    try {
+      expect(await effects.inboxOrder()).toEqual([]);
+    } finally {
+      await chmod(join(root, 'repair', 'inbox'), 0o700);
     }
   });
 });
