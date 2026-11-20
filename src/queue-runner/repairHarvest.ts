@@ -406,6 +406,11 @@ export async function repairHarvest(
       if (typeof jobId !== 'string') throw new TypeError('job id must be a str');
       if (!(await fx.resultExists(jobId))) break;
       const expected = dict(await fx.readJob(jobId), 'inbox job');
+      // A swapped inbox file must not drive canonical delivery, result
+      // validation or any finding write; reject it like the terminal replay.
+      if (!pyEq(get(expected, 'job'), jobId) || !pyEq(get(expected, 'item'), pyReq(item, 'id'))) {
+        throw new PyError('ValueError', 'repair job identity mismatch');
+      }
       try {
         await fx.requireCanonicalDelivery(expected);
       } catch (e) {
