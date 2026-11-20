@@ -2009,10 +2009,12 @@ def switch_unit(effects, adapter, unit, runtime):
     work until start. For an issuing unit the controller also holds the
     runner's tick lock from the journal intent until immediately before the
     start's own pre-ExecStart work (unmask, daemon-reload, byte checks), and
-    reacquires it for any rollback fence, so no tick can dispatch new queue
-    work between the fence's queue observation and activation; the lock is
-    released before start so the started runner can actually tick. Snapshot/restore retain exact installed
-    unit bytes and activation state. validate_snapshot rejects invalid types
+    reacquires it for any rollback fence. This keeps ticks from dispatching
+    new queue work between the fence's queue observation and that
+    pre-ExecStart window; it does not cover the window itself, and the lock is
+    released before start so the started runner can actually tick.
+    Snapshot/restore retain exact installed unit bytes and activation
+    state. validate_snapshot rejects invalid types
     and paths before any mutation. Completion sequences are monotonic for
     each unit.
     """

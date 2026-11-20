@@ -170,12 +170,30 @@ class UnitSwitchTests(ControllerFixture):
                                 ("completion", False)])
         self.assertFalse(held())
 
-    def test_controller_tick_lock_path_is_the_runners_lock(self):
-        # A rename on either side would make the fence fail open silently.
+    def lock_path_matches_runner(self, effects):
+        """True when the controller's tick-lock path, relative to its root,
+        is exactly the runner's crq.LOCK relative to the repository root."""
         import crq
-        self.assertEqual(dc.TICK_LOCK_NAME, crq.LOCK.name)
-        self.assertEqual(crq.LOCK.parent.name, "state")
-        self.assertEqual(self.effects.state_dir().name, crq.STATE.name)
+        repo_root = crq.ROOT.parents[1]
+        return (effects.state_dir().relative_to(effects.root)
+                == crq.STATE.relative_to(repo_root)
+                and effects.state_dir().relative_to(effects.root)
+                / dc.TICK_LOCK_NAME == crq.LOCK.relative_to(repo_root))
+
+    def test_controller_tick_lock_path_is_the_runners_lock(self):
+        # A rename or relocation on either side would make the fence fail
+        # open silently, so compare full paths, not basenames.
+        self.assertTrue(self.lock_path_matches_runner(self.effects))
+
+    def test_lock_path_check_fails_when_state_dir_is_relocated(self):
+        # Counterfactual: same basename ("state"), different parent.
+        class Relocated(type(self.effects)):
+            def state_dir(self):
+                return self.root / "elsewhere/state"
+
+        relocated = Relocated.__new__(Relocated)
+        relocated.__dict__.update(self.effects.__dict__)
+        self.assertFalse(self.lock_path_matches_runner(relocated))
 
     def test_rollback_releases_the_tick_lock_before_restore_activation(self):
         probe, seen, held = self.tick_lock_probe()
