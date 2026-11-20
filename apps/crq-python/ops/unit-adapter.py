@@ -1403,7 +1403,7 @@ class ProductionUnitAdapter:
             text, "Service", ("TimeoutStartSec", "TimeoutSec"))
         effective = None
         for _key, raw in assignments:
-            value = raw.strip()
+            value = raw.strip(SYSTEMD_BLANKS)
             if not value:
                 effective = None  # an empty assignment resets to the default
             elif value == "infinity":

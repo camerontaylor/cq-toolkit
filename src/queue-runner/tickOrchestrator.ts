@@ -78,7 +78,13 @@ export interface TickPhases {
   notifyOwner(message: string): Promise<void>;
   enrollPrimary(queue: JsonObject, dry: boolean): Promise<PhaseResult>;
   enrollOthers(queue: JsonObject, dry: boolean): Promise<PhaseResult>;
-  readSlotUsage(queue: JsonObject): Promise<{ usage: unknown; reserved: readonly unknown[] }>;
+  /**
+   * `read_slot_usage(q)`. Python marks observed runs `vendor_observed` in place;
+   * queues are immutable here, so the probe returns the marked queue to thread on.
+   */
+  readSlotUsage(
+    queue: JsonObject,
+  ): Promise<{ queue: JsonObject; usage: unknown; reserved: readonly unknown[] }>;
   /** `admit_available`: reservation and launch under the gate. */
   admit(
     queue: JsonObject,
@@ -232,7 +238,9 @@ export async function runTick(input: TickInput, p: TickPhases): Promise<string[]
   q = others.queue;
   log.push(...others.log);
   const pendingAtSelection = anyPending(q);
-  const { usage, reserved } = await p.readSlotUsage(q);
+  const probed = await p.readSlotUsage(q);
+  q = probed.queue;
+  const { usage, reserved } = probed;
   const admitted = await p.admit(q, {
     usage,
     reserved,
@@ -258,7 +266,9 @@ export async function runTick(input: TickInput, p: TickPhases): Promise<string[]
     await p.writeStatus(q);
     await p.writeHeartbeat(q);
     q = await p.publishLocalReviewPr(q);
-    const health = await p.recordClientHealth(q, only === null && p.mergedDiscoveryEnabled());
+    // Python: `not only and <merged discovery enabled>`; '' counts as unrestricted.
+    const unrestricted = only === null || only === '';
+    const health = await p.recordClientHealth(q, unrestricted && p.mergedDiscoveryEnabled());
     q = health.queue;
     log.push(...health.log);
     await p.saveQueue(q);

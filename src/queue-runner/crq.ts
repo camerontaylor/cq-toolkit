@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { OpResult } from '../kernel/types.js';
 import { runRepairPrepare } from '../adapters/crq/repairPreparation.js';
+import { runRepairCli } from '../adapters/crq/repairCli.js';
 import { runPublishUnit } from '../adapters/crq/publishSource.js';
 import {
   AUTHOR_DEADLINE_MS,
@@ -123,6 +124,14 @@ if (command === 'queue-capability') {
       'review-v1': () => serveReview([], rewritten('review-v1')),
     },
   });
+} else if (command === 'repair') {
+  // `crq_repair.py`'s CLI: it owns its argv and its one Python-shaped JSON
+  // document. Admission (usage, the #1716 runner-disabled refusal, config and
+  // selector refusals) is ported; the drain is not, so `repair` is not a live
+  // unit command and crq-repair.service stays on Python.
+  const result = await runRepairCli(rest, { root, stderr: stdio.stderr });
+  process.stdout.write(result.stdout);
+  process.exitCode = result.exitCode;
 } else {
   const stateHome = process.env.XDG_STATE_HOME;
   const gitleaksPath = process.env.PATH;

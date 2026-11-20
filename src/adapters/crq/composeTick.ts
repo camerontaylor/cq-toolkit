@@ -4,11 +4,12 @@
  * nothing here enables a tick or slot unit.
  *
  * Bound here: the plain state seams (`fileTickSeams`), delivery
- * (`bindDeliveryPhases`), admission (`bindAdmit`), and the single heartbeat and
+ * (`bindDeliveryPhases`), admission (`bindAdmit`), the single heartbeat and
  * slot-deadline seams (`writeHeartbeat` with `fileHeartbeatEffects`,
- * `refreshSlotDeadline` with `fileSlotDeadlineEffects`). Every other phase is
- * caller-injected through `remaining`, so a missing port is a compile error
- * rather than a silent no-op.
+ * `refreshSlotDeadline` with `fileSlotDeadlineEffects`), and the S6-0 host
+ * effects (`fetch`, `notifyOwner`, `readSlotUsage`, `recordCoverage`, from
+ * `tickHostEffects.ts`). Every other phase is caller-injected through
+ * `remaining`, so a missing port is a compile error rather than a silent no-op.
  */
 import { join } from 'node:path';
 import { JsonObject, parseJsonValue, toPlainJson } from '../../policy/crq/jsonValue.js';
@@ -26,10 +27,19 @@ import { queueBytes } from './queueEffects.js';
 import { fileHeartbeatEffects, fileSlotDeadlineEffects } from './slotDeadlineSource.js';
 import { fileSlotPreflightEffects } from './slotSource.js';
 import { fileTickSeams } from './tickPhaseSeams.js';
+import {
+  fileReadSlotUsage,
+  fileSlotUsageProbes,
+  fileTickFetch,
+  notifyOwnerFrom,
+  recordCoverage,
+} from './tickHostEffects.js';
 
-/** The phases this module cannot bind: discovery, harvest, repair, reconcile, status. */
+/**
+ * The phases this module cannot bind yet. Each one is a gap listed with its
+ * Python source in docs/crq/tick-slot-missing-effects.md.
+ */
 export type RemainingPhaseNames =
-  | 'fetch'
   | 'backfillPublish'
   | 'backfillInventoryMode'
   | 'backfillInventory'
@@ -39,11 +49,8 @@ export type RemainingPhaseNames =
   | 'repairBackfill'
   | 'archiveLegacy'
   | 'reconcile'
-  | 'notifyOwner'
   | 'enrollPrimary'
   | 'enrollOthers'
-  | 'readSlotUsage'
-  | 'recordCoverage'
   | 'writeStatus'
   | 'publishLocalReviewPr'
   | 'recordClientHealth';
@@ -52,6 +59,10 @@ export interface ComposeInput {
   readonly stateRoot: string;
   /** The parsed `config.json`. */
   readonly config: JsonObject;
+  /** `crq.CLONE`: the primary clone (`config.clone`). */
+  readonly clone: string;
+  /** The vendor probes `readSlotUsage` uses; defaults to the file/process binding. */
+  readonly usageProbes?: Parameters<typeof fileReadSlotUsage>[0]['probes'];
   /** `WATCHDOG_HOME`. */
   readonly watchdogHome: string;
   /** The heartbeat's `root` field (Python's `str(ROOT)`). */
@@ -92,6 +103,13 @@ export function composeTickPhases(input: ComposeInput): TickPhases {
     ...input.remaining,
     ...seams,
     ...delivery,
+    fetch: fileTickFetch(input.clone),
+    notifyOwner: notifyOwnerFrom(input.config),
+    readSlotUsage: fileReadSlotUsage({
+      clone: input.clone,
+      probes: input.usageProbes ?? fileSlotUsageProbes(input.root, input.stateRoot),
+    }),
+    recordCoverage,
     admit: bindAdmit(input.admit),
     async refreshSlotDeadline(queue, usage, remaining, globalGate) {
       await refreshSlotDeadline(
@@ -129,15 +147,17 @@ export function composeSlot(input: ComposeSlotInput): () => Promise<string[]> {
   const { phases } = input;
   const preflight = fileSlotPreflightEffects(input.stateRoot, () => run(), input.now ?? Date.now);
   const run = (): Promise<string[]> =>
-    scheduledSlot<JsonObject, { usage: unknown; reserved: readonly unknown[] }>({
+    scheduledSlot<JsonObject, Awaited<ReturnType<TickPhases['readSlotUsage']>>>({
       disabled: () => phases.runnerDisabled(),
       withTickLock: (work) => preflight.withTickLock(work),
       loadQueue: () => phases.loadQueue(false),
       copyQueue,
       equalQueue,
       readUsage: (queue) => phases.readSlotUsage(queue),
-      async admit(queue, observation) {
-        const collected = await input.collectFinished(queue);
+      async admit(_copy, observation) {
+        // Python's `slot(observed, observation)`: continue from the probed
+        // queue, which carries the `vendor_observed` marks.
+        const collected = await input.collectFinished(observation.queue);
         const admitted = await phases.admit(collected.queue, {
           usage: observation.usage,
           reserved: observation.reserved,

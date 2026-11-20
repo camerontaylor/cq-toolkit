@@ -13,6 +13,12 @@ export const SLOT_RUNNER_DISABLED_LOG = 'runner disabled for host handover';
 export const SLOT_QUEUE_CHANGED_LOG = 'queue changed during quota probe; retry next slot tick';
 
 export interface SlotUsageObservation {
+  /**
+   * The probed queue. Python's `read_slot_usage` marks observed runs
+   * `vendor_observed` in place; queues are immutable here, so the probe
+   * returns the marked queue and the slot continues from it.
+   */
+  readonly queue: JsonObject;
   readonly usage: unknown;
   readonly reserved: readonly unknown[];
 }
@@ -64,7 +70,12 @@ export async function runSlot(input: SlotInput, p: SlotPhases): Promise<string[]
   const collected = await p.collectFinished(q);
   q = collected.queue;
   log.push(...collected.log);
-  const { usage, reserved } = input.observation ?? (await p.readSlotUsage(q));
+  let observation = input.observation ?? null;
+  if (observation === null) {
+    observation = await p.readSlotUsage(q);
+    q = observation.queue;
+  }
+  const { usage, reserved } = observation;
   const admitted = await p.admit(q, { usage, reserved, log });
   q = admitted.queue;
   log.push(...admitted.log);
@@ -92,7 +103,8 @@ export async function runScheduledSlot(lock: SlotLock, p: ScheduledSlotPhases): 
   const observation = await p.readSlotUsage(snapshot);
   const committed = await lock.withLock(async () => {
     if (!p.sameQueue(await p.loadQueue(), snapshot)) return [SLOT_QUEUE_CHANGED_LOG];
-    return runSlot({ queue: snapshot, observation }, p);
+    // Python runs `slot(observed, observation)`: the probed copy, not the snapshot.
+    return runSlot({ queue: observation.queue, observation }, p);
   });
   return committed.ran ? committed.value : [];
 }

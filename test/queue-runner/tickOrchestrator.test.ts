@@ -99,7 +99,8 @@ function harness(over: Partial<TickPhases> = {}, queue: JsonObject = baseQueue()
     readSlotUsage: async (q) => (
       calls.push('readSlotUsage'),
       seen.set('readSlotUsage', seenN(q)),
-      { usage: 'U', reserved: ['r'] }
+      // The probe returns a new queue (Python's in-place vendor_observed mark).
+      { queue: bump(q), usage: 'U', reserved: ['r'] }
     ),
     admit: async (q, req) => (
       admitRequests.push({ only: req.only, dry: req.dry, log: [...req.log] }),
@@ -187,15 +188,16 @@ describe('runTick ordering', () => {
       'readSlotUsage',
     ];
     threaded.forEach((name, index) => expect(h.seen.get(name), name).toBe(index));
-    expect(h.seen.get('admit')).toBe(13);
-    expect(h.seen.get('recordCoverage')).toBe(14);
-    expect(h.seen.get('save1')).toBe(15);
-    expect(h.seen.get('refreshSlotDeadline')).toBe(15);
-    expect(h.seen.get('writeStatus')).toBe(16);
-    expect(h.seen.get('writeHeartbeat')).toBe(16);
-    expect(h.seen.get('publishLocalReviewPr')).toBe(16);
-    expect(h.seen.get('recordClientHealth')).toBe(17);
-    expect(h.seen.get('save2')).toBe(18);
+    // readSlotUsage returns the probed queue (bumped), so admission sees it.
+    expect(h.seen.get('admit')).toBe(14);
+    expect(h.seen.get('recordCoverage')).toBe(15);
+    expect(h.seen.get('save1')).toBe(16);
+    expect(h.seen.get('refreshSlotDeadline')).toBe(16);
+    expect(h.seen.get('writeStatus')).toBe(17);
+    expect(h.seen.get('writeHeartbeat')).toBe(17);
+    expect(h.seen.get('publishLocalReviewPr')).toBe(17);
+    expect(h.seen.get('recordClientHealth')).toBe(18);
+    expect(h.seen.get('save2')).toBe(19);
     expect(log).toEqual(['D', 'H', 'I', 'R', 'C', 'F', 'X', 'E1', 'E2', 'A', 'K']);
   });
 
@@ -288,7 +290,8 @@ describe('runTick early exits and gating', () => {
     expect(h.calls).not.toContain('discovery');
     expect(h.calls).toContain('backfillInventory');
     expect(h.coverage[0]?.blockedReason).toBeNull();
-    expect(h.health).toEqual([false]);
+    // Python passes `not only and <merged discovery enabled>`: '' is unrestricted.
+    expect(h.health).toEqual([true]);
   });
 
   it('runs inventory only for the integrated rollout and an unrestricted tick', async () => {

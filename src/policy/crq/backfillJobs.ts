@@ -273,6 +273,51 @@ const ledgerEpochSeconds = (value: JsonValue | undefined): number => {
   return Date.UTC(t.year, t.month - 1, t.day, t.hour, t.minute, t.second) / 1000;
 };
 
+/** Python `ValueError`: a malformed timestamp, but not the KeyError/TypeError subclasses. */
+const isValueError = (error: unknown): boolean =>
+  error instanceof LedgerTimestampError ||
+  (error instanceof LedgerIntegrityError &&
+    !(error instanceof LedgerKeyError) &&
+    !(error instanceof LedgerTypeError));
+
+/**
+ * `backfill_jobs.expired`: pending past the age bound, or with an unreadable
+ * `created_at`. Such a job can never launch, so inventory releases it.
+ */
+export function expired(item: JsonObject, at: string): boolean {
+  try {
+    return (
+      ledgerEpochSeconds(at) - ledgerEpochSeconds(item.get('created_at')) > MAX_PENDING_AGE_SECONDS
+    );
+  } catch (error) {
+    if (isValueError(error)) return true;
+    throw error;
+  }
+}
+
+/**
+ * `backfill_runtime.retire_superseded`: a pending job at an older pin, or one
+ * past the age bound, leaves the queue as `skipped` with its reason.
+ */
+export function retireSuperseded(item: JsonObject, target: string): JsonObject {
+  let reason: string;
+  if (!pythonValueEqual(item.get('target') ?? null, target)) {
+    reason = `superseded by inventory ${target}`;
+  } else {
+    try {
+      ledgerTimestamp(item.get('created_at'));
+      reason = 'expired: pending more than 24 h';
+    } catch (error) {
+      if (!isValueError(error)) throw error;
+      reason = 'expired: unreadable created_at';
+    }
+  }
+  return withObjectKeys(item, [
+    ['state', 'skipped'],
+    ['last_error', reason],
+  ]);
+}
+
 /** Eligibility creates the same missing family and lineage histories as Python. */
 export function eligible(
   queue: JsonObject,

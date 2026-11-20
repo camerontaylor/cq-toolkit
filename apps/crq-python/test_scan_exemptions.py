@@ -147,12 +147,27 @@ class ScanExemptionTest(unittest.TestCase):
         self.assertTrue(crq._glob_regex("**/tests.rs").match("tests.rs"))
         self.assertTrue(crq._glob_regex("a/**").match("a/b/c"))
 
+    def test_many_single_stars_in_one_segment_match_in_bounded_time(self):
+        # A backtracking regex took ~16 s for ten "*" and over a minute for
+        # twelve on a 60-character path; the NFA matcher is O(path * tokens).
+        import time
+        for stars in (10, 12, 40):
+            rx = crq._glob_regex("a" + "*a" * stars + "b")
+            started = time.monotonic()
+            self.assertFalse(rx.match("a" * 200))
+            self.assertTrue(rx.match("a" * (stars + 1) + "b"))
+            self.assertLess(time.monotonic() - started, 2.0)
+        # Wildcards never cross a "/" and "?" is one non-slash character.
+        self.assertFalse(crq._glob_regex("a*b").match("a/b"))
+        self.assertTrue(crq._glob_regex("a?b").match("axb"))
+        self.assertFalse(crq._glob_regex("a?b").match("a/b"))
+
     def test_glob_globstar_bounded(self):
-        # Consecutive "**/" collapse, so the regex has one optional group.
+        # Consecutive "**/" collapse, so the matcher has one optional group.
         rx = crq._glob_regex("**/**/x")
         self.assertTrue(rx.match("x"))
         self.assertTrue(rx.match("a/b/x"))
-        self.assertEqual(rx.pattern.count("(?:.*/)?"), 1)
+        self.assertEqual(rx._toks.count(("opt", "")), 1)
         # More globstars than the cap fail the whole file closed.
         many = "/".join(["**"] * 8) + "/x.rs"
         base = self.commit({crq.SCAN_EXEMPTIONS_PATH:
