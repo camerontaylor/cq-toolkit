@@ -84,6 +84,27 @@ class SumsTests(unittest.TestCase):
                              vm.sha256_file(path))
 
 
+class DownloadTests(unittest.TestCase):
+    def test_failed_transfer_removes_the_partial_file(self):
+        class Broken:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, size):
+                raise OSError("connection reset")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = pathlib.Path(tmp) / "image.img"
+            with mock.patch.object(vm.urllib.request, "urlopen",
+                                   return_value=Broken()):
+                with self.assertRaises(OSError):
+                    vm.download("https://example.invalid/x", destination)
+            self.assertEqual(list(pathlib.Path(tmp).iterdir()), [])
+
+
 class FetchImageTests(unittest.TestCase):
     def _download(self, digest, data, calls, *, fail_image=False):
         def fake(url, destination, timeout=120):
@@ -146,6 +167,82 @@ class FetchImageTests(unittest.TestCase):
                                       vm.IMAGE_URL + vm.IMAGE_NAME])
             self.assertEqual(image["sha256"], digest)
             self.assertEqual((images / vm.IMAGE_NAME).read_bytes(), data)
+
+    def test_recorder_failure_removes_the_downloaded_manifest_part(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            recorder = vm.Recorder(state)
+            with mock.patch.object(
+                    vm, "download",
+                    side_effect=self._download("1" * 64, b"x", [])), \
+                    mock.patch.object(recorder, "append",
+                                      side_effect=OSError("ledger full")):
+                with self.assertRaisesRegex(OSError, "ledger full"):
+                    vm.fetch_sums(images / vm.SUMS_NAME, recorder)
+            self.assertEqual(list(images.glob("*.part")), [])
+
+    def test_cleanup_failure_never_masks_the_original_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            recorder = vm.Recorder(state)
+            with mock.patch.object(
+                    vm, "download",
+                    side_effect=self._download("1" * 64, b"x", [])), \
+                    mock.patch.object(recorder, "append",
+                                      side_effect=OSError("ledger full")), \
+                    mock.patch.object(pathlib.Path, "unlink",
+                                      side_effect=OSError("read-only")):
+                with self.assertRaisesRegex(OSError, "ledger full"):
+                    vm.fetch_sums(images / vm.SUMS_NAME, recorder)
+
+    def test_fetch_holds_an_exclusive_lock_on_the_images_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            with mock.patch.object(vm.fcntl, "flock") as flock, \
+                    mock.patch.object(vm, "_fetch_image_locked",
+                                      return_value={"ok": 1}):
+                self.assertEqual(vm.fetch_image(state, vm.Recorder(state)),
+                                 {"ok": 1})
+            self.assertEqual(flock.call_args.args[1], vm.fcntl.LOCK_EX)
+
+    def test_digest_mismatch_removes_the_unverified_partial_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            calls = []
+            with mock.patch.object(
+                    vm, "download",
+                    side_effect=self._download("1" * 64, b"wrong bytes", calls)):
+                with self.assertRaises(ValueError):
+                    vm.fetch_image(state, vm.Recorder(state))
+            self.assertFalse((images / vm.IMAGE_NAME).exists())
+            self.assertEqual(list(images.glob("*.part")), [])
+
+    def test_failed_promotion_removes_the_verified_partial_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            data = b"verified bytes"
+            inner = self._download(vm.sha256_bytes(data), data, [])
+
+            def fake(url, destination, timeout=120):
+                part = inner(url, destination, timeout)
+                if url.endswith(vm.IMAGE_NAME):
+                    # The destination becomes a directory mid-download, so the
+                    # promotion rename fails after verification succeeded.
+                    destination.mkdir()
+                return part
+
+            with mock.patch.object(vm, "download", side_effect=fake):
+                with self.assertRaises(OSError):
+                    vm.fetch_image(state, vm.Recorder(state))
+            self.assertEqual(list(images.glob("*.part")), [])
 
     def test_cached_image_is_verified_without_redownloading(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1198,7 +1295,7 @@ class PlanTests(unittest.TestCase):
                 self.assertEqual(err.getvalue(), "")
                 artifact = json.loads(out.getvalue())
                 if expected == 2:
-                    self.assertEqual(artifact["error"]["kind"], "refused")
+                    self.assertEqual(artifact["error"]["kind"], "usage")
                 else:
                     self.assertTrue(artifact["problems"])
 

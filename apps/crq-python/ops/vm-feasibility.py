@@ -26,6 +26,7 @@ See ``VM-FEASIBILITY.md`` for the recorded evidence and its limits.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -86,6 +87,15 @@ LIMITATIONS = [
     "fixture shape, not generalized into a masking guarantee.",
     "No production host, ceres, signer, credential or CRQ checkout is touched.",
 ]
+
+
+class UsageRefusal(ValueError):
+    """A usage error or refusal: the invocation itself is unacceptable.
+
+    Only this dedicated exception is a usage error (exit 2, doctrine I1).
+    Every other ``ValueError`` -- e.g. ``verify_image`` rejecting a corrupted
+    cached image -- is a thrown runtime error (exit 1).
+    """
 
 
 # ------------------------------------------------------------------ pure
@@ -533,33 +543,56 @@ def tool(name: str, directory: pathlib.Path | None) -> str:
 # ------------------------------------------------------------- lifecycle
 
 
+def discard(part: pathlib.Path | str) -> None:
+    """Best-effort removal of a temporary file; never masks the error in flight."""
+    try:
+        pathlib.Path(part).unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"warning: could not remove {part}: {exc}", file=sys.stderr)
+
+
 def download(url: str, destination: pathlib.Path, timeout: float = 120) -> str:
     """Download to a sibling ``.part`` and fsync before replacing."""
-    part = destination.with_name(destination.name + ".part")
-    with urllib.request.urlopen(url, timeout=timeout) as response, \
-            part.open("wb") as handle:
-        while True:
-            chunk = response.read(1 << 20)
-            if not chunk:
-                break
-            handle.write(chunk)
-        handle.flush()
-        os.fsync(handle.fileno())
+    part = destination.with_name(f"{destination.name}.{uuid.uuid4().hex}.part")
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response, \
+                part.open("wb") as handle:
+            while True:
+                chunk = response.read(1 << 20)
+                if not chunk:
+                    break
+                handle.write(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        discard(part)
+        raise
     return str(part)
 
 
 def fetch_sums(sums_path: pathlib.Path, recorder: Recorder) -> None:
     started = time.time()
     part = download(IMAGE_URL + SUMS_NAME, sums_path)
-    recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + SUMS_NAME],
-                     "rc": 0, "bytes": pathlib.Path(part).stat().st_size,
-                     "seconds": round(time.time() - started, 3)})
-    pathlib.Path(part).replace(sums_path)
+    try:
+        recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + SUMS_NAME],
+                         "rc": 0, "bytes": pathlib.Path(part).stat().st_size,
+                         "seconds": round(time.time() - started, 3)})
+        pathlib.Path(part).replace(sums_path)
+    except BaseException:
+        discard(part)
+        raise
 
 
 def fetch_image(state: pathlib.Path, recorder: Recorder) -> dict:
+    """Fetch under an exclusive lock so manifest and image stay one transaction."""
     images = state / "images"
     images.mkdir(parents=True, exist_ok=True)
+    with (images / ".fetch.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return _fetch_image_locked(images, recorder)
+
+
+def _fetch_image_locked(images: pathlib.Path, recorder: Recorder) -> dict:
     sums_path = images / SUMS_NAME
     image_path = images / IMAGE_NAME
     if image_path.exists():
@@ -583,8 +616,12 @@ def fetch_image(state: pathlib.Path, recorder: Recorder) -> dict:
     expected = sums_digest(text, IMAGE_NAME)
     started = time.time()
     part = download(IMAGE_URL + IMAGE_NAME, image_path, timeout=1800)
-    actual = verify_image(pathlib.Path(part), expected)
-    pathlib.Path(part).replace(image_path)
+    try:
+        actual = verify_image(pathlib.Path(part), expected)
+        pathlib.Path(part).replace(image_path)
+    except BaseException:
+        discard(part)
+        raise
     recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + IMAGE_NAME],
                      "rc": 0, "bytes": image_path.stat().st_size,
                      "seconds": round(time.time() - started, 3)})
@@ -1247,8 +1284,8 @@ def cmd_run(args) -> int:
     source_commit = (getattr(args, "source_commit", None)
                      or os.environ.get("CRQ_VM_SOURCE_COMMIT"))
     if not isinstance(source_commit, str) or not COMMIT_RE.fullmatch(source_commit):
-        raise ValueError("run requires --source-commit with the full git commit "
-                         "whose tree produced the executed scripts")
+        raise UsageRefusal("run requires --source-commit with the full git commit "
+                           "whose tree produced the executed scripts")
     recorder = Recorder(state)
     stamps = {"start": host_stamp()}
     image = fetch_image(state, recorder)
@@ -1392,7 +1429,7 @@ def cmd_verify(args) -> int:
     report_path = pathlib.Path(args.report).resolve()
     report = json.loads(report_path.read_text())
     if not isinstance(report, dict):
-        raise ValueError("report is not a JSON object: " + str(report_path))
+        raise UsageRefusal("report is not a JSON object: " + str(report_path))
     problems = verify_report(report, report_path.parent)
     print(json.dumps({"problems": problems}, indent=2, sort_keys=True))
     return 0 if not problems else 1
@@ -1485,20 +1522,22 @@ def main(argv=None) -> int:
                 "run": cmd_run, "destroy": cmd_destroy, "verify": cmd_verify}
     try:
         return commands[args.command](args)
-    except ValueError as exc:
-        # Refusals and missing arguments (e.g. run without --source-commit)
-        # stay usage errors (exit 2) but still write the one JSON artifact to
-        # stdout; stderr stays empty in machine mode.
+    except UsageRefusal as exc:
+        # Usage errors and refusals (e.g. run without --source-commit, or a
+        # report that is not a JSON object) stay usage errors (exit 2) but
+        # still write the one JSON artifact to stdout; stderr stays empty in
+        # machine mode.
         message = _error_message(exc)
-        print(json.dumps(_error_artifact("refused", args.command, message, 2),
+        print(json.dumps(_error_artifact("usage", args.command, message, 2),
                          indent=2, sort_keys=True))
         if not parser.json_mode:
             print("refused: " + message, file=sys.stderr)
         return 2
-    except (RuntimeError, OSError) as exc:
-        # A RuntimeError from QEMU or a guest phase, or an OSError from a
-        # missing report, a download or the filesystem, is a thrown error
-        # (exit 1), never an argument error.
+    except (ValueError, RuntimeError, OSError) as exc:
+        # A ValueError from runtime integrity (e.g. verify_image rejecting a
+        # corrupted cached image), a RuntimeError from QEMU or a guest phase,
+        # or an OSError from a missing report, a download or the filesystem,
+        # is a thrown error (exit 1), never an argument error.
         message = _error_message(exc)
         print(json.dumps(_error_artifact("thrown", args.command, message, 1),
                          indent=2, sort_keys=True))

@@ -260,8 +260,11 @@ export async function verifyTarget(
 // ---- switch -------------------------------------------------------------
 
 export interface SwitchEffects extends GitEffects, RootCheckEffects, InactiveEffects {
-  /** Run `fn` while holding the tick lock; releases on return or throw. */
-  withTickLock<T>(fn: () => Promise<T>): Promise<T>;
+  /**
+   * Run `fn` while holding the tick lock; releases on return or throw. The
+   * signal aborts when the lock is lost; `fn` must check it before mutating.
+   */
+  withTickLock<T>(fn: (signal?: AbortSignal) => Promise<T>): Promise<T>;
   /** Bytes of the live `<root>/apps/crq-python/config.json`. */
   readConfig(): Promise<Uint8Array>;
   writeConfig(data: Uint8Array): Promise<void>;
@@ -297,10 +300,11 @@ export async function switchCheckout(
   // Validate the destination config before changing anything.
   const destination = await renderAt(effects, overlay, target);
   await inactive(effects);
-  await effects.withTickLock(async () => {
+  await effects.withTickLock(async (signal) => {
     await inactive(effects);
     const current = await renderAt(effects, overlay);
     await driftCheck(current, () => effects.readConfig());
+    signal?.throwIfAborted();
     const changes = splitLines(await gitText(effects, STATUS));
     if (changes.some((line) => line !== ` M ${CONFIG}`))
       throw new ValueError('checkout has changes other than rendered config');
@@ -309,6 +313,7 @@ export async function switchCheckout(
       ['target', target],
       ['tag', tag],
     ]);
+    signal?.throwIfAborted();
     await gitText(effects, ['restore', '--', CONFIG]);
     try {
       if (await gitText(effects, STATUS))
@@ -320,6 +325,7 @@ export async function switchCheckout(
     }
     // Same tick lock spans drift check, checkout, render and audit.
     try {
+      signal?.throwIfAborted();
       await effects.record(destination, 'switch-render', [
         ['previous_sha', previous],
         ['tag', tag],
@@ -398,25 +404,29 @@ export async function prepare(
 ): Promise<void> {
   await rootCheck(effects, root, overlay);
   await inactive(effects);
-  await effects.withTickLock(async () => {
+  await effects.withTickLock(async (signal) => {
     await inactive(effects);
     const sha = await gitText(effects, ['rev-parse', 'HEAD']);
     // Validate against the SHA read under the lock so a concurrent switch
     // cannot make prepare render from a commit the tag does not name.
     await verifyTarget(effects, sha, tag);
     const data = await renderAt(effects, overlay, sha);
+    signal?.throwIfAborted();
     await effects.renderUnitsToTemp(sha, async (paths) => {
       await effects.verifyUnits(paths);
       const shas: [string, JsonValue][] = [];
       for (const path of paths) shas.push([nameOf(path), digest(await effects.readFile(path))]);
       await effects.record(data, 'prepare', [['unit_sha256', new JsonObject(shas)]]);
+      signal?.throwIfAborted();
       await effects.mkdirOutput();
       for (const path of paths)
         await effects.writeOutput(nameOf(path), await effects.readFile(path));
     });
     // Marker first: a crash before the config write leaves the host inert
     // on its previous configuration instead of live without the marker.
+    signal?.throwIfAborted();
     await effects.writeMarker(Buffer.from('Prepared inert; owner approval required to start.\n'));
+    signal?.throwIfAborted();
     await effects.writeConfig(data);
   });
   await effects.daemonReload();

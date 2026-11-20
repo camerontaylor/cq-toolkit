@@ -327,7 +327,7 @@ class BoundedRepairTest(unittest.TestCase):
     def test_service_disabled_or_partial_selector_never_dispatch(self):
         atomic(self.root / 'config.json', self.config)
         with mock.patch.object(service, 'ROOT', self.root), \
-             mock.patch.object(service, 'process_item') as dispatch, mock.patch.object(service, 'drain') as drain:
+             mock.patch.object(service, 'process_item') as dispatch, mock.patch.object(service, 'drain', return_value=None) as drain:
             service.main([])
             for authorization in (None, '', '  ', True):
                 self.config['repair'].update(enabled=True, spend_authorization=authorization)
@@ -342,7 +342,7 @@ class BoundedRepairTest(unittest.TestCase):
     def test_service_without_selector_drains(self):
         self.config['repair'].update(enabled=True, spend_authorization='offline-test-fixture-only')
         atomic(self.root / 'config.json', self.config)
-        with mock.patch.object(service, 'ROOT', self.root), mock.patch.object(service, 'drain') as drain:
+        with mock.patch.object(service, 'ROOT', self.root), mock.patch.object(service, 'drain', return_value=None) as drain:
             service.main([])
         drain.assert_called_once_with(self.config)
 
@@ -865,6 +865,8 @@ class BoundedRepairTest(unittest.TestCase):
         atomic(self.root / 'config.json', self.config)
         self.assertEqual(artifact(['--job', OLD]), 'refused')
         self.assertEqual(artifact(['--recover-job', 'x', '--job', OLD]), 'refused')
+        # Mode validation precedes the dry run: recovery never combines with it.
+        self.assertEqual(artifact(['--recover-job', 'x', '--triage-dry-run']), 'refused')
         # A dry run with no triage state writes nothing itself, so it reports that.
         self.assertEqual(artifact(['--triage-dry-run']), 'no-triage')
 
@@ -875,7 +877,7 @@ class BoundedRepairTest(unittest.TestCase):
         atomic(self.root / 'config.json', self.config)
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(service, 'ROOT', self.root), \
-             mock.patch.object(service, 'drain') as drain, \
+             mock.patch.object(service, 'drain', return_value=None) as drain, \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = service.main(['--job'])
         self.assertEqual(code, 2)

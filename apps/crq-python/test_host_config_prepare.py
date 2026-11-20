@@ -46,19 +46,40 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
 
     def test_prepare_stays_inert_verifies_before_install_and_reloads_without_start(self):
         calls = []
+        verified = []
+        rendered_paths = []
+        real_render = host.render_units
+        def capture_render(*args, **kwargs):
+            paths = real_render(*args, **kwargs)
+            rendered_paths.append([str(p) for p in paths])
+            return paths
         def stopped(argv):
             calls.append(argv)
             if argv[0] == 'systemd-analyze':
+                self.assertEqual(argv[:3], ['systemd-analyze', '--user', 'verify'])
                 self.assertTrue(all(Path(p).is_file() for p in argv[3:]))
                 self.assertFalse((self.base / 'installed').exists())
+                verified.append(argv[3:])
                 return ''
             if argv[:3] == ['systemctl', '--user', 'daemon-reload']:
                 return ''
             return self.stopped(argv)
         self.command('tag', '-a', 'crq-runner/20261016-7', self.before, '-m', 'owner fixture approval')
-        with mock.patch.object(host, 'run', side_effect=stopped):
+        with mock.patch.object(host, 'run', side_effect=stopped), \
+                mock.patch.object(host, 'render_units', side_effect=capture_render):
             host.prepare(self.root, self.overlay, self.raw, self.base / 'installed',
                          'crq-runner/20261016-7')
+        # verification must receive exactly the paths render_units returned,
+        # not the original template paths.
+        self.assertEqual(len(rendered_paths), 1)
+        self.assertEqual(verified, rendered_paths)
+        expected = [path.name for path in host.unit_files(self.root)]
+        # prepare must have verified the rendered units themselves: one
+        # systemd-analyze run carrying every rendered unit path, checked
+        # above while the units output did not yet exist.
+        self.assertTrue(expected)
+        self.assertEqual([sorted(Path(p).name for p in paths) for paths in verified],
+                         [expected])
         self.assertTrue((self.runner / 'state/runner-disabled').is_file())
         self.assertTrue((self.base / 'installed/crq-tick.service').is_file())
         self.assertIn(['systemctl', '--user', 'daemon-reload'], calls)
@@ -134,6 +155,26 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(out, '')
         self.assertNotEqual(err, '')
+
+
+    def test_preview_refuses_a_rendered_child_linked_into_a_checkout(self):
+        # render_units and render_plists follow systemd/ and launchd/ under
+        # --output; a child linked into the deployment checkout must be refused
+        # before any preview byte is written, not followed by the renderer.
+        for child in ('systemd', 'launchd'):
+            with self.subTest(child=child):
+                output = self.base / ('preview-' + child)
+                output.mkdir()
+                (output / child).symlink_to(self.root, target_is_directory=True)
+                # main() reports the refusal (exit 1, narration on stderr) rather
+                # than raising it.
+                code, out, err = self.run_main(
+                    ['--overlay', str(self.overlay_path), 'preview', '--output', str(output)])
+                self.assertEqual(code, 1)
+                self.assertEqual(out, '')
+                self.assertRegex(err, 'outside every Git checkout|outside checkout')
+                self.assertEqual(sorted(p.name for p in output.iterdir()), [child])
+                self.assertFalse((self.base / 'records').exists())
 
     def test_prepare_rejects_worktree_drift_before_installing_units(self):
         self.command('checkout', '-q', '--detach', self.target)
