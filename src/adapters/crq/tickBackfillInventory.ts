@@ -13,7 +13,8 @@
  * merges under two short holds). The tick's queue is the live queue, so the
  * preparation result is final: retire and enqueue events spool in Python's order,
  * the ranked and report artifacts are written, an `inventory` halt is cleared
- * and the queue is saved.
+ * and the queue is saved. A rollout that disappears mid-run aborts before
+ * publication, so the save never outruns the spooled events.
  */
 import type { PreparedInventory } from '../../ops/crq/internal/backfillTransaction.js';
 import { JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
@@ -102,6 +103,16 @@ export function tickBackfillInventory(
           'inventory enqueue',
         );
       }
+      // The event writer spools nothing when the rollout file is gone, so
+      // re-read it before publishing: aborting here (the operator route's
+      // stale-settings refusal under the merge lock) keeps retired and
+      // enqueued jobs from being saved without their spooled events; a
+      // present-but-disabled rollout still spooled, so the save stays
+      // consistent and the writer's behavior is preserved.
+      if ((await readBackfillRollout(stateRoot)) === null)
+        throw new LedgerIntegrityError(
+          'operator rollout removed during inventory; queue not saved',
+        );
       await files.writeRanked(prepared.ranked);
       await files.writeReport(prepared.report);
       current = files.clearHalt(current);
