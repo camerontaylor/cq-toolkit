@@ -18,7 +18,11 @@ import { runStatusWriter } from '../adapters/crq/statusWriter.js';
 import { runBackfillUnit } from '../adapters/crq/backfillSource.js';
 import { pythonJsonText } from '../policy/crq/pythonJson.js';
 import { runReconcileMergedUnit } from '../adapters/crq/reconcileSource.js';
-import { runCapabilityDispatcher } from '../adapters/crq/capabilityDispatcher.js';
+import {
+  type Capability,
+  dispatchedRefusal,
+  runCapabilityDispatcher,
+} from '../adapters/crq/capabilityDispatcher.js';
 import { MAX_REQUEST_BYTES, runQueueCapabilityMain } from '../adapters/crq/queueCapabilityMain.js';
 import { REVIEW_MAX_BYTES } from '../ops/crq/reviewCapability.js';
 import { AUTHOR_MAX_SNAPSHOT_BYTES } from '../policy/crq/authorWire.js';
@@ -52,11 +56,15 @@ const stdio = {
     process.stderr.write(`${message}\n`);
   },
 };
-const serveQueue = (argv: readonly string[]): Promise<number> =>
+const serveQueue = (
+  argv: readonly string[],
+  stderr: (message: string) => void = stdio.stderr,
+): Promise<number> =>
   // The forced-command route: policy and identity come from the environment,
   // the request frame from stdin, and nothing else is accepted.
   runQueueCapabilityMain({
     ...stdio,
+    stderr,
     argv,
     readStdin: readFrame,
     // The deadline must end the process, not just the race: a pending stdin
@@ -64,24 +72,37 @@ const serveQueue = (argv: readonly string[]): Promise<number> =>
     terminate: () => process.exit(2),
     root,
   });
-const serveReview = (argv: readonly string[]): Promise<number> =>
+const serveReview = (
+  argv: readonly string[],
+  stderr: (message: string) => void = stdio.stderr,
+): Promise<number> =>
   runReviewCapabilityMain({
     ...stdio,
+    stderr,
     argv,
     readStdin: () => readFrame(REVIEW_MAX_BYTES + 1),
     terminate: (code = 2) => process.exit(code),
     root,
     deadlineMs: REVIEW_DEADLINE_MS,
   });
-const serveAuthor = (argv: readonly string[]): Promise<number> =>
+const serveAuthor = (
+  argv: readonly string[],
+  stderr: (message: string) => void = stdio.stderr,
+): Promise<number> =>
   runAuthorCapabilityMain({
     ...stdio,
+    stderr,
     argv,
     readStdin: () => readFrame(AUTHOR_MAX_SNAPSHOT_BYTES + 1),
     terminate: () => process.exit(2),
     root,
     deadlineMs: AUTHOR_DEADLINE_MS,
   });
+
+/** Under `dispatch` every refusal line is the one the Python dispatcher prints. */
+const rewritten = (capability: Capability) => (): void => {
+  stdio.stderr(dispatchedRefusal(capability));
+};
 
 if (command === 'queue-capability') {
   process.exitCode = await serveQueue(rest);
@@ -97,9 +118,9 @@ if (command === 'queue-capability') {
     env: stdio.env,
     stderr: stdio.stderr,
     handlers: {
-      'author-v1': () => serveAuthor([]),
-      'queue-v1': () => serveQueue([]),
-      'review-v1': () => serveReview([]),
+      'author-v1': () => serveAuthor([], rewritten('author-v1')),
+      'queue-v1': () => serveQueue([], rewritten('queue-v1')),
+      'review-v1': () => serveReview([], rewritten('review-v1')),
     },
   });
 } else {

@@ -2,7 +2,9 @@
 // and `test_dispatcher_real_permission_failure_remains_nonzero`.
 import { describe, expect, test } from 'vitest';
 import {
+  AUTHOR_REFUSAL,
   CAPABILITIES,
+  dispatchedRefusal,
   DISPATCH_REFUSAL,
   runCapabilityDispatcher,
   selectCapability,
@@ -82,5 +84,12 @@ describe('capability dispatcher', () => {
     expect(CAPABILITIES.map(selectCapability)).toEqual([...CAPABILITIES]);
     expect(selectCapability('toString')).toBeUndefined();
     expect(selectCapability(undefined)).toBeUndefined();
+  });
+
+  test('refusal lines match the Python dispatcher per capability', () => {
+    expect(dispatchedRefusal('queue-v1')).toBe('queue capability refused; no permission');
+    expect(dispatchedRefusal('review-v1')).toBe('queue capability refused; no permission');
+    expect(dispatchedRefusal('author-v1')).toBe(AUTHOR_REFUSAL);
+    expect(AUTHOR_REFUSAL).toBe('author-transport: request refused; no permission');
   });
 });
