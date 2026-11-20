@@ -38,6 +38,53 @@ afterEach(() => {
 const init = makeAnalyzeInit();
 
 describe('analyze.init detection', () => {
+  async function tscArgs(files: Record<string, string>): Promise<string[] | undefined> {
+    const result = await init({ dir: project(files) });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return undefined;
+    expect(result.value.config.checks).toHaveLength(1);
+    return result.value.config.checks[0]?.command.args;
+  }
+  const BUILD = ['--build', '--pretty', 'false'];
+
+  test('a solution-style tsconfig.json → one `tsc --build` check', async () => {
+    expect(
+      await tscArgs({
+        'tsconfig.json':
+          '{ /* solution */ "files": [], "references": [{ "path": "./app" }, { "path": "./lib" }] }',
+      }),
+    ).toEqual(BUILD);
+  });
+
+  test('a solution root that inherits `include` via extends still builds the root', async () => {
+    expect(
+      await tscArgs({
+        'tsconfig.base.json': '{ "include": ["src/**/*.ts"] }',
+        'tsconfig.json':
+          '{ "extends": "./tsconfig.base.json", "files": [], "references": [{ "path": "./app" }] }',
+      }),
+    ).toEqual(BUILD);
+  });
+
+  test.each([
+    ['trailing comma', '{ "files": [], "references": [{ "path": "./app" },] }'],
+    ['inline // comment', '{ "files": [], // none\n "references": [{ "path": "./app" }] }'],
+    ['UTF-8 BOM', '\uFEFF{ "files": [], "references": [{ "path": "./app" }] }'],
+    ['empty include', '{ "files": [], "include": [], "references": [{ "path": "./app" }] }'],
+  ])('a JSONC solution root (%s) is still detected', async (_name, text) => {
+    expect(await tscArgs({ 'tsconfig.json': text })).toEqual(BUILD);
+  });
+
+  test('a root with files or no references stays a plain --noEmit check', async () => {
+    const plain = ['--noEmit', '--pretty', 'false'];
+    expect(
+      await tscArgs({
+        'tsconfig.json': '{ "files": ["a.ts"], "references": [{ "path": "./app" }] }',
+      }),
+    ).toEqual(plain);
+    expect(await tscArgs({ 'tsconfig.json': '{ "files": [], "references": [] }' })).toEqual(plain);
+  });
+
   test('tsconfig.json → one tsc-lines check with the bare tool name; the file parses back', async () => {
     const dir = project({ 'tsconfig.json': '{}' });
     const result = await init({ dir });

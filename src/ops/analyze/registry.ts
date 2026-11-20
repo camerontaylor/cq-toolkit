@@ -605,6 +605,7 @@ export const registry: OpRegistryEntry[] = [
           m.makeAnalyzeFix({
             run: runner.subprocessRunCheck,
             attended: a.makeAttendedApprovalAuthority,
+            ...(wiring?.env !== undefined ? { env: wiring.env } : {}),
             drivers: createDriverFactory({
               ...(wiring?.onDeprecatedAlias !== undefined
                 ? { onDeprecatedAlias: wiring.onDeprecatedAlias }

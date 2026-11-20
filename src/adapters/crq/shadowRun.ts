@@ -8,8 +8,16 @@
  * never locked and never written. The pre/post `queue.json` digest is the abort signal.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { JsonValue } from '../../policy/crq/jsonValue.js';
 import { JsonObject, parseJsonValue } from '../../policy/crq/jsonValue.js';
 import { ledgerValueEqual } from '../../policy/crq/ledger.js';
@@ -42,11 +50,55 @@ export interface FrozenInput {
   readonly liveDigest: string | null;
 }
 
+/** Absolute path with symlinks resolved, including the part that does not exist yet. */
+function resolvedPath(path: string): string {
+  const absolute = resolve(path);
+  let current = absolute;
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) return absolute;
+    current = parent;
+  }
+  return resolve(realpathSync.native(current), relative(current, absolute));
+}
+
+/** True when `target` is `root` itself or lies beneath it. */
+function isWithin(root: string, target: string): boolean {
+  const rel = relative(root, target);
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/**
+ * Refuse scratch destinations that overlap the live root, comparing resolved paths so symlinked
+ * or `.`/`..` aliases cannot slip through. `writeFileSync` replaces existing contents, so writing
+ * into a directory that aliases the live root would clobber live state; the live root is read-only.
+ */
+function rejectLiveOverlap(liveRoot: string, destinations: readonly string[]): void {
+  const live = resolvedPath(liveRoot);
+  for (const destination of destinations) {
+    const target = resolvedPath(destination);
+    if (isWithin(live, target) || isWithin(target, live)) {
+      throw new Error(
+        `scratch destination ${target} overlaps the live root ${live}; refusing to write`,
+      );
+    }
+  }
+}
+
+function lstatOrNull(path: string): ReturnType<typeof lstatSync> | null {
+  try {
+    return lstatSync(path);
+  } catch {
+    return null;
+  }
+}
+
 /** Copy the live state root into `<scratch>/a` and `<scratch>/b`; the source is only read. */
 export function freezeStateRoot(liveRoot: string, scratch: string): FrozenInput {
-  const liveDigest = liveQueueDigest(liveRoot);
   const a = join(scratch, 'a');
   const b = join(scratch, 'b');
+  rejectLiveOverlap(liveRoot, [a, b]);
+  const liveDigest = liveQueueDigest(liveRoot);
   // Capture each live file once, so both copies come from one consistent snapshot.
   const captured = SHADOW_FILES.map((name) => {
     const source = join(liveRoot, name);
@@ -54,15 +106,21 @@ export function freezeStateRoot(liveRoot: string, scratch: string): FrozenInput 
   });
   for (const dir of [a, b]) {
     mkdirSync(dir, { recursive: true });
+    // Refuse symlinks at every destination before the first write, so a link planted in a reused
+    // scratch directory cannot redirect a copy onto live state.
+    for (const { name } of captured) {
+      const target = join(dir, name);
+      if (lstatOrNull(target)?.isSymbolicLink()) {
+        throw new Error(`scratch destination ${target} is a symbolic link; refusing to write`);
+      }
+    }
     for (const { name, bytes } of captured) {
       const target = join(dir, name);
       // Preserve absence: a retained destination file must not survive when the live one is absent,
-      // or the two copies would start from different inputs.
-      if (bytes === null) {
-        if (existsSync(target)) unlinkSync(target);
-        continue;
-      }
-      writeFileSync(target, bytes);
+      // or the two copies would start from different inputs. Replace stale files, then create
+      // exclusively ('wx') so the write can never follow a link that appeared meanwhile.
+      if (existsSync(target)) unlinkSync(target);
+      if (bytes !== null) writeFileSync(target, bytes, { flag: 'wx' });
     }
   }
   return { a, b, liveDigest };

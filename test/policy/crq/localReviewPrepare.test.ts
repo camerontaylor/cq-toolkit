@@ -58,6 +58,31 @@ describe('local review preparation', () => {
     const plan = await prepareLocalReview(queue, repeated, 'a/b', false, true, effects());
     expect(plan.plan?.get('base')).toBe('base');
   });
+  it('fails closed when the active run cannot be resolved, but skips unresolvable cycles', async () => {
+    const repeated = doc(
+      '{"identity_inputs":{"repo":"a/b","base_commit":"base","head_commit":"head","scope":"full-diff","projection":"full-diff","config_digest":"digest","profile":{"adapter":"coderabbit-cli","revision":"v1"}},"profile":{"adapter":"coderabbit-cli","revision":"v1","flags":[]},"generation":1,"repeat_requested":true}',
+    );
+    const live = doc(
+      `{"items":[{"kind":"open","repo":"a/b","cycles":[${record}],"run":{"run_id":"old"}}]}`,
+    );
+    let calls = 0;
+    const flaky: LocalReviewPrepareEffects = {
+      ...effects(),
+      resolveFacts: async () => {
+        calls += 1;
+        if (calls > 1) throw new Error('resolver down');
+        return identity;
+      },
+    };
+    await expect(prepareLocalReview(live, repeated, 'a/b', false, false, flaky)).rejects.toThrow(
+      'resolver down',
+    );
+    // A completed-cycle candidate that fails to resolve is skipped, not fatal.
+    const completedOnly = doc(`{"items":[{"kind":"open","repo":"a/b","cycles":[${record}]}]}`);
+    calls = 0;
+    const skipped = await prepareLocalReview(completedOnly, item, 'a/b', false, false, flaky);
+    expect(skipped.plan?.get('base')).toBe('base');
+  });
   it('skips empty historical profiles and empty live runs', async () => {
     const queue = doc(
       `{"items":[{"kind":"open","repo":"a/b","cycles":[${record.replace('"profile":{"adapter":"coderabbit-cli","revision":"v1","flags":[]}', '"profile":{}')}],"run":{}}]}`,

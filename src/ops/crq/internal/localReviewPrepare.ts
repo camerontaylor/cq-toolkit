@@ -59,23 +59,27 @@ export async function prepareLocalReview(
   const repeat = item.has('repeat_requested')
     ? pyTruthy(item.get('repeat_requested'))
     : generation instanceof JsonNumber && generation.integer !== null && generation.integer > 1n;
-  async function matches(record: JsonObject, pr: JsonObject): Promise<boolean> {
+  async function matches(record: JsonObject, pr: JsonObject, failClosed = false): Promise<boolean> {
     if (
       record.get('range_policy') !== 'full-range-once-v1' ||
       !(record.get('profile') instanceof JsonObject) ||
       !pyTruthy(record.get('profile'))
     )
       return false;
-    const resolved = await effects.resolveFacts(
-      text(pr.get('repo') ?? runnerRepo),
-      text(record.get('base')),
-      text(record.get('head')),
-      obj(record.get('profile')),
-    );
     try {
+      const resolved = await effects.resolveFacts(
+        text(pr.get('repo') ?? runnerRepo),
+        text(record.get('base')),
+        text(record.get('head')),
+        obj(record.get('profile')),
+      );
       effects.validateIdentity(resolved);
       return equivalentIdentityInputs(resolved, wanted);
-    } catch {
+    } catch (error) {
+      // A completed-cycle candidate that cannot resolve is skipped so one
+      // unusable candidate does not block the rest. The active-run check fails
+      // closed: an unresolvable active run must not let a duplicate plan out.
+      if (failClosed) throw error;
       return false;
     }
   }
@@ -119,7 +123,11 @@ export async function prepareLocalReview(
     const run = completedOnly ? null : value.get('run');
     if (run instanceof JsonObject && pyTruthy(run)) {
       const meta = await effects.readRunMeta(text(run.get('run_id')));
-      if (meta.get('base') === base && meta.get('head') === head && (await matches(meta, value)))
+      if (
+        meta.get('base') === base &&
+        meta.get('head') === head &&
+        (await matches(meta, value, true))
+      )
         throw new LocalReviewNotReady('equivalent-pr-review');
     }
   }

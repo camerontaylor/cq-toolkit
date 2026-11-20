@@ -23,7 +23,7 @@
 // reporting ok while the lock may be racing a thief is never an option.
 import { mkdirSync, statSync } from 'node:fs';
 import type { Stats } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { lock } from 'proper-lockfile';
 
@@ -105,6 +105,13 @@ export interface GitMutex {
 }
 
 /**
+ * The stale window each resolved lockPath was first built with. One window
+ * per lock file: a peer with a SHORTER window would judge a live holder
+ * (refreshed against the longer one) stale and steal its lock.
+ */
+const staleMsByLockPath = new Map<string, number>();
+
+/**
  * Build a git-mutation mutex over one lock file. Per acquire: mkdir -p of
  * the lock's parent (a first run's missing `.cq/` must not burn retries on
  * ENOENT — the ledger store's lesson), an mtime probe of the artifact for
@@ -126,6 +133,14 @@ export function makeGitMutex(config: GitMutexConfig): GitMutex {
       `git-mutex: staleMs (${String(staleMs)}) must be an integer ≥ ${String(MIN_STALE_MS)} — proper-lockfile clamps the stale window to that floor, and a config meaning less than it says is a misconfiguration`,
     );
   }
+  const resolvedLockPath = resolve(config.lockPath);
+  const knownStaleMs = staleMsByLockPath.get(resolvedLockPath);
+  if (knownStaleMs !== undefined && knownStaleMs !== staleMs) {
+    throw new RangeError(
+      `git-mutex: lockPath '${config.lockPath}' already has staleMs ${String(knownStaleMs)}; a second config with staleMs ${String(staleMs)} would let one caller steal the other's live lock — use one staleMs per lockPath`,
+    );
+  }
+  staleMsByLockPath.set(resolvedLockPath, staleMs);
   const configuredRetries = config.retries ?? DEFAULT_GIT_MUTEX_RETRIES;
   if (!Number.isInteger(configuredRetries) || configuredRetries < 0) {
     throw new RangeError(

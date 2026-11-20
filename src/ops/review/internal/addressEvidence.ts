@@ -228,6 +228,10 @@ export async function assertAddressTerminalRoot(token: object, root: string): Pr
   assertBinaryOutside(canonical, session.bin);
   if (!sameFile(await lstat(session.bin), session.binary))
     throw new Error('terminal Git binary changed');
+  // The same inode can lose its execute bit; terminal cleanup spawns this path.
+  await access(session.bin, constants.X_OK).catch(() => {
+    throw new Error('terminal Git binary not executable');
+  });
 }
 
 async function terminalSession(
@@ -257,6 +261,7 @@ async function terminalSession(
           // the checkout whose path merely begins with '..' (`..tools/git`) is
           // still checkout-controlled and must not become the trusted binary.
           const relation = relative(canonical, candidate);
+          // `relative` returns an absolute path across Windows drives: that is outside too.
           if (relation !== '..' && !relation.startsWith(`..${sep}`) && !isAbsolute(relation))
             continue;
           await access(candidate, constants.X_OK);

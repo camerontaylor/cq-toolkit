@@ -338,11 +338,17 @@ export function makeAgenticRemediation(
     // nothing and counts as unknown), folded through the same ledger the
     // governed runs use, so the counts and sums cannot drift from the house
     // semantics: exactly one known-or-unknown usage, priced-or-unpriced cost.
+    // Provenance gates the MEASUREMENT only (seam v3): a result that did not
+    // declare `'measured'` — an `'unmeasured'` placeholder, or a legacy/custom
+    // driver with no declaration at all — contributes NO usage, so the fold
+    // counts it unknown instead of trusting a number the driver never claimed
+    // to have observed. Cost normalizes independently: it is engine-derived,
+    // so an unpriced/absent usage never suppresses a settled price.
     const ledger = createKnownUsageLedger();
     ledger.record(
       'analyze.agenticRemediation',
       normalizeUsageObservation({
-        usage: result.usage,
+        ...(result.usageProvenance === 'measured' ? { usage: result.usage } : {}),
         ...(result.costUSD !== undefined ? { costUSD: result.costUSD } : {}),
       }),
     );

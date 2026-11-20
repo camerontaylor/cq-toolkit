@@ -93,7 +93,10 @@ function equivalent(cycle: JsonValue, base: string, head: string): boolean {
     run.length > 0
   );
 }
-function newestHead(cycles: readonly JsonValue[]): string | null {
+/** Newest captured cycle with both its base and head, so callers can check the base. */
+function newestCycle(
+  cycles: readonly JsonValue[],
+): { readonly base: JsonValue | undefined; readonly head: string } | null {
   const records = cycles.filter(
     (c): c is JsonObject => c instanceof JsonObject && typeof c.get('completed_at') === 'string',
   );
@@ -103,7 +106,7 @@ function newestHead(cycles: readonly JsonValue[]): string | null {
   const last = records[0];
   if (!last) return null;
   const head = last.get('pr_head') || last.get('head');
-  return typeof head === 'string' ? head : null;
+  return typeof head === 'string' ? { base: last.get('base'), head } : null;
 }
 /** Returns replacement queue, including association updates; never dispatches. */
 export async function discoverOpenPrs(
@@ -197,10 +200,14 @@ export async function discoverOpenPrs(
         }
         const evidence = mine.flatMap((item) => list(item.get('cycles')));
         if (repo.primary) {
-          const previous = newestHead(evidence);
-          if (previous && previous !== pr.head) {
+          // Repair proof suppresses only the delta since the previous head. That is
+          // sound only while the captured range used today's pin as its base: a
+          // retarget to an older base adds commits the repair never covered, and
+          // those must reach the equivalence check below instead of being skipped.
+          const previous = newestCycle(evidence);
+          if (previous && previous.base === pin && previous.head !== pr.head) {
             try {
-              if (await effects.ownRange(queue, previous, pr.head)) continue;
+              if (await effects.ownRange(queue, previous.head, pr.head)) continue;
             } catch {
               /* without proof review remains owed */
             }

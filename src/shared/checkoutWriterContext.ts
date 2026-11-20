@@ -300,11 +300,15 @@ export class CheckoutWriterContext {
     this.mutated = true;
     return [...fds];
   }
-  track(child: ChildProcess): void {
+  track(child: ChildProcess, drained?: Promise<void>): void {
     this.assertLive();
-    const close = new Promise<void>((done) => child.once('close', () => done()));
+    // A spawner whose lifecycle destroys the child's pipes itself (a forced
+    // close that proves nothing about descendants still holding them) supplies
+    // its own reconciliation: the child counts as drained only when that
+    // settles, never merely because the child emitted `close`.
+    const close = drained ?? new Promise<void>((done) => child.once('close', () => done()));
     this.hooks?.track(close);
-    this.parent?.track(child);
+    this.parent?.track(child, drained);
     this.#children.add(close);
     void close.then(
       () => this.#children.delete(close),
@@ -329,8 +333,8 @@ export function checkoutWriterStdio<
 >(base: [A, B, C]): [A, B, C, ...number[]] {
   return [...base, ...(storage.getStore()?.snapshot() ?? [])];
 }
-export function trackCheckoutWriter(child: ChildProcess): void {
-  storage.getStore()?.track(child);
+export function trackCheckoutWriter(child: ChildProcess, drained?: Promise<void>): void {
+  storage.getStore()?.track(child, drained);
 }
 
 /** Called only by terminalGit after its private terminal authority validation. */

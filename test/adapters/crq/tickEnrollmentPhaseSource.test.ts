@@ -166,7 +166,7 @@ describe('tick enrollment phase source', () => {
         kind: 'open',
         pr: 7,
         state: 'done',
-        cycles: [{ completed_at: '2026-01-01T00:00:00Z', head: old, run_id: 'r', base: old }],
+        cycles: [{ completed_at: '2026-01-01T00:00:00Z', head: old, run_id: 'r', base: BASE }],
       },
     ];
     const owned = await effects.primary(q({ repair_own_commits: [HEAD], items }), false);

@@ -44,10 +44,45 @@ class TimedDispatcher extends Dispatcher {
     handler: Dispatcher.DispatchHandler,
   ): boolean {
     return this.delegate.dispatch(
-      { ...options, headersTimeout: this.timeoutMs, bodyTimeout: this.timeoutMs },
+      {
+        ...options,
+        headersTimeout: this.timeoutMs,
+        bodyTimeout: this.timeoutMs,
+      },
       handler,
     );
   }
+}
+
+/**
+ * Buffer a native Request body, honoring `signal` while the stream is open:
+ * on abort the reader is cancelled and the wait rejects with the signal's
+ * reason, so an open body stream cannot pin the call past a caller abort.
+ */
+async function bufferBody(request: Request, signal: AbortSignal | null): Promise<Buffer> {
+  // Fetch rejects a Request whose body was already read (even partly) or is locked when no
+  // `init.body` replaces it; a fresh reader would otherwise send only the remaining bytes.
+  if (request.bodyUsed || (request.body as ReadableStream<Uint8Array>).locked) {
+    throw new TypeError('Cannot send a Request whose body has already been used.');
+  }
+  signal?.throwIfAborted();
+  const reader = (request.body as ReadableStream<Uint8Array>).getReader();
+  const onAbort = (): void => {
+    void reader.cancel(signal?.reason).catch(() => undefined);
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  const chunks: Uint8Array[] = [];
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (signal?.aborted) throw signal.reason;
+      if (done) break;
+      chunks.push(value);
+    }
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
+  return Buffer.concat(chunks);
 }
 
 /** Apply per-request socket timeouts while preserving the supplied or process-global transport. */
@@ -56,14 +91,46 @@ export function createStepFetch(
   marginMs: number = STEP_FETCH_MARGIN_MS,
   transport?: Dispatcher,
 ): typeof globalThis.fetch {
-  return (input, init) => {
+  return async (input, init) => {
     const dispatcher = new TimedDispatcher(
       transport ?? getGlobalDispatcher(),
       stepTimeoutMs + marginMs,
     );
-    return undiciFetch(input as Parameters<typeof undiciFetch>[0], {
-      ...(init as Parameters<typeof undiciFetch>[1]),
+    // A native `Request` is not undici's own class, so undici's RequestInfo
+    // converter would stringify it ("[object Request]"). Unpack it into a URL
+    // plus init; an explicit `init` still wins, as it does for native fetch.
+    const target: string | URL =
+      typeof Request !== 'undefined' && input instanceof Request
+        ? input.url
+        : (input as string | URL);
+    const isRequest = typeof Request !== 'undefined' && input instanceof Request;
+    const initOpts = init as { signal?: AbortSignal | null; body?: unknown } | undefined;
+    // `signal: null` means "no signal" in fetch; only `undefined` falls back to the request's.
+    const bufferSignal =
+      initOpts?.signal !== undefined ? initOpts.signal : isRequest ? input.signal : null;
+    // Native fetch prefers `init.body`, so the request body is never read then.
+    const needsBodyBuffer = isRequest && input.body !== null && initOpts?.body == null;
+    const fromRequest = isRequest
+      ? {
+          method: input.method,
+          headers: input.headers,
+          signal: input.signal,
+          redirect: input.redirect,
+          ...(needsBodyBuffer ? { body: await bufferBody(input, bufferSignal) } : {}),
+        }
+      : {};
+    // Fetch treats an own `undefined` init member as absent, so `{ signal: undefined }` keeps
+    // the Request's signal (likewise method, headers, redirect). A nullish `init.body` also
+    // means "not set", so it never overwrites the buffered Request body. `signal: null` stays.
+    const overrides = Object.fromEntries(
+      Object.entries(init ?? {}).filter(
+        ([key, value]) => value !== undefined && !(key === 'body' && value === null),
+      ),
+    );
+    return undiciFetch(target, {
+      ...fromRequest,
+      ...overrides,
       dispatcher,
-    }) as unknown as Promise<Response>;
+    } as unknown as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>;
   };
 }

@@ -18,11 +18,12 @@ import { QUEUE_SELECTORS, QueueRefused, refuseQueue, type QueueSelector } from '
 import {
   isJsonRecord,
   pythonValueEqual,
+  recordEntries,
   recordGet,
   recordHas,
   type JsonRecordLike,
 } from './queueDoc.js';
-import { normalizeInterval } from './reconcileCheckpoint.js';
+import { normalizeInterval, ReconcileRefused } from './reconcileCheckpoint.js';
 
 /** `queue_transport.MAX_BYTES`: one request or response frame, including the newline. */
 export const QUEUE_WIRE_BYTES = 8192;
@@ -204,6 +205,15 @@ function selectorOf(value: unknown): QueueSelector {
   return value as QueueSelector;
 }
 
+/**
+ * Python stores the client's binding dict as sent, so a stored binding keeps the
+ * frame's key order; rebuild the validated fields in that order.
+ */
+function inWireOrder<T extends object>(wire: JsonRecordLike, fields: T): T {
+  const source = fields as Record<string, unknown>;
+  return Object.fromEntries(recordEntries(wire).map(([key]) => [key, source[key]])) as T;
+}
+
 /** `queue_transport.binding`: an exact immutable request binding. */
 export function decodeBinding(value: unknown): QueueBinding {
   if (!isJsonRecord(value)) refuseQueue('invalid binding');
@@ -233,14 +243,14 @@ export function decodeBinding(value: unknown): QueueBinding {
     ) {
       refuseQueue('invalid producer/head/target');
     }
-    return { kind, repo, producer, head, target, targetSelector };
+    return inWireOrder(value, { kind, repo, producer, head, target, targetSelector });
   }
   const pr = recordGet(value, 'pr');
   const mergeSha = recordGet(value, 'mergeSha');
   if (!isInt(pr) || intValue(pr) <= 0 || typeof mergeSha !== 'string' || !SHA.test(mergeSha)) {
     refuseQueue('invalid merged source');
   }
-  return { kind, repo, pr: intValue(pr), mergeSha, targetSelector };
+  return inWireOrder(value, { kind, repo, pr: intValue(pr), mergeSha, targetSelector });
 }
 
 /** `queue_transport._health_binding`: a repo/selector pair and nothing else. */
@@ -271,7 +281,15 @@ export function decodeInventoryBinding(value: unknown): QueueInventoryBinding {
   }
   const repo = recordGet(value, 'repo') as string;
   const targetSelector = selectorOf(recordGet(value, 'targetSelector'));
-  const interval = normalizeInterval(recordGet(value, 'after'), recordGet(value, 'before'));
+  // One refusal type across the wire layer: an empty or inverted interval is a
+  // wire refusal, not a ReconcileRefused escaping to callers that catch QueueRefused.
+  let interval: ReturnType<typeof normalizeInterval>;
+  try {
+    interval = normalizeInterval(recordGet(value, 'after'), recordGet(value, 'before'));
+  } catch (error) {
+    if (error instanceof ReconcileRefused) refuseQueue(error.message);
+    throw error;
+  }
   return { repo, targetSelector, after: interval.after, before: interval.before };
 }
 

@@ -97,6 +97,35 @@ export interface Participant {
   opaqueDispatched: boolean;
 }
 
+/**
+ * Re-checks that a participant's report still resolves through the directory it
+ * was bound to. Returns the canonical target and the directory identity read
+ * by this check, or undefined when the journal directory vanished (ENOENT).
+ */
+async function validateBoundReportDirectory(
+  participant: Participant,
+): Promise<{ target: string; identity: Identity } | undefined> {
+  const report = participant.report;
+  if (!report) return undefined;
+  let parent: string;
+  try {
+    parent = await realpath(dirname(report.reportPath));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return undefined;
+  }
+  const target = resolve(parent, basename(report.reportPath));
+  const ancestor = participant.reportAncestor;
+  if (
+    !ancestor ||
+    !same(await lstat(ancestor.path), ancestor.identity) ||
+    (await realpath(ancestor.path)) !== ancestor.path ||
+    target !== participant.reportTarget
+  )
+    throw new Error('address terminal: report target identity changed');
+  return { target, identity: await lstat(dirname(target)) };
+}
+
 /** A fresh context mints its own token; callers cannot install or replace global capabilities. */
 function createAddressRunContext(owner: AddressRunAuthority, internals: TerminalInternals) {
   const token = Object.freeze({});
@@ -284,6 +313,19 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
       const result = await action();
       if (this.stopping) await this.arrive(participant);
       return result;
+    } catch (error) {
+      // A rejected action skips arrive(), yet a deferred (cancelled) attempt it
+      // holds is never released: start terminal cleanup before the participant
+      // closes so that attempt is still settled. The rejection itself wins; a
+      // cleanup failure is recorded as the terminal failure by runTerminal.
+      if (this.stopping && participant.attempts.some((attempt) => attempt.cancelled)) {
+        try {
+          await this.arrive(participant);
+        } catch {
+          /* recorded in terminalFailure */
+        }
+      }
+      throw error;
     } finally {
       participant.arrived = true;
       participant.closed = true;
@@ -430,40 +472,35 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
       const targets = new Set<string>();
       for (const participant of open)
         if (participant.report) {
-          let parent: string;
-          try {
-            parent = await realpath(dirname(participant.report.reportPath));
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-            // The journal directory vanished after binding (ordinary parent
-            // cancellation timing). End the attempt without a report rather
-            // than failing with ENOENT and quarantining the owner.
-            continue;
-          }
-          const target = resolve(parent, basename(participant.report.reportPath));
-          const ancestor = participant.reportAncestor;
-          if (
-            !ancestor ||
-            !same(await lstat(ancestor.path), ancestor.identity) ||
-            (await realpath(ancestor.path)) !== ancestor.path ||
-            target !== participant.reportTarget
-          )
-            throw new Error('address terminal: report target identity changed');
-          if (targets.has(target)) throw new Error('address terminal: canonical report alias');
-          participant.reportDirectory = await lstat(dirname(target));
-          targets.add(target);
+          const directory = await validateBoundReportDirectory(participant);
+          // The journal directory vanished after binding (ordinary parent
+          // cancellation timing). End the attempt without a report rather
+          // than failing with ENOENT and quarantining the owner.
+          if (!directory) continue;
+          if (targets.has(directory.target))
+            throw new Error('address terminal: canonical report alias');
+          participant.reportDirectory = directory.identity;
+          targets.add(directory.target);
         }
-      const attempts = open.flatMap((entry) =>
+      // Cancelled attempts are never released, so a participant closed without
+      // arriving (a rejected action that skipped arrive()) still holds one.
+      const attempts = [...this.participants].flatMap((entry) =>
         entry.attempts.filter((attempt) => attempt.cancelled),
       );
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const work = (async () => {
+          let persistFailure: { error: unknown } | undefined;
+          let settled = false;
           try {
             await settleAddressTerminalEvidence(terminalToken(this), attempts);
+            settled = true;
           } finally {
             // Real local ref effects survive a later restore/report failure.
-            for (const participant of open)
+            // Every participant, closed or open: a closed participant's cancelled
+            // attempt can hold a retained reference too.
+            const gained = new Set<Participant>();
+            for (const participant of this.participants)
               for (const attempt of participant.attempts) {
                 if (
                   attempt.retained &&
@@ -471,12 +508,44 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
                   !participant.report.failed.includes(attempt.retained)
                 ) {
                   participant.report.failed.push(attempt.retained);
+                  gained.add(participant);
                   const row = participant.report.attempts.findLast(
                     (row) => row.finding === attempt.finding && row.invocation === 'edit',
                   );
                   if (row) row.failedAttempt = attempt.retained;
                 }
               }
+            // Make a reference operator-visible now, not only in memory, when
+            // no caller receives the report: a closed participant has no later
+            // write, and after a failed settlement every open participant's
+            // action rejects with the terminal error. When settlement succeeds,
+            // open participants get the full terminal report below.
+            for (const participant of gained) {
+              if (!participant.report || !participant.reportTarget) continue;
+              // An open participant is written once, by the open pass below,
+              // when settlement succeeds. When settlement fails there is no open
+              // pass and every open participant's action rejects with the
+              // terminal error (arrive() throws it), so its caller never
+              // receives the report: write it now.
+              if (!participant.closed && settled) continue;
+              try {
+                // A closed participant was not re-validated above: apply the
+                // same bound-directory checks and use the identity they read.
+                let directory = participant.reportDirectory;
+                if (!directory) {
+                  directory = (await validateBoundReportDirectory(participant))?.identity;
+                  if (!directory) continue;
+                }
+                await persistAddressTerminalReport(
+                  terminalToken(this),
+                  participant.reportTarget,
+                  participant.report,
+                  directory,
+                );
+              } catch (error) {
+                persistFailure ??= { error };
+              }
+            }
           }
           for (const participant of open)
             if (participant.report) {
@@ -495,13 +564,21 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
               report.fixesPerRun = new Set(
                 report.fixes.flatMap((fix) => (fix.commit ? [fix.commit] : [])),
               ).size;
-              await persistAddressTerminalReport(
-                terminalToken(this),
-                participant.reportTarget!,
-                report,
-                participant.reportDirectory!,
-              );
+              try {
+                await persistAddressTerminalReport(
+                  terminalToken(this),
+                  participant.reportTarget!,
+                  report,
+                  participant.reportDirectory!,
+                );
+              } catch (error) {
+                persistFailure ??= { error };
+              }
             }
+          // A persistence failure never masks a settlement failure (which already
+          // propagated); after a successful settlement it is surfaced here, once
+          // the open participants' reports have been written.
+          if (persistFailure) throw persistFailure.error;
           if (this.terminalProcesses.size)
             throw new Error('address terminal: subprocess close unobserved');
         })();

@@ -4,6 +4,7 @@ import contextlib
 import datetime as dt
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -400,15 +401,21 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
         pr = self.pr()
         info = dict(state="OPEN", isDraft=False, headRefOid=self.head,
                     baseRefName="main", headRefName="feature")
+        # The real crq.git calls below inherit this process env: strip caller
+        # GIT_* overrides exactly like the fixture helper so CLONE stays the
+        # repository Git opens while the production wrapper stays under test.
+        ambient = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         for pr_first in (False, True):
             self.q["items"] = [pr, self.item] if pr_first else [self.item, pr]
-            with mock.patch.multiple(crq, REPOS=[], CLONE=self.repo, STATE=self.state, RUNS=self.runs), \
+            with mock.patch.dict(os.environ, ambient, clear=True), \
+                 mock.patch.multiple(crq, REPOS=[], CLONE=self.repo, STATE=self.state, RUNS=self.runs), \
                  mock.patch.object(crq, "ensure_commit", return_value=True):
                 for planner in (crq.plan_open, crq.plan_delta):
                     with self.assertRaisesRegex(crq.NotReady, "equivalent-local-review"):
                         planner(pr, info, False, self.q)
         self.finish()
-        with mock.patch.multiple(crq, REPOS=[], CLONE=self.repo, STATE=self.state, RUNS=self.runs), \
+        with mock.patch.dict(os.environ, ambient, clear=True), \
+             mock.patch.multiple(crq, REPOS=[], CLONE=self.repo, STATE=self.state, RUNS=self.runs), \
              mock.patch.object(crq, "ensure_commit", return_value=True):
             with self.assertRaises(crq.NothingToReview):
                 crq.plan_open(pr, info, False, self.q)
@@ -457,40 +464,79 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
     def test_faults_at_receipt_queue_and_publication_persist_points_replay(self):
         baseline = copy.deepcopy(self.q)
         real_write = review_receipt.write_receipt
+        fired = []
         def after_write(*a):
             real_write(*a)
+            fired.append("receipt")
             raise OSError("receipt crash")
         for point in ("receipt", "terminal-queue", "outbox", "publication-queue"):
             with self.subTest(point):
+                # Per-case roots: only the receipt and outbox writes this case
+                # actually made can survive its simulated crash.
+                c = copy.copy(self.c)
+                c.STATE = self.state / point
                 self.q = copy.deepcopy(baseline)
                 self.item = self.q["items"][0]
-                store = review_ledger.ArtifactStore(self.state / "artifacts")
-                outbox = review_ledger.Outbox(self.state / "publication", store)
-                calls = []
+                store = review_ledger.ArtifactStore(c.STATE / "artifacts")
+                outbox = review_ledger.Outbox(c.STATE / "publication", store)
+                real_spool = outbox.spool
+                saved = []
+                fired.clear()
                 def save(q):
-                    calls.append(copy.deepcopy(q))
-                    if (point == "terminal-queue" and len(calls) == 1
-                            or point == "publication-queue" and len(calls) == 2):
+                    if (point == "terminal-queue" and not saved
+                            or point == "publication-queue" and len(saved) == 1):
+                        fired.append(point)
                         raise OSError("queue crash")
-                self.c.save_queue = save
+                    saved.append(copy.deepcopy(q))
+                c.save_queue = save
+                def spool(value):
+                    if point == "outbox":
+                        fired.append(point)
+                        raise OSError("outbox crash")
+                    return real_spool(value)
                 with mock.patch.object(backfill_runtime, "settings", return_value={"enabled": True}), \
                      mock.patch.object(backfill_runtime, "services", return_value=(None, store, outbox, None)), \
                      mock.patch.object(backfill_runtime, "publish"), \
-                     mock.patch.object(outbox, "spool", side_effect=OSError("outbox crash") if point == "outbox" else outbox.spool), \
+                     mock.patch.object(outbox, "spool", side_effect=spool), \
                      mock.patch.object(review_receipt, "write_receipt", side_effect=after_write if point == "receipt" else real_write):
-                    try:
-                        runtime.complete(self.c, self.q, self.item, self.rdir, "run-1", self.cls, "2026-11-08T00:01:00Z", 0)
-                    except OSError:
-                        pass
-                # Recover from the pre-terminal persisted snapshot, then replay
-                # retained completion bytes. This path never invokes launch.
-                self.q = copy.deepcopy(baseline)
+                    if point == "outbox":
+                        # Spool faults are handled in-place, so completion returns.
+                        runtime.complete(c, self.q, self.item, self.rdir, "run-1", self.cls, "2026-11-08T00:01:00Z", 0)
+                    else:
+                        with self.assertRaises(OSError) as caught:
+                            runtime.complete(c, self.q, self.item, self.rdir, "run-1", self.cls, "2026-11-08T00:01:00Z", 0)
+                        self.assertEqual(str(caught.exception),
+                                         "receipt crash" if point == "receipt" else "queue crash")
+                    self.assertEqual(fired, [point])  # the selected fault actually fired
+                    if point == "outbox":
+                        self.assertEqual(self.item["state"], "done")
+                        self.assertTrue(self.item["publication_pending"])
+                        self.assertEqual(self.item["publication_reason"], "outbox crash")
+                # Recover from the last successfully persisted queue snapshot, then
+                # replay completion and publication with publication enabled. This
+                # path never invokes launch.
+                self.q = saved[-1] if saved else copy.deepcopy(baseline)
                 self.item = self.q["items"][0]
-                self.c.save_queue = lambda q: None
-                self.finish()
+                replayed = []
+                c.save_queue = lambda q: None
+                with mock.patch.object(backfill_runtime, "settings", return_value={"enabled": True}), \
+                     mock.patch.object(backfill_runtime, "services", return_value=(None, store, outbox, None)), \
+                     mock.patch.object(backfill_runtime, "publish"):
+                    for _ in range(2):  # a repeated replay must not duplicate the outbox entry
+                        if self.item["state"] == "pending":
+                            replayed.append("complete")
+                            runtime.complete(c, self.q, self.item, self.rdir, "run-1", self.cls,
+                                             "2026-11-08T00:01:00Z", 0)
+                        else:
+                            replayed.append("republish")
+                            runtime.republish(c, self.q, self.item)
+                # Only the last saved snapshot already holds the terminal state, so
+                # recovering from it enters republish; the baseline would re-complete.
+                self.assertEqual(replayed[0], "republish" if saved else "complete")
                 self.assertEqual(self.item["state"], "done")
                 self.assertEqual(len(self.q["review_events"]), 1)
                 self.assertEqual(len(self.item["attempts"]), 1)
+                self.assertEqual(len(outbox.pending()), 1)
 
     def test_explicit_repeat_launches_despite_completed_pr_or_local_evidence(self):
         initial = copy.deepcopy(self.q)
@@ -545,7 +591,8 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
         with mock.patch.multiple(crq, **patches), \
              mock.patch.object(crq, "secret_scan", return_value=(True, {})), \
              mock.patch.object(crq, "make_worktree", return_value=(worktree, "fixture-branch")), \
-             mock.patch.object(crq, "save_queue", side_effect=lambda q: saved.append(copy.deepcopy(q))), \
+             mock.patch.object(crq, "save_queue", side_effect=lambda q: saved.append(
+                 (copy.deepcopy(q), processes.Popen.call_count))), \
              mock.patch.object(crq, "append_work_record"), mock.patch.object(crq, "event"), \
              mock.patch.object(crq, "subprocess", SimpleNamespace(DEVNULL=-3, Popen=mock.Mock(return_value=SimpleNamespace(pid=12345)))) as processes:
             for generation in (1, 2, 3):
@@ -553,6 +600,7 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                     self.admit("repeat-" + str(generation), repeat=True)
                 item = self.q["items"][-1]
                 plan = runtime.prepare(self.c, self.q, item, False)
+                spawns_before = processes.Popen.call_count
                 run_id = crq.launch(self.q, item, plan)
                 meta = json.loads((self.runs / run_id / "meta.json").read_text())
                 self.assertEqual(item["run"]["band"], "interactive")
@@ -560,7 +608,14 @@ class ExecutionTests(SnapshotGitFixture, unittest.TestCase):
                 self.assertEqual(meta["cmd"], ["coderabbit", "review", *item["profile"]["flags"]])
                 self.assertIn("--committed", meta["cmd"])
                 self.assertEqual(meta["cmd"][-2:], ["--base-commit", self.base])
-                self.assertTrue(any(q["items"][-1].get("run", {}).get("launch_pending") for q in saved if q["items"][-1].get("run")))
+                reserved = [(q_item["run"]["run_id"], popen_count)
+                            for q, popen_count in saved for q_item in q["items"]
+                            if q_item.get("id") == item["id"]
+                            and (q_item.get("run") or {}).get("launch_pending")]
+                # This generation -- not an earlier one -- reserved its own run,
+                # and it did so before spawning the child.
+                self.assertEqual([run for run, _ in reserved], [run_id])
+                self.assertEqual([popen_count - spawns_before for _, popen_count in reserved], [0])
                 reserved_band = item["run"]["band"]
                 (self.runs / run_id / "review.ndjson").write_text(self.raw)
                 with mock.patch.object(backfill_runtime, "settings", return_value=None):
@@ -652,11 +707,42 @@ class SchedulingTests(unittest.TestCase):
         q["items"][0]["attempts"].append(dict(run_id="old-20261108T000002Z"))
         self.assertFalse(crq.background_turn(q))
 
-    def test_turn_fallback_is_scoped(self):
-        q = dict(items=[], backfill_ordinary_exhausted=False)
-        with mock.patch.object(crq, "_coverage_fallback", side_effect=lambda *args: (crq.ordinary_review_eligible(q), True)):
-            self.assertEqual(crq.coverage_fallback(q, [], False, None, ordinary_eligible=False), (False, True))
-        self.assertFalse(q["backfill_ordinary_exhausted"])
+    def test_background_turn_never_launches_backfill_before_pending_interactive(self):
+        """Backfill is strictly lowest: two interactive launches must not let it jump a pending open item."""
+        a = dict(run_id="a-20261108T000000Z", band="interactive", started_at="2026-11-08T00:00:00Z")
+        b = dict(run_id="b-20261108T000001Z", band="interactive", started_at="2026-11-08T00:00:01Z")
+        history = dict(id="h", kind="open", state="done", order=0, attempts=[a, b])
+        opened = dict(id="o", kind="open", state="pending", pr=1, order=1)
+        backfill = dict(id="bf", kind=crq.backfill_jobs.KIND, state="pending", order=2)
+        q = dict(items=[history, opened, backfill])
+        self.assertTrue(crq.background_turn(q))
+        plan = dict(notes=[], base="a", head="b", target="c", label="test")
+        def launch(q, item, plan):
+            item["state"] = "reviewing"
+            return item["id"]
+        with mock.patch.object(crq, "pr_info", return_value=dict(state="OPEN")), \
+             mock.patch.object(crq, "quiet_reason", return_value=None), \
+             mock.patch.object(crq, "plan_open", return_value=plan), \
+             mock.patch.object(crq, "launch", side_effect=launch), \
+             mock.patch.object(crq, "_coverage_fallback", return_value=("backfill-run", True)) as fallback:
+            result = crq.start_one(q, [], False, None, False)[0]
+        self.assertEqual(result, "o")
+        fallback.assert_not_called()
+
+    def test_backfill_reached_only_after_ordinary_items_exhausted(self):
+        a = dict(run_id="a-20261108T000000Z", band="interactive", started_at="2026-11-08T00:00:00Z")
+        b = dict(run_id="b-20261108T000001Z", band="interactive", started_at="2026-11-08T00:00:01Z")
+        q = dict(items=[dict(id="h", kind="open", state="done", order=0, attempts=[a, b]),
+                        dict(id="o", kind="open", state="pending", pr=1, order=1),
+                        dict(id="bf", kind=crq.backfill_jobs.KIND, state="pending", order=2)])
+        with mock.patch.object(crq, "pr_info", return_value=dict(state="OPEN")), \
+             mock.patch.object(crq, "quiet_reason", return_value=None), \
+             mock.patch.object(crq, "plan_open", side_effect=crq.NotReady("busy")), \
+             mock.patch.object(crq, "_coverage_fallback", return_value=(None, False)) as fallback:
+            crq.start_one(q, [], False, None, False)
+        # Only the end-of-loop exhausted path (nothing launchable) may reach backfill.
+        self.assertEqual(fallback.call_count, 1)
+        self.assertTrue(q["backfill_ordinary_exhausted"])
 
     def test_band_turn_background_eligibility_and_operator_priority(self):
         for priority, blocked in ((False, False), (True, False), (False, True)):

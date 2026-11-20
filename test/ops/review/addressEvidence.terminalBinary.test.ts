@@ -90,3 +90,26 @@ test('a root that holds the session binary is refused before a candidate can be 
     await rm(base, { recursive: true, force: true });
   }
 });
+
+test('preflight refuses a cached session binary that lost its execute permission', async () => {
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'terminal-exec-')));
+  try {
+    authority.commonDir = join(base, 'common');
+    const root = join(base, 'root');
+    const bin = join(base, 'bin');
+    for (const dir of [authority.commonDir, root, bin]) await mkdir(dir, { recursive: true });
+    const git = join(bin, 'git');
+    await writeFile(git, '#!/bin/sh\nexit 0\n');
+    await chmod(git, 0o755);
+    vi.stubEnv('PATH', bin);
+    const token = {};
+    await expect(assertAddressTerminalRoot(token, root)).resolves.toBeUndefined();
+    // Same device and inode, so the identity check alone still passes.
+    await chmod(git, 0o644);
+    await expect(assertAddressTerminalRoot(token, root)).rejects.toThrow(
+      /terminal Git binary not executable/,
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});

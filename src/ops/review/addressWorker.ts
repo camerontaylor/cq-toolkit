@@ -1440,6 +1440,10 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               throw new AddressRefusal('unexpected baseline head outside engine', true);
             const candidate = resolve(deps.journalDir, `baseline-${randomUUID()}`);
             if (deps.terminalBinding) await addressTerminalPreflight(deps.terminalBinding, root);
+            // The unit budget may expire during preflight; admit the mutation
+            // before the worktree exists. (The restore path above stays exempt
+            // so it can still clean up after exhaustion.)
+            admitMutation();
             await git(root, ['worktree', 'add', '--detach', candidate, baselineHead]);
             if (deps.terminalBinding)
               await addressTerminalCandidate(deps.terminalBinding, root, candidate, false);

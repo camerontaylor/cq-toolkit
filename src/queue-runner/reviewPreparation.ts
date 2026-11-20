@@ -6,6 +6,9 @@ import { reserveAndSpawnReview, type ReviewLaunchEffects } from './reviewLaunch.
 /** An identified failure from the checkout operation, not a validation error. */
 export class ReviewCheckoutError extends Error {}
 
+/** A diff the scanner can never read (e.g. an undecodable path); retrying cannot help. */
+export class ReviewScanRefusal extends Error {}
+
 export interface ReviewScanDecision {
   readonly clean: boolean;
   readonly denylistHits: number;
@@ -84,9 +87,9 @@ export async function prepareOrdinaryReview(
   )
     throw new Error('incomplete review plan');
   const profile = input.plan.get('profile');
-  let cmd: JsonValue[] = ['coderabbit', 'review', '--agent', '--deep'];
-  if (pyTruthy(input.plan.get('range_policy'))) cmd.push('--committed');
-  cmd.push('--base-commit', base);
+  const rangeArgs: JsonValue[] = pyTruthy(input.plan.get('range_policy')) ? ['--committed'] : [];
+  rangeArgs.push('--base-commit', base);
+  let cmd: JsonValue[] = ['coderabbit', 'review', '--agent', '--deep', ...rangeArgs];
   if (pyTruthy(profile)) {
     if (
       !(profile instanceof JsonObject) ||
@@ -95,12 +98,38 @@ export async function prepareOrdinaryReview(
       input.plan.get('config_digest') === undefined
     )
       throw new Error('invalid review profile');
-    cmd = ['coderabbit', 'review', ...(profile.get('flags') as JsonValue[])];
+    // The runner owns the review range; a profile flag must not pick another base.
+    if ((profile.get('flags') as string[]).some((flag) => /^--base(?:-commit)?(?:=|$)/.test(flag)))
+      throw new Error('review profile must not set a base selector');
+    // Nor may it pick the review scope (uncommitted/untracked/committed/all).
+    if (
+      (profile.get('flags') as string[]).some((flag) =>
+        /^(?:--(?:uncommitted|committed|all|type|untracked|include-untracked|dir)(?:=|$)|-t(?:=|$))/.test(
+          flag,
+        ),
+      )
+    )
+      throw new Error('review profile must not set a review scope');
+    cmd = ['coderabbit', 'review', ...(profile.get('flags') as JsonValue[]), ...rangeArgs];
   }
   const runId = await effects.allocate(id);
   if (!runId.startsWith(`${id}-`) || !/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(runId))
     throw new Error('invalid allocated run identity');
-  const scan = await effects.scan({ runId, repo, base, head });
+  let scan: Awaited<ReturnType<ReviewPreparationEffects['scan']>>;
+  try {
+    scan = await effects.scan({ runId, repo, base, head });
+  } catch (error) {
+    if (!(error instanceof ReviewScanRefusal)) throw error;
+    const reason = `review scan refused the diff: ${error.message}`.slice(0, 300);
+    const nextItems = [...items];
+    nextItems[input.itemIndex] = withObjectKeys(item, [
+      ['state', 'blocked'],
+      ['last_error', reason],
+    ]);
+    const blockedQueue = withObjectKeys(queue, [['items', nextItems]]);
+    await effects.blocked(id, reason);
+    return { queue: blockedQueue, runId, outcome: 'blocked' };
+  }
   if (
     !scan ||
     typeof scan.clean !== 'boolean' ||
