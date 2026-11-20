@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -125,5 +125,33 @@ describe('tick inventory binding', () => {
       await expect(tick.inventory(obj('{"items":[]}'))).rejects.toThrow(message);
       expect(prepared).toBe(false);
     }
+  });
+  it('aborts before publishing when the rollout disappears mid-run', async () => {
+    const root = await stateRoot();
+    const live = obj(
+      `{"items":[${job('old', 'skipped')},${job('new', 'pending', '2026-01-02T00:00:00Z')}],"scheduler":1}`,
+    );
+    const prepared: PreparedInventory = {
+      queue: live,
+      ranked: { ranked: 1 },
+      report: { report: 1 },
+      eventItems: ['new'],
+      retired: [{ id: 'old', at: '2026-01-03T00:00:00Z' }],
+    };
+    const tick = tickBackfillInventory({
+      stateRoot: root,
+      cloneRoot: '/clone',
+      prepare: async () => {
+        await unlink(join(root, 'backfill-rollout.json'));
+        return prepared;
+      },
+    });
+    // Refuse at the event write even if a later rollout read could succeed.
+    await expect(tick.inventory(live)).rejects.toThrow(
+      'operator rollout removed during inventory event write',
+    );
+    await expect(readFile(join(root, 'queue.json'), 'utf8')).rejects.toThrow();
+    await expect(readFile(join(root, 'backfill/latest-ranked.json'), 'utf8')).rejects.toThrow();
+    await expect(readFile(join(root, 'backfill/latest-report.json'), 'utf8')).rejects.toThrow();
   });
 });
