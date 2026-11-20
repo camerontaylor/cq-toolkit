@@ -885,6 +885,17 @@ class HoldPersistenceTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.hold = rb.Hold(Path(self.temp.name))
 
+    def test_ownership_distinguishes_unreadable_from_not_owned(self):
+        self.hold.acquire()
+        self.assertIs(self.hold.ownership(), True)
+        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError(13, "denied")):
+            self.assertIsNone(self.hold.ownership())
+            self.assertFalse(self.hold.owns())
+        self.hold.path.write_bytes(b"foreign\n")
+        self.assertIs(self.hold.ownership(), False)
+        self.hold.path.unlink()
+        self.assertIs(self.hold.ownership(), False)
+
     def test_fragment_token_demands_recovery_and_keeps_the_marker(self):
         # Only a fragment of the token lands before storage gives up, so the
         # marker's bytes cannot prove this run's ownership. The marker must
