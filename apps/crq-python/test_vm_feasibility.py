@@ -635,7 +635,7 @@ class LifecycleTests(unittest.TestCase):
             state, run = self._prepared(temporary)
             args = type("Args", (), {"state_dir": str(state), "run_id": "r1",
                                      "tools": None})()
-            with mock.patch.object(vm, "boot", return_value={"pid": 1}) as boot, \
+            with mock.patch.object(vm, "boot", return_value={"pid": 1, "starttime": "5"}) as boot, \
                  mock.patch.object(vm, "wait_ssh", return_value={}), \
                  mock.patch.object(vm, "upload_guest_probe"):
                 self.assertEqual(vm.cmd_boot(args), 0)
@@ -646,7 +646,7 @@ class LifecycleTests(unittest.TestCase):
             state, run = self._prepared(temporary)
             args = type("Args", (), {"state_dir": str(state), "run_id": "r1",
                                      "tools": None})()
-            with mock.patch.object(vm, "boot", return_value={"pid": 1}), \
+            with mock.patch.object(vm, "boot", return_value={"pid": 1, "starttime": "5"}), \
                  mock.patch.object(vm, "wait_ssh",
                                    side_effect=RuntimeError("SSH never ready")), \
                  mock.patch.object(vm, "stop_owned_process",
@@ -673,7 +673,7 @@ class LifecycleTests(unittest.TestCase):
             state, run = self._prepared(temporary)
             args = type("Args", (), {"state_dir": str(state), "run_id": "r1",
                                      "tools": None})()
-            with mock.patch.object(vm, "boot", return_value={"pid": 1}), \
+            with mock.patch.object(vm, "boot", return_value={"pid": 1, "starttime": "5"}), \
                  mock.patch.object(vm, "wait_ssh", return_value={}), \
                  mock.patch.object(vm, "upload_guest_probe",
                                    side_effect=RuntimeError("upload failed")), \
@@ -691,7 +691,7 @@ class LifecycleTests(unittest.TestCase):
             args = type("Args", (), {"state_dir": str(state), "run_id": "r1",
                                      "tools": None, "json": True})()
             err = io.StringIO()
-            with mock.patch.object(vm, "boot", return_value={"pid": 1}), \
+            with mock.patch.object(vm, "boot", return_value={"pid": 1, "starttime": "5"}), \
                  mock.patch.object(vm, "wait_ssh",
                                    side_effect=RuntimeError("SSH never ready")), \
                  mock.patch.object(vm, "stop_owned_process",
@@ -927,6 +927,64 @@ class LifecycleTests(unittest.TestCase):
                     "started_at": "now"}),
                 mock.patch.object(vm, "host_stamp",
                                   return_value={"kvm_writable": True}))
+
+    def test_cmd_boot_cleanup_skips_a_replacement_vm(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            args = type("Args", (), {"state_dir": str(state), "run_id": "r1",
+                                     "tools": None})()
+
+            def boot(*_args):
+                (run / "process.json").write_text(json.dumps(
+                    {"pid": 111, "starttime": "5",
+                     "scope_unit": "crq-vm-r1.scope"}))
+                return {"pid": 111, "starttime": "5"}
+
+            def wait_ssh(*_args):
+                # After the lock is released another boot replaces the VM.
+                (run / "process.json").write_text(json.dumps(
+                    {"pid": 222, "starttime": "9",
+                     "scope_unit": "crq-vm-r1.scope"}))
+                raise RuntimeError("ssh down")
+            with mock.patch.object(vm, "boot", side_effect=boot), \
+                 mock.patch.object(vm, "wait_ssh", side_effect=wait_ssh), \
+                 mock.patch.object(vm, "process_matches", return_value=True), \
+                 mock.patch.object(vm, "_stop_owned_process") as stop:
+                with self.assertRaisesRegex(RuntimeError, "ssh down"):
+                    vm.cmd_boot(args)
+            stop.assert_not_called()
+
+    def test_cmd_boot_cleanup_stops_the_vm_it_launched(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            args = type("Args", (), {"state_dir": str(state), "run_id": "r1",
+                                     "tools": None})()
+
+            def boot(*_args):
+                (run / "process.json").write_text(json.dumps(
+                    {"pid": 111, "starttime": "5",
+                     "scope_unit": "crq-vm-r1.scope"}))
+                return {"pid": 111, "starttime": "5"}
+            with mock.patch.object(vm, "boot", side_effect=boot), \
+                 mock.patch.object(vm, "wait_ssh",
+                                   side_effect=RuntimeError("ssh down")), \
+                 mock.patch.object(vm, "process_matches", return_value=True), \
+                 mock.patch.object(vm, "_stop_owned_process",
+                                   return_value={"stopped": True}) as stop:
+                with self.assertRaisesRegex(RuntimeError, "ssh down"):
+                    vm.cmd_boot(args)
+            stop.assert_called_once()
+
+    def test_launched_guard_leaves_a_replacement_in_its_spawn_window_alone(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            self.assertFalse((run / "process.json").exists())
+            with mock.patch.object(vm, "_stop_owned_process") as stop:
+                result = vm.stop_owned_process(
+                    {"run_id": "r1", "path": str(run)}, purge=False,
+                    launched={"pid": 111, "starttime": "5"})
+            stop.assert_not_called()
+            self.assertTrue(result["replaced"])
 
     def test_cmd_run_cleanup_skips_a_replacement_vm(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -1284,11 +1284,14 @@ def cmd_boot(args) -> int:
     recorder = Recorder(pathlib.Path(run["path"]))
     stamp = host_stamp()
     entered_boot = False
+    launched = None
     try:
         with run_lock(pathlib.Path(run["path"])):
             refuse_live_run(run)
             entered_boot = True
             info = boot(run, recorder, args.tools, stamp)
+        # The lock is released here: later cleanup must stop only this launch.
+        launched = {"pid": info["pid"], "starttime": info["starttime"]}
         info["ssh"] = wait_ssh(run, recorder)
         upload_guest_probe(run, recorder)
     except BaseException as exc:
@@ -1296,7 +1299,7 @@ def cmd_boot(args) -> int:
         # guest; cleaning up would stop that invocation's live guest.
         if entered_boot:
             try:
-                stop_owned_process(run, purge=False)
+                stop_owned_process(run, purge=False, launched=launched)
             except Exception as cleanup_error:
                 _cleanup_diagnostic(args, "cleanup after failed boot",
                                     cleanup_error, exc)
@@ -1474,10 +1477,16 @@ def stop_owned_process(run: dict, *, purge: bool,
 
     ``launched`` is the {pid, starttime} this invocation started. When given,
     the VM is stopped only if the recorded identity still matches it, so a
-    replacement VM another invocation booted afterwards is left alone.
+    replacement VM another invocation booted afterwards is left alone. A
+    missing process.json also counts as a replacement: boot() deletes it before
+    spawning, so no identity means this launch is gone and any scope member
+    belongs to a boot still in its spawn-before-write window.
     """
     with run_lock(pathlib.Path(run["path"])):
         if launched is not None:
+            if not (pathlib.Path(run["path"]) / "process.json").exists():
+                return {"scope_unit": None, "pid": None, "stop_rc": None,
+                        "stopped": True, "trash": None, "replaced": True}
             current = live_identity(run)
             if current is not None and (current.get("pid"), current.get("starttime")) != (
                     launched["pid"], launched["starttime"]):
