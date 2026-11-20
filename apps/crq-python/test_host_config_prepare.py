@@ -22,7 +22,7 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
 
         def fake(argv, **kwargs):
             seen.update(kwargs['env'])
-            return mock.Mock(returncode=128, stderr='fatal: not a git repository')
+            return mock.Mock(returncode=128, stderr='fatal: not a git repository (or any of the parent directories): .git')
 
         routing = ('GIT_CEILING_DIRECTORIES', 'GIT_COMMON_DIR', 'GIT_DIR',
                    'GIT_OBJECT_DIRECTORY', 'GIT_WORK_TREE')
@@ -47,6 +47,17 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
                     host.require_outside_git(self.root)
             with self.subTest(accept=key), mock.patch.dict('os.environ', {key: hidden}):
                 host.require_outside_git(self.root.parent)
+
+    def test_outside_git_probe_requires_the_full_outside_diagnostic_line(self):
+        def probe(stderr):
+            return mock.patch.object(host.subprocess, 'run', return_value=mock.Mock(
+                returncode=128, stderr=stderr))
+        quoted = ("fatal: detected dubious ownership in repository at "
+                  "'/srv/not a git repository/x'\n")
+        with probe(quoted), self.assertRaisesRegex(ValueError, 'cannot establish'):
+            host.require_outside_git(self.root.parent)
+        with probe('fatal: not a git repository (or any of the parent directories): .git\n'):
+            host.require_outside_git(self.root.parent)
 
     def test_notification_allowlist_overlay_renders_and_validates(self):
         hosts = ['triton:6767', 'uranus:6767', 'pluto:6767']

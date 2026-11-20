@@ -176,9 +176,20 @@ export async function requireOutsideGit(path: string, env: OverlayEnv): Promise<
     throw new ValueError('private host artifacts must be outside every Git checkout');
   // Only git's "not a git repository" answer proves the path is outside a checkout: a
   // malformed config or any other probe failure says nothing about exclusion.
-  if (result.code !== 128 || !/not a git repository/i.test(text(result.stderr)))
+  if (result.code !== 128 || !isOutsideDiagnostic(text(result.stderr)))
     throw new ValueError(
       `cannot establish that the path is outside every Git checkout: git exited ${result.code}`,
+    );
+}
+
+// Whole-line match: a dubious-ownership refusal can quote a path containing the phrase.
+function isOutsideDiagnostic(stderr: string): boolean {
+  return stderr
+    .split(/\r?\n/)
+    .some(
+      (line) =>
+        line.trim().toLowerCase() ===
+        'fatal: not a git repository (or any of the parent directories): .git',
     );
 }
 

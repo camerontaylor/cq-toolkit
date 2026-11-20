@@ -207,6 +207,11 @@ describe('requireOutsideGit probe failures', () => {
   test('refuses a failed git probe that is not a not-a-repository answer', async () => {
     for (const result of [
       ok('', 128, 'fatal: bad config line 1 in file x'),
+      ok(
+        '',
+        128,
+        "fatal: detected dubious ownership in repository at '/srv/not a git repository/x'",
+      ),
       ok('', 1),
       ok('', 129),
     ]) {

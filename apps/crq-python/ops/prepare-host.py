@@ -215,7 +215,11 @@ def require_outside_git(path):
     # checkout: a shared-checkout ownership refusal or any other probe failure
     # says nothing about exclusion, and a record written inside a checkout on
     # that evidence would be a private artifact in Git.
-    if result.returncode != 128 or 'not a git repository' not in result.stderr.lower():
+    # Match the whole diagnostic line: a dubious-ownership refusal can quote a path
+    # that itself contains the phrase.
+    outside_line = 'fatal: not a git repository (or any of the parent directories): .git'
+    if result.returncode != 128 or not any(
+            line.strip().lower() == outside_line for line in result.stderr.splitlines()):
         raise ValueError('cannot establish that the path is outside every Git checkout: '
                          + 'git exited ' + str(result.returncode))
 
