@@ -18,6 +18,11 @@ import { runStatusWriter } from '../adapters/crq/statusWriter.js';
 import { runBackfillUnit } from '../adapters/crq/backfillSource.js';
 import { pythonJsonText } from '../policy/crq/pythonJson.js';
 import { runReconcileMergedUnit } from '../adapters/crq/reconcileSource.js';
+import {
+  type Capability,
+  dispatchedRefusal,
+  runCapabilityDispatcher,
+} from '../adapters/crq/capabilityDispatcher.js';
 import { MAX_REQUEST_BYTES, runQueueCapabilityMain } from '../adapters/crq/queueCapabilityMain.js';
 import { REVIEW_MAX_BYTES } from '../ops/crq/reviewCapability.js';
 import { AUTHOR_MAX_SNAPSHOT_BYTES } from '../policy/crq/authorWire.js';
@@ -41,53 +46,82 @@ async function readFrame(limit: number = MAX_REQUEST_BYTES + 1): Promise<Uint8Ar
 
 const root = process.cwd();
 const [command, ...rest] = process.argv.slice(2);
-if (command === 'queue-capability') {
+/** The three forced-command capabilities, shared by their direct routes and `dispatch`. */
+const stdio = {
+  env: (name: string) => process.env[name],
+  stdout: (bytes: Uint8Array) => {
+    process.stdout.write(bytes);
+  },
+  stderr: (message: string) => {
+    process.stderr.write(`${message}\n`);
+  },
+};
+const serveQueue = (
+  argv: readonly string[],
+  stderr: (message: string) => void = stdio.stderr,
+): Promise<number> =>
   // The forced-command route: policy and identity come from the environment,
   // the request frame from stdin, and nothing else is accepted.
-  process.exitCode = await runQueueCapabilityMain({
-    argv: rest,
-    env: (name) => process.env[name],
+  runQueueCapabilityMain({
+    ...stdio,
+    stderr,
+    argv,
     readStdin: readFrame,
-    stdout: (bytes) => {
-      process.stdout.write(bytes);
-    },
-    stderr: (message) => {
-      process.stderr.write(`${message}\n`);
-    },
     // The deadline must end the process, not just the race: a pending stdin
     // read or a held queue lock would otherwise outlive the refusal.
     terminate: () => process.exit(2),
     root,
   });
-} else if (command === 'review-capability') {
-  process.exitCode = await runReviewCapabilityMain({
-    argv: rest,
-    env: (name) => process.env[name],
+const serveReview = (
+  argv: readonly string[],
+  stderr: (message: string) => void = stdio.stderr,
+): Promise<number> =>
+  runReviewCapabilityMain({
+    ...stdio,
+    stderr,
+    argv,
     readStdin: () => readFrame(REVIEW_MAX_BYTES + 1),
-    stdout: (bytes) => {
-      process.stdout.write(bytes);
-    },
-    stderr: (message) => {
-      process.stderr.write(`${message}\n`);
-    },
     terminate: (code = 2) => process.exit(code),
     root,
     deadlineMs: REVIEW_DEADLINE_MS,
   });
-} else if (command === 'author-capability') {
-  process.exitCode = await runAuthorCapabilityMain({
-    argv: rest,
-    env: (name) => process.env[name],
+const serveAuthor = (
+  argv: readonly string[],
+  stderr: (message: string) => void = stdio.stderr,
+): Promise<number> =>
+  runAuthorCapabilityMain({
+    ...stdio,
+    stderr,
+    argv,
     readStdin: () => readFrame(AUTHOR_MAX_SNAPSHOT_BYTES + 1),
-    stdout: (bytes) => {
-      process.stdout.write(bytes);
-    },
-    stderr: (message) => {
-      process.stderr.write(`${message}\n`);
-    },
     terminate: () => process.exit(2),
     root,
     deadlineMs: AUTHOR_DEADLINE_MS,
+  });
+
+/** Under `dispatch` every refusal line is the one the Python dispatcher prints. */
+const rewritten = (capability: Capability) => (): void => {
+  stdio.stderr(dispatchedRefusal(capability));
+};
+
+if (command === 'queue-capability') {
+  process.exitCode = await serveQueue(rest);
+} else if (command === 'review-capability') {
+  process.exitCode = await serveReview(rest);
+} else if (command === 'author-capability') {
+  process.exitCode = await serveAuthor(rest);
+} else if (command === 'dispatch') {
+  // `capability_dispatcher.py`: the one SSH forced command. The request text
+  // selects an exact capability and nothing else.
+  process.exitCode = await runCapabilityDispatcher({
+    argv: rest,
+    env: stdio.env,
+    stderr: stdio.stderr,
+    handlers: {
+      'author-v1': () => serveAuthor([], rewritten('author-v1')),
+      'queue-v1': () => serveQueue([], rewritten('queue-v1')),
+      'review-v1': () => serveReview([], rewritten('review-v1')),
+    },
   });
 } else {
   const stateHome = process.env.XDG_STATE_HOME;

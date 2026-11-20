@@ -82,6 +82,8 @@ const FEATURES = [
 ] as const;
 const READ_ONLY = new Set(['capabilities', 'status', 'result', 'review-history']);
 const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/;
+/** `repo_registry.SLUG`: an owner/name with a resolvable review clone. */
+const REPO_SLUG = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
 
 /** One runner effect set for the review capability. */
 export interface ReviewCapabilityEffects {
@@ -97,8 +99,13 @@ export interface ReviewCapabilityEffects {
   readonly withQueueLock: <T>(work: () => Promise<T>, waitMs: number) => Promise<T | null>;
   /** Read one receipt's bytes; a missing file is an ENOENT error. */
   readonly readReceipt: (receiptId: string) => Promise<Uint8Array>;
-  /** True when `repo` has a configured clone this runner may serve. */
-  readonly isConfiguredRepo: (repo: string) => boolean;
+  /**
+   * `review_transport.provision`: make a clone available for a manual review
+   * of any repository. The primary and configured repositories already have
+   * one; any other repository is cloned once into the runner state and never
+   * joins the automatic `repos` list. False when it cannot be cloned.
+   */
+  readonly provisionRepo: (repo: string) => Promise<boolean>;
   /** True when the commit object is present in the repository's clone. */
   readonly hasCommit: (repo: string, commit: string) => Promise<boolean>;
   /** Fetch the repository's clone when a required object is absent. */
@@ -213,7 +220,11 @@ function capabilities(): JsonObject {
   ]);
 }
 
-/** `review_transport.decode`; duplicate keys and missing newline refuse. */
+/**
+ * `review_transport.decode`; duplicate keys refuse. A frame without its
+ * terminating LF also refuses: that check is TypeScript-only (Python's decode
+ * accepts it), kept as the stricter contract.
+ */
 export function decodeReviewRequest(raw: Uint8Array): JsonObject {
   if (raw.length > REVIEW_MAX_BYTES) {
     throw new ValueError('review request exceeds 6 MiB; reduce the commit range');
@@ -289,6 +300,15 @@ async function handle(
   }
 }
 
+function unsupported(reason: string): JsonObject {
+  return new JsonObject([
+    ['v', JsonNumber.int(1)],
+    ['action', 'observed'],
+    ['state', 'unsupported'],
+    ['reason', reason],
+  ]);
+}
+
 async function submit(
   queue: JsonObject,
   request: JsonObject,
@@ -301,18 +321,11 @@ async function submit(
   const repeat = request.get('repeat') === true;
   const repo = stringRequired(inputs, 'repo');
   const target = stringRequired(inputs, 'target');
-  const allowed = [policy.repo, ...policy.repos];
-  if (!allowed.includes(repo) || !effects.isConfiguredRepo(repo)) {
-    return {
-      queue,
-      result: new JsonObject([
-        ['v', JsonNumber.int(1)],
-        ['action', 'observed'],
-        ['state', 'unsupported'],
-        ['reason', 'unsupported-repo'],
-      ]),
-    };
-  }
+  // Manual review covers any repository: no CRQ-side repository gate, so only
+  // CodeRabbit's own limits bound it. Neither the policy `repos` list nor the
+  // runner `repos` config gates a submit; `repos` config only selects
+  // automatic discovery. A malformed slug still has nothing to clone.
+  if (!REPO_SLUG.test(repo)) return { queue, result: unsupported('unsupported-repo') };
   if (!policy.branches.includes(target)) throw new ValueError('target branch denied');
   const key = keyDigest(inputs, repeat);
   const replay = replayRequest(queue, requestId, key);
@@ -323,6 +336,9 @@ async function submit(
       historyDefaults(historyQuery(queue, readRequest(queue, requestId)!)),
     );
     return { queue, result: withField(replay, 'history', historyCue(history)) };
+  }
+  if (!(await effects.provisionRepo(repo))) {
+    return { queue, result: unsupported('repo-unavailable') };
   }
 
   const snapshot = objectOrNull(request.get('snapshot'));
@@ -542,8 +558,10 @@ async function historyProjection(
   query: HistoryQuery,
 ): Promise<JsonObject> {
   try {
+    // `clone_for` resolves the primary, a configured clone or the manual
+    // review clone of any well-formed repository.
     const git =
-      query.repo === effects.runnerRepo || effects.isConfiguredRepo(query.repo)
+      query.repo === effects.runnerRepo || REPO_SLUG.test(query.repo)
         ? effects.historyGit(query.repo)
         : NO_GIT;
     return await projectHistory(queue, { ...query, git });
