@@ -1028,6 +1028,37 @@ class DeployTests(DeployFixture, unittest.TestCase):
         document = json.loads(output.getvalue())
         self.assertEqual(document["error"]["kind"], "interrupted")
 
+    def recovery_required_error(self, record):
+        class Failing:
+            def __init__(self, args):
+                self.args = args
+
+            def run(self):
+                raise rb.RecoveryRequired("x", record)
+
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            code = rb.main(
+                ["deploy", "--root", str(self.root),
+                 "--overlay", str(self.overlay_path),
+                 "--record-dir", str(self.record_dir)],
+                run_factory=Failing)
+        self.assertEqual(code, 3)
+        return json.loads(output.getvalue())["error"]
+
+    def test_main_embeds_the_record_only_when_it_could_not_be_persisted(self):
+        # deploy.json was not written, so the JSON error is the only artifact
+        # holding the record; embed it with the structured storage error.
+        error = self.recovery_required_error(
+            {"run_dir": "/run", "outcome": "recovery_required",
+             "persistence_error": "disk full"})
+        self.assertEqual(error["kind"], "recovery_required")
+        self.assertEqual(error["recovery_record"]["persistence_error"],
+                         "disk full")
+        # An ordinary recovery record is on disk already: no embed.
+        error = self.recovery_required_error(
+            {"run_dir": "/run", "outcome": "recovery_required"})
+        self.assertNotIn("recovery_record", error)
+
     def test_argument_errors_are_one_json_document(self):
         with contextlib.redirect_stdout(io.StringIO()) as output, \
                 contextlib.redirect_stderr(io.StringIO()) as errors:
