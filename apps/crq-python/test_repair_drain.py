@@ -204,6 +204,24 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(calls, [ROLES['fixer']['model']])
         self.assertEqual(report['stop'], 'rate-limit')
 
+    def test_unreadable_cooldown_file_maps_to_cooldown_state_error(self):
+        path = service.ROOT / 'state/repair/provider-cooldowns.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}')
+        with mock.patch.object(Path, 'read_text', side_effect=PermissionError('denied')):
+            with self.assertRaises(service.CooldownStateError):
+                service.provider_cooldowns()
+            self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
+            self.assertEqual(service.dispatch_paused(self.config), service.OPERATOR_RECOVERY_PAUSE)
+
+    def test_unprefixed_codex_models_share_one_provider_cooldown(self):
+        first = {'driver': 'codex', 'model': 'gpt-5.1'}
+        second = {'driver': 'codex', 'model': 'gpt-5.2'}
+        self.assertEqual(service.role_provider(first), service.role_provider(second))
+        self.assertEqual(service.role_provider({'driver': 'cq', 'model': 'zai/glm-5.3'}), 'zai')
+        service.remember_provider_limit(service.role_provider(first), {'retry_after_ms': 60000})
+        self.assertIn(service.role_provider(second), service.provider_cooldowns())
+
     def test_reap_aggregates_success_and_crash_before_replacement(self):
         fds = []
         active = {}
