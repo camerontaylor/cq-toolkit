@@ -187,8 +187,9 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
-      # repair-parity.test.ts diffs against the Python runtime; the `--=x`
-      # vector differs on 3.13, so pin the production minor like crq-python.
+      # repair-parity.test.ts diffs the Node runtime against the Python one;
+      # pin the production minor (3.14), as crq-python does, so the parity
+      # comparison is deterministic and matches what production runs.
       - name: Set up production Python minor
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
