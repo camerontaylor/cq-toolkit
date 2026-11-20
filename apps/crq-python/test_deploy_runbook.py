@@ -173,7 +173,7 @@ class DeployFixture(unittest.TestCase):
 
     def stopped(self, argv):
         if argv[0] == "systemctl":
-            if argv[2] in {"list-unit-files", "list-units"}:
+            if argv[2] in {"list-unit-files", "list-units", "list-jobs"}:
                 return ""
             return "inactive\n"
         return subprocess.run(argv, check=True, capture_output=True,
@@ -319,6 +319,26 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertFalse(self.marker().exists())
         self.assertEqual(self.head(), unmerged)
 
+    def test_unrollbackable_prior_refuses_before_admission(self):
+        # Only the target was tested for merged-main ancestry, so a live prior
+        # SHA that is not merged to origin/main passed preflight and then
+        # failed the helper's same check inside the rollback switch, after the
+        # target was installed. The prior SHA must be refused up front, before
+        # admission and any switch.
+        self.command("commit", "--allow-empty", "-qm", "local only")
+        local = self.head()
+        self.assertNotEqual(
+            subprocess.run(["git", "-C", str(self.root), "merge-base",
+                            "--is-ancestor", local,
+                            "refs/remotes/origin/main"]).returncode, 0)
+        run = self.build(target_sha=self.target)
+        with self.assertRaisesRegex(rb.Refused, "rollback target check"):
+            run.run()
+        self.assertEqual(self.head(), local)
+        self.assertEqual(self.units.stopped, [])
+        self.assertEqual(self.units.started, [])
+        self.assertFalse(self.marker().exists())
+
     def test_foreign_marker_refuses_and_touches_no_unit(self):
         self.marker().write_text("someone else's hold\n")
         run = self.build()
@@ -343,6 +363,64 @@ class DeployTests(DeployFixture, unittest.TestCase):
         record = self.record(run)
         self.assertEqual(record["outcome"], "recovery_required")
         self.assertEqual(record["original_triggers"], self.original)
+
+    def test_drain_expiry_survives_a_failed_diagnostic_write(self):
+        # The drain expires against the real controller poll and drain.json
+        # cannot be written (disk full). The I/O error must not replace the
+        # FailStop: an escaping error would be an ordinary refusal whose
+        # pre-switch restore restarts the triggers and releases admission
+        # while live work may still be running against this checkout.
+        (self.runner / "state/queue.json").write_text(
+            '{"items": [{"id": "q1", "run": {"run_id": 7}}], "starts": []}\n')
+        real_write = rb.durable_write
+
+        def failing_write(path, payload):
+            if Path(path).name == "drain.json":
+                raise OSError("disk full")
+            return real_write(path, payload)
+
+        run = self.build()
+        run.drain_fn = None
+        with mock.patch.object(rb, "durable_write", side_effect=failing_write):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                run.run()
+        self.assertIn("drain expired", str(caught.exception))
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.units.started, [])
+        self.assertTrue(all(self.units.state(unit) in ("inactive", "failed")
+                            for unit in TRIGGERS))
+        self.assertEqual(self.head(), self.prior)
+        self.assertFalse((Path(run.run_dir) / "drain.json").exists())
+        record = self.record(run)
+        self.assertEqual(record["outcome"], "recovery_required")
+        self.assertEqual(record["original_triggers"], self.original)
+
+    def test_drain_expiry_survives_failed_diagnostic_write_and_narration(self):
+        (self.runner / "state/queue.json").write_text(
+            '{"items": [{"id": "q1", "run": {"run_id": 7}}], "starts": []}\n')
+        real_write = rb.durable_write
+
+        def failing_write(path, payload):
+            if Path(path).name == "drain.json":
+                raise OSError("disk full")
+            return real_write(path, payload)
+
+        real_narrate = rb.narrate
+
+        def failing_narrate(message):
+            if "drain.json" in message:
+                raise OSError(28, "No space left")
+            return real_narrate(message)
+
+        run = self.build()
+        run.drain_fn = None
+        with mock.patch.object(rb, "durable_write", side_effect=failing_write), \
+                mock.patch.object(rb, "narrate", side_effect=failing_narrate):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                run.run()
+        self.assertIn("drain expired", str(caught.exception))
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.units.started, [])
 
     def test_incompatible_queue_refuses_before_hold(self):
         state = self.runner / "state/queue.json"
@@ -864,6 +942,17 @@ class HoldPersistenceTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="crq-hold-")
         self.addCleanup(self.temp.cleanup)
         self.hold = rb.Hold(Path(self.temp.name))
+
+    def test_ownership_distinguishes_unreadable_from_not_owned(self):
+        self.hold.acquire()
+        self.assertIs(self.hold.ownership(), True)
+        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError(13, "denied")):
+            self.assertIsNone(self.hold.ownership())
+            self.assertFalse(self.hold.owns())
+        self.hold.path.write_bytes(b"foreign\n")
+        self.assertIs(self.hold.ownership(), False)
+        self.hold.path.unlink()
+        self.assertIs(self.hold.ownership(), False)
 
     def test_fragment_token_demands_recovery_and_keeps_the_marker(self):
         # Only a fragment of the token lands before storage gives up, so the

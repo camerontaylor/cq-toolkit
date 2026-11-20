@@ -9,7 +9,7 @@ import { REPO } from './prWorktree.helpers.js';
 //
 // Shared fixtures and the fake git model (with the full pinned-behavior
 // header) live in prWorktree.helpers.ts.
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { mkdir, rm, symlink } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { realTmpDir } from '../../helpers/tmp-dir.js';
@@ -458,5 +458,60 @@ describe('removePrWorktree lock discipline (review-debt #121)', () => {
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
     }
+  });
+});
+
+describe('removePrWorktree ignored-file guard', () => {
+  test('an ignored non-bookkeeping file refuses the remove (git would delete it silently)', async () => {
+    const tree = `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`;
+    const registry = memRegistry({ '7': { path: tree, branch: LABEL, createdAt: NOW - 1000 } });
+    const model = mkModel([{ path: tree, branch: LABEL, head: SHA_B }], {
+      ignoredFiles: { [tree]: ['notes.local'] },
+    });
+    await expect(
+      removePrWorktree({
+        ...baseOpts(model, registry, { run: fakeGit(model), isBookkeepingPath: async () => false }),
+        path: tree,
+      }),
+    ).rejects.toThrow(/unowned ignored checkout path would be deleted: notes\.local/);
+    expect(model.worktrees).toHaveLength(1);
+    expect(registry.current()['7']).toBeDefined();
+  });
+
+  test('isRetirableIgnoredPath takes precedence over isBookkeepingPath for the guard', async () => {
+    const tree = `${REPO}/.git/cq-review-worktrees/pr-7-pr-7-fix`;
+    const setup = () => {
+      const registry = memRegistry({ '7': { path: tree, branch: LABEL, createdAt: NOW - 1000 } });
+      const model = mkModel([{ path: tree, branch: LABEL, head: SHA_B }], {
+        ignoredFiles: { [tree]: ['owned.receipt'] },
+      });
+      return { registry, model };
+    };
+    // Retirable says yes while bookkeeping says no: the remove proceeds.
+    const allowed = setup();
+    const bookkeeping = vi.fn(async () => false);
+    await removePrWorktree({
+      ...baseOpts(allowed.model, allowed.registry, {
+        run: fakeGit(allowed.model),
+        isBookkeepingPath: bookkeeping,
+        isRetirableIgnoredPath: async (path) => path === 'owned.receipt',
+      }),
+      path: tree,
+    });
+    expect(allowed.model.worktrees).toHaveLength(0);
+    expect(bookkeeping).not.toHaveBeenCalled();
+    // Retirable says no while bookkeeping says yes: the remove is refused.
+    const refused = setup();
+    await expect(
+      removePrWorktree({
+        ...baseOpts(refused.model, refused.registry, {
+          run: fakeGit(refused.model),
+          isBookkeepingPath: async () => true,
+          isRetirableIgnoredPath: async () => false,
+        }),
+        path: tree,
+      }),
+    ).rejects.toThrow(/unowned ignored checkout path would be deleted: owned\.receipt/);
+    expect(refused.model.worktrees).toHaveLength(1);
   });
 });

@@ -5,8 +5,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
+import subprocess
 import sys
+import tempfile
 
 import author_snapshot
 import backfill_runtime
@@ -21,6 +24,7 @@ import repo_registry
 MAX_BYTES = 6 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024
 DEADLINE_S = 120
+CLONE_TIMEOUT_S = 90
 OPERATIONS = ["capabilities", "submit", "status", "result", "cancel", "notify-update",
               "review-history", "record"]
 FEATURES = ["original-commit-snapshot-v1", "chunked-result-v1", "repeat-generations-v1",
@@ -54,13 +58,75 @@ def profile(config, base):
 
 
 def clone_for(runner, repo):
-    """Clone configuration locates objects; policy authorization is separate."""
+    """Clone configuration locates objects; policy authorization is separate.
+
+    A configured repository uses its configured clone; any other well-formed
+    repository uses its on-demand manual-review clone (see provision).
+    """
     if repo_registry.same_repo(repo, runner.REPO):
         return Path(runner.CLONE)
     cfg = repo_registry.by_repo(getattr(runner, "REPOS", []), repo)
-    if cfg is None:
+    if cfg is not None:
+        return Path(cfg["clone"])
+    manual = repo_registry.manual_clone(runner.STATE, repo)
+    if manual is None:
         raise ValueError("unconfigured review repository")
-    return Path(cfg["clone"])
+    return manual
+
+
+def clone_url(runner, repo):
+    """The primary clone's origin URL with the repository swapped in.
+
+    Reusing the primary origin's host and scheme means a manual clone uses the
+    same transport and credentials the runner already fetches with.
+    """
+    url = author_snapshot.git(runner.CLONE, "remote", "get-url", "origin").decode().strip()
+    at = url.casefold().rfind(runner.REPO.casefold())
+    if at < 0:
+        return f"https://github.com/{repo}.git"
+    return url[:at] + repo + url[at + len(runner.REPO):]
+
+
+def provision(runner, repo):
+    """Make a clone available for a manual review of any repository.
+
+    Configured repositories (and the primary) already have one. Any other
+    repository is cloned once, on demand, into the runner state; it never joins
+    the automatic `repos` list. Returns True when the clone is usable, False
+    when the repository cannot be cloned (missing, private without access, or
+    the clone timed out).
+    """
+    if repo_registry.same_repo(repo, runner.REPO) or \
+            repo_registry.by_repo(getattr(runner, "REPOS", []), repo) is not None:
+        return True
+    path = repo_registry.manual_clone(runner.STATE, repo)
+    if path is None:
+        return False
+    if (path / ".git").is_dir():
+        return True
+    # A unique scratch directory under `.tmp`, outside the owner/name
+    # namespace (a slug never starts with a dot), so a failed clone can never
+    # collide with or delete another repository's clone.
+    scratch_root = Path(runner.STATE) / "review-repos" / ".tmp"
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(prefix="clone-", dir=scratch_root))
+    partial = scratch / "clone"
+    # Keep the runner's user and system Git configuration (credential helpers,
+    # URL rewrites) exactly as crq.fetch does; only prompts are disabled.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_TERMINAL_PROMPT="0", GIT_SSH_COMMAND="ssh -o BatchMode=yes")
+    try:
+        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "clone", "--quiet", "--no-checkout",
+                        clone_url(runner, repo), str(partial)],
+                       env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=CLONE_TIMEOUT_S, check=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(partial, path)
+    except (OSError, subprocess.SubprocessError, author_snapshot.AuthorRefused):
+        return False
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return True
 
 
 def history_git(clone):
@@ -354,14 +420,19 @@ def handle(raw, runner, *, principal, policy):
         result = record_import(q, req, principal, runner)
     elif op == "submit":
         inputs = req["inputs"]
-        allowed = [policy["repo"], *policy.get("repos", [])]
-        configured = repo_registry.same_repo(inputs["repo"], runner.REPO) or repo_registry.by_repo(getattr(runner, "REPOS", []), inputs["repo"]) is not None
-        if inputs["repo"] not in allowed or not configured:
+        # Manual review covers any repository: no CRQ-side repository gate, so
+        # only CodeRabbit's own limits (rate limits, capacity) bound it. The
+        # policy `repos` list and the runner `repos` config no longer gate a
+        # submit; `repos` config only selects automatic discovery. A malformed
+        # slug still has nothing to clone.
+        if repo_registry.manual_clone(runner.STATE, inputs["repo"]) is None:
             return review_receipt.canonical(dict(v=1, action="observed", state="unsupported", reason="unsupported-repo"))
         if inputs["target"] not in policy.get("branches", []):
             raise ValueError("target branch denied")
         key = admission.key_digest(inputs, repeat=req.get("repeat", False))
         result = admission.retry(q, req["request_id"], key)
+        if result is None and not provision(runner, inputs["repo"]):
+            return review_receipt.canonical(dict(v=1, action="observed", state="unsupported", reason="repo-unavailable"))
         if result is None:
             clone = clone_for(runner, inputs["repo"])
             # Snapshot bundles supply the unpublished head; only the base must be fetched.
@@ -375,7 +446,7 @@ def handle(raw, runner, *, principal, policy):
                 if req["snapshot"]["tree"] != inputs["head_tree"]:
                     raise ValueError("snapshot tree mismatch")
                 cfg = repo_registry.by_repo(getattr(runner, "REPOS", []), inputs["repo"])
-                classes = (runner.UNIVERSAL_SCAN_CLASSES | set(cfg.get("scan_extra_classes", []))
+                classes = (runner.UNIVERSAL_SCAN_CLASSES | set((cfg or {}).get("scan_extra_classes", []))
                            if not repo_registry.same_repo(inputs["repo"], runner.REPO) else None)
                 author_snapshot.install(req["snapshot"], dict(base=inputs["base_commit"], head=inputs["head_commit"]),
                                         runner, original=True, clone=clone, classes=classes)

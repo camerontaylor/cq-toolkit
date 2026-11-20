@@ -64,7 +64,7 @@ def pending_unit_switch():
         "prior_runtime": "python",
         "outcome": "pending",
         "at": "2026-10-27T00:00:00Z",
-        "snapshot": {},
+        "snapshot": {"runtime": "python", "running": True},
         "state": None,
         "phase": "snapshot",
     }
@@ -216,23 +216,39 @@ class UnitSwitchTests(ControllerFixture):
         class CrashingAdapter(Adapter):
             crashed = False
 
+            def __init__(self):
+                super().__init__("python")
+                self.events = []
+
             def install(self, unit, runtime):
                 raise RuntimeError("install failed")
 
+            def stop_and_drain(self, unit):
+                self.events.append(("drain", self.running))
+                super().stop_and_drain(unit)
+
             def restore_activation(self, unit, snapshot):
+                self.events.append(("release", self.running))
                 super().restore_activation(unit, snapshot)
                 if not self.crashed:
                     self.crashed = True
                     raise Crash()
 
-        adapter = CrashingAdapter("python")
+        adapter = CrashingAdapter()
         with self.assertRaises(Crash):
             dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
         path = next(self.record_dir.glob("controller-*.json"))
         self.assertEqual(json.loads(path.read_text())["phase"], "restore_activation_pending")
+        # The interrupted release already left the unit running, so the recovery
+        # must not be able to release again without fencing the unit first.
+        self.assertEqual(adapter.events[-1], ("release", False))
+        self.assertTrue(adapter.running)
+        before = len(adapter.events)
         recovered = dc.recover_unit(self.effects, adapter, path)
         self.assertEqual(recovered["outcome"], "rolled_back")
         self.assertEqual(recovered["failed_phase"], "drained")
+        self.assertEqual(adapter.events[before:],
+                         [("drain", True), ("release", False)])
         self.assertTrue(adapter.running)
         final = json.loads(path.read_text())
         self.assertEqual(final["phase"], "restore_activation_pending")
@@ -795,8 +811,15 @@ class RecoverFactoryTests(ControllerFixture):
         self.assertEqual(path.read_bytes(), before)
 
     def test_recover_factory_receives_the_retained_source_commit(self):
-        path = self.pending_record()
-        retained = json.loads(path.read_text())["state"]["prior_head"]
+        # The journal's retained commit must differ from the live checkout:
+        # otherwise this test would also pass if recovery composed the adapter
+        # at live HEAD instead of at the commit the record retained.
+        state = dc.captured_state(self.effects)
+        live = state["prior_head"]
+        retained = self.target
+        self.assertNotEqual(retained, live)
+        state["prior_head"] = retained
+        path = self.pending_record(state=state)
         seen = []
 
         def factory(unit, prior_runtime, source_sha=None):
@@ -914,15 +937,18 @@ class RecoverFactoryTests(ControllerFixture):
     def test_recover_factory_error_is_a_refusal(self):
         path = self.pending_record()
         before = path.read_bytes()
+        classes = {name: type(name, (RuntimeError,), {}) for name in
+                   ("LiveBindingRefused", "FactoryRefused", "CompletionError")}
         for name in ("LiveBindingRefused", "FactoryRefused", "CompletionError"):
             with self.subTest(error=name):
-                error = type(name, (RuntimeError,), {})
                 binding = SimpleNamespace(
-                    LiveBindingRefused=error,
-                    factory=SimpleNamespace(FactoryRefused=error),
-                    completion=SimpleNamespace(CompletionError=error),
+                    LiveBindingRefused=classes["LiveBindingRefused"],
+                    factory=SimpleNamespace(
+                        FactoryRefused=classes["FactoryRefused"]),
+                    completion=SimpleNamespace(
+                        CompletionError=classes["CompletionError"]),
                     production_adapter=mock.Mock(
-                        side_effect=error("compose failed")))
+                        side_effect=classes[name]("compose failed")))
                 code, stdout, stderr = self.run_recover_cli(
                     path, mock.Mock(return_value=binding))
                 self.assertEqual(code, 2)
@@ -1043,7 +1069,8 @@ class ControllerLockModeTests(ControllerFixture):
         path.parent.mkdir(parents=True)
         path.write_text("retained\n")
         path.chmod(0o600)
-        with self.assertRaises(RuntimeError):
+        blocked = RuntimeError("block failed")
+        with self.assertRaises(RuntimeError) as caught:
             with self.effects.controller_lock():
                 descriptor = os.open(path, os.O_RDONLY)
                 try:
@@ -1051,7 +1078,8 @@ class ControllerLockModeTests(ControllerFixture):
                         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 finally:
                     os.close(descriptor)
-                raise RuntimeError("block failed")
+                raise blocked
+        self.assertIs(caught.exception, blocked)
         descriptor = os.open(path, os.O_RDONLY)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)

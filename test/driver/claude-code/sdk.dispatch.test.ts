@@ -4,10 +4,10 @@
 // validation, verbatim model ids and observed-model surfacing, maxTurns,
 // endpoint env injection, the tool-policy surface, the resume sidecar, and
 // the pre-dispatch budget guard.
-import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import type { ZodType } from 'zod';
 import { ClaudeCodeDriver } from '../../../src/driver/claude-code/index.js';
@@ -368,6 +368,8 @@ describe('claude-code sdk transport specifics (mock sdk)', () => {
         `${run1.sessionId as string}${CLI_SESSION_FILE}`,
       );
       await expect(readFile(sidecarPath, 'utf8')).resolves.toBe('agent-cli-1\n');
+      // The same observed native id is returned on the WorkerResult (archiver join key).
+      expect(run1.nativeSessionId).toBe('agent-cli-1');
       // 0o600 — the sidecar is evidence like the records it sits beside,
       // never world-readable (review thread: mode was umask-default 0o666).
       expect((await stat(sidecarPath)).mode & 0o777).toBe(0o600);
@@ -386,6 +388,38 @@ describe('claude-code sdk transport specifics (mock sdk)', () => {
       // The resumed run still leaves NO resume handle in the workspace.
       await noSidecarInWorkspace();
     } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('nativeSessionPath: a planted ~/.claude/projects transcript rides the result; absent, the field is omitted', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      vi.stubEnv('HOME', scratchDir);
+      vi.stubEnv('USERPROFILE', scratchDir);
+      const { driver } = driverWithCalls(scratchDir, {
+        directive: { kind: 'reply', text: 'run one' },
+      });
+      const run1 = await driver.run(invocation({ prompt: 'native path one' }));
+      expect(run1.nativeSessionId).toBe('agent-cli-1');
+      // No transcript exists yet: the id is reported, the path is not guessed.
+      expect(run1.nativeSessionPath).toBeUndefined();
+      const record = await new SessionStore(join(scratchDir, SESSIONS_DIR)).load(
+        run1.sessionId as string,
+      );
+      const key = record!.workspace.replace(/[^A-Za-z0-9]/g, '-');
+      const dir = join(homedir(), '.claude', 'projects', key);
+      const transcript = join(dir, 'agent-cli-2.jsonl');
+      await mkdir(dir, { recursive: true });
+      await writeFile(transcript, '');
+      // Same workspace (resume); the mock numbers its agent id per call, so run 2
+      // reports agent-cli-2. With that transcript present the path rides.
+      const run2 = await driver.run(
+        invocation({ prompt: 'native path two', sessionRef: run1.sessionId as string }),
+      );
+      expect(run2.nativeSessionPath).toBe(transcript);
+    } finally {
+      vi.unstubAllEnvs();
       await rm(scratchDir, { recursive: true, force: true });
     }
   });

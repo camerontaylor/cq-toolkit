@@ -327,7 +327,7 @@ class BoundedRepairTest(unittest.TestCase):
     def test_service_disabled_or_partial_selector_never_dispatch(self):
         atomic(self.root / 'config.json', self.config)
         with mock.patch.object(service, 'ROOT', self.root), \
-             mock.patch.object(service, 'process_item') as dispatch, mock.patch.object(service, 'drain') as drain:
+             mock.patch.object(service, 'process_item') as dispatch, mock.patch.object(service, 'drain', return_value=None) as drain:
             service.main([])
             for authorization in (None, '', '  ', True):
                 self.config['repair'].update(enabled=True, spend_authorization=authorization)
@@ -438,15 +438,34 @@ class BoundedRepairTest(unittest.TestCase):
         self.config.update(repo='example/repo')
         self.config['repair'].update(cq_bin='/unused', budget={'wall_clock_min': 1})
         with mock.patch.object(service.cq, 'command') as command:
-            for body, source in [('😀' * 4000, '2: pinned code'),
-                                 ('small', '2: ' + '\\' * 8000),
-                                 ('small', '3: wrong anchor')]:
+            for body, source, message in [('😀' * 4000, '2: pinned code', 'exceed item body budget'),
+                                          ('small', '2: ' + '\\' * 8000, 'exceed item body budget'),
+                                          ('small', '3: wrong anchor', 'incomplete or malformed')]:
                 with self.subTest(body=body[:8], source=source[:16]):
+                    # Rebind both finding digests to this case's body: a stale
+                    # binding must not be the rejection these assertions accept.
                     job['finding']['body'] = body
+                    job['finding_sha256'] = bounded.identity(job['finding'])
+                    job['source_snapshot']['finding_sha256'] = job['finding_sha256']
                     job['source_snapshot']['source'] = source
-                    with self.assertRaises(ValueError):
+                    with self.assertRaisesRegex(ValueError, message):
                         service.cq.invoke(self.config, {'model': 'p/m'}, job, self.root, self.root)
             command.assert_not_called()
+            # Under the same config, a fitting body with the pinned anchor and
+            # consistent digests reaches the command, so the refusals above
+            # come from size and anchor validation alone.
+            job['finding']['body'] = 'small'
+            job['finding_sha256'] = bounded.identity(job['finding'])
+            job['source_snapshot']['finding_sha256'] = job['finding_sha256']
+            job['source_snapshot']['source'] = '2: pinned code'
+            command.return_value = SimpleNamespace(returncode=0, stdout='{"status":"ok","value":{"changed":false}}', stderr='')
+            self.assertEqual(service.cq.invoke(self.config, {'model': 'p/m'}, job, self.root, self.root),
+                             {'stop': 'ok', 'changed': False})
+            self.assertEqual(command.call_count, 1)
+            item_arg = next(arg for arg in command.call_args.args[0] if arg.startswith('--item='))
+            sent = json.loads(item_arg.split('=', 1)[1])['body']
+            self.assertTrue(sent.startswith('small'))
+            self.assertIn('2: pinned code', sent)
 
     def test_harvest_records_wrong_prepared_source_binding_as_failed(self):
         job_id, job = self.prepare()
@@ -513,6 +532,9 @@ class BoundedRepairTest(unittest.TestCase):
                {'job': job_id, 'item': job['item'], 'verdict': 'FIXED', 'commits': [],
                 'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'],
                 'origin_job': OLD, 'repair_base': record['base']})
+        # Persist the two-job fixture so the replay below starts from the state a
+        # fresh tick would load, not from this test's in-memory queue.
+        self.c.save_queue(self.queue)
         self.c.iso = lambda: '2026-11-12T00:00:00Z'
         import finding_delivery
         import review_ledger as ledger
@@ -524,6 +546,11 @@ class BoundedRepairTest(unittest.TestCase):
                 repair_tick.harvest(self.c, self.queue, item)
         self.assertEqual(record['state'], 'failed')
         self.assertEqual(json.loads(row.read_text())['status'], 'delivered')
+        # The terminal run must survive a reload, exactly as a later tick sees it.
+        self.queue = json.loads((self.root / 'state/queue.json').read_text())
+        item = self.queue['items'][0]
+        self.assertEqual(item['repair_runs'][job['run']]['state'], 'failed')
+        self.assertEqual(item['repair_runs'][job['run']]['jobs'], [job_id, sibling_id])
         with mock.patch.object(repair_tick, 'finding_inbox', return_value=inbox):
             repair_tick.harvest(self.c, self.queue, item)
         self.assertEqual(json.loads(row.read_text())['status'], 'needs-human')
@@ -806,22 +833,31 @@ class BoundedRepairTest(unittest.TestCase):
         self.config['repair'].update(enabled=True, spend_authorization='offline-test-fixture-only')
         atomic(self.root / 'config.json', self.config)
         out = io.StringIO()
+        # A direct selector reads the one named job, never the whole inbox: a
+        # listing here would mean the dispatch enumerated every prepared job.
+        enumerating = AssertionError('bounded dispatch must not enumerate the inbox')
         with mock.patch.object(service, 'ROOT', self.root), \
              mock.patch.object(service, 'process_item', return_value=None) as dispatch, \
+             mock.patch.object(service, 'drain_order', side_effect=enumerating) as listing, \
+             mock.patch.object(bounded, 'drain_order', side_effect=enumerating) as bounded_listing, \
              contextlib.redirect_stdout(out):
             service.main(['--job', job_id, '--source-sha', SOURCE,
                           '--finding-sha256', self.evidence['finding_sha256']])
+        listing.assert_not_called()
+        bounded_listing.assert_not_called()
         dispatch.assert_called_once_with(self.config, [job])
         artifact = json.loads(out.getvalue())
         self.assertEqual((artifact['status'], artifact['job']), ('no-result', job_id))
 
     def test_every_cli_exit_emits_exactly_one_json_artifact(self):
-        def artifact(argv):
+        def artifact(argv, code=None):
             out = io.StringIO()
             with mock.patch.object(service, 'ROOT', self.root), \
                  mock.patch.object(service, 'runner_disabled', return_value=False), \
                  contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-                service.main(argv)
+                exit_code = service.main(argv)
+            if code is not None:
+                self.assertEqual(exit_code, code, argv)
             return json.loads(out.getvalue())['status']
         self.config['repair'].update(enabled=False)
         atomic(self.root / 'config.json', self.config)
@@ -831,8 +867,46 @@ class BoundedRepairTest(unittest.TestCase):
         atomic(self.root / 'config.json', self.config)
         self.assertEqual(artifact(['--job', OLD]), 'refused')
         self.assertEqual(artifact(['--recover-job', 'x', '--job', OLD]), 'refused')
+        # Mode validation precedes the dry run: recovery never combines with it.
+        self.assertEqual(artifact(['--recover-job', 'x', '--triage-dry-run']), 'refused')
+        # A dry run never ignores a complete job selector.
+        self.assertEqual(artifact(['--triage-dry-run', '--job', OLD, '--source-sha', SOURCE,
+                                   '--finding-sha256', self.evidence['finding_sha256']], code=2),
+                         'refused')
+        # An empty recovery selector is still supplied: it conflicts with a dry run
+        # (exit 2) and alone refuses instead of draining the inbox.
+        self.assertEqual(artifact(['--triage-dry-run', '--recover-job', ''], code=2), 'refused')
+        self.assertEqual(artifact(['--recover-job', '', '--job', OLD], code=2), 'refused')
+        self.assertEqual(artifact(['--recover-job', ''], code=2), 'refused')
         # A dry run with no triage state writes nothing itself, so it reports that.
         self.assertEqual(artifact(['--triage-dry-run']), 'no-triage')
+
+    def test_argument_failure_emits_one_json_usage_artifact_and_returns_2(self):
+        # An argparse failure (`--job` without a value) must not exit before the
+        # CLI result writer runs: stdout still carries one JSON artifact and the
+        # exit code stays 2.
+        atomic(self.root / 'config.json', self.config)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(service, 'ROOT', self.root), \
+             mock.patch.object(service, 'drain', return_value=None) as drain, \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = service.main(['--job'])
+        self.assertEqual(code, 2)
+        drain.assert_not_called()
+        error = json.loads(out.getvalue())['error']
+        self.assertEqual((error['kind'], error['exitCode']), ('usage', 2))
+        self.assertIn('--job', err.getvalue())
+
+    def test_operational_exception_is_one_error_artifact_with_exit_1(self):
+        # An exception out of run() (e.g. the ValueError select_job raises for a
+        # wrong digest) must exit 1 with exactly one JSON artifact, not a traceback.
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(service, 'run', side_effect=ValueError('bad digest')), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = service.main([])
+        self.assertEqual(code, 1)
+        error = json.loads(out.getvalue())['error']
+        self.assertEqual((error['kind'], error['message'], error['exitCode']), ('failed', 'bad digest', 1))
 
 
 if __name__ == '__main__':
