@@ -155,6 +155,7 @@
           "source_blob_sha",
           "origin_job"
         ],
+        "reason": "",
         "refusal": null,
         "status": "run"
       },
@@ -256,6 +257,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "finding source changed on the default branch since the pin",
         "refusal": "default-source-changed",
         "status": "stale"
       },
@@ -357,6 +359,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "finding path is absent at the job pin",
         "refusal": "pinned-path-absent",
         "status": "stale"
       },
@@ -456,6 +459,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "pinned source path missing",
         "refusal": "pinned-path-missing",
         "status": "skip"
       },
@@ -555,6 +559,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "reviewed PR head is already on the default branch",
         "refusal": "pr-head-on-default",
         "status": "stale"
       },
@@ -661,6 +666,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "PR branch is gone from origin (closed or deleted)",
         "refusal": "pr-branch-gone",
         "status": "stale"
       },
@@ -770,6 +776,7 @@
           "source_blob_sha",
           "origin_job"
         ],
+        "reason": "",
         "refusal": null,
         "status": "run"
       },
@@ -881,6 +888,7 @@
           "source_blob_sha",
           "origin_job"
         ],
+        "reason": "",
         "refusal": null,
         "status": "run"
       },
@@ -986,6 +994,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "PR branch changed the finding source since the pin",
         "refusal": "pr-branch-source-changed",
         "status": "stale"
       },
@@ -1091,6 +1100,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "PR branch is gone from origin (closed or deleted)",
         "refusal": "pr-branch-gone",
         "status": "stale"
       },
@@ -1199,6 +1209,7 @@
           "source_blob_sha",
           "origin_job"
         ],
+        "reason": "",
         "refusal": null,
         "status": "run"
       },
@@ -1307,6 +1318,7 @@
           "source_sha",
           "source_blob_sha"
         ],
+        "reason": "",
         "refusal": null,
         "status": "run"
       },
@@ -1411,6 +1423,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "no queued tick-owned repair run",
         "refusal": "no-queued-run",
         "status": "skip"
       },
@@ -1506,6 +1519,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "no queued tick-owned repair run",
         "refusal": "no-queued-run",
         "status": "skip"
       },
@@ -1601,6 +1615,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "no queued tick-owned repair run",
         "refusal": "no-queued-run",
         "status": "skip"
       },
@@ -1696,6 +1711,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "no queued tick-owned repair run",
         "refusal": "no-queued-run",
         "status": "skip"
       },
@@ -1791,6 +1807,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "no queued tick-owned repair run",
         "refusal": "no-queued-run",
         "status": "skip"
       },
@@ -1884,6 +1901,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "no queued tick-owned repair run",
         "refusal": "no-queued-run",
         "status": "skip"
       },
@@ -1969,6 +1987,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "no queued tick-owned repair run",
         "refusal": "no-queued-run",
         "status": "skip"
       },
@@ -2044,6 +2063,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "job pin differs from its tick-owned repair run",
         "refusal": "pin-record-mismatch",
         "status": "skip"
       },
@@ -2147,6 +2167,7 @@
           "source_blob_sha",
           "origin_job"
         ],
+        "reason": "",
         "refusal": null,
         "status": "run"
       },
@@ -2254,6 +2275,7 @@
           "source_blob_sha",
           "origin_job"
         ],
+        "reason": "",
         "refusal": null,
         "status": "run"
       },
@@ -2355,6 +2377,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "no queued tick-owned repair run",
         "refusal": "no-queued-run",
         "status": "skip"
       },
@@ -2454,6 +2477,7 @@
           "source_blob_sha",
           "origin_job"
         ],
+        "reason": "",
         "refusal": null,
         "status": "run"
       },
@@ -2559,6 +2583,7 @@
           "source_blob_sha",
           "origin_job"
         ],
+        "reason": "",
         "refusal": null,
         "status": "run"
       },
@@ -2657,6 +2682,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "full immutable source SHA required",
         "refusal": "source-sha-invalid",
         "status": "skip"
       },
@@ -2752,6 +2778,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "only critical/major or canonical minor findings are repaired",
         "refusal": "severity-not-repairable",
         "status": "skip"
       },
@@ -2847,6 +2874,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "only critical/major or canonical minor findings are repaired",
         "refusal": "severity-not-repairable",
         "status": "skip"
       },
@@ -2952,6 +2980,7 @@
           "source_blob_sha",
           "origin_job"
         ],
+        "reason": "",
         "refusal": null,
         "status": "run"
       },
@@ -3059,6 +3088,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "finding path must be repository-relative",
         "refusal": "finding-path-invalid",
         "status": "skip"
       },
@@ -3154,6 +3184,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "finding path must be repository-relative",
         "refusal": "finding-path-invalid",
         "status": "skip"
       },
@@ -3249,6 +3280,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "finding path required",
         "refusal": "finding-path-invalid",
         "status": "skip"
       },
@@ -3346,6 +3378,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "invalid canonical finding identity",
         "refusal": "canonical-delivery-invalid",
         "status": "skip"
       },
@@ -3444,6 +3477,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "canonical delivery state unavailable",
         "refusal": "canonical-delivery-unavailable",
         "status": "skip"
       },
@@ -3542,6 +3576,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "canonical finding is not delivered to this repair task",
         "refusal": "canonical-delivery-mismatch",
         "status": "skip"
       },
@@ -3645,6 +3680,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "canonical finding is not delivered to this repair task",
         "refusal": "canonical-delivery-mismatch",
         "status": "skip"
       },
@@ -3748,6 +3784,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "canonical finding is not delivered to this repair task",
         "refusal": "canonical-delivery-mismatch",
         "status": "skip"
       },
@@ -3849,6 +3886,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "canonical finding is not delivered to this repair task",
         "refusal": "canonical-delivery-mismatch",
         "status": "skip"
       },
@@ -3947,6 +3985,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "canonical delivery state unavailable",
         "refusal": "canonical-delivery-unavailable",
         "status": "skip"
       },
@@ -4012,6 +4051,7 @@
       "expected": {
         "job": null,
         "job_keys": null,
+        "reason": "job identity mismatch",
         "refusal": "job-identity-mismatch",
         "status": "skip"
       },
@@ -4076,6 +4116,7 @@
       "expected": {
         "job": null,
         "job_keys": null,
+        "reason": "unreadable job: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
         "refusal": "job-unreadable",
         "status": "skip"
       },
@@ -4122,6 +4163,153 @@
       "expected": {
         "job": null,
         "job_keys": null,
+        "reason": "unreadable job: Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)",
+        "refusal": "job-unreadable",
+        "status": "skip"
+      },
+      "git": {
+        "ancestors": [],
+        "blobs": {},
+        "branches": {},
+        "tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "git_reads": [],
+      "job": null,
+      "job_id": "crq-run1-F1",
+      "job_raw": "\ufeff{\"job\": \"crq-run1-F1\", \"item\": \"pr1-merged\", \"kind\": \"merged\", \"pr\": 1, \"run\": \"run1\", \"cycle\": 1, \"repair_base\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"branch\": null, \"finding\": {\"path\": \"src/kept.ts\", \"line\": 2, \"severity\": \"major\", \"body\": \"Finding data\"}, \"repair_round\": 1, \"prior\": null, \"recurrence\": false}",
+      "kind": "drain",
+      "name": "job-bom",
+      "queue": {
+        "items": [
+          {
+            "id": "pr1-merged",
+            "kind": "merged",
+            "pr": 1,
+            "repair_runs": {
+              "run1": {
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch": null,
+                "jobs": [
+                  "crq-run1-F1"
+                ],
+                "open_pr": false,
+                "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "round": 1,
+                "state": "queued"
+              }
+            },
+            "state": "repairing"
+          }
+        ]
+      },
+      "started": false,
+      "triage_row": null,
+      "triage_row_raw": null
+    },
+    {
+      "expected": {
+        "job": {
+          "branch": null,
+          "canonical_finding_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "cycle": 1,
+          "finding": {
+            "body": "Finding data",
+            "line": 2,
+            "path": "src/kept.ts",
+            "severity": "major"
+          },
+          "item": "pr1-merged",
+          "job": "crq-run1-F1",
+          "kind": "merged",
+          "pr": 1,
+          "prior": null,
+          "recurrence": false,
+          "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "repair_round": 1,
+          "run": "run1"
+        },
+        "job_keys": [
+          "branch",
+          "canonical_finding_id",
+          "cycle",
+          "finding",
+          "item",
+          "job",
+          "kind",
+          "pr",
+          "prior",
+          "recurrence",
+          "repair_base",
+          "repair_round",
+          "run"
+        ],
+        "reason": "canonical delivery state unavailable",
+        "refusal": "canonical-delivery-unavailable",
+        "status": "skip"
+      },
+      "git": {
+        "ancestors": [],
+        "blobs": {},
+        "branches": {},
+        "tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "git_reads": [],
+      "job": {
+        "branch": null,
+        "canonical_finding_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "cycle": 1,
+        "finding": {
+          "body": "Finding data",
+          "line": 2,
+          "path": "src/kept.ts",
+          "severity": "major"
+        },
+        "item": "pr1-merged",
+        "job": "crq-run1-F1",
+        "kind": "merged",
+        "pr": 1,
+        "prior": null,
+        "recurrence": false,
+        "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "repair_round": 1,
+        "run": "run1"
+      },
+      "job_id": "crq-run1-F1",
+      "job_raw": null,
+      "kind": "drain",
+      "name": "canonical-row-bom",
+      "queue": {
+        "items": [
+          {
+            "id": "pr1-merged",
+            "kind": "merged",
+            "pr": 1,
+            "repair_runs": {
+              "run1": {
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch": null,
+                "jobs": [
+                  "crq-run1-F1"
+                ],
+                "open_pr": false,
+                "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "round": 1,
+                "state": "queued"
+              }
+            },
+            "state": "repairing"
+          }
+        ]
+      },
+      "started": false,
+      "triage_row": null,
+      "triage_row_raw": "\ufeff{\"status\": \"delivered\", \"receipt\": {\"repair_task\": \"crq-run1-F1\"}}"
+    },
+    {
+      "expected": {
+        "job": null,
+        "job_keys": null,
+        "reason": "job identity mismatch",
         "refusal": "job-identity-mismatch",
         "status": "skip"
       },
@@ -4168,6 +4356,7 @@
       "expected": {
         "job": null,
         "job_keys": null,
+        "reason": "unreadable job: [Errno 2] No such file or directory: '<state-root>/state/repair/inbox/crq-missing-F1.json'",
         "refusal": "job-unreadable",
         "status": "skip"
       },
@@ -4240,6 +4429,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "malformed job: 'NoneType' object has no attribute 'get'",
         "refusal": "selection-malformed",
         "status": "skip"
       },
@@ -4325,6 +4515,7 @@
           "repair_round",
           "run"
         ],
+        "reason": "malformed job: 'list' object has no attribute 'get'",
         "refusal": "selection-malformed",
         "status": "skip"
       },
@@ -4353,6 +4544,527 @@
       "job_raw": null,
       "kind": "drain",
       "name": "finding-not-object",
+      "queue": {
+        "items": [
+          {
+            "id": "pr1-merged",
+            "kind": "merged",
+            "pr": 1,
+            "repair_runs": {
+              "run1": {
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch": null,
+                "jobs": [
+                  "crq-run1-F1"
+                ],
+                "open_pr": false,
+                "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "round": 1,
+                "state": "queued"
+              }
+            },
+            "state": "repairing"
+          }
+        ]
+      },
+      "started": false,
+      "triage_row": null,
+      "triage_row_raw": null
+    },
+    {
+      "expected": {
+        "job": {
+          "branch": null,
+          "cycle": 1,
+          "finding": "src/a.ts",
+          "item": "pr1-merged",
+          "job": "crq-run1-F1",
+          "kind": "merged",
+          "pr": 1,
+          "prior": null,
+          "recurrence": false,
+          "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "repair_round": 1,
+          "run": "run1"
+        },
+        "job_keys": [
+          "branch",
+          "cycle",
+          "finding",
+          "item",
+          "job",
+          "kind",
+          "pr",
+          "prior",
+          "recurrence",
+          "repair_base",
+          "repair_round",
+          "run"
+        ],
+        "reason": "malformed job: 'str' object has no attribute 'get'",
+        "refusal": "selection-malformed",
+        "status": "skip"
+      },
+      "git": {
+        "ancestors": [],
+        "blobs": {},
+        "branches": {},
+        "tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "git_reads": [],
+      "job": {
+        "branch": null,
+        "cycle": 1,
+        "finding": "src/a.ts",
+        "item": "pr1-merged",
+        "job": "crq-run1-F1",
+        "kind": "merged",
+        "pr": 1,
+        "prior": null,
+        "recurrence": false,
+        "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "repair_round": 1,
+        "run": "run1"
+      },
+      "job_id": "crq-run1-F1",
+      "job_raw": null,
+      "kind": "drain",
+      "name": "finding-string",
+      "queue": {
+        "items": [
+          {
+            "id": "pr1-merged",
+            "kind": "merged",
+            "pr": 1,
+            "repair_runs": {
+              "run1": {
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch": null,
+                "jobs": [
+                  "crq-run1-F1"
+                ],
+                "open_pr": false,
+                "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "round": 1,
+                "state": "queued"
+              }
+            },
+            "state": "repairing"
+          }
+        ]
+      },
+      "started": false,
+      "triage_row": null,
+      "triage_row_raw": null
+    },
+    {
+      "expected": {
+        "job": {
+          "branch": null,
+          "cycle": 1,
+          "finding": 7,
+          "item": "pr1-merged",
+          "job": "crq-run1-F1",
+          "kind": "merged",
+          "pr": 1,
+          "prior": null,
+          "recurrence": false,
+          "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "repair_round": 1,
+          "run": "run1"
+        },
+        "job_keys": [
+          "branch",
+          "cycle",
+          "finding",
+          "item",
+          "job",
+          "kind",
+          "pr",
+          "prior",
+          "recurrence",
+          "repair_base",
+          "repair_round",
+          "run"
+        ],
+        "reason": "malformed job: 'int' object has no attribute 'get'",
+        "refusal": "selection-malformed",
+        "status": "skip"
+      },
+      "git": {
+        "ancestors": [],
+        "blobs": {},
+        "branches": {},
+        "tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "git_reads": [],
+      "job": {
+        "branch": null,
+        "cycle": 1,
+        "finding": 7,
+        "item": "pr1-merged",
+        "job": "crq-run1-F1",
+        "kind": "merged",
+        "pr": 1,
+        "prior": null,
+        "recurrence": false,
+        "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "repair_round": 1,
+        "run": "run1"
+      },
+      "job_id": "crq-run1-F1",
+      "job_raw": null,
+      "kind": "drain",
+      "name": "finding-number",
+      "queue": {
+        "items": [
+          {
+            "id": "pr1-merged",
+            "kind": "merged",
+            "pr": 1,
+            "repair_runs": {
+              "run1": {
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch": null,
+                "jobs": [
+                  "crq-run1-F1"
+                ],
+                "open_pr": false,
+                "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "round": 1,
+                "state": "queued"
+              }
+            },
+            "state": "repairing"
+          }
+        ]
+      },
+      "started": false,
+      "triage_row": null,
+      "triage_row_raw": null
+    },
+    {
+      "expected": {
+        "job": {
+          "branch": null,
+          "cycle": 1,
+          "finding": 1.5,
+          "item": "pr1-merged",
+          "job": "crq-run1-F1",
+          "kind": "merged",
+          "pr": 1,
+          "prior": null,
+          "recurrence": false,
+          "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "repair_round": 1,
+          "run": "run1"
+        },
+        "job_keys": [
+          "branch",
+          "cycle",
+          "finding",
+          "item",
+          "job",
+          "kind",
+          "pr",
+          "prior",
+          "recurrence",
+          "repair_base",
+          "repair_round",
+          "run"
+        ],
+        "reason": "malformed job: 'float' object has no attribute 'get'",
+        "refusal": "selection-malformed",
+        "status": "skip"
+      },
+      "git": {
+        "ancestors": [],
+        "blobs": {},
+        "branches": {},
+        "tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "git_reads": [],
+      "job": {
+        "branch": null,
+        "cycle": 1,
+        "finding": 1.5,
+        "item": "pr1-merged",
+        "job": "crq-run1-F1",
+        "kind": "merged",
+        "pr": 1,
+        "prior": null,
+        "recurrence": false,
+        "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "repair_round": 1,
+        "run": "run1"
+      },
+      "job_id": "crq-run1-F1",
+      "job_raw": null,
+      "kind": "drain",
+      "name": "finding-float",
+      "queue": {
+        "items": [
+          {
+            "id": "pr1-merged",
+            "kind": "merged",
+            "pr": 1,
+            "repair_runs": {
+              "run1": {
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch": null,
+                "jobs": [
+                  "crq-run1-F1"
+                ],
+                "open_pr": false,
+                "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "round": 1,
+                "state": "queued"
+              }
+            },
+            "state": "repairing"
+          }
+        ]
+      },
+      "started": false,
+      "triage_row": null,
+      "triage_row_raw": null
+    },
+    {
+      "expected": {
+        "job": {
+          "branch": null,
+          "cycle": 1,
+          "finding": true,
+          "item": "pr1-merged",
+          "job": "crq-run1-F1",
+          "kind": "merged",
+          "pr": 1,
+          "prior": null,
+          "recurrence": false,
+          "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "repair_round": 1,
+          "run": "run1"
+        },
+        "job_keys": [
+          "branch",
+          "cycle",
+          "finding",
+          "item",
+          "job",
+          "kind",
+          "pr",
+          "prior",
+          "recurrence",
+          "repair_base",
+          "repair_round",
+          "run"
+        ],
+        "reason": "malformed job: 'bool' object has no attribute 'get'",
+        "refusal": "selection-malformed",
+        "status": "skip"
+      },
+      "git": {
+        "ancestors": [],
+        "blobs": {},
+        "branches": {},
+        "tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "git_reads": [],
+      "job": {
+        "branch": null,
+        "cycle": 1,
+        "finding": true,
+        "item": "pr1-merged",
+        "job": "crq-run1-F1",
+        "kind": "merged",
+        "pr": 1,
+        "prior": null,
+        "recurrence": false,
+        "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "repair_round": 1,
+        "run": "run1"
+      },
+      "job_id": "crq-run1-F1",
+      "job_raw": null,
+      "kind": "drain",
+      "name": "finding-bool",
+      "queue": {
+        "items": [
+          {
+            "id": "pr1-merged",
+            "kind": "merged",
+            "pr": 1,
+            "repair_runs": {
+              "run1": {
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch": null,
+                "jobs": [
+                  "crq-run1-F1"
+                ],
+                "open_pr": false,
+                "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "round": 1,
+                "state": "queued"
+              }
+            },
+            "state": "repairing"
+          }
+        ]
+      },
+      "started": false,
+      "triage_row": null,
+      "triage_row_raw": null
+    },
+    {
+      "expected": {
+        "job": {
+          "branch": null,
+          "cycle": 1,
+          "item": "pr1-merged",
+          "job": "crq-run1-F1",
+          "kind": "merged",
+          "pr": 1,
+          "prior": null,
+          "recurrence": false,
+          "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "repair_round": 1,
+          "run": "run1"
+        },
+        "job_keys": [
+          "branch",
+          "cycle",
+          "item",
+          "job",
+          "kind",
+          "pr",
+          "prior",
+          "recurrence",
+          "repair_base",
+          "repair_round",
+          "run"
+        ],
+        "reason": "malformed job: 'finding'",
+        "refusal": "selection-malformed",
+        "status": "skip"
+      },
+      "git": {
+        "ancestors": [],
+        "blobs": {},
+        "branches": {},
+        "tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "git_reads": [],
+      "job": {
+        "branch": null,
+        "cycle": 1,
+        "item": "pr1-merged",
+        "job": "crq-run1-F1",
+        "kind": "merged",
+        "pr": 1,
+        "prior": null,
+        "recurrence": false,
+        "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "repair_round": 1,
+        "run": "run1"
+      },
+      "job_id": "crq-run1-F1",
+      "job_raw": null,
+      "kind": "drain",
+      "name": "finding-key-absent",
+      "queue": {
+        "items": [
+          {
+            "id": "pr1-merged",
+            "kind": "merged",
+            "pr": 1,
+            "repair_runs": {
+              "run1": {
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch": null,
+                "jobs": [
+                  "crq-run1-F1"
+                ],
+                "open_pr": false,
+                "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "round": 1,
+                "state": "queued"
+              }
+            },
+            "state": "repairing"
+          }
+        ]
+      },
+      "started": false,
+      "triage_row": null,
+      "triage_row_raw": null
+    },
+    {
+      "expected": {
+        "job": null,
+        "job_keys": null,
+        "reason": "unreadable job: expected one exact CRQ job id",
+        "refusal": "job-id-invalid",
+        "status": "skip"
+      },
+      "git": {
+        "ancestors": [],
+        "blobs": {},
+        "branches": {},
+        "tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "git_reads": [],
+      "job": null,
+      "job_id": "not-a-job",
+      "job_raw": null,
+      "kind": "drain",
+      "name": "job-id-invalid-grammar",
+      "queue": {
+        "items": [
+          {
+            "id": "pr1-merged",
+            "kind": "merged",
+            "pr": 1,
+            "repair_runs": {
+              "run1": {
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch": null,
+                "jobs": [
+                  "crq-run1-F1"
+                ],
+                "open_pr": false,
+                "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "round": 1,
+                "state": "queued"
+              }
+            },
+            "state": "repairing"
+          }
+        ]
+      },
+      "started": false,
+      "triage_row": null,
+      "triage_row_raw": null
+    },
+    {
+      "expected": {
+        "job": null,
+        "job_keys": null,
+        "reason": "unreadable job: expected one exact CRQ job id",
+        "refusal": "job-id-invalid",
+        "status": "skip"
+      },
+      "git": {
+        "ancestors": [],
+        "blobs": {},
+        "branches": {},
+        "tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "git_reads": [],
+      "job": null,
+      "job_id": "crq-",
+      "job_raw": null,
+      "kind": "drain",
+      "name": "job-id-invalid-prefix-only",
       "queue": {
         "items": [
           {
@@ -4430,6 +5142,7 @@
           "run",
           "source_sha"
         ],
+        "reason": "",
         "refusal": null,
         "status": "run"
       },
@@ -4558,6 +5271,7 @@
           "run",
           "source_sha"
         ],
+        "reason": "prepared source is no longer the default-branch tip",
         "refusal": "prepared-source-not-tip",
         "status": "stale"
       },
@@ -4650,6 +5364,358 @@
           "item": "pr1-merged",
           "job": "crq-revalidated-fixture-F1",
           "kind": "merged",
+          "origin_job": "crq-origin-F1",
+          "pr": 1,
+          "prior": null,
+          "recurrence": false,
+          "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "repair_round": 1,
+          "revalidation": [
+            1
+          ],
+          "run": "revalidated-fixture",
+          "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "job_keys": [
+          "branch",
+          "cycle",
+          "finding",
+          "finding_sha256",
+          "item",
+          "job",
+          "kind",
+          "origin_job",
+          "pr",
+          "prior",
+          "recurrence",
+          "repair_base",
+          "repair_round",
+          "revalidation",
+          "run",
+          "source_sha"
+        ],
+        "reason": "prepared source is no longer the default-branch tip",
+        "refusal": "prepared-source-not-tip",
+        "status": "stale"
+      },
+      "git": {
+        "ancestors": [],
+        "blobs": {
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:src/kept.ts": "cccccccccccccccccccccccccccccccccccccccc"
+        },
+        "branches": {},
+        "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "git_reads": [
+        "rev-parse origin/main"
+      ],
+      "job": {
+        "branch": null,
+        "cycle": null,
+        "finding": {
+          "body": "Finding data",
+          "line": 2,
+          "path": "src/kept.ts",
+          "severity": "major"
+        },
+        "finding_sha256": "6567a98569c3a3189845f51031355c25bb830ee375176bb68be11fa8a47e64c2",
+        "item": "pr1-merged",
+        "job": "crq-revalidated-fixture-F1",
+        "kind": "merged",
+        "origin_job": "crq-origin-F1",
+        "pr": 1,
+        "prior": null,
+        "recurrence": false,
+        "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "repair_round": 1,
+        "revalidation": [
+          1
+        ],
+        "run": "revalidated-fixture",
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "job_id": "crq-revalidated-fixture-F1",
+      "job_raw": null,
+      "kind": "drain",
+      "name": "prepared-revalidation-list-tip-moved",
+      "queue": {
+        "items": [
+          {
+            "id": "pr1-merged",
+            "kind": "merged",
+            "pr": 1,
+            "repair_runs": {
+              "revalidated-fixture": {
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch": null,
+                "jobs": [
+                  "crq-revalidated-fixture-F1"
+                ],
+                "open_pr": false,
+                "origin_job": "crq-origin-F1",
+                "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "revalidation_sha256": "b2ccfec15117f28c7806825f2435731f9dab55ed3e0c7e45638655801bb8bd3e",
+                "round": 1,
+                "state": "queued"
+              }
+            },
+            "state": "repairing"
+          }
+        ]
+      },
+      "started": false,
+      "triage_row": null,
+      "triage_row_raw": null
+    },
+    {
+      "expected": {
+        "job": {
+          "branch": null,
+          "cycle": null,
+          "finding": {
+            "body": "Finding data",
+            "line": 2,
+            "path": "src/kept.ts",
+            "severity": "major"
+          },
+          "finding_sha256": "6567a98569c3a3189845f51031355c25bb830ee375176bb68be11fa8a47e64c2",
+          "item": "pr1-merged",
+          "job": "crq-revalidated-fixture-F1",
+          "kind": "merged",
+          "origin_job": "crq-origin-F1",
+          "pr": 1,
+          "prior": null,
+          "recurrence": false,
+          "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "repair_round": 1,
+          "revalidation": [
+            1
+          ],
+          "run": "revalidated-fixture",
+          "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "job_keys": [
+          "branch",
+          "cycle",
+          "finding",
+          "finding_sha256",
+          "item",
+          "job",
+          "kind",
+          "origin_job",
+          "pr",
+          "prior",
+          "recurrence",
+          "repair_base",
+          "repair_round",
+          "revalidation",
+          "run",
+          "source_sha"
+        ],
+        "reason": "malformed job: 'list' object has no attribute 'get'",
+        "refusal": "selection-malformed",
+        "status": "skip"
+      },
+      "git": {
+        "ancestors": [],
+        "blobs": {
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:src/kept.ts": "cccccccccccccccccccccccccccccccccccccccc"
+        },
+        "branches": {},
+        "tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "git_reads": [
+        "rev-parse origin/main",
+        "rev-parse aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:src/kept.ts"
+      ],
+      "job": {
+        "branch": null,
+        "cycle": null,
+        "finding": {
+          "body": "Finding data",
+          "line": 2,
+          "path": "src/kept.ts",
+          "severity": "major"
+        },
+        "finding_sha256": "6567a98569c3a3189845f51031355c25bb830ee375176bb68be11fa8a47e64c2",
+        "item": "pr1-merged",
+        "job": "crq-revalidated-fixture-F1",
+        "kind": "merged",
+        "origin_job": "crq-origin-F1",
+        "pr": 1,
+        "prior": null,
+        "recurrence": false,
+        "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "repair_round": 1,
+        "revalidation": [
+          1
+        ],
+        "run": "revalidated-fixture",
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "job_id": "crq-revalidated-fixture-F1",
+      "job_raw": null,
+      "kind": "drain",
+      "name": "prepared-revalidation-list-at-tip",
+      "queue": {
+        "items": [
+          {
+            "id": "pr1-merged",
+            "kind": "merged",
+            "pr": 1,
+            "repair_runs": {
+              "revalidated-fixture": {
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch": null,
+                "jobs": [
+                  "crq-revalidated-fixture-F1"
+                ],
+                "open_pr": false,
+                "origin_job": "crq-origin-F1",
+                "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "revalidation_sha256": "b2ccfec15117f28c7806825f2435731f9dab55ed3e0c7e45638655801bb8bd3e",
+                "round": 1,
+                "state": "queued"
+              }
+            },
+            "state": "repairing"
+          }
+        ]
+      },
+      "started": false,
+      "triage_row": null,
+      "triage_row_raw": null
+    },
+    {
+      "expected": {
+        "job": {
+          "branch": null,
+          "cycle": null,
+          "finding": {
+            "body": "Finding data",
+            "line": 2,
+            "path": "src/kept.ts",
+            "severity": "major"
+          },
+          "finding_sha256": "6567a98569c3a3189845f51031355c25bb830ee375176bb68be11fa8a47e64c2",
+          "item": "pr1-merged",
+          "job": "crq-revalidated-fixture-F1",
+          "kind": "merged",
+          "origin_job": "crq-origin-F1",
+          "pr": 1,
+          "prior": null,
+          "recurrence": false,
+          "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "repair_round": 1,
+          "revalidation": "stale",
+          "run": "revalidated-fixture",
+          "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "job_keys": [
+          "branch",
+          "cycle",
+          "finding",
+          "finding_sha256",
+          "item",
+          "job",
+          "kind",
+          "origin_job",
+          "pr",
+          "prior",
+          "recurrence",
+          "repair_base",
+          "repair_round",
+          "revalidation",
+          "run",
+          "source_sha"
+        ],
+        "reason": "malformed job: 'str' object has no attribute 'get'",
+        "refusal": "selection-malformed",
+        "status": "skip"
+      },
+      "git": {
+        "ancestors": [],
+        "blobs": {
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:src/kept.ts": "cccccccccccccccccccccccccccccccccccccccc"
+        },
+        "branches": {},
+        "tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "git_reads": [
+        "rev-parse origin/main",
+        "rev-parse aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:src/kept.ts"
+      ],
+      "job": {
+        "branch": null,
+        "cycle": null,
+        "finding": {
+          "body": "Finding data",
+          "line": 2,
+          "path": "src/kept.ts",
+          "severity": "major"
+        },
+        "finding_sha256": "6567a98569c3a3189845f51031355c25bb830ee375176bb68be11fa8a47e64c2",
+        "item": "pr1-merged",
+        "job": "crq-revalidated-fixture-F1",
+        "kind": "merged",
+        "origin_job": "crq-origin-F1",
+        "pr": 1,
+        "prior": null,
+        "recurrence": false,
+        "repair_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "repair_round": 1,
+        "revalidation": "stale",
+        "run": "revalidated-fixture",
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "job_id": "crq-revalidated-fixture-F1",
+      "job_raw": null,
+      "kind": "drain",
+      "name": "prepared-revalidation-string-at-tip",
+      "queue": {
+        "items": [
+          {
+            "id": "pr1-merged",
+            "kind": "merged",
+            "pr": 1,
+            "repair_runs": {
+              "revalidated-fixture": {
+                "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch": null,
+                "jobs": [
+                  "crq-revalidated-fixture-F1"
+                ],
+                "open_pr": false,
+                "origin_job": "crq-origin-F1",
+                "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "revalidation_sha256": "b2ccfec15117f28c7806825f2435731f9dab55ed3e0c7e45638655801bb8bd3e",
+                "round": 1,
+                "state": "queued"
+              }
+            },
+            "state": "repairing"
+          }
+        ]
+      },
+      "started": false,
+      "triage_row": null,
+      "triage_row_raw": null
+    },
+    {
+      "expected": {
+        "job": {
+          "branch": null,
+          "cycle": null,
+          "finding": {
+            "body": "Finding data",
+            "line": 2,
+            "path": "src/kept.ts",
+            "severity": "major"
+          },
+          "finding_sha256": "6567a98569c3a3189845f51031355c25bb830ee375176bb68be11fa8a47e64c2",
+          "item": "pr1-merged",
+          "job": "crq-revalidated-fixture-F1",
+          "kind": "merged",
           "origin_job": null,
           "pr": 1,
           "prior": null,
@@ -4685,6 +5751,7 @@
           "run",
           "source_sha"
         ],
+        "reason": "prepared job must preserve historical finding lineage",
         "refusal": "origin-job-missing",
         "status": "skip"
       },
@@ -4813,6 +5880,7 @@
           "run",
           "source_sha"
         ],
+        "reason": "finding evidence digest mismatch",
         "refusal": "finding-digest-mismatch",
         "status": "skip"
       },
@@ -4936,6 +6004,7 @@
           "run",
           "source_sha"
         ],
+        "reason": "revalidation does not bind source, finding, blob and verdict",
         "refusal": "evidence-binding-mismatch",
         "status": "skip"
       },
@@ -5064,6 +6133,7 @@
           "run",
           "source_sha"
         ],
+        "reason": "named revalidation reviewer and concrete reason required",
         "refusal": "evidence-text-invalid",
         "status": "skip"
       },
@@ -5192,6 +6262,7 @@
           "run",
           "source_sha"
         ],
+        "reason": "selected job revalidation lineage mismatch",
         "refusal": "revalidation-lineage-mismatch",
         "status": "skip"
       },
@@ -5320,6 +6391,7 @@
           "run",
           "source_sha"
         ],
+        "reason": "selected job lacks matching queued tick-owned preparation",
         "refusal": "no-queued-run",
         "status": "skip"
       },
@@ -5449,6 +6521,7 @@
           "run",
           "source_sha"
         ],
+        "reason": "",
         "refusal": null,
         "status": "run"
       },
@@ -5576,6 +6649,7 @@
           "run",
           "source_sha"
         ],
+        "reason": "canonical finding is not delivered to this repair task",
         "refusal": "canonical-delivery-mismatch",
         "status": "skip"
       },
@@ -5707,6 +6781,7 @@
           "run",
           "source_sha"
         ],
+        "reason": "no queued tick-owned repair run",
         "refusal": "no-queued-run",
         "status": "skip"
       },

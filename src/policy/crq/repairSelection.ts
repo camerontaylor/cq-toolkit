@@ -31,9 +31,10 @@
  * - `selectedJobId` is returned only when every check passes. A refusal never
  *   carries a selected job id.
  */
-import { JsonObject, pythonNumbersEqual, type JsonValue } from './jsonValue.js';
+import { JsonNumber, JsonObject, pythonNumbersEqual, type JsonValue } from './jsonValue.js';
 import {
   checkSha,
+  hasUnsafePathCharacter,
   findingDigest,
   pythonLength,
   pythonStrip,
@@ -51,6 +52,9 @@ export const REPAIR_DEFAULT_REF = 'origin/main';
 const REPAIR_JOB_ID = /^crq-[A-Za-z0-9._-]+$/;
 
 const MAX_EVIDENCE_TEXT = 4000;
+
+/** `drain_job`'s reason when the queue holds no queued run listing the job. */
+const NO_QUEUED_RUN_REASON = 'no queued tick-owned repair run';
 
 /** One directory entry the caller observed under `state/repair/inbox`. */
 export interface RepairInboxEntry {
@@ -89,7 +93,15 @@ export function drainOrder(entries: readonly RepairInboxEntry[]): string[] {
 /** The caller's parsed job file, or the fact that reading/parsing it failed. */
 export type RepairJobFile =
   | { readonly kind: 'value'; readonly value: JsonValue }
-  | { readonly kind: 'unreadable' };
+  | {
+      readonly kind: 'unreadable';
+      /**
+       * The caller's `str(exc)` for the failed read or parse. `drain_job`
+       * narrates it as `unreadable job: <first 200 characters>`; the policy
+       * cannot derive it, so an absent detail leaves that tail empty.
+       */
+      readonly detail?: string | undefined;
+    };
 
 /**
  * The five Git observations `bounded.py` performs, split by the Python helper
@@ -145,12 +157,18 @@ export type RepairSelectionRefusal =
  * the immutable bound copy).
  */
 export type RepairDrainOutcome =
-  | { readonly status: 'run'; readonly job: JsonObject }
-  | { readonly status: 'stale'; readonly refusal: RepairSelectionRefusal; readonly job: JsonObject }
+  | { readonly status: 'run'; readonly job: JsonObject; readonly reason: '' }
+  | {
+      readonly status: 'stale';
+      readonly refusal: RepairSelectionRefusal;
+      readonly job: JsonObject;
+      readonly reason: string;
+    }
   | {
       readonly status: 'skip';
       readonly refusal: RepairSelectionRefusal;
       readonly job: JsonObject | null;
+      readonly reason: string;
     };
 
 export interface RepairDrainInput {
@@ -199,30 +217,108 @@ export type RepairSelectJobResult =
       readonly job: JsonObject;
       readonly selection: RepairSelectionFacts;
     }
-  | { readonly ok: false; readonly refusal: RepairSelectionRefusal };
+  | {
+      readonly ok: false;
+      readonly refusal: RepairSelectionRefusal;
+      /** `str(exc)` of the guarded `KeyError`/`TypeError`/`AttributeError`, for `selection-malformed`. */
+      readonly python?: string;
+    };
 
 /** A structural shape Python would reach with a dict/list attribute or key. */
 class ShapeError extends Error {
   override readonly name: string = 'ShapeError';
+  /**
+   * What `str(exc)` is where Python's guarded region raises this shape. A
+   * shape Python reaches before its guard (a corrupt queue) crashes the drain
+   * there, so its text is this port's own.
+   */
+  readonly python: string;
+
+  constructor(shape: string, python: string = shape) {
+    super(shape);
+    this.python = python;
+  }
 }
 
-function refusal(refusalCode: RepairSelectionRefusal): {
+/** Python `type(value).__name__` for a decoded JSON value. */
+function pythonTypeName(value: JsonValue): string {
+  if (value === null) return 'NoneType';
+  if (typeof value === 'boolean') return 'bool';
+  if (typeof value === 'string') return 'str';
+  if (value instanceof JsonNumber) return value.kind === 'int' ? 'int' : 'float';
+  return Array.isArray(value) ? 'list' : 'dict';
+}
+
+/** Python `str[:200]`: the first 200 code points. */
+function pythonHead(text: string): string {
+  return [...text].slice(0, 200).join('');
+}
+
+function refusal(
+  refusalCode: RepairSelectionRefusal,
+  python?: string,
+): {
   ok: false;
   refusal: RepairSelectionRefusal;
+  python?: string;
 } {
-  return { ok: false, refusal: refusalCode };
+  return python === undefined
+    ? { ok: false, refusal: refusalCode }
+    : { ok: false, refusal: refusalCode, python };
+}
+
+/** `str(exc)` for `x.get(...)` on a value that is not a dict. */
+function noGet(value: JsonValue): string {
+  return `'${pythonTypeName(value)}' object has no attribute 'get'`;
 }
 
 function drainSkip(
   refusalCode: RepairSelectionRefusal,
   job: JsonObject | null,
+  reason: string,
 ): RepairDrainOutcome {
-  return { status: 'skip', refusal: refusalCode, job };
+  return { status: 'skip', refusal: refusalCode, job, reason };
 }
 
-function drainStale(refusalCode: RepairSelectionRefusal, job: JsonObject): RepairDrainOutcome {
-  return { status: 'stale', refusal: refusalCode, job };
+function drainStale(
+  refusalCode: RepairSelectionRefusal,
+  job: JsonObject,
+  reason: string,
+): RepairDrainOutcome {
+  return { status: 'stale', refusal: refusalCode, job, reason };
 }
+
+/**
+ * `select_job`'s message for each refusal it can return to `drain_job`, which
+ * narrates `str(exc)` verbatim. Two codes read differently here than where
+ * `drain_job` raises them itself (`job-identity-mismatch`, `no-queued-run`),
+ * which is why the text is chosen by origin and not by code alone.
+ * `source-blob-unreadable` is Python's uncaught `RuntimeError` (the drain
+ * crashes); the port skips with `git rev-parse`'s own prefix instead.
+ */
+const SELECT_REASON: Readonly<Partial<Record<RepairSelectionRefusal, string>>> = {
+  'source-sha-invalid': 'full immutable source SHA required',
+  'job-identity-mismatch': 'job identity/source pin mismatch; historical jobs cannot be repinned',
+  'finding-digest-mismatch': 'finding evidence digest mismatch',
+  'canonical-delivery-invalid': 'invalid canonical finding identity',
+  'canonical-delivery-unavailable': 'canonical delivery state unavailable',
+  'canonical-delivery-mismatch': 'canonical finding is not delivered to this repair task',
+  'prepared-source-not-tip': 'prepared source is no longer the default-branch tip',
+  'severity-not-repairable': 'only critical/major or canonical minor findings can be prepared',
+  'finding-path-invalid': 'finding path required',
+  'source-blob-unreadable': 'git rev-parse failed: source blob unreadable',
+  'evidence-binding-mismatch': 'revalidation does not bind source, finding, blob and verdict',
+  'evidence-text-invalid': 'named revalidation reviewer and concrete reason required',
+  'origin-job-missing': 'prepared job must preserve historical finding lineage',
+  'no-queued-run': 'selected job lacks matching queued tick-owned preparation',
+  'revalidation-lineage-mismatch': 'selected job revalidation lineage mismatch',
+};
+
+const CANONICAL_REASON = {
+  'canonical-delivery-invalid': 'invalid canonical finding identity',
+  'canonical-delivery-unavailable': 'canonical delivery state unavailable',
+  'canonical-delivery-mismatch': 'canonical finding is not delivered to this repair task',
+} as const;
 
 function getOr(object: JsonObject, key: string, fallback: JsonValue): JsonValue {
   return object.has(key) ? (object.get(key) as JsonValue) : fallback;
@@ -256,7 +352,7 @@ function queueRecord(
   for (const item of items) {
     if (!(item instanceof JsonObject)) throw new ShapeError('item');
     if (!item.has('id')) {
-      if (missingId === 'malformed') throw new ShapeError('item.id');
+      if (missingId === 'malformed') throw new ShapeError('item.id', "'id'");
     }
     // Python compares `i.get('id') == job.get('item')`, where a missing key
     // and an explicit JSON null are both None.
@@ -288,7 +384,9 @@ function validEvidenceText(value: JsonValue | undefined): boolean {
   );
 }
 
-function canonicalRefusal(value: RepairRefusal | undefined): RepairSelectionRefusal | undefined {
+function canonicalRefusal(
+  value: RepairRefusal | undefined,
+): keyof typeof CANONICAL_REASON | undefined {
   if (value === undefined) return undefined;
   if (
     value === 'canonical-delivery-invalid' ||
@@ -301,6 +399,17 @@ function canonicalRefusal(value: RepairRefusal | undefined): RepairSelectionRefu
 }
 
 /**
+ * Python's `source_path` message for a path `sourcePath` refused: the
+ * unsafe-character branch says `required`; an absolute, `.`-only or `..` path
+ * says `must be repository-relative`.
+ */
+function pathRefusalReason(finding: JsonObject): string {
+  const path = finding.get('path');
+  const required = typeof path !== 'string' || path.length === 0 || hasUnsafePathCharacter(path);
+  return required ? 'finding path required' : 'finding path must be repository-relative';
+}
+
+/**
  * `bounded.validate_revalidation` after the caller supplied the observed tip
  * and blob. Order matches Python: source-sha grammar, observed tip, severity,
  * path, then the checked blob, then the evidence binding and text.
@@ -309,7 +418,7 @@ function validateRevalidation(input: {
   readonly job: JsonObject;
   readonly finding: JsonObject;
   readonly sourceSha: string;
-  readonly evidence: JsonObject;
+  readonly evidence: JsonValue;
   readonly git: RepairSelectionGit;
 }): RepairSelectionRefusal | undefined {
   if (!checkSha(input.sourceSha)) return 'source-sha-invalid';
@@ -319,19 +428,20 @@ function validateRevalidation(input: {
   if (!path.ok) return 'finding-path-invalid';
   const blob = input.git.checkedBlob(input.sourceSha, path.path);
   if (blob === undefined) return 'source-blob-unreadable';
+  // Python reads `evidence.get(...)` only here, after the tip, severity, path
+  // and blob checks, so a non-object revalidation surfaces at this point.
+  const evidence = input.evidence;
+  if (!(evidence instanceof JsonObject)) throw new ShapeError('evidence', noGet(evidence));
   const digest = findingDigest(input.finding);
   if (
-    input.evidence.get('source_sha') !== input.sourceSha ||
-    input.evidence.get('finding_sha256') !== digest ||
-    input.evidence.get('source_blob_sha') !== blob ||
-    input.evidence.get('verdict') !== 'still-valid'
+    evidence.get('source_sha') !== input.sourceSha ||
+    evidence.get('finding_sha256') !== digest ||
+    evidence.get('source_blob_sha') !== blob ||
+    evidence.get('verdict') !== 'still-valid'
   ) {
     return 'evidence-binding-mismatch';
   }
-  if (
-    !validEvidenceText(input.evidence.get('reviewer')) ||
-    !validEvidenceText(input.evidence.get('reason'))
-  ) {
+  if (!validEvidenceText(evidence.get('reviewer')) || !validEvidenceText(evidence.get('reason'))) {
     return 'evidence-text-invalid';
   }
   return undefined;
@@ -356,7 +466,12 @@ export function selectJob(input: RepairSelectJobInput): RepairSelectJobResult {
     return refusal('job-identity-mismatch');
   }
   const finding = job.get('finding');
-  if (!(finding instanceof JsonObject)) return refusal('selection-malformed');
+  if (!(finding instanceof JsonObject)) {
+    return refusal(
+      'selection-malformed',
+      job.has('finding') ? noGet(finding as JsonValue) : "'finding'",
+    );
+  }
   if (
     findingDigest(finding) !== input.findingSha256 ||
     job.get('finding_sha256') !== input.findingSha256
@@ -369,23 +484,32 @@ export function selectJob(input: RepairSelectJobInput): RepairSelectJobResult {
   if (canonical !== undefined) return refusal(canonical);
   const revalidation = job.get('revalidation');
   const evidence = pythonTruthy(revalidation) ? (revalidation as JsonValue) : new JsonObject([]);
-  if (!(evidence instanceof JsonObject)) return refusal('selection-malformed');
-  const binding = validateRevalidation({
-    job,
-    finding,
-    sourceSha: input.sourceSha,
-    evidence,
-    git: input.git,
-  });
+  let binding: RepairSelectionRefusal | undefined;
+  try {
+    binding = validateRevalidation({
+      job,
+      finding,
+      sourceSha: input.sourceSha,
+      evidence,
+      git: input.git,
+    });
+  } catch (error) {
+    if (error instanceof ShapeError) return refusal('selection-malformed', error.python);
+    throw error;
+  }
   if (binding !== undefined) return refusal(binding);
+  if (!(evidence instanceof JsonObject)) {
+    throw new Error('revalidation evidence passed validation without being an object');
+  }
   if (!pythonTruthy(job.get('origin_job'))) return refusal('origin-job-missing');
-  if (!job.has('item') || !job.has('run')) return refusal('selection-malformed');
+  if (!job.has('item')) return refusal('selection-malformed', "'item'");
+  if (!job.has('run')) return refusal('selection-malformed', "'run'");
 
   let record: JsonObject | undefined;
   try {
     record = recordObject(queueRecord(input.queue, job.get('item'), job.get('run'), 'malformed'));
   } catch (error) {
-    if (error instanceof ShapeError) return refusal('selection-malformed');
+    if (error instanceof ShapeError) return refusal('selection-malformed', error.python);
     throw error;
   }
   if (
@@ -484,11 +608,20 @@ function pythonEqual(left: JsonValue | undefined, right: JsonValue | undefined):
  * job bound to its immutable pin, finding digest and source blob.
  */
 export function drainJob(input: RepairDrainInput): RepairDrainOutcome {
-  if (!REPAIR_JOB_ID.test(input.jobId)) return drainSkip('job-id-invalid', null);
-  if (input.jobFile.kind === 'unreadable') return drainSkip('job-unreadable', null);
+  if (!REPAIR_JOB_ID.test(input.jobId)) {
+    // `job_path` raises before the read: `unreadable job: <ValueError>`.
+    return drainSkip('job-id-invalid', null, 'unreadable job: expected one exact CRQ job id');
+  }
+  if (input.jobFile.kind === 'unreadable') {
+    return drainSkip(
+      'job-unreadable',
+      null,
+      `unreadable job: ${pythonHead(input.jobFile.detail ?? '')}`,
+    );
+  }
   const value = input.jobFile.value;
   if (!(value instanceof JsonObject) || value.get('job') !== input.jobId) {
-    return drainSkip('job-identity-mismatch', null);
+    return drainSkip('job-identity-mismatch', null, 'job identity mismatch');
   }
   const job = value;
 
@@ -496,39 +629,52 @@ export function drainJob(input: RepairDrainInput): RepairDrainOutcome {
   try {
     record = recordObject(queueRecord(input.queue, job.get('item'), job.get('run'), 'ignore'));
   } catch (error) {
-    if (error instanceof ShapeError) return drainSkip('selection-malformed', job);
+    if (error instanceof ShapeError)
+      return drainSkip('selection-malformed', job, `malformed queue: ${error.python}`);
     throw error;
   }
-  if (record === undefined) return drainSkip('no-queued-run', job);
+  if (record === undefined) return drainSkip('no-queued-run', job, NO_QUEUED_RUN_REASON);
   let queued: boolean;
   try {
     queued =
       pythonContains(getOr(record, 'jobs', []), input.jobId) && record.get('state') === 'queued';
   } catch (error) {
-    if (error instanceof ShapeError) return drainSkip('selection-malformed', job);
+    if (error instanceof ShapeError)
+      return drainSkip('selection-malformed', job, `malformed queue: ${error.python}`);
     throw error;
   }
-  if (!queued) return drainSkip('no-queued-run', job);
+  if (!queued) return drainSkip('no-queued-run', job, NO_QUEUED_RUN_REASON);
 
   const resume = input.started;
   try {
     const canonical = canonicalRefusal(
       canonicalDeliveryRefusal({ rowText: input.triageRowText, job }),
     );
-    if (canonical !== undefined) return drainSkip(canonical, job);
+    if (canonical !== undefined) return drainSkip(canonical, job, CANONICAL_REASON[canonical]);
     const findingValue = job.get('finding');
-    if (!(findingValue instanceof JsonObject)) throw new ShapeError('finding');
+    if (!(findingValue instanceof JsonObject)) {
+      throw new ShapeError(
+        'finding',
+        job.has('finding') ? noGet(findingValue as JsonValue) : "'finding'",
+      );
+    }
     const finding = findingValue;
-    if (!severityRepairable(job)) return drainSkip('severity-not-repairable', job);
+    if (!severityRepairable(job)) {
+      return drainSkip(
+        'severity-not-repairable',
+        job,
+        'only critical/major or canonical minor findings are repaired',
+      );
+    }
     const normalized = sourcePath(finding);
-    if (!normalized.ok) return drainSkip('finding-path-invalid', job);
+    if (!normalized.ok) return drainSkip('finding-path-invalid', job, pathRefusalReason(finding));
     const path = normalized.path;
 
     if (pythonTruthy(job.get('revalidation'))) {
       if (!resume) {
         const sourceSha = job.get('source_sha');
         if (typeof sourceSha !== 'string' || !checkSha(sourceSha)) {
-          return drainSkip('source-sha-invalid', job);
+          return drainSkip('source-sha-invalid', job, SELECT_REASON['source-sha-invalid']!);
         }
         const findingSha256 = job.get('finding_sha256');
         const selected = selectJob({
@@ -541,41 +687,74 @@ export function drainJob(input: RepairDrainInput): RepairDrainOutcome {
           git: input.git,
         });
         if (!selected.ok) {
-          return selected.refusal === 'prepared-source-not-tip'
-            ? drainStale(selected.refusal, job)
-            : drainSkip(selected.refusal, job);
+          if (selected.refusal === 'prepared-source-not-tip') {
+            return drainStale(selected.refusal, job, SELECT_REASON['prepared-source-not-tip']!);
+          }
+          const reason =
+            selected.refusal === 'selection-malformed'
+              ? `malformed job: ${selected.python ?? ''}`
+              : SELECT_REASON[selected.refusal];
+          if (reason === undefined)
+            throw new Error(`unexpected selector refusal ${selected.refusal}`);
+          return drainSkip(selected.refusal, job, reason);
         }
       }
-      return { status: 'run', job };
+      return { status: 'run', job, reason: '' };
     }
 
     const pinValue = job.get('repair_base');
     if (typeof pinValue !== 'string' || !checkSha(pinValue)) {
-      return drainSkip('source-sha-invalid', job);
+      return drainSkip('source-sha-invalid', job, SELECT_REASON['source-sha-invalid']!);
     }
-    if (record.get('base') !== pinValue) return drainSkip('pin-record-mismatch', job);
+    if (record.get('base') !== pinValue) {
+      return drainSkip(
+        'pin-record-mismatch',
+        job,
+        'job pin differs from its tick-owned repair run',
+      );
+    }
 
     const pin = pinValue;
     const blob = input.git.blobAt(pin, path);
     if (blob === undefined) {
-      return resume ? drainSkip('pinned-path-missing', job) : drainStale('pinned-path-absent', job);
+      return resume
+        ? drainSkip('pinned-path-missing', job, 'pinned source path missing')
+        : drainStale('pinned-path-absent', job, 'finding path is absent at the job pin');
     }
     if (!resume) {
       if (pythonTruthy(record.get('open_pr'))) {
         if (input.git.isAncestor(pin, REPAIR_DEFAULT_REF)) {
-          return drainStale('pr-head-on-default', job);
+          return drainStale(
+            'pr-head-on-default',
+            job,
+            'reviewed PR head is already on the default branch',
+          );
         }
         const branch = record.get('branch');
         const head =
           typeof branch === 'string' && branch.length > 0 && !branch.startsWith('-')
             ? input.git.originBranchHead(branch)
             : undefined;
-        if (head === undefined) return drainStale('pr-branch-gone', job);
+        if (head === undefined) {
+          return drainStale(
+            'pr-branch-gone',
+            job,
+            'PR branch is gone from origin (closed or deleted)',
+          );
+        }
         if (head !== pin && input.git.blobAt(head, path) !== blob) {
-          return drainStale('pr-branch-source-changed', job);
+          return drainStale(
+            'pr-branch-source-changed',
+            job,
+            'PR branch changed the finding source since the pin',
+          );
         }
       } else if (input.git.blobAt(REPAIR_DEFAULT_REF, path) !== blob) {
-        return drainStale('default-source-changed', job);
+        return drainStale(
+          'default-source-changed',
+          job,
+          'finding source changed on the default branch since the pin',
+        );
       }
     }
 
@@ -589,9 +768,12 @@ export function drainJob(input: RepairDrainInput): RepairDrainOutcome {
       job: bound.has('origin_job')
         ? bound
         : new JsonObject([...bound.entries, ['origin_job', null]]),
+      reason: '',
     };
   } catch (error) {
-    if (error instanceof ShapeError) return drainSkip('selection-malformed', job);
+    if (error instanceof ShapeError) {
+      return drainSkip('selection-malformed', job, `malformed job: ${pythonHead(error.python)}`);
+    }
     throw error;
   }
 }

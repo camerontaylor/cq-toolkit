@@ -135,6 +135,17 @@ export interface ParseJsonOptions {
   onRawSurrogate?: () => void;
 }
 
+/**
+ * Python `json.loads`' default `parse_constant`: `NaN`, `Infinity` and
+ * `-Infinity` become floats. Pass it as `parseConstant` wherever the Python
+ * side reads a state file with a bare `json.loads` (which `json.dump` can
+ * have written with those tokens).
+ */
+export function pythonNonFinite(raw: string): JsonValue {
+  const value = raw === 'NaN' ? Number.NaN : raw === '-Infinity' ? -Infinity : Infinity;
+  return JsonNumber.float(value, raw);
+}
+
 /** Parse RFC 8259 JSON without losing int-vs-float or object key order. */
 export function parseJsonValue(text: string, options: ParseJsonOptions = {}): JsonValue {
   return new Parser(text, options).parse();
