@@ -285,6 +285,11 @@ describe('review.address candidate isolation', () => {
   test.each([
     ['run-s build:deps', 'build::deps'],
     ["sh -c 'run-s build:*'", 'build:deps'],
+    ["echo x\nrun-s 'build:*'", 'build:deps'],
+    ["sh -c 'echo x;run-s build:*'", 'build:deps'],
+    ["sh -c 'false || run-s build:*'", 'build:deps'],
+    ["sh -c 'true||run-s build:*'", 'build:deps'],
+    ["sh -c '(run-s build:*)'", 'build:deps'],
     ["run-s 'build:*'", 'build:other'],
     ['run-s "build:*"', 'build:other'],
     ['run-s build:**:other', 'build:other'],
@@ -338,18 +343,20 @@ describe('review.address candidate isolation', () => {
     },
   );
   test('a catastrophic-backtracking runner pattern still resolves and compares scripts', async () => {
+    // Any literal task named after the pathological pattern must stay compared.
+    const named = 'task:literal';
     const f = await fixture(undefined, '', { installedDependencies: 'matching' });
     try {
       const scripts = {
-        postinstall: 'run-s *a*a*a*a*a*a*a*a*a*a*a*a*b build:deps',
+        postinstall: `run-s *a*a*a*a*a*a*a*a*a*a*a*a*b ${named}`,
         ['a'.repeat(64)]: 'node long.mjs',
-        'build:deps': 'node deps.mjs',
+        [named]: 'node named.mjs',
       };
       await f.repo.write('package.json', JSON.stringify({ scripts }));
       f.repo.commitAll('pathological runner pattern');
       await writeFile(
         join(f.dependencyRoot, 'package.json'),
-        JSON.stringify({ scripts: { ...scripts, 'build:deps': 'different installed files' } }),
+        JSON.stringify({ scripts: { ...scripts, [named]: 'different installed files' } }),
       );
       const result = await f.engine.fix(finding(), 1);
       expect(result.commit).toBeUndefined();

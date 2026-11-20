@@ -279,8 +279,9 @@ export async function assertAddressDependencyMetadata(
       // Unquoted shell boundaries stay in the stream so a runner's task list ends there.
       // A word is any run of quoted and unquoted segments (`"build":deps`), decoded
       // together; a stray unmatched quote stays in the word and forces ambiguity.
-      const raw = command.match(/[;&|()]+|(?:"[^"]*"|'[^']*'|[^\s;&|()"']|["'])+/g) ?? [];
-      const boundary = raw.map((token) => /^[;&|()]+$/.test(token));
+      // An unquoted newline separates commands like `;`, so it is a boundary too.
+      const raw = command.match(/[;&|()\n]+|(?:"[^"]*"|'[^']*'|[^\s;&|()"']|["'])+/g) ?? [];
+      const boundary = raw.map((token) => /^[;&|()\n]+$/.test(token));
       const tokens = raw.map((token) =>
         token.replace(
           /"([^"]*)"|'([^']*)'/g,
@@ -307,7 +308,8 @@ export async function assertAddressDependencyMetadata(
       if (
         tokens.some(
           (token) =>
-            /\s/.test(token) && /(?:^|[\s/])(?:run-s|run-p|npm-run-all)(?:\s|$)/.test(token),
+            /\s/.test(token) &&
+            /(?:^|[\s/;&|(])(?:run-s|run-p|npm-run-all)(?:[\s;&|)]|$)/.test(token),
         )
       )
         unresolved = true;
