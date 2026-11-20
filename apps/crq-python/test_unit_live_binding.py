@@ -737,6 +737,124 @@ class DiscoveryTests(PortFixture):
         self.assertIn("Wants names crq-tick.service",
                       " ".join(evidence["foreign"]))
 
+    def test_cotenant_dependency_prefixing_the_selected_unit_is_supported(
+            self):
+        declared = self.declare()
+        # ``backup-crq-tick.service`` is one complete unit name that is not
+        # the selected unit; extracting ``crq-tick.service`` from the middle
+        # of the argument would reject a topology whose dependency names a
+        # different service. The direct name must still be refused above.
+        self.write("ingress.service",
+                   "[Unit]\nWants=backup-crq-tick.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], True)
+        self.assertEqual(evidence["foreign"], [])
+        self.assertIsNone(evidence["error"])
+
+    def test_escaped_crq_dependency_name_is_foreign(self):
+        declared = self.declare()
+        # ``\x2d`` is a systemd escape inside one complete CRQ unit name.
+        # A declared source naming a CRQ unit outside the expected set is
+        # foreign.
+        self.write("crq-tick.service",
+                   "[Unit]\nWants=crq-worker@tenant\\x2dblue.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["complete"], True)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("crq-worker@tenant\\x2dblue.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_also_double_backslash_escape_is_foreign(self):
+        declared = self.declare()
+        # config_parse_also removes one backslash level, so the doubled form
+        # names crq-worker@tenant\x2dblue.service.
+        self.write("crq-tick.service",
+                   "[Install]\nAlso=crq-worker@tenant\\\\x2dblue.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("crq-worker@tenant\\x2dblue.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_also_single_backslash_is_dropped_before_matching(self):
+        declared = self.declare()
+        # extract_first_word drops a backslash before any character, so
+        # ``crq-slot\.service`` names crq-slot.service, outside the set.
+        self.write("crq-tick.service",
+                   "[Install]\nAlso=crq-slot\\.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Also names crq-slot.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_undeclared_also_with_escape_naming_expected_unit_is_foreign(
+            self):
+        declared = self.declare()
+        # ``crq-tick\.service`` in an undeclared unit names the expected
+        # crq-tick.service once systemd drops the backslash.
+        self.write("ingress.service",
+                   "[Install]\nAlso=crq-tick\\.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Also names crq-tick.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_also_odd_backslash_run_keeps_half(self):
+        declared = self.declare()
+        # Three backslashes: the first pair yields one backslash, the third
+        # escapes ``x``, so the name is crq-worker@tenant\x2dblue.service.
+        self.write("crq-tick.service",
+                   "[Install]\nAlso=crq-worker@tenant\\\\\\x2dblue.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("Also names crq-worker@tenant\\x2dblue.service",
+                      " ".join(evidence["foreign"]))
+
+    def test_also_trailing_backslash_is_refused(self):
+        declared = self.declare()
+        # A backslash followed only by trailing whitespace is not a line
+        # continuation; systemd strips the line, so the value ends in a lone
+        # backslash and extract_first_word rejects it (-EINVAL). Discovery
+        # cannot vouch for what the unit names.
+        self.write("crq-tick.service",
+                   "[Install]\nAlso=crq-tick.service \\ \n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("trailing backslash", " ".join(evidence["foreign"]))
+
+    def test_quoted_install_argument_is_unquoted_before_matching(self):
+        declared = self.declare()
+        # systemd strips the quotes of a WantedBy argument, so the quoted
+        # form names crq-slot.target just as the bare form does.
+        self.write("crq-tick.service",
+                   '[Install]\nWantedBy="crq-slot.target"\n')
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("crq-slot.target", " ".join(evidence["foreign"]))
+
+    def test_embedded_quotes_are_removed_before_matching(self):
+        declared = self.declare()
+        # systemd drops quote characters anywhere in the argument.
+        for value in ('crq-"slot".target', "crq-'slot'.target",
+                      'cr"q-slot.target"'):
+            with self.subTest(value=value):
+                self.write("crq-tick.service",
+                           "[Install]\nWantedBy=%s\n" % value)
+                evidence = self.discover(declared)
+                self.assertEqual(evidence["supported"], False)
+                self.assertIn("crq-slot.target",
+                              " ".join(evidence["foreign"]))
+
+    def test_unresolved_specifier_in_declared_dependency_is_foreign(self):
+        declared = self.declare()
+        # ``%p`` expands to the unit prefix (crq-tick), which names
+        # crq-worker@crq-tick.service, outside the expected set.
+        self.write("crq-tick.service",
+                   "[Unit]\nWants=crq-worker@%p.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("unresolved specifier", " ".join(evidence["foreign"]))
+
     def test_declared_source_may_name_expected_units(self):
         declared = self.declare()
         self.write("crq-tick.timer",
