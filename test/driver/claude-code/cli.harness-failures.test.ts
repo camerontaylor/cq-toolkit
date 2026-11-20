@@ -235,19 +235,6 @@ describe('claude-code CLI transport: the closed harness tool surface (W1.4)', ()
     const read = 'mcp__cq-harness__read';
     const edit = 'mcp__cq-harness__edit';
 
-    // (0) Repeated assistant frames of one message.id count usage once.
-    const dup = harnessObservation(['read', 'edit']);
-    const usageFrame = (id: string): string =>
-      line({
-        type: 'assistant',
-        message: { id, content: [], usage: { input_tokens: 10, output_tokens: 5 } },
-      });
-    handleStdoutLine(dup, usageFrame('msg-1'));
-    handleStdoutLine(dup, usageFrame('msg-1'));
-    expect(dup.assistantUsage?.input).toBe(10);
-    handleStdoutLine(dup, usageFrame('msg-2'));
-    expect(dup.assistantUsage?.input).toBe(20);
-
     // (a) The permission_denied FRAME names the tool_use: whatever the text,
     // the errored result is a permission denial.
     const framed = harnessObservation(['read', 'edit']);

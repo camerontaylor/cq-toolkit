@@ -84,6 +84,172 @@ class SumsTests(unittest.TestCase):
                              vm.sha256_file(path))
 
 
+class StopOwnedProcessTests(unittest.TestCase):
+    def _stop(self, active_state, *, purge=True, stop_rc=0, show_rc=0,
+              load_state="loaded", run_id="r1"):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = pathlib.Path(tmp) / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            (run_dir / "overlay.qcow2").write_text("disk")
+
+            self.dispatched = []
+
+            def fake_run(argv, **kwargs):
+                self.dispatched.append(argv)
+                if "show" in argv:
+                    out = "ActiveState=%s\nLoadState=%s\n" % (active_state, load_state)
+                    return mock.Mock(returncode=show_rc, stdout=out, stderr="")
+                return mock.Mock(returncode=stop_rc, stdout="", stderr="")
+
+            with mock.patch.object(vm.subprocess, "run", side_effect=fake_run):
+                result = vm.stop_owned_process(
+                    {"path": str(run_dir), "run_id": run_id}, purge=purge)
+            return result, (run_dir / "overlay.qcow2").exists()
+
+    def test_inactive_scope_is_stopped_and_purged(self):
+        result, still_there = self._stop("inactive")
+        self.assertTrue(result["stopped"])
+        self.assertFalse(still_there)
+        show = ["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
+                "-p", "ControlGroup", "crq-vm-r1.scope"]
+        stop = ["systemctl", "--user", "stop", "crq-vm-r1.scope"]
+        # Ownership proof first, then the stop, then the post-stop state query.
+        self.assertEqual(self.dispatched, [show, stop, show])
+
+    def test_failed_scope_is_stopped(self):
+        result, _ = self._stop("failed")
+        self.assertTrue(result["stopped"])
+
+    def test_unloaded_unit_counts_as_stopped_even_if_stop_fails(self):
+        result, _ = self._stop("inactive", stop_rc=5, load_state="not-found")
+        self.assertTrue(result["stopped"])
+
+    def test_failed_scope_query_never_dispatches_stop(self):
+        with self.assertRaises(RuntimeError):
+            self._stop("", show_rc=1)
+        self.assertFalse(any("stop" in argv for argv in self.dispatched))
+
+    def test_indeterminate_membership_never_dispatches_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = pathlib.Path(tmp) / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            calls = []
+
+            def fake_run(argv, **kwargs):
+                calls.append(argv)
+                out = ("ActiveState=failed\nLoadState=loaded\n"
+                       "ControlGroup=/user.slice/crq-vm-r1.scope\n")
+                return mock.Mock(returncode=0, stdout=out, stderr="")
+
+            with mock.patch.object(vm.subprocess, "run", side_effect=fake_run), \
+                 mock.patch.object(vm, "_cgroup_pids", return_value=None):
+                with self.assertRaises(RuntimeError):
+                    vm.stop_owned_process(
+                        {"path": str(run_dir), "run_id": "r1"}, purge=True)
+            self.assertFalse(any("stop" in argv for argv in calls))
+
+    def test_deactivating_scope_is_not_stopped(self):
+        result, still_there = self._stop("deactivating", stop_rc=1)
+        self.assertFalse(result["stopped"])
+        self.assertTrue(still_there)
+
+    def test_failed_stop_command_blocks_purge_even_when_inactive(self):
+        result, still_there = self._stop("inactive", stop_rc=1)
+        self.assertFalse(result["stopped"])
+        self.assertTrue(still_there)
+
+    def test_active_scope_is_not_stopped(self):
+        result, still_there = self._stop("active")
+        self.assertFalse(result["stopped"])
+        self.assertTrue(still_there)
+
+    def test_glob_run_id_never_reaches_systemctl(self):
+        with self.assertRaises(RuntimeError):
+            self._stop("inactive", run_id="*")
+        self.assertEqual(self.dispatched, [])
+
+    def _scoped(self, *, members, owned, cgroup_after):
+        """Derived-scope stop where the cgroup holds `members` before and
+        `cgroup_after` after the stop; `owned` says if their cmdline matches."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = pathlib.Path(tmp) / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            (run_dir / "overlay.qcow2").write_text("disk")
+            calls = []
+
+            def fake_run(argv, **kwargs):
+                calls.append(argv)
+                if "show" in argv:
+                    out = ("ActiveState=failed\nLoadState=loaded\n"
+                           "ControlGroup=/user.slice/crq-vm-r1.scope\n")
+                    return mock.Mock(returncode=0, stdout=out, stderr="")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            pids = iter([members, cgroup_after])
+            command = (str(run_dir / "overlay.qcow2") if owned else "other").encode()
+            with mock.patch.object(vm.subprocess, "run", side_effect=fake_run), \
+                 mock.patch.object(vm, "_cgroup_pids", side_effect=lambda *_: next(pids)), \
+                 mock.patch.object(pathlib.Path, "read_bytes", return_value=command):
+                try:
+                    result = vm.stop_owned_process(
+                        {"path": str(run_dir), "run_id": "r1"}, purge=True)
+                except RuntimeError as exc:
+                    return exc, calls, (run_dir / "overlay.qcow2").exists()
+            return result, calls, (run_dir / "overlay.qcow2").exists()
+
+    def test_scope_with_foreign_members_is_never_stopped(self):
+        error, calls, still_there = self._scoped(members=[4242], owned=False,
+                                                 cgroup_after=[])
+        self.assertIsInstance(error, RuntimeError)
+        self.assertFalse(any("stop" in argv for argv in calls))
+        self.assertEqual(
+            calls, [["systemctl", "--user", "show", "-p", "ActiveState", "-p", "LoadState",
+                     "-p", "ControlGroup", "crq-vm-r1.scope"]])
+        self.assertTrue(still_there)
+
+    def test_failed_scope_with_populated_cgroup_keeps_files(self):
+        result, _, still_there = self._scoped(members=[4242], owned=True,
+                                              cgroup_after=[4242])
+        self.assertFalse(result["stopped"])
+        self.assertTrue(still_there)
+
+    def test_failed_scope_with_empty_cgroup_is_purged(self):
+        result, _, still_there = self._scoped(members=[4242], owned=True,
+                                              cgroup_after=[])
+        self.assertTrue(result["stopped"])
+        self.assertFalse(still_there)
+
+    def test_unknown_cgroup_state_keeps_files(self):
+        result, _, still_there = self._scoped(members=[4242], owned=True,
+                                              cgroup_after=None)
+        self.assertFalse(result["stopped"])
+        self.assertTrue(still_there)
+
+    def test_busy_run_lock_blocks_stop_before_any_systemctl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = pathlib.Path(tmp) / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            with vm.run_lock(run_dir):
+                with mock.patch.object(vm.subprocess, "run") as dispatch:
+                    with self.assertRaises(RuntimeError):
+                        vm.stop_owned_process(
+                            {"path": str(run_dir), "run_id": "r1"}, purge=True)
+                dispatch.assert_not_called()
+
+    def test_load_run_rejects_a_missing_run_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (pathlib.Path(tmp) / "runs" / "r1").mkdir(parents=True)
+            with self.assertRaises(ValueError):
+                vm.load_run(pathlib.Path(tmp), "r2", require_process=False)
+
+    def test_load_run_rejects_unsafe_run_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (pathlib.Path(tmp) / "runs" / "r1").mkdir(parents=True)
+            for bad in ("*", "..", "a/b", "", "-x"):
+                with self.assertRaises(ValueError):
+                    vm.load_run(pathlib.Path(tmp), bad, require_process=False)
+
+
 class DownloadTests(unittest.TestCase):
     def test_failed_transfer_removes_the_partial_file(self):
         class Broken:
@@ -436,13 +602,17 @@ class LifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             state, run = self._prepared(temporary)
             (run / "overlay.qcow2").write_text("evidence")
-            payload = vm.stop_owned_process(
-                {"run_id": "r1", "path": str(run)}, purge=True)
-            self.assertTrue(payload["stopped"])
-            self.assertFalse((run / "overlay.qcow2").exists())
-            self.assertTrue(pathlib.Path(payload["trash"]).is_dir())
-            again = vm.stop_owned_process(
-                {"run_id": "r1", "path": str(run)}, purge=True)
+            inactive = mock.Mock(returncode=0,
+                                 stdout="ActiveState=inactive\nLoadState=loaded\n",
+                                 stderr="")
+            with mock.patch.object(vm.subprocess, "run", return_value=inactive):
+                payload = vm.stop_owned_process(
+                    {"run_id": "r1", "path": str(run)}, purge=True)
+                self.assertTrue(payload["stopped"])
+                self.assertFalse((run / "overlay.qcow2").exists())
+                self.assertTrue(pathlib.Path(payload["trash"]).is_dir())
+                again = vm.stop_owned_process(
+                    {"run_id": "r1", "path": str(run)}, purge=True)
             self.assertTrue(again["stopped"])
             self.assertIsNone(again["trash"])
 
@@ -484,6 +654,19 @@ class LifecycleTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     vm.cmd_boot(args)
                 stop.assert_called_once()
+
+    def test_cmd_boot_rejected_by_busy_lock_never_cleans_up(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            args = type("Args", (), {"state_dir": str(state), "run_id": "r1",
+                                     "tools": None})()
+            with vm.run_lock(run):
+                with mock.patch.object(vm, "boot") as boot, \
+                     mock.patch.object(vm, "stop_owned_process") as stop:
+                    with self.assertRaises(RuntimeError):
+                        vm.cmd_boot(args)
+                    boot.assert_not_called()
+                    stop.assert_not_called()
 
     def test_cmd_boot_cleans_up_when_upload_fails(self):
         with tempfile.TemporaryDirectory() as temporary:

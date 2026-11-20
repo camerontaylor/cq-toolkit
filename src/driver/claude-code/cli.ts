@@ -1186,8 +1186,8 @@ export interface RunObservation {
   stderr: string[];
   /** Usage folded from assistant events — the fallback when no result usage. */
   assistantUsage: Usage | undefined;
-  /** `message.id`s whose usage is already folded: a repeated id counts once (parity with the SDK transport). */
-  countedAssistantMessageIds: Set<string>;
+  /** `message.id`s whose usage was already folded: one message can arrive as several assistant events. */
+  assistantUsageMessageIds: Set<string>;
   /** The terminal result event, when it arrived. */
   result: ResultEvent | undefined;
   /** The child's settled close (exit code/signal/spawn error), when it closed — error-cause evidence (#208). */
@@ -1241,7 +1241,7 @@ function newObservation(): RunObservation {
     narration: [],
     stderr: [],
     assistantUsage: undefined,
-    countedAssistantMessageIds: new Set(),
+    assistantUsageMessageIds: new Set(),
     result: undefined,
     close: undefined,
     toolUseNameById: new Map(),
@@ -1366,13 +1366,14 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
         observation.narration.push(refusalNarrationMarker());
       }
       const usage = usageFromWire(message['usage']);
+      // Claude Code can emit one assistant event per content block, all sharing
+      // one `message.id` and repeating the message's usage: count it once.
       const messageId = asString(message['id']);
-      if (
-        usage !== undefined &&
-        (messageId === undefined || !observation.countedAssistantMessageIds.has(messageId))
-      ) {
-        if (messageId !== undefined) observation.countedAssistantMessageIds.add(messageId);
+      const repeated =
+        messageId !== undefined && observation.assistantUsageMessageIds.has(messageId);
+      if (usage !== undefined && !repeated) {
         observation.assistantUsage = addUsage(observation.assistantUsage, usage);
+        if (messageId !== undefined) observation.assistantUsageMessageIds.add(messageId);
       }
       const content = asArray(message['content']) ?? [];
       for (const block of content) {

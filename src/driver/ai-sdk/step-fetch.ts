@@ -44,10 +44,45 @@ class TimedDispatcher extends Dispatcher {
     handler: Dispatcher.DispatchHandler,
   ): boolean {
     return this.delegate.dispatch(
-      { ...options, headersTimeout: this.timeoutMs, bodyTimeout: this.timeoutMs },
+      {
+        ...options,
+        headersTimeout: this.timeoutMs,
+        bodyTimeout: this.timeoutMs,
+      },
       handler,
     );
   }
+}
+
+/**
+ * Buffer a native Request body, honoring `signal` while the stream is open:
+ * on abort the reader is cancelled and the wait rejects with the signal's
+ * reason, so an open body stream cannot pin the call past a caller abort.
+ */
+async function bufferBody(request: Request, signal: AbortSignal | null): Promise<Buffer> {
+  // Fetch rejects a Request whose body was already read (even partly) or is locked when no
+  // `init.body` replaces it; a fresh reader would otherwise send only the remaining bytes.
+  if (request.bodyUsed || (request.body as ReadableStream<Uint8Array>).locked) {
+    throw new TypeError('Cannot send a Request whose body has already been used.');
+  }
+  signal?.throwIfAborted();
+  const reader = (request.body as ReadableStream<Uint8Array>).getReader();
+  const onAbort = (): void => {
+    void reader.cancel(signal?.reason).catch(() => undefined);
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  const chunks: Uint8Array[] = [];
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (signal?.aborted) throw signal.reason;
+      if (done) break;
+      chunks.push(value);
+    }
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
+  return Buffer.concat(chunks);
 }
 
 /** Apply per-request socket timeouts while preserving the supplied or process-global transport. */
@@ -61,37 +96,41 @@ export function createStepFetch(
       transport ?? getGlobalDispatcher(),
       stepTimeoutMs + marginMs,
     );
-    type UndiciInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
-    const base = { ...(init as unknown as UndiciInit), dispatcher };
-    // undici's fetch does not recognise a runtime-native Request (a different
-    // class) and would stringify it. Unpack it into url + init; explicit init
-    // fields still win, as in the fetch contract.
-    if (typeof Request !== 'undefined' && input instanceof Request) {
-      // An explicitly-undefined init signal means "not supplied" in the fetch
-      // contract; a plain spread of `base` would overwrite the unpacked
-      // Request's signal with undefined, so it must be handled separately.
-      const { signal: initSignal, ...baseRest } = base;
-      // A native Request body is a one-shot stream, which undici cannot
-      // re-send when following a 307/308 redirect. Recover the payload as a
-      // replayable buffer before constructing the request; an explicit init
-      // body still wins below, as in the fetch contract.
-      const body =
-        baseRest.body === undefined && input.body !== null ? await input.arrayBuffer() : undefined;
-      return undiciFetch(input.url, {
-        method: input.method,
-        headers: input.headers as unknown as UndiciInit['headers'],
-        signal: (initSignal ?? input.signal) as UndiciInit['signal'],
-        // Keep the Request's redirect policy (`error`/`manual`); an explicit
-        // init redirect still wins through `baseRest`.
-        redirect: input.redirect,
-        ...(input.body !== null ? { duplex: 'half' as const } : {}),
-        ...(body !== undefined ? { body } : {}),
-        ...baseRest,
-      } as UndiciInit) as unknown as Promise<Response>;
-    }
-    return undiciFetch(
-      input as Parameters<typeof undiciFetch>[0],
-      base,
-    ) as unknown as Promise<Response>;
+    // A native `Request` is not undici's own class, so undici's RequestInfo
+    // converter would stringify it ("[object Request]"). Unpack it into a URL
+    // plus init; an explicit `init` still wins, as it does for native fetch.
+    const target: string | URL =
+      typeof Request !== 'undefined' && input instanceof Request
+        ? input.url
+        : (input as string | URL);
+    const isRequest = typeof Request !== 'undefined' && input instanceof Request;
+    const initOpts = init as { signal?: AbortSignal | null; body?: unknown } | undefined;
+    // `signal: null` means "no signal" in fetch; only `undefined` falls back to the request's.
+    const bufferSignal =
+      initOpts?.signal !== undefined ? initOpts.signal : isRequest ? input.signal : null;
+    // Native fetch prefers `init.body`, so the request body is never read then.
+    const needsBodyBuffer = isRequest && input.body !== null && initOpts?.body == null;
+    const fromRequest = isRequest
+      ? {
+          method: input.method,
+          headers: input.headers,
+          signal: input.signal,
+          redirect: input.redirect,
+          ...(needsBodyBuffer ? { body: await bufferBody(input, bufferSignal) } : {}),
+        }
+      : {};
+    // Fetch treats an own `undefined` init member as absent, so `{ signal: undefined }` keeps
+    // the Request's signal (likewise method, headers, redirect). A nullish `init.body` also
+    // means "not set", so it never overwrites the buffered Request body. `signal: null` stays.
+    const overrides = Object.fromEntries(
+      Object.entries(init ?? {}).filter(
+        ([key, value]) => value !== undefined && !(key === 'body' && value === null),
+      ),
+    );
+    return undiciFetch(target, {
+      ...fromRequest,
+      ...overrides,
+      dispatcher,
+    } as unknown as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>;
   };
 }

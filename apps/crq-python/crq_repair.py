@@ -10,13 +10,15 @@ import os
 from pathlib import Path
 import random
 import re
+import shutil
 import signal
 import sys
+import tempfile
 import time
 from zoneinfo import ZoneInfo
 from crq_repair import DetectorUnavailable, atomic, command, git, hack_detector, utc, verify
 from crq_repair.drivers import cq, codex, paseo
-from crq_repair.retain import retain
+from crq_repair.retain import UnsupportedUntracked, retain, untracked_directories
 from crq_repair.bounded import drain_job, drain_order, require_canonical_delivery, select_job, source_snapshot
 
 ROOT = Path(__file__).resolve().parent
@@ -305,14 +307,41 @@ def dispatch(config, role, job, wt, directory, judge=False):
             if remaining < 0.001:
                 return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
             if attempted and not judge:
-                retain(wt, baseline, previous_directory)
+                try:
+                    retain(wt, baseline, previous_directory)
+                except UnsupportedUntracked:
+                    # A throttled fixer can leave an unignored nested repository
+                    # in the tree: retain() refuses to archive an untracked
+                    # entry that is not a regular file or symlink, and the
+                    # doubled -f below is what removes nested repositories.
+                    # Moving each such repository into the provider's evidence
+                    # directory preserves its contents unarchived, so the
+                    # capture retry succeeds and the cleanup can run; any other
+                    # unsupported entry still fails closed without a reset.
+                    nested = untracked_directories(wt)
+                    if not nested:
+                        raise
+                    # A rate-limit deferral re-runs this rung against the same
+                    # evidence directory, so every capture gets its own fresh
+                    # subdirectory: shutil.move treats an existing destination
+                    # directory as a container, which would nest or collide.
+                    holder = previous_directory / 'retained-nested'
+                    holder.mkdir(parents=True, exist_ok=True)
+                    capture = Path(tempfile.mkdtemp(prefix='capture-', dir=holder))
+                    for name in nested:
+                        target = capture / name
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(os.fspath(Path(wt) / name), os.fspath(target))
+                    retain(wt, baseline, previous_directory)
                 # Each fallback fixer gets a fresh checkout at the baseline:
                 # -x also removes ignored files, and the doubled -f removes
                 # nested git repositories, so nothing a throttled fixer left
                 # behind can reach the next provider's context. retain() above
                 # archived only the tracked and non-ignored state; ignored
-                # output (build output, caches, nested repos) is deliberately
-                # discarded here and is not recoverable.
+                # output (build output, caches) is deliberately discarded here
+                # and is not recoverable, but a nested repository retain()
+                # cannot archive was moved into the provider's evidence
+                # directory above, so its contents stay recoverable.
                 git(wt, 'reset', '--hard', baseline)
                 git(wt, 'clean', '-ffdx')
                 # Retention and reset consume the shared budget; remeasure so
@@ -335,6 +364,27 @@ def dispatch(config, role, job, wt, directory, judge=False):
     return {'stop': 'rate-limit', 'retry_after_ms': max(1000, (end - dt.datetime.now(dt.timezone.utc)).total_seconds() * 1000)}
 
 
+def review_diff_sections(diff):
+    """Split a review diff into (path, text) per 'diff --git' section.
+
+    Text before the first header keeps the generic review-diff.txt path. A
+    header without a ' b/' separator (for example a git-quoted non-ASCII path)
+    is scanned under the whole header line, which still contains the real
+    path. An empty diff is one empty section so the scan still runs once."""
+    sections, path, lines = [], 'review-diff.txt', []
+    for line in str(diff).splitlines():
+        if line.startswith('diff --git '):
+            if lines:
+                sections.append((path, '\n'.join(lines)))
+            _, _, tail = line.rpartition(' b/')
+            path = tail.strip() or 'review-diff.txt'
+            lines = []
+        lines.append(line)
+    if lines or not sections:
+        sections.append((path, '\n'.join(lines)))
+    return sections
+
+
 def _dispatch(config, role, job, wt, directory, judge=False):
     directory.mkdir(parents=True, exist_ok=True)
     job = copy.deepcopy(job)
@@ -348,6 +398,14 @@ def _dispatch(config, role, job, wt, directory, judge=False):
     if not triage_context_safe(c, {'current_path': snapshot.get('path') or 'source-snapshot.txt', 'source': snapshot.get('source', '')},
                                directory / 'source-snapshot-scan.json'):
         raise ValueError('source snapshot secret scan rejected; refusing dispatch')
+    # The review diff rides in the job and is serialized into the judge prompt;
+    # it gets the identical scan before any driver or provider call.
+    # Each file section is scanned under its own path so path-gated rules
+    # (key-material-env) apply exactly as they do for the source snapshot.
+    for index, (section_path, section) in enumerate(review_diff_sections(job.get('review_diff', ''))):
+        if not triage_context_safe(c, {'current_path': section_path, 'source': section},
+                                   directory / ('review-diff-scan-' + str(index) + '.json')):
+            raise ValueError('review diff secret scan rejected; refusing dispatch')
     job['source_snapshot'] = snapshot
     atomic(directory / 'source-snapshot.json', snapshot)
     # The admission checks sample the clock before worktree retention and the
@@ -1446,9 +1504,18 @@ def run(argv=None):
     # Mode validation before any alternate path runs: recovery selects exactly
     # one job and never combines with --job/--source-sha/--finding-sha256 or
     # --triage-dry-run.
-    if args.recover_job and (any(supplied) or args.triage_dry_run):
+    # Presence, not truthiness: `--recover-job ''` was still supplied.
+    if args.recover_job is not None and (any(supplied) or args.triage_dry_run):
         narrate('repair dispatch refused: recovery selects exactly one job')
         return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
+    if args.recover_job is not None and not args.recover_job.strip():
+        # An empty recovery selector must refuse, never fall through to the drain.
+        narrate('repair dispatch refused: --recover-job must not be empty')
+        return 2, {'status': 'refused', 'reason': '--recover-job must not be empty'}
+    if args.triage_dry_run and any(supplied):
+        # The dry run selects no job; a selector beside it would be ignored.
+        narrate('repair dispatch refused: --triage-dry-run takes no job selector')
+        return 2, {'status': 'refused', 'reason': '--triage-dry-run takes no job selector'}
     if args.triage_dry_run:
         # triage_phase returns its report only when triage is configured and
         # has a rollout; otherwise it returns None having written nothing, so

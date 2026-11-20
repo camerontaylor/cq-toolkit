@@ -281,6 +281,8 @@ export function decodeInventoryBinding(value: unknown): QueueInventoryBinding {
   }
   const repo = recordGet(value, 'repo') as string;
   const targetSelector = selectorOf(recordGet(value, 'targetSelector'));
+  // One refusal type across the wire layer: an empty or inverted interval is a
+  // wire refusal, not a ReconcileRefused escaping to callers that catch QueueRefused.
   let interval: ReturnType<typeof normalizeInterval>;
   try {
     interval = normalizeInterval(recordGet(value, 'after'), recordGet(value, 'before'));

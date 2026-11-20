@@ -425,7 +425,7 @@ export function harnessObservation(tools: string[]): Observation {
     narration: [],
     stderr: [],
     assistantUsage: undefined,
-    countedAssistantMessageIds: new Set(),
+    assistantUsageMessageIds: new Set(),
     result: undefined,
     close: undefined,
     toolUseNameById: new Map(),

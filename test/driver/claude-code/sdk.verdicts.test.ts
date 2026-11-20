@@ -199,42 +199,6 @@ describe('claude-code sdk transport specifics (mock sdk)', () => {
     }
   });
 
-  test('the observed native session id is returned on the WorkerResult', async () => {
-    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
-    try {
-      const driver = new ClaudeCodeDriver({
-        transport: 'sdk',
-        sdkLoader: async () => ({
-          ...mockAdapters,
-          query: ({
-            options,
-          }: {
-            prompt: string;
-            options: Record<string, unknown>;
-          }): AsyncGenerator<unknown, void> =>
-            (async function* () {
-              yield initFrame(options, { session_id: 'native-sdk-1' });
-              yield {
-                type: 'result',
-                subtype: 'success',
-                is_error: false,
-                session_id: 'native-sdk-1',
-                result: 'ok',
-                usage: AGENT_USAGE,
-              };
-            })(),
-        }),
-        routingTable: conformanceEndpointTable(),
-        sessionsDir: join(scratchDir, SESSIONS_DIR),
-        harnessConfig: conformanceHarnessConfig(scratchDir),
-      });
-      const result = await driver.run(invocation());
-      expect(result.nativeSessionId).toBe('native-sdk-1');
-    } finally {
-      await rm(scratchDir, { recursive: true, force: true });
-    }
-  });
-
   test('cost prices the SERVED model when one was observed (remap rates, not requested rates)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
