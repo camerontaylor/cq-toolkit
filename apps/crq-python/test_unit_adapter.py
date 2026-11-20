@@ -1473,6 +1473,154 @@ class AdapterTests(AdapterFixture):
         self.assertEqual(self.fake.active["crq-tick.service"], "active")
         self.assertEqual(self.fake.active["crq-tick.timer"], "active")
 
+    def test_restore_activation_uses_the_saved_service_start_timeout(self):
+        service = self.unit_dir / "crq-tick.service"
+        prior = self.python_service("crq-tick.service")
+        text = prior["bytes"].decode("utf-8")
+        self.assertIn("TimeoutStartSec=10min", text)
+        _write(service, text.replace(
+            "TimeoutStartSec=10min", "TimeoutStartSec=20min").encode(), 0o600)
+        self.fake.active["crq-tick.service"] = "active"
+        current = self.make_adapter()
+        snapshot = current.snapshot("crq-tick.service")
+        recovery = self.make_adapter()
+        recovery.validate_snapshot("crq-tick.service", snapshot)
+        recovery.stop_and_drain("crq-tick.service")
+        recovery.restore("crq-tick.service", snapshot)
+        # 700 s exceeds the pinned 10-minute bound plus the margin (660 s) but
+        # is inside the saved 20-minute bound plus the margin (1,260 s), so the
+        # restore start must be bounded by the saved unit, not the template.
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+        self.assertEqual(self.fake.active["crq-tick.timer"], "active")
+
+    def _recovery_with_timeout_line(self, line):
+        service = self.unit_dir / "crq-tick.service"
+        text = self.python_service("crq-tick.service")["bytes"].decode("utf-8")
+        _write(service, text.replace("TimeoutStartSec=10min", line).encode(), 0o600)
+        self.fake.active["crq-tick.service"] = "active"
+        current = self.make_adapter()
+        snapshot = current.snapshot("crq-tick.service")
+        recovery = self.make_adapter()
+        recovery.validate_snapshot("crq-tick.service", snapshot)
+        recovery.stop_and_drain("crq-tick.service")
+        recovery.restore("crq-tick.service", snapshot)
+        return recovery, snapshot
+
+    def test_restore_start_timeout_accepts_whitespace_before_equals(self):
+        recovery, snapshot = self._recovery_with_timeout_line("TimeoutStartSec =20min")
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_unsupported_saved_timeout_falls_back_to_the_pinned_bound(self):
+        for line in ("TimeoutStartSec=bogus", "TimeoutStartSec=infinity",
+                     "TimeoutStartSec=" + "9" * 309 + "s"):
+            with self.subTest(line=line):
+                self.setUp()
+                recovery, snapshot = self._recovery_with_timeout_line(line)
+                self.fake.service_start_delay = 120
+                recovery.restore_activation("crq-tick.service", snapshot)
+                self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_last_timeout_assignment_wins_across_both_keys(self):
+        for lines in ("TimeoutStartSec=5min\nTimeoutStartSec=20min",
+                      "TimeoutStartSec=1min\nTimeoutSec=20min",
+                      "# c \\\nTimeoutStartSec=20min"):
+            with self.subTest(lines=lines):
+                self.setUp()
+                recovery, snapshot = self._recovery_with_timeout_line(lines)
+                self.fake.service_start_delay = 700
+                recovery.restore_activation("crq-tick.service", snapshot)
+                self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_restore_start_command_timeout_is_recorded_for_fallbacks(self):
+        for line, expected in (("TimeoutStartSec=192h", 660),
+                               ("TimeoutStartSec=infinity", 660),
+                               ("TimeoutStartSec=20min30s", 1290),
+                               ("TimeoutStartSec=20min 30s", 1290),
+                               ("TimeoutStartSec=20min\nTimeoutSec=bogus", 1260),
+                               ("TimeoutStartSec=" + "9" * 5000, 660)):
+            with self.subTest(line=line):
+                self.setUp()
+                recovery, snapshot = self._recovery_with_timeout_line(line)
+                seen = []
+                original = self.fake.run
+
+                def record(*args, timeout=60, _original=original, **kwargs):
+                    if "start" in args:
+                        seen.append(timeout)
+                    return _original(*args, timeout=timeout, **kwargs)
+
+                self.fake.run = record
+                recovery.restore_activation("crq-tick.service", snapshot)
+                self.assertIn(expected, seen)
+
+    def test_u2028_in_a_comment_is_not_an_assignment(self):
+        recovery, snapshot = self._recovery_with_timeout_line(
+            "TimeoutStartSec=20min\n# note\u2028TimeoutStartSec=1s")
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_duration_without_spaces_and_oversized_digits(self):
+        self.assertEqual(adapter_mod._duration_seconds("20min30s"), 1230)
+        self.assertEqual(adapter_mod._duration_seconds("20min 30s"), 1230)
+        self.assertIsNone(adapter_mod._duration_seconds("9" * 5000))
+
+    def test_all_systemd_time_span_units_are_accepted(self):
+        for text, expected in (("2d", 172800), ("1w", 604800), ("1day", 86400),
+                               ("2days", 172800), ("5sec", 5), ("3seconds", 3),
+                               ("2hr", 7200), ("2hours", 7200), ("5minutes", 300),
+                               ("1month", 2629800), ("1M", 2629800),
+                               ("1y", 31557600), ("1year", 31557600),
+                               ("1500msec", 1), ("2000000usec", 2),
+                               ("2000000us", 2), ("1d 2h", 93600)):
+            with self.subTest(text=text):
+                self.assertEqual(adapter_mod._duration_seconds(text), expected)
+        self.assertIsNone(adapter_mod._duration_seconds("5mins"))
+        self.assertIsNone(adapter_mod._duration_seconds("5H"))
+
+    def test_saved_timeout_in_days_is_honored(self):
+        recovery, snapshot = self._recovery_with_timeout_line("TimeoutStartSec=2d")
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_minute_unit_m_is_accepted(self):
+        self.assertEqual(adapter_mod._duration_seconds("5m"), 300)
+        self.assertIsNone(adapter_mod._duration_seconds("9" * 309 + "s"))
+
+    def test_comment_inside_a_timeout_continuation_is_ignored(self):
+        recovery, snapshot = self._recovery_with_timeout_line(
+            "TimeoutStartSec=10min \\\n# note\n10min")
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
+    def test_inactive_snapshot_ignores_an_unsupported_start_timeout(self):
+        service = self.unit_dir / "crq-tick.service"
+        text = self.python_service("crq-tick.service")["bytes"].decode("utf-8")
+        _write(service, text.replace(
+            "TimeoutStartSec=10min", "TimeoutStartSec=bogus").encode(), 0o600)
+        self.fake.active["crq-tick.service"] = "inactive"
+        current = self.make_adapter()
+        snapshot = current.snapshot("crq-tick.service")
+        recovery = self.make_adapter()
+        recovery.validate_snapshot("crq-tick.service", snapshot)
+        recovery.stop_and_drain("crq-tick.service")
+        recovery.restore("crq-tick.service", snapshot)
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "inactive")
+        self.assertFalse(service.is_symlink())
+
+    def test_space_separated_time_span_is_summed(self):
+        self.assertEqual(adapter_mod._duration_seconds("5min 20s"), 320)
+        self.assertEqual(adapter_mod._duration_seconds("1h 30min"), 5400)
+        self.assertIsNone(adapter_mod._duration_seconds("5min bogus"))
+        self.assertIsNone(adapter_mod._duration_seconds(""))
+
     def test_forward_and_recovery_for_both_runtimes(self):
         cases = [
             ("crq-tick.service", NODE_RUNTIME, "python", 0o600),
