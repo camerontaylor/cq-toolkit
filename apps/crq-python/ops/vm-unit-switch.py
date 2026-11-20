@@ -4203,8 +4203,9 @@ def cmd_run(args):
         # destroy --purge cannot move the overlay while the guest launches.
         boot_lock_attempted = True
         with vm.run_lock(run_dir):
-            boot_lock_held = True
             vm.refuse_live_run(run)
+            # Armed only after the live-run refusal: a refused run owns no guest.
+            boot_lock_held = True
             boot = vm.boot(run, recorder, args.tools, vm.host_stamp())
         boot["ssh"] = vm.wait_ssh(run, recorder)
         uploads = upload_files(run, recorder, snapshot, commit, args.mode)

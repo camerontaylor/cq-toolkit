@@ -3196,7 +3196,7 @@ class FinishCleanupTests(unittest.TestCase):
 class RunBootLockTests(unittest.TestCase):
     """cmd_run boots under run.lock, as vm-feasibility cmd_boot does."""
 
-    def _run(self, hold_lock):
+    def _run(self, hold_lock, live=None):
         import fcntl
         with tempfile.TemporaryDirectory() as tmp:
             state = pathlib.Path(tmp)
@@ -3219,8 +3219,10 @@ class RunBootLockTests(unittest.TestCase):
                      mock.patch.object(harness, "prepare_run", return_value=run), \
                      mock.patch.object(harness.vm, "boot",
                                        side_effect=RuntimeError("boot reached")) as boot, \
+                     mock.patch.object(harness.vm, "live_identity",
+                                       return_value=live), \
                      mock.patch.object(harness.vm, "stop_owned_process") as stop:
-                    with self.assertRaises(RuntimeError) as ctx:
+                    with self.assertRaises((RuntimeError, ValueError)) as ctx:
                         harness.cmd_run(args)
             finally:
                 holder.close()
@@ -3237,6 +3239,12 @@ class RunBootLockTests(unittest.TestCase):
         self.assertEqual(str(exc), "boot reached")
         boot.assert_called_once()
         stop.assert_called_once()
+
+    def test_live_run_refusal_does_not_stop_the_live_guest(self):
+        exc, boot, stop = self._run(hold_lock=False, live={"pid": 4242})
+        self.assertIn("already owns a live VM", str(exc))
+        boot.assert_not_called()
+        stop.assert_not_called()
 
 
 if __name__ == "__main__":
