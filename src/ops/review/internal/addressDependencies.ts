@@ -477,6 +477,13 @@ const selectInvokedScripts = (
         // build`) may name scripts as plain words; over-selection only widens the check.
         for (const name of byCollapsedName.get(collapseColons(piece)) ?? []) literal.add(name);
       }
+      // A script name may itself contain `=` or `,` (`node --run=a=b` runs the
+      // script `a=b`), which the split above cuts apart; select any such name
+      // the argument contains, so a split never narrows to the wrong scripts.
+      const collapsed = collapseColons(argument);
+      for (const name of names) {
+        if (/[=,]/.test(name) && collapsed.includes(collapseColons(name))) literal.add(name);
+      }
     }
     return true;
   };

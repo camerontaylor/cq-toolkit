@@ -359,6 +359,37 @@ describe('review.address candidate isolation', () => {
     }
   });
   test.each([
+    ['node --run=a=b', 'a=b'],
+    ['node --run=a,b', 'a,b'],
+    ['node --run a=b', 'a=b'],
+    ['wireit --tasks=x,a=b', 'a=b'],
+    ['node --run=a::b=c', 'a:b=c'],
+  ])(
+    'script named in %s refuses reuse when %s, whose name has = or , changes',
+    async (postinstall, changed) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        const scripts = {
+          postinstall,
+          a: 'node a.mjs',
+          b: 'node b.mjs',
+          [changed]: 'node selected.mjs',
+        };
+        await f.repo.write('package.json', JSON.stringify({ scripts }));
+        f.repo.commitAll('script name with = or ,');
+        await writeFile(
+          join(f.dependencyRoot, 'package.json'),
+          JSON.stringify({ scripts: { ...scripts, [changed]: 'node different.mjs' } }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.commit).toBeUndefined();
+        expect(result.reason).toContain('manifests/locks differ');
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test.each([
     ["run-s 'build:[ab]'", 'build:a'],
     ["run-s 'build:**'", 'build:docs:html'],
   ])(
