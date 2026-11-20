@@ -1579,6 +1579,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               )
                 throw new AddressRefusal('protected worker edits', true);
               const candidate = resolve(deps.journalDir, `candidate-${randomUUID()}`);
+              // Candidate removal spawns the same git binary; refuse before the
+              // worktree exists if this session could not later remove it.
+              if (deps.terminalBinding) await addressTerminalPreflight(deps.terminalBinding, root);
               await git(root, [
                 'worktree',
                 'add',
