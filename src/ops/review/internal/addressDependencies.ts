@@ -238,6 +238,11 @@ const globstarVariants = (pattern: string): string[] | null => {
   return [...new Set(variants.map((variant) => variant.join(':')))];
 };
 
+const scriptRunners = new Set(['npm-run-all', 'run-s', 'run-p']);
+
+/** An npm-run-all runner word, including path-qualified `.bin` invocations. */
+const isRunner = (word: string): boolean => scriptRunners.has(word.split('/').at(-1) ?? '');
+
 /** Compare installed-tree inputs without exposing package-manager credential bytes. */
 export async function assertAddressDependencyMetadata(
   root: string,
@@ -280,8 +285,13 @@ export async function assertAddressDependencyMetadata(
       // A word is any run of quoted and unquoted segments (`"build":deps`), decoded
       // together; a stray unmatched quote stays in the word and forces ambiguity.
       // An unquoted newline separates commands like `;`, so it is a boundary too.
-      const raw = command.match(/[;&|()\n]+|(?:"[^"]*"|'[^']*'|[^\s;&|()"']|["'])+/g) ?? [];
+      // An unquoted redirection operator (`>`, `2>&1`'s `>&1`, `&>>`) is its own token,
+      // so `run-s build:*>/dev/null` still names `build:*`; a leading fd digit stays a word.
+      const raw =
+        command.match(/&?[<>]+(?:&\d*-?)?|[;&|()\n]+|(?:"[^"]*"|'[^']*'|[^\s;&|()<>"']|["'])+/g) ??
+        [];
       const boundary = raw.map((token) => /^[;&|()\n]+$/.test(token));
+      const redirect = raw.map((token) => /^&?[<>]/.test(token));
       const tokens = raw.map((token) =>
         token.replace(
           /"([^"]*)"|'([^']*)'/g,
@@ -303,13 +313,16 @@ export async function assertAddressDependencyMetadata(
         /[$`\\<>]/.test(command) ||
         tokens.includes('eval') ||
         tokens.some((token) => /[\s'"]/.test(token));
-      // A shell payload (`sh -c 'run-s build:*'`) hides its runner selection inside
-      // one token; its targets cannot be established, so compare every script.
+      // A runner hidden inside one word — a shell payload (`sh -c 'run-s build:*'`),
+      // quoted (`sh -c '"run-s" x'`), command-substituted (`` `run-s x` ``) or nested
+      // (`sh -c 'bash -c "run-s x"'`) — has targets this pass cannot establish, so
+      // compare every script. Splitting on every shell metacharacter, quote, backtick
+      // and expansion sigil exposes a runner word at any nesting depth in one linear
+      // pass; over-detection only widens the comparison.
       if (
         tokens.some(
           (token) =>
-            /\s/.test(token) &&
-            /(?:^|[\s/;&|(])(?:run-s|run-p|npm-run-all)(?:[\s;&|)]|$)/.test(token),
+            !isRunner(token) && token.split(/[\s;&|()<>`'"\\$]+/).some((word) => isRunner(word)),
         )
       )
         unresolved = true;
@@ -330,7 +343,7 @@ export async function assertAddressDependencyMetadata(
         // Normalize path-qualified .bin invocations (e.g. ./node_modules/.bin/run-s)
         // to the runner name so the npm-run-all family stays ambiguous, keeping
         // the scripts it names reachable.
-        if (!printsOnly && ['npm-run-all', 'run-s', 'run-p'].includes(runner)) {
+        if (!printsOnly && isRunner(token)) {
           ambiguous = true;
           for (let next = index + 1; next < tokens.length; next++) {
             const argument = tokens[next] ?? '';
@@ -341,12 +354,13 @@ export async function assertAddressDependencyMetadata(
               next++;
               continue;
             }
-            // Redirections are shell syntax: drop the operator and its operand.
-            if (/^\d*(?:>>?|<<?|&>>?)$/.test(argument)) {
-              next++;
+            // Redirections are shell syntax: drop the operator, its operand unless the
+            // operator already names an fd (`>&1`), and the fd digit before it (`2>`).
+            if (redirect[next]) {
+              if (/[<>&]$/.test(argument)) next++;
               continue;
             }
-            if (/^\d*(?:>>?|<<?|&>>?)./.test(argument)) continue;
+            if (/^\d+$/.test(argument) && redirect[next + 1]) continue;
             if (argument.startsWith('-')) continue;
             // Unsupported matcher syntax (negation, brackets, braces, shell expansion) stays
             // ambiguous; supported `*`/`?` patterns resolve to the scripts they

@@ -257,6 +257,8 @@ describe('review.address candidate isolation', () => {
     ['a quoted -- ends the task list', "run-s build:deps '--' 'docs:*'", 'docs:lint'],
     ['printf operands are not a runner', "printf '%s' run-s 'docs:*'", 'docs:lint'],
     ['a redirection operand is not a task', "run-s build:deps > 'docs:*'", 'docs:lint'],
+    ['an attached redirection operand is not a task', "run-s build:deps>'docs:*'", 'docs:lint'],
+    ['fd redirections are not tasks', "run-s build:deps 2>&1 2> 'docs:*'", 'docs:lint'],
     ['* stays inside one segment', "run-s 'build:*'", 'build:docs:html'],
   ])(
     'runner selection: %s reuses dependencies when an unselected script changes',
@@ -290,6 +292,17 @@ describe('review.address candidate isolation', () => {
     ["sh -c 'false || run-s build:*'", 'build:deps'],
     ["sh -c 'true||run-s build:*'", 'build:deps'],
     ["sh -c '(run-s build:*)'", 'build:deps'],
+    ["run-s 'build:*'>/dev/null", 'build:deps'],
+    ['run-s build:*>/dev/null', 'build:deps'],
+    ['run-s build:* 2>/dev/null', 'build:deps'],
+    ['run-s build:*&>/dev/null', 'build:deps'],
+    ['run-s build:*>&2', 'build:deps'],
+    ['sh -c \'"run-s" "build:*"\'', 'build:deps'],
+    ["sh -c 'echo `run-s build:*`'", 'build:deps'],
+    ['echo `run-s build:*`', 'build:deps'],
+    ['sh -c \'bash -c "run-s build:*"\'', 'build:deps'],
+    ['sh -c "sh -c \'run-s build:*\'"', 'build:deps'],
+    ["sh -c './node_modules/.bin/run-s build:*'", 'build:deps'],
     ["run-s 'build:*'", 'build:other'],
     ['run-s "build:*"', 'build:other'],
     ['run-s build:**:other', 'build:other'],
@@ -361,6 +374,29 @@ describe('review.address candidate isolation', () => {
         JSON.stringify({ scripts: { ...scripts, [selected]: 'different installed files' } }),
       );
       const result = await f.engine.fix(finding(), 1);
+      expect(result.commit).toBeUndefined();
+      expect(result.reason).toContain('manifests/locks differ');
+    } finally {
+      await f.cleanup();
+    }
+  }, 10_000);
+  test('adversarial quoting and redirection in a long command lexes in linear time', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const scripts = {
+        // Thousands of quoted words and redirections, then a real runner invocation.
+        postinstall: `echo ${'"a" \'b\' 2>&1 >x '.repeat(4000)}; run-s build:*`,
+        'build:deps': 'node deps.mjs',
+      };
+      await f.repo.write('package.json', JSON.stringify({ scripts }));
+      f.repo.commitAll('adversarial lexer input');
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ scripts: { ...scripts, 'build:deps': 'different deps' } }),
+      );
+      const started = Date.now();
+      const result = await f.engine.fix(finding(), 1);
+      expect(Date.now() - started).toBeLessThan(5000);
       expect(result.commit).toBeUndefined();
       expect(result.reason).toContain('manifests/locks differ');
     } finally {
