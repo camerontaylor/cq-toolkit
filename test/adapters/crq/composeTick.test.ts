@@ -24,7 +24,6 @@ function setup(queue: unknown = { items: [], starts: [], last_tick: '2027-01-15T
     throw new Error(`unbound ${name}`);
   };
   const remaining = {
-    fetch: unbound('fetch'),
     backfillPublish: unbound('backfillPublish'),
     backfillInventoryMode: unbound('backfillInventoryMode'),
     backfillInventory: unbound('backfillInventory'),
@@ -34,21 +33,24 @@ function setup(queue: unknown = { items: [], starts: [], last_tick: '2027-01-15T
     repairBackfill: unbound('repairBackfill'),
     archiveLegacy: unbound('archiveLegacy'),
     reconcile: unbound('reconcile'),
-    notifyOwner: unbound('notifyOwner'),
     enrollPrimary: unbound('enrollPrimary'),
     enrollOthers: unbound('enrollOthers'),
-    recordCoverage: unbound('recordCoverage'),
     writeStatus: unbound('writeStatus'),
     publishLocalReviewPr: unbound('publishLocalReviewPr'),
     recordClientHealth: unbound('recordClientHealth'),
-    readSlotUsage: async () => {
-      calls.push('readSlotUsage');
-      return { usage: { remaining: 1 }, reserved: [] };
-    },
   } as unknown as ComposeInput['remaining'];
+  const usageProbes: NonNullable<ComposeInput['usageProbes']> = {
+    vendorProgress: async () => false,
+    readUsage: async () => {
+      calls.push('readSlotUsage');
+      return { remaining: 1 };
+    },
+  };
   const input: ComposeInput = {
     stateRoot: root,
     config: doc({ schedule_id: 'sched', alerts: { alert_agent_id: 'a' } }),
+    clone: join(root, 'clone-not-created'),
+    usageProbes,
     watchdogHome: home,
     root: '/r',
     now: () => NOW,
@@ -197,17 +199,17 @@ describe('composeSlot', () => {
 
   it('discards the observation when the queue changed during the probe', async () => {
     const s = setup();
-    const original = s.input.remaining.readSlotUsage;
+    const probes = s.input.usageProbes!;
     s.input = {
       ...s.input,
-      remaining: {
-        ...s.input.remaining,
-        readSlotUsage: async (queue: JsonObject) => {
+      usageProbes: {
+        ...probes,
+        readUsage: async (clone: string) => {
           writeFileSync(
             join(s.root, 'queue.json'),
             JSON.stringify({ items: [], starts: [], last_tick: 'changed' }),
           );
-          return original(queue);
+          return probes.readUsage(clone);
         },
       },
     };
