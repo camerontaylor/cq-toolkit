@@ -166,6 +166,13 @@ export interface PrWorktreeOpts {
   /** The PR → worktree registry (persistence seam). */
   registry: SlotWorktreeRegistry;
   isBookkeepingPath?: (path: string, root: string) => Promise<boolean>;
+  /**
+   * Read-only ownership check for the ignored-file guard that runs before a
+   * checkout is removed. Unlike `isBookkeepingPath` it must NOT import or
+   * fingerprint bookkeeping (that would taint the run's in-memory state for a
+   * tree about to be deleted). Falls back to `isBookkeepingPath` when absent.
+   */
+  isRetirableIgnoredPath?: (path: string, root: string) => Promise<boolean>;
   /** Caller clock retained for resolver API compatibility. */
   nowMs: number;
   /** Root for created worktrees; defaults to `<git-common-dir>/cq-review-worktrees`. */
@@ -638,6 +645,7 @@ async function resolveLockedPrWorktree(opts: PrWorktreeOpts, phase: ResolutionPh
       }
       const canonicalPath = await realpath(candidate.path);
       await bindCheckout(opts, canonicalPath, true, phase);
+      await assertNoIgnoredFiles(opts, canonicalPath);
       phase.checkoutMutation = true;
       checkoutWriterContext()!.markCheckoutMutation();
       const removeArgs = ['-C', repoRoot, 'worktree', 'remove', candidate.path];
@@ -807,6 +815,7 @@ async function removeLockedPrWorktree(
   const metadata = await opts.registry.read(opts.pr);
   const entryPath = metadata?.state === 'bound' ? metadata.checkoutPath : undefined;
   const entryMatches = entryPath !== undefined && (await canonicalize(entryPath)) === canonicalPath;
+  await assertNoIgnoredFiles(opts, canonicalPath);
   phase.checkoutMutation = true;
   checkoutWriterContext()!.markCheckoutMutation();
   const removeArgs = ['-C', repoRoot, 'worktree', 'remove', requestedPath];
@@ -863,6 +872,30 @@ async function bindCheckout(
   if (register) await opts.registry.update(opts.pr, metadata);
   if (phase) phase.metadataWrite = false;
 }
+/**
+ * A non-forced `git worktree remove` deletes IGNORED files without complaint
+ * (it only refuses tracked changes and untracked, non-ignored files), so an
+ * ignored file the review tooling does not own would be lost silently. Refuse
+ * when any ignored path is not review bookkeeping.
+ */
+async function assertNoIgnoredFiles(opts: PrWorktreeOpts, path: string): Promise<void> {
+  const files = await opts.run([
+    '-C',
+    path,
+    'ls-files',
+    '--others',
+    '--ignored',
+    '--exclude-standard',
+    '-z',
+  ]);
+  if (files.code !== 0) throw new Error('checkout ignored state unavailable');
+  for (const file of files.stdout.split('\0').filter(Boolean)) {
+    const owns = opts.isRetirableIgnoredPath ?? opts.isBookkeepingPath;
+    if (!(await owns?.(file, path)))
+      throw new Error(`unowned ignored checkout path would be deleted: ${file}`);
+  }
+}
+
 async function assertCleanCheckout(opts: PrWorktreeOpts, path: string): Promise<void> {
   for (const args of [
     ['diff', '--quiet'],
