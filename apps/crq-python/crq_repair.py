@@ -1504,9 +1504,18 @@ def run(argv=None):
     # Mode validation before any alternate path runs: recovery selects exactly
     # one job and never combines with --job/--source-sha/--finding-sha256 or
     # --triage-dry-run.
-    if args.recover_job and (any(supplied) or args.triage_dry_run):
+    # Presence, not truthiness: `--recover-job ''` was still supplied.
+    if args.recover_job is not None and (any(supplied) or args.triage_dry_run):
         narrate('repair dispatch refused: recovery selects exactly one job')
         return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
+    if args.recover_job is not None and not args.recover_job.strip():
+        # An empty recovery selector must refuse, never fall through to the drain.
+        narrate('repair dispatch refused: --recover-job must not be empty')
+        return 2, {'status': 'refused', 'reason': '--recover-job must not be empty'}
+    if args.triage_dry_run and any(supplied):
+        # The dry run selects no job; a selector beside it would be ignored.
+        narrate('repair dispatch refused: --triage-dry-run takes no job selector')
+        return 2, {'status': 'refused', 'reason': '--triage-dry-run takes no job selector'}
     if args.triage_dry_run:
         # triage_phase returns its report only when triage is configured and
         # has a rollout; otherwise it returns None having written nothing, so
