@@ -36,6 +36,8 @@ import {
   type GhResult,
 } from '../../policy/crq/prReviewFindings.js';
 import { ReceiptOsError, type ReceiptFiles } from '../../policy/crq/receiptPrepare.js';
+import { sha256Hex } from '../../policy/crq/pythonJson.js';
+import { MAX_RECEIPT_BYTES } from '../../policy/crq/queueReceipt.js';
 import { adequate, ValueError } from '../../policy/crq/reviewAdmission.js';
 import { authenticatedGh } from '../../policy/crq/reviewIdentity.js';
 import { DeliveryRuntimeError } from '../../ops/crq/internal/deliverPending.js';
@@ -178,7 +180,9 @@ export function fileDeliveryEnv(input: DeliveryRoots): ComposeInput['delivery'] 
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') return null;
-        throw error;
+        // Python's OSError: the delivery layer maps only ReceiptOsError, so a raw Node error
+        // would abort the whole phase instead of recording the item's delivery error.
+        throw new ReceiptOsError('OSError', pythonOsErrorText(error, path));
       }
     },
   };
@@ -268,6 +272,11 @@ class ForgeProcessError extends Error {
   }
 }
 
+/** `spawnSync` needs an unsigned integer; the budget's remaining seconds are fractional. */
+export function forgeTimeoutMs(seconds: number): number {
+  return Math.max(1, Math.ceil(seconds * 1000));
+}
+
 /** `crq.gh_json(args, definite_failure)` in the advisory: gh in the clone, bounded, parsed. */
 function forgeJson(clone: string) {
   return async (args: string[], options: { timeoutSeconds: number }): Promise<JsonValue> => {
@@ -276,7 +285,7 @@ function forgeJson(clone: string) {
     const result = spawnSync(command ?? 'gh', rest, {
       encoding: 'utf8',
       cwd: clone,
-      timeout: options.timeoutSeconds * 1000,
+      timeout: forgeTimeoutMs(options.timeoutSeconds),
       killSignal: 'SIGKILL',
       env: currentEntryEnv(),
       maxBuffer: 256 * 1024 * 1024,
@@ -305,6 +314,20 @@ function forgeJson(clone: string) {
 
 const parseJsonText = (text: string): JsonValue => parseJsonValue(text, { duplicates: 'last' });
 
+/**
+ * The default retained-receipt reader: `<stateRoot>/receipts/<id>.json`, bounded and checked
+ * against its content address (`_ReceiptSnapshot`), as `reviewEffects.readReceipt` does.
+ */
+export function stateReceiptReader(stateRoot: string): (receiptId: string) => Promise<Uint8Array> {
+  return async (receiptId) => {
+    if (!/^[0-9a-f]{64}$/.test(receiptId)) throw new ValueError('invalid receipt id');
+    const bytes = await readFile(join(stateRoot, 'receipts', `${receiptId}.json`));
+    if (bytes.length > MAX_RECEIPT_BYTES) throw new ValueError('receipt exceeds its read bound');
+    if (sha256Hex(bytes) !== receiptId) throw new ValueError('receipt digest mismatch');
+    return new Uint8Array(bytes);
+  };
+}
+
 /** The three reporting phases, for `ComposeInput.remaining`. */
 export function fileReportingPhases(
   input: ReportingInput,
@@ -314,14 +337,7 @@ export function fileReportingPhases(
   const saveQueue = (queue: JsonObject): void => atomicWriteSync(queuePath, queueBytes(queue));
   const iso = (): string => isoUtc(new Date(now()));
   const runs = join(input.roots.stateRoot, 'runs');
-  const readReceipt =
-    input.readReceipt ??
-    (async (receiptId: string): Promise<Uint8Array> => {
-      if (!/^[0-9a-f]{64}$/.test(receiptId)) throw new ValueError('invalid receipt id');
-      return new Uint8Array(
-        await readFile(join(input.roots.stateRoot, 'receipts', `${receiptId}.json`)),
-      );
-    });
+  const readReceipt = input.readReceipt ?? stateReceiptReader(input.roots.stateRoot);
   const threshold = input.config.get('discovery_incomplete_ticks');
   return {
     async writeStatus(queue) {

@@ -1,14 +1,17 @@
 // The reporting adapter: the `DeliveryEnv` file/gh ports and the three in-process reporting
 // phases (writeStatus, local_review_pr.publish, client_health.record) over a real state root.
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   fileDeliveryEnv,
   fileReportingPhases,
+  forgeTimeoutMs,
   pythonOsErrorText,
   readTextReplacing,
+  stateReceiptReader,
 } from '../../../src/adapters/crq/tickReportingSource.js';
 import { DeliveryRuntimeError } from '../../../src/ops/crq/internal/deliverPending.js';
 import {
@@ -104,6 +107,13 @@ describe('fileDeliveryEnv', () => {
     expect(Buffer.from(files.readBytes(join(dir, 'a')) as Uint8Array).toString()).toBe('hi');
     expect(files.readBytes(join(dir, 'missing'))).toBeNull();
     expect(files.readBytes(dir)).toBeNull(); // a directory is EISDIR
+  });
+
+  it('maps any other artifact read failure to the receipt OSError, not a raw Node error', async () => {
+    const dir = await tmp('crq-del-');
+    const loop = join(dir, 'loop');
+    await symlink(loop, loop); // ELOOP: neither a missing file nor a directory
+    expect(() => env().files.readBytes(loop)).toThrow(ReceiptOsError);
   });
 
   it('maps a text read failure to the receipt OSError with Python text', async () => {
@@ -223,6 +233,28 @@ describe('fileReportingPhases', () => {
     expect(saved.review_pr_outbox.k1?.pending).toBe(false);
   });
 
+  it('rounds the advisory forge timeout up to a positive integer of milliseconds', () => {
+    expect(forgeTimeoutMs(2.5)).toBe(2500);
+    expect(forgeTimeoutMs(1.0004)).toBe(1001); // a monotonic-clock remainder is fractional
+    expect(forgeTimeoutMs(0.0001)).toBe(1);
+    expect(Number.isInteger(forgeTimeoutMs(7.123456789))).toBe(true);
+  });
+
+  it('the default receipt reader verifies the content address before returning bytes', async () => {
+    const stateRoot = await tmp('crq-rcpt-');
+    await mkdir(join(stateRoot, 'receipts'));
+    const body = Buffer.from('{"v":1}');
+    const id = createHash('sha256').update(body).digest('hex');
+    await writeFile(join(stateRoot, 'receipts', `${id}.json`), body);
+    const wrong = 'e'.repeat(64);
+    await writeFile(join(stateRoot, 'receipts', `${wrong}.json`), body);
+    const read = stateReceiptReader(stateRoot);
+    expect(Buffer.from(await read(id)).toString()).toBe('{"v":1}');
+    await expect(read(wrong)).rejects.toThrow('receipt digest mismatch');
+    await expect(read('../x')).rejects.toThrow('invalid receipt id');
+    await expect(read('f'.repeat(64))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('publishLocalReviewPr reads the retained receipt through the injected reader', async () => {
     const r = await roots();
     const clone = await tmp('crq-rep-clone-');
@@ -245,7 +277,8 @@ describe('fileReportingPhases', () => {
       items: [
         {
           ...QUEUE_ITEM,
-          state: 'findings',
+          state: 'done',
+          outcome: 'findings',
           scope_adequate: true,
           receipt_id: 'c'.repeat(64),
         },
@@ -259,6 +292,8 @@ describe('fileReportingPhases', () => {
     // No usable retained receipt: the row stays pending with a recorded error, never delivered.
     expect(outbox.k1?.pending).toBe(true);
     expect(outbox.k1?.error).toBeTypeOf('string');
+    // The row is adequate, so the failure is the reader's, not an earlier skip.
+    expect(requested).toEqual(['c'.repeat(64)]);
   });
 
   it('recordClientHealth saves the observation with the runner checkout sha', async () => {
