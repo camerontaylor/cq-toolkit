@@ -159,11 +159,6 @@ describe('liveRender', () => {
     expect(log.some((l) => l.startsWith('write'))).toBe(false);
     expect(log.at(-1)).toBe('lock-');
   });
-  test('a non-detached checkout is refused before the lock', async () => {
-    const { effects, log } = lr({ head: 'main\n' });
-    await expect(liveRender(effects, '/d', overlay)).rejects.toThrow('must be detached');
-    expect(log).not.toContain('lock+');
-  });
 });
 
 describe('plist CR round trip', () => {

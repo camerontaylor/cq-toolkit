@@ -29,7 +29,7 @@ CONFIG_KEYS = {
     'clone', 'worktree_root', 'timeout_bin', 'paseo_hosts',
     'repos', 'notify.hosts',
     'alerts.alert_agent_host', 'alerts.alert_agent_id',
-    # Transition-only promotion leaves: switch() renders the live source
+    # Transition-only promotion leaves: legacy_check() renders the live source
     # before its drift check, so an overlay must still be able to reproduce a
     # pre-Phase-0.1 config byte-for-byte. New configs keep the alert recipient
     # and ignore the rest; see apply().
@@ -411,8 +411,8 @@ def root_check(root, overlay):
         raise ValueError('not the overlay deployment checkout')
     if git(root, 'rev-parse', '--show-toplevel') != str(root.resolve()):
         raise ValueError('deploy_root must be the full monorepo checkout')
-    if git(root, 'rev-parse', '--abbrev-ref', 'HEAD') != 'HEAD':
-        raise ValueError('deployment checkout must be detached')
+    # No detached-HEAD requirement: a clone left on a branch (e.g. ``main``)
+    # is deployable because switch() itself checks the target out detached.
 
 
 def validate_unit_template(name, text):
@@ -816,21 +816,42 @@ def verify_target(root, target, tag=None):
         validate_unit_template(Path(path).name, git(root, 'show', f'{target}:{path}'))
 
 
-def switch(root, overlay, raw, target, tag=None):
+def switch(root, overlay, raw, target, tag=None, rollback_config=None):
+    """Move the checkout to ``target`` and install its rendered config.
+
+    ``rollback_config`` is set only by a rollback to a recorded prior SHA:
+    the exact live config bytes measured before the forward switch. A
+    rollback restores that SHA and those bytes verbatim, so it neither
+    re-verifies the SHA as a deploy target (the prior revision was running
+    live; it need not be merged to origin/main) nor re-renders a config.
+    A forward switch verifies the target and renders its config.
+    """
     root_check(root, overlay)
-    verify_target(root, target, tag)
-    # Validate the destination config before changing anything.
-    destination = render(root, overlay, target)
+    if rollback_config is None:
+        verify_target(root, target, tag)
+        # Validate the destination config before changing anything.
+        destination = render(root, overlay, target)
+    else:
+        if not re.fullmatch(r'[0-9a-f]{40}', target):
+            raise ValueError('target must be a full commit SHA')
+        git(root, 'cat-file', '-e', target + '^{commit}')
+        destination = rollback_config
     inactive(root)
     with tick_lock(root):
         inactive(root)
-        current = render(root, overlay)
-        drift_check(current, root / CONFIG)
+        # The live config is whatever bytes are installed now. It is not
+        # compared with a render of HEAD: the checkout may carry host edits
+        # (repair.enabled, a merged local branch) that the next render
+        # replaces. The live bytes are backed up before anything is mutated
+        # and reinstalled if the switch fails.
+        current = (root / CONFIG).read_bytes()
         changes = git(root, 'status', '--porcelain', '--untracked-files=all').splitlines()
         if any(line != ' M ' + CONFIG for line in changes):
             raise ValueError('checkout has changes other than rendered config')
         previous = git(root, 'rev-parse', 'HEAD')
         record(root, overlay, raw, current, 'switch-before', target=target, tag=tag)
+        backup = Path(overlay['record_dir']) / ('config-before-switch-' + uuid.uuid4().hex)
+        atomic_bytes(backup, current)
         git(root, 'restore', '--', CONFIG)
         try:
             if git(root, 'status', '--porcelain', '--untracked-files=all'):
@@ -838,7 +859,7 @@ def switch(root, overlay, raw, target, tag=None):
             # --no-overwrite-ignore aborts the checkout instead of silently
             # replacing an ignored host-local file at a tracked path.
             git(root, 'checkout', '--no-overwrite-ignore', '--detach', target)
-            # Same tick lock spans drift check, checkout, render and audit.
+            # The same tick lock spans backup, checkout, install and audit.
             record(root, overlay, raw, destination, 'switch-render', previous_sha=previous, tag=tag)
             atomic_bytes(root / CONFIG, destination)
             if git(root, 'status', '--porcelain', '--untracked-files=all') not in ('', ' M ' + CONFIG):

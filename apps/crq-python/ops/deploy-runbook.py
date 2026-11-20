@@ -47,15 +47,15 @@ are kept:
   rollback (no queue schema marker, no ``author_*`` state keys). The live
   ``repair.cq_bin`` pointer and its entry bytes are measured before the
   deploy; the target render must keep both. Rollback switches back to the
-  measured prior SHA with the same helper fence, requires the live config
+  measured prior SHA with the same helper (the prior SHA is not re-verified as a deploy target; the measured config bytes are restored verbatim), requires the live config
   bytes to equal the pre-deploy bytes (pointer included), requires the queue
   bytes to survive the rollback switch (re-measured after its own drain when
   a completed health tick may have advanced them), and restarts exactly the
   triggers observed active before the run.
 
 The target's own helper and controller are extracted and executed. A target
-whose ``verify_target`` still requires an annotated tag is refused before the
-hold: it cannot support a tagless switch or the tagless automatic rollback.
+whose helper still requires an annotated tag or lacks exact-byte rollback
+support is refused before the hold.
 
 Only a failure *after* the switch triggers automatic rollback: a failed
 verification or a failed health check. A failure before the switch restarts
@@ -648,31 +648,13 @@ class Run:
                     "target that contains the tagless-helper change first. "
                     "Nothing has been switched.")
 
+        require("rollback_config" in inspect.signature(
+                    self.helper.switch).parameters,
+                "the target revision's prepare-host.switch cannot restore "
+                "recorded rollback config bytes. Choose a target with "
+                "rollback_config support. Nothing has been switched.")
+
     # -- steps ---------------------------------------------------------
-    def require_rollback_target(self):
-        """Refuse before admission if the rollback target would not verify.
-
-        Automatic rollback switches back to the live prior SHA through the
-        helper's ``switch``, which runs ``verify_target`` on it: merged to
-        ``refs/remotes/origin/main`` and at or above the policy floor. The
-        preflight above tests only the target, so a local-only prior SHA
-        passes it and then fails inside the helper after the forward switch
-        has already installed the target, leaving admission held for the
-        owner. Apply the rollback's own rule to the prior SHA here, before
-        admission and before any switch, so preflight and rollback agree.
-        """
-        verify = getattr(self.helper, "verify_target", None)
-        if verify is None:
-            return
-        try:
-            verify(self.root, self.prior_sha, None)
-        except Exception as exc:
-            raise Refused(
-                "the live prior SHA " + self.prior_sha + " fails the helper's "
-                "rollback target check, so a health failure could not roll "
-                "back to it; nothing has been admitted or switched: "
-                + str(exc)[:200]) from exc
-
     def refuse_unfinished_controller_transactions(self):
         """Run the controller's unfinished-transaction guard before admission.
 
@@ -739,10 +721,6 @@ class Run:
         require(self.git("rev-parse", "HEAD") == self.prior_sha,
                 "live HEAD changed before the controller lock was acquired; "
                 "nothing has been switched. Retry the deploy.")
-        # Preflight proves only the target. Rollback switches back to the
-        # prior SHA through the helper's own fence, so that SHA must pass the
-        # same rule now, before admission and any switch.
-        self.require_rollback_target()
         if self.units is None:
             self.units = RealUnits()
         self.original_config = read_config(self.root)
@@ -1143,8 +1121,13 @@ class Run:
         # guard as the forward switch; a refusal keeps the hold and is
         # surfaced as recovery_required.
         self.refuse_unfinished_controller_transactions()
+        # Rollback restores the recorded prior SHA and the exact measured
+        # pre-deploy config bytes; the prior revision ran live, so it is not
+        # re-verified as a deploy target (it may be a local merge that is not
+        # on origin/main). A helper without the keyword cannot do this.
         self.helper.switch(self.root, self.overlay, self.overlay_raw,
-                           self.prior_sha, None)
+                           self.prior_sha, None,
+                           rollback_config=self.original_config)
         self.switched = False
         require(self.git("rev-parse", "HEAD") == self.prior_sha,
                 "helper returned but HEAD is not the prior SHA")

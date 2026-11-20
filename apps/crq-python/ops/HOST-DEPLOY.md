@@ -95,7 +95,7 @@ alert leaves back onto a pre-Phase-0.1 target's `promotion` block so a rollback
 still delivers alerts.
 An overlay written for a pre-Phase-0.1 deployment may keep its
 `promotion.record_url_template`, `promotion.alert_agent_*` and
-`promotion.signer.spool.*` leaves. They let `switch` reproduce the live source
+`promotion.signer.spool.*` leaves. They let `legacy_check` reproduce the live source
 config byte-for-byte for its drift check; the new config keeps the alert
 recipient and ignores the retired template and spool values. Remove them after
 the source has switched.
@@ -116,7 +116,8 @@ it must peel to that SHA. This tool does not create tags.
 Targets must descend from import C (`f748fd43`); earlier rollback needs the
 separate, recorded old-runner rollback below. Targets must also provide relocated
 unit templates: every service/path template must contain `@CRQ_ROOT@`. Import-era
-targets with legacy unit paths are refused before checkout. Keep the checkout detached.
+targets with legacy unit paths are refused before checkout. The checkout need not be
+detached beforehand (a clone left on `main` is fine); the switch checks the target out detached.
 
 The helper reads `HEAD:apps/crq-python/config.json`, never the generated working
 copy. The rendered bytes retain the existing indent-2 JSON plus newline format.
@@ -232,9 +233,10 @@ from this general sequence.
    documents the same fence):
    `switch --sha FULL40TARGETSHA [--tag crq-runner/YYYYMMDD-N]`. It
    verifies the target without fetching, refuses active units,
-   drift-checks the live config against the current HEAD's render, holds
-   the tick lock, checks out the target detached and atomically writes
-   the target's rendered config. It installs no unit files and starts
+   holds the tick lock, backs up the live config bytes (as installed, with
+   no comparison against a render of HEAD) into the private record
+   directory, checks out the target detached and atomically writes the
+   target's rendered config. It installs no unit files and starts
    and enables nothing.
 3. Save copies of the prior installed unit definitions privately before
    anything else here: the prepare run below replaces the installed
@@ -271,7 +273,11 @@ from this general sequence.
    clean: the runbook's rollback treats a queue shape the prior target
    cannot provably read as operator recovery, and this manual path must
    not bypass that refusal. Only after the check passes, run the same
-   helper `switch` back to the prior SHA; remove any target-only
+   helper `switch` back to the prior SHA. The manual helper and the
+   controller rollback require a verified prior target on `origin/main`.
+   For a local-only prior, the runbook’s automatic rollback restores the
+   prior SHA and measured config bytes verbatim. After a successful manual
+   switch, remove any target-only
    `crq-*` unit the target installed that is absent from the saved
    prior set; restore the complete saved prior unit set into
    `$HOME/.config/systemd/user`; run
@@ -343,8 +349,8 @@ python3 /srv/crq-deploy/apps/crq-python/ops/deploy-controller.py --root /srv/crq
 Ordering and guarantees:
 
 1. **Preflight** — full 40-hex target SHA, annotated `crq-runner/` tag peeling
-   to it; prior HEAD/config digests retained; reachability, drift and
-   stopped-unit checks are the helper's own (they run inside its `switch`).
+   to it; prior HEAD/config digests retained; reachability and stopped-unit
+   checks are the helper's own (they run inside its `switch`).
    The owner must provision a durable, private mode-0700 record directory before
    invoking the controller. The controller never creates it or missing ancestors;
    absence, wrong type/mode and ambiguous prior annotated tags refuse before
@@ -363,7 +369,7 @@ Ordering and guarantees:
    no record and no change. The controller's own tag check is also a full
    match now. Only then is the durable recovery intent written (the
    `deploy_pending`/`rollback_pending` record described below), and the
-   helper's `switch` runs unchanged, under its tick lock and drift fence. An
+   helper's `switch` runs unchanged, under its tick lock. An
    interruption during validation therefore leaves no intent to replace or
    clear; one after the write is replaced by its recorded outcome.
 4. **Preservation** — `state/queue.json` (items, starts, author_requests,
@@ -577,9 +583,9 @@ The sequence:
 
 1. **Resolve the target.** Fetch `origin/main` and require a full SHA
    contained in `refs/remotes/origin/main`. A tag is optional. The target's
-   own `prepare-host.py` must accept a tagless switch; a historical target
-   whose helper still requires a tag is refused before the hold, because its
-   automatic rollback could never pass `None`.
+   own `prepare-host.py` must support both a tagless switch and exact-byte
+   rollback through `rollback_config`. The runbook checks both before
+   claiming the hold.
 2. **Measure before touching anything.** Record the live `repair.cq_bin`
    pointer, its entry bytes and mode, and hash `state/queue.json` plus the
    completion heartbeat. Require the controller's rollback-compatibility
@@ -677,11 +683,11 @@ python3 /retained/prepare-host.py --overlay /private/host.json switch --sha FULL
 
 The helper verifies the target is contained in `origin/main` without fetching;
 an optional tag must peel to it. Under one
-nonblocking tick lock it rechecks stopped units, renders CURRENT SHA + overlay
-into a temporary file, and compares every byte with live config. Drift reports
-field names only and refuses before restore/checkout. Resolve drift by an approved
-overlay/repository change and a recorded render, never by editing live JSON.
-It refuses other dirty/untracked files; restores tracked config; requires a clean
+nonblocking tick lock it rechecks stopped units and backs up the live config
+bytes to the private record directory (`config-before-switch-*`, mode 0600); it
+does not refuse a live config that differs from the render of CURRENT SHA +
+overlay (for example a host `repair.enabled` edit): the next render replaces it
+and the backup is reinstalled if the switch fails. It refuses other dirty/untracked files; restores tracked config; requires a clean
 Git status; checks out detached; records and atomically re-renders target config;
 and requires status to show only:
 

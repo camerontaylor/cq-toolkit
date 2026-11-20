@@ -100,8 +100,8 @@ export async function rootCheck(
     throw new ValueError('not the overlay deployment checkout');
   if ((await gitText(effects, ['rev-parse', '--show-toplevel'])) !== effects.resolve(root))
     throw new ValueError('deploy_root must be the full monorepo checkout');
-  if ((await gitText(effects, ['rev-parse', '--abbrev-ref', 'HEAD'])) !== 'HEAD')
-    throw new ValueError('deployment checkout must be detached');
+  // No detached-HEAD requirement: a clone left on a branch is deployable because
+  // switchCheckout checks the target out detached.
 }
 
 // ---- inactive -----------------------------------------------------------
@@ -294,21 +294,37 @@ export async function switchCheckout(
   overlay: JsonObject,
   target: string,
   tag: string | null = null,
+  /**
+   * Set only by a rollback to a recorded prior SHA: the exact live config bytes measured
+   * before the forward switch. The rollback restores them verbatim and does not re-verify
+   * the prior SHA as a deploy target (it ran live; it need not be on origin/main).
+   */
+  rollbackConfig: Uint8Array | null = null,
 ): Promise<string> {
   await rootCheck(effects, root, overlay);
-  await verifyTarget(effects, target, tag);
-  // Validate the destination config before changing anything.
-  const destination = await renderAt(effects, overlay, target);
+  let destination: Uint8Array;
+  if (rollbackConfig === null) {
+    await verifyTarget(effects, target, tag);
+    // Validate the destination config before changing anything.
+    destination = await renderAt(effects, overlay, target);
+  } else {
+    if (!/^[0-9a-f]{40}$/.test(target)) throw new ValueError('target must be a full commit SHA');
+    await gitText(effects, ['cat-file', '-e', `${target}^{commit}`]);
+    destination = rollbackConfig;
+  }
   await inactive(effects);
   await effects.withTickLock(async (signal) => {
     await inactive(effects);
-    const current = await renderAt(effects, overlay);
-    await driftCheck(current, () => effects.readConfig());
+    // The live bytes are not compared with a render of HEAD: host edits are replaced by the
+    // next render, and these bytes are reinstalled if the switch fails.
+    const current = await effects.readConfig();
     signal?.throwIfAborted();
     const changes = splitLines(await gitText(effects, STATUS));
     if (changes.some((line) => line !== ` M ${CONFIG}`))
       throw new ValueError('checkout has changes other than rendered config');
     const previous = await gitText(effects, ['rev-parse', 'HEAD']);
+    // The Python helper also persists a private exact-byte crash-recovery copy.
+    // This port records the digest and retains the original bytes in memory for rollback.
     await effects.record(current, 'switch-before', [
       ['target', target],
       ['tag', tag],
@@ -323,7 +339,7 @@ export async function switchCheckout(
       await effects.writeConfig(current);
       throw error;
     }
-    // Same tick lock spans drift check, checkout, render and audit.
+    // The same tick lock spans checkout, install, and audit.
     try {
       signal?.throwIfAborted();
       await effects.record(destination, 'switch-render', [
