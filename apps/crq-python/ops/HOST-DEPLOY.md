@@ -180,19 +180,26 @@ old handover as evidence, without inventing new live evidence.
 ## Owner procedure for any template-changing target
 
 `deploy-runbook.py` refuses a target whose rendered `crq-*` unit templates
-differ from the live checkout's. The sequence below applies to any such target;
-the root-move section above adds only the legacy overlay, `.bak` removal and
-`dispatch_after_min` steps, which apply to that move alone.
+differ from the live checkout's. The sequence below covers an in-place change
+of target. A first root move is itself template-changing but keeps its own
+section above, which adds the read-only legacy-config and `.bak` hashes, the
+old tick lock held through the state snapshot and transfer, the state copy to
+the new deployment root with the old checkout kept inert, the legacy overlay,
+`.bak` removal and `dispatch_after_min` steps; do not run a first root move
+from this general sequence.
 
-1. Stop the tick/watchdog timers and records service, and on a host using
-   the slot scheduling deployment also `crq-slot.timer`, and on a host using
-   background ledger publication also `crq-publisher.path`,
-   `crq-publisher.timer` and the `crq-publisher.service` worker: `prepare`
-   and `switch` refuse every active or loaded `crq-*` unit, and the slot
-   timer would keep admitting reviews during the drain. Note which of these
-   were active; step 5 and any rollback restore exactly that set. Wait for
-   tick inactivity and for `crq-slot.service` (and the publisher worker) to
-   settle, and drain owned reviews.
+1. Stop every installed or loaded `crq-*.timer` and `crq-*.path` and the
+   records service: the tick and watchdog timers, and where present
+   `crq-slot.timer`, `crq-publisher.path`, `crq-publisher.timer`,
+   `crq-repair.timer`, `crq-repair.path` and `crq-backfill.timer`.
+   `prepare` and `switch` refuse any active or loaded `crq-*` unit
+   (`prepare-host.py` `inactive()`), including the repair and backfill
+   triggers on hosts that enabled them, and the slot timer would keep
+   admitting reviews during the drain. Note which of these were active;
+   step 5 and any rollback restore exactly that set. Then wait for every
+   `crq-*.service` (tick, watchdog, slot, publisher, repair, backfill) to
+   reach inactive or failed, with no queued `crq-*` job, and drain owned
+   reviews.
 2. Before moving the checkout, run the rollback-compatibility check
    `deploy-runbook.py` enforces before its switch and this manual path
    otherwise bypasses: the controller's `compatibility_record` judged by
@@ -218,8 +225,12 @@ the root-move section above adds only the legacy overlay, `.bak` removal and
    files, and the prior bytes cannot be recovered from the replaced
    install. Then run `prepare --tag crq-runner/YYYYMMDD-N --units-output
    "$HOME/.config/systemd/user"`. Prepare renders from HEAD, so this is
-   the step that applies the template delta, and its `--tag` must peel
-   to the target HEAD. It refuses active units, verifies the rendered
+   the step that applies the template delta. Its `--tag` is required
+   (`prepare-host.py` `add_argument('--tag', required=True)`) and must peel
+   to the target HEAD, so a target deployed by SHA alone must first be given
+   an annotated `crq-runner/YYYYMMDD-N` tag by the owner (this tool does not
+   create tags); a tagless target cannot use this ceremony. Supply the same
+   tag to step 2's `switch` so the two agree. It refuses active units, verifies the rendered
    units with `systemd-analyze --user verify`, records hashes, writes
    the inert `state/runner-disabled` marker and the rendered config,
    and reloads the user manager. It starts and enables nothing. If the
@@ -232,11 +243,11 @@ the root-move section above adds only the legacy overlay, `.bak` removal and
    Rollback is those saved definitions plus the same helper `switch`
    back to the prior SHA; no automatic rollback runs here. To roll
    back, including after a failed health check in step 5 (which starts
-   the units): repeat step 1 in full — stop the tick/watchdog timers and
-   records service again (and `crq-slot.timer` and the publisher triggers
-   and worker if they were stopped in step 1), because the helper refuses
-   active units; wait for tick inactivity and for `crq-slot.service` to
-   settle, and drain owned reviews; then run the step 2 compatibility check again,
+   the units): repeat step 1 in full — stop every `crq-*.timer`/`.path` and the
+   records service again (including the repair and backfill triggers if
+   they were active), because the helper refuses active units; wait for
+   every `crq-*.service` to reach inactive or failed, and drain owned
+   reviews; then run the step 2 compatibility check again,
    judged against the prior SHA — the rollback target that must be able
    to read the queue — and refuse the rollback when it is no longer
    clean: the runbook's rollback treats a queue shape the prior target
@@ -250,9 +261,10 @@ the root-move section above adds only the legacy overlay, `.bak` removal and
    step 5, restoring the units that were active before step 1.
 5. Verify and approve the recorded evidence (rendered config, unit
    hashes, Git status), then remove the inert marker and start the
-   tick/watchdog timers and records service (and `crq-slot.timer`, and
-   `crq-publisher.path` and `crq-publisher.timer`, if they were stopped
-   in step 1); accept only after
+   tick/watchdog timers and records service (and every other
+   `crq-*.timer`/`.path` noted active in step 1, such as `crq-slot.timer`,
+   `crq-publisher.path`/`.timer`, `crq-repair.timer`/`.path` and
+   `crq-backfill.timer`); accept only after
    `last_tick` advances for two consecutive slots in the heartbeat
    and summary. Do not finish this target by re-running
    `deploy-runbook.py`: it refuses a target that is already the
