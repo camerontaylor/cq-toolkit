@@ -139,7 +139,7 @@ const BASIC_ESCAPES: Readonly<Record<string, string>> = {
   '\\': '\\',
 };
 
-/** TOML forbids every control character except tab raw inside a string. */
+/** TOML forbids every control character except tab in strings and comments; none is valid elsewhere. */
 function hasForbiddenControl(value: string): boolean {
   for (let at = 0; at < value.length; at += 1) {
     const code = value.charCodeAt(at);
@@ -216,10 +216,14 @@ export function parseScanExemptions(text: string): ScanExemption[] {
   const headerKinds = new Map<string, 'table' | 'array'>();
   let ignoredKeys: Set<string> | null = null;
   for (const raw of text.split(/\r\n|\n/)) {
+    // TOML 1.0: a raw control character other than tab is invalid anywhere in a
+    // document (strings, comments, whitespace); a lone CR is one too, since
+    // only LF and CRLF end a line.
+    if (hasForbiddenControl(raw)) throw new Error('control character in document');
     const line = tomlTrim(raw);
     if (line === '' || line.startsWith('#')) continue;
     if (line.startsWith('[')) {
-      const header = /^\[(\[)?[ \t]*([A-Za-z0-9_-]+)[ \t]*(\])?\](?:[ \t]*#.*)?$/.exec(line);
+      const header = /^\[(\[)?[ \t]*([A-Za-z0-9_-]+)[ \t]*(\])?\](?:[ \t]*#.*)?$/s.exec(line);
       if (header === null || (header[1] === '[') !== (header[3] === ']'))
         throw new Error('invalid table header');
       const name = header[2] as string;
@@ -242,7 +246,7 @@ export function parseScanExemptions(text: string): ScanExemption[] {
       }
       continue;
     }
-    const pair = /^([A-Za-z0-9_-]+)[ \t]*=[ \t]*(.*)$/.exec(line);
+    const pair = /^([A-Za-z0-9_-]+)[ \t]*=[ \t]*(.*)$/s.exec(line);
     if (pair === null) throw new Error('invalid line');
     const { value, rest } = parseString(tomlTrim(pair[2] as string));
     const tail = tomlTrim(rest);

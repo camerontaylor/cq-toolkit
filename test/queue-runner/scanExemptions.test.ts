@@ -139,6 +139,37 @@ describe('TOML whitespace is space and tab only', () => {
   });
 });
 
+describe('TOML control characters and comments', () => {
+  const valid = (comment: string): string =>
+    `# top ${comment}\n[meta] # t ${comment}\nname = "x"\n[[exempt]] # h ${comment}\n` +
+    `path = "a" # v ${comment}\nrule = "generic-api-key"\nreason = "r"\n`;
+  it('accepts comments with tabs and non-control Unicode after headers and values', () => {
+    expect(loadScanExemptions(valid('a\tb \u2028 é')).entries).toHaveLength(1);
+  });
+  it.each([
+    ['NUL', '\u0000'],
+    ['SOH', '\u0001'],
+    ['BS', '\u0008'],
+    ['VT', '\u000b'],
+    ['FF', '\u000c'],
+    ['a lone CR', '\r'],
+    ['US', '\u001f'],
+    ['DEL', '\u007f'],
+  ])('a raw %s in a comment voids the whole file', (_name, ch) => {
+    const loaded = loadScanExemptions(valid(`x${ch}y`));
+    expect(loaded.entries).toEqual([]);
+    expect(loaded.error).toMatch(/control character/);
+  });
+  it('a control character in a comment-only line also voids the file', () => {
+    const loaded = loadScanExemptions(`# bad \u0000\n${valid('ok')}`);
+    expect(loaded.entries).toEqual([]);
+    expect(loaded.error).not.toBeNull();
+  });
+  it('CRLF line endings still load', () => {
+    expect(loadScanExemptions(valid('c').replaceAll('\n', '\r\n')).entries).toHaveLength(1);
+  });
+});
+
 describe('raw control characters fail closed', () => {
   const doc = (reason: string, quote: string): string =>
     `[[exempt]]\npath = "a"\nrule = "generic-api-key"\nreason = ${quote}${reason}${quote}\n`;
