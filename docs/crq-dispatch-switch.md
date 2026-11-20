@@ -85,9 +85,10 @@ Nothing here edits queue state, the policy file or the signer.
    the line, and confirm from the calling host that a well-formed, authorized
    request reaches the activation gate. An empty or malformed frame is refused
    before that gate, so it cannot show `unsupported`. Use a read-only `status`
-   frame for the policy's own repo and principal (`<owner/repo>` is the policy's
-   `repo`; the PR number and SHA need not exist, nothing is looked up while the
-   policy is disabled):
+   frame for the policy's own repo, principal and target selector (`<owner/repo>`
+   is the policy's `repo`; `targetSelector` must be one of its `targets`; the PR
+   number and SHA need not exist, nothing is looked up while the policy is
+   disabled):
 
    ```sh
    printf '%s\n' '{"v":1,"op":"status","requestId":"switch-probe-1","binding":{"kind":"merged-current","repo":"<owner/repo>","targetSelector":"promoted-main","pr":1,"mergeSha":"0000000000000000000000000000000000000000"}}' \
@@ -98,11 +99,28 @@ Nothing here edits queue state, the policy file or the signer.
    The first must exit `0` with
    `"result":{"unsupported":"Reviewed D1C queue-v1 activation required"}`
    (the Python dispatcher prints the same line). A refusal here means the line,
-   principal or policy path is wrong. The second must exit `2` and print
+   principal, policy path, repo or `targetSelector` is wrong. The second must exit `2` and print
    `queue capability refused; no permission`.
 
 4. Re-enable the policy (`"enabled": true`) for an approved window and run one
-   `status` call from the client. Watch `<deploy-root>/state/events.jsonl` for the request.
+   read-only `health` call from the client. `status` cannot be the check: it is
+   refused (exit `2`) for a request id that was never enqueued, and no queue
+   capability request writes `state/events.jsonl`. `health` needs no enqueue and
+   no forge lookup, but the policy must carry a `health_reads` grant for the
+   principal and this exact binding (see `docs/queue-client.md`, health):
+
+   ```sh
+   printf '%s\n' '{"v":1,"op":"health","requestId":"switch-probe-health","binding":{"repo":"<owner/repo>","targetSelector":"promoted-main"}}' \
+     | ssh <alias> queue-v1; echo "exit=$?"
+   ```
+
+   It must exit `0` with a `"result"` carrying `pending`, `blocked`, `deployedSha`
+   and a `snapshot` digest (null ages and SHAs are normal on a quiet queue). A
+   refusal (`queue capability refused; no permission`, exit `2`) means the
+   `health_reads` grant is missing or does not match the binding, the repo or
+   `targetSelector` is not in the policy, or `<deploy-root>/state/queue.json` is
+   unreadable; the first two are policy fixes, not a reason to roll back. The call
+   changes no queue state; `<deploy-root>/state/queue.json` is unchanged.
 
 ## Rollback
 
