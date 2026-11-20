@@ -79,7 +79,7 @@ class HostConfigFixture:
 
     def stopped(self, argv):
         if argv[0] == 'systemctl':
-            if argv[2] in {'list-unit-files', 'list-units'}:
+            if argv[2] in {'list-unit-files', 'list-units', 'list-jobs'}:
                 return ''
             return 'inactive\n'
         return subprocess.run(argv, check=True, capture_output=True, text=True).stdout

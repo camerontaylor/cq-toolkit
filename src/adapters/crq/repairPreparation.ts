@@ -29,8 +29,8 @@
 import { execFile } from 'node:child_process';
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { lstat, mkdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { parseDenylistPatterns } from '../../ops/dev/denylist.js';
+import { join, resolve } from 'node:path';
+import { parseDenylistPatterns, type GitleaksEffects } from '../../ops/dev/denylist.js';
 import { makeSubprocessDevEffects } from '../../ops/dev/effects.js';
 import type {
   RepairGateGit,
@@ -387,21 +387,55 @@ function makeRepairGateGit(clone: string): RepairGateGit {
   };
 }
 
-/** `shutil.which('gitleaks')`: an executable regular file on the given `PATH`. */
-function gitleaksOnPath(path: string | undefined): boolean {
-  if (path === undefined) return false;
+/**
+ * `shutil.which('gitleaks')`: the absolute path of an executable regular file
+ * on the given `PATH`.
+ *
+ * The probe and the scan must name the SAME file. A relative `PATH` entry is
+ * resolved here, against this adapter process's working directory (as the
+ * probe has always resolved it); the scanner runs out of the clone, so handing
+ * it the bare name would let a relative entry resolve to a repository-supplied
+ * executable inside the clone instead — a binary the probe never checked.
+ */
+function gitleaksExecutableOnPath(path: string | undefined): string | undefined {
+  if (path === undefined) return undefined;
   for (const directory of path.split(':')) {
     if (directory === '') continue;
-    const candidate = join(directory, 'gitleaks');
+    const candidate = resolve(directory, 'gitleaks');
     try {
       if (!statSync(candidate).isFile()) continue;
       accessSync(candidate, fsConstants.X_OK);
-      return true;
+      return candidate;
     } catch {
       continue;
     }
   }
-  return false;
+  return undefined;
+}
+
+/**
+ * Bind the scan to the executable the probe resolved. The scan runs from the
+ * clone, so the bare name `gitleaks` would re-resolve `PATH` there; running the
+ * probed absolute path keeps one file behind both the availability check and
+ * the scan. Absent a resolution the run FAILS CLOSED (the verdict is `error`,
+ * never a clean scan) rather than falling back to the bare name.
+ */
+function makeBoundGitleaksEffects(
+  clone: string,
+  executable: () => string | undefined,
+): GitleaksEffects {
+  const base = makeSubprocessDevEffects(clone);
+  return {
+    runCommand: (_command, args, opts) => {
+      const pinned = executable();
+      if (pinned === undefined) {
+        return Promise.reject(new Error('gitleaks executable was not resolved by the probe'));
+      }
+      return base.runCommand(pinned, args, opts);
+    },
+    makeScratchDir: (prefix) => base.makeScratchDir(prefix),
+    removeScratchDir: (path) => base.removeScratchDir(path),
+  };
 }
 
 /**
@@ -420,10 +454,15 @@ function makeLazyRepairScan(clone: string, gitleaksPath: string | undefined): Re
       patternsText,
       'origin/main:policy/denylist/patterns.yml',
     );
+    // The probe records WHAT it resolved so the scan runs that exact file.
+    let probed: string | undefined;
     return makeRepairScan({
       rules: patterns.rules,
-      gitleaksEffects: makeSubprocessDevEffects(clone),
-      gitleaksAvailable: () => gitleaksOnPath(gitleaksPath),
+      gitleaksEffects: makeBoundGitleaksEffects(clone, () => probed),
+      gitleaksAvailable: () => {
+        probed = gitleaksExecutableOnPath(gitleaksPath);
+        return probed !== undefined;
+      },
     });
   };
   return {

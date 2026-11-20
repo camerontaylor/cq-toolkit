@@ -10,12 +10,15 @@ import os
 from pathlib import Path
 import random
 import re
+import shutil
+import signal
 import sys
+import tempfile
 import time
 from zoneinfo import ZoneInfo
 from crq_repair import DetectorUnavailable, atomic, command, git, hack_detector, utc, verify
 from crq_repair.drivers import cq, codex, paseo
-from crq_repair.retain import retain
+from crq_repair.retain import UnsupportedUntracked, retain, untracked_directories
 from crq_repair.bounded import drain_job, drain_order, require_canonical_delivery, select_job, source_snapshot
 
 ROOT = Path(__file__).resolve().parent
@@ -275,9 +278,14 @@ def dispatch_paused(config):
 
 
 def dispatch(config, role, job, wt, directory, judge=False):
-    if role['driver'] != 'cq' or not config.get('repair', {}).get('fallback_models'):
+    if not config.get('repair', {}).get('fallback_models'):
         with correlation(job, judge):
             return _dispatch(config, role, job, wt, directory, judge)
+    # Fallback admission applies to the lane being dispatched, not only CQ
+    # fixers: a Codex or Paseo judge retrying after rate-limit must observe its
+    # provider's persisted cooldown (recorded below by remember_provider_limit)
+    # instead of reopening the rate-limited lane, while a ready CQ fallback
+    # elsewhere proceeds without being blocked by that pause.
     deadline = time.monotonic() + config['repair']['budget']['wall_clock_min'] * 60
     waits = []
     baseline = git(wt, 'rev-parse', 'HEAD') if not judge else None
@@ -299,17 +307,58 @@ def dispatch(config, role, job, wt, directory, judge=False):
             if remaining < 0.001:
                 return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
             if attempted and not judge:
-                retain(wt, baseline, previous_directory)
+                try:
+                    retain(wt, baseline, previous_directory)
+                except UnsupportedUntracked:
+                    # A throttled fixer can leave an unignored nested repository
+                    # in the tree: retain() refuses to archive an untracked
+                    # entry that is not a regular file or symlink, and the
+                    # doubled -f below is what removes nested repositories.
+                    # Moving each such repository into the provider's evidence
+                    # directory preserves its contents unarchived, so the
+                    # capture retry succeeds and the cleanup can run; any other
+                    # unsupported entry still fails closed without a reset.
+                    nested = untracked_directories(wt)
+                    if not nested:
+                        raise
+                    # A rate-limit deferral re-runs this rung against the same
+                    # evidence directory, so every capture gets its own fresh
+                    # subdirectory: shutil.move treats an existing destination
+                    # directory as a container, which would nest or collide.
+                    holder = previous_directory / 'retained-nested'
+                    holder.mkdir(parents=True, exist_ok=True)
+                    capture = Path(tempfile.mkdtemp(prefix='capture-', dir=holder))
+                    for name in nested:
+                        target = capture / name
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(os.fspath(Path(wt) / name), os.fspath(target))
+                    retain(wt, baseline, previous_directory)
+                # Each fallback fixer gets a fresh checkout at the baseline:
+                # -x also removes ignored files, and the doubled -f removes
+                # nested git repositories, so nothing a throttled fixer left
+                # behind can reach the next provider's context. retain() above
+                # archived only the tracked and non-ignored state; ignored
+                # output (build output, caches) is deliberately discarded here
+                # and is not recoverable, but a nested repository retain()
+                # cannot archive was moved into the provider's evidence
+                # directory above, so its contents stay recoverable.
                 git(wt, 'reset', '--hard', baseline)
-                git(wt, 'clean', '-fd')
+                git(wt, 'clean', '-ffdx')
                 # Retention and reset consume the shared budget; remeasure so
                 # the next provider never starts past the deadline.
                 remaining = deadline - time.monotonic()
                 if remaining < 0.001:
                     return {'stop': 'budget', 'summary': 'repair dispatch wall-clock deadline reached'}
-            attempted = True
+            # A prior provider's run (and this cleanup) consumed wall clock:
+            # recheck immediately before the paid launch so a fallback whose
+            # window would now reach the blackout defers without spending.
+            # The stop is the typed clock condition, not rate-limit: no
+            # provider refused, so no drain-wide rate-limit pause is written.
             bounded_config = copy.deepcopy(config)
             bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
+            if attempted and blocked(bounded_config['repair']):
+                return {'stop': 'blackout', 'summary': 'GLM peak blackout; fallback launch deferred'}
+            attempted = True
             previous_directory = directory / provider
             report = _dispatch(bounded_config, candidate, job, wt, previous_directory, judge)
             report.update(driver=candidate['driver'], model=candidate['model'])
@@ -322,14 +371,58 @@ def dispatch(config, role, job, wt, directory, judge=False):
     return {'stop': 'rate-limit', 'retry_after_ms': max(1000, (end - dt.datetime.now(dt.timezone.utc)).total_seconds() * 1000)}
 
 
+def review_diff_sections(diff):
+    """Split a review diff into (path, text) per 'diff --git' section.
+
+    Text before the first header keeps the generic review-diff.txt path. A
+    header without a ' b/' separator (for example a git-quoted non-ASCII path)
+    is scanned under the whole header line, which still contains the real
+    path. An empty diff is one empty section so the scan still runs once."""
+    sections, path, lines = [], 'review-diff.txt', []
+    for line in str(diff).splitlines():
+        if line.startswith('diff --git '):
+            if lines:
+                sections.append((path, '\n'.join(lines)))
+            _, _, tail = line.rpartition(' b/')
+            path = tail.strip() or 'review-diff.txt'
+            lines = []
+        lines.append(line)
+    if lines or not sections:
+        sections.append((path, '\n'.join(lines)))
+    return sections
+
+
 def _dispatch(config, role, job, wt, directory, judge=False):
     directory.mkdir(parents=True, exist_ok=True)
     job = copy.deepcopy(job)
     if job.get('triage_context') is not None:
         return cq.judge(config, role, job, wt, directory)
     require_canonical_delivery(ROOT, job)
-    job['source_snapshot'] = source_snapshot(config, job)
-    atomic(directory / 'source-snapshot.json', job['source_snapshot'])
+    snapshot = source_snapshot(config, job)
+    # The excerpt leaves the machine for every driver: scan it with the same
+    # policy as triage context, before it is persisted or handed to a provider.
+    import crq as c
+    if not triage_context_safe(c, {'current_path': snapshot.get('path') or 'source-snapshot.txt', 'source': snapshot.get('source', '')},
+                               directory / 'source-snapshot-scan.json'):
+        raise ValueError('source snapshot secret scan rejected; refusing dispatch')
+    # The review diff rides in the job and is serialized into the judge prompt;
+    # it gets the identical scan before any driver or provider call.
+    # Each file section is scanned under its own path so path-gated rules
+    # (key-material-env) apply exactly as they do for the source snapshot.
+    for index, (section_path, section) in enumerate(review_diff_sections(job.get('review_diff', ''))):
+        if not triage_context_safe(c, {'current_path': section_path, 'source': section},
+                                   directory / ('review-diff-scan-' + str(index) + '.json')):
+            raise ValueError('review diff secret scan rejected; refusing dispatch')
+    job['source_snapshot'] = snapshot
+    atomic(directory / 'source-snapshot.json', snapshot)
+    # The admission checks sample the clock before worktree retention and the
+    # snapshot scan above; either can outlast the margin they allowed, so the
+    # switch below could start a paid call inside the blackout. Sample the
+    # clock again at this last boundary before the call (never during one) and
+    # refuse to start when the window has opened or the remaining budget would
+    # still reach it.
+    if blocked(config.get('repair', {})):
+        return {'stop': 'blackout', 'summary': 'GLM peak blackout began during preparation; driver call not started'}
     if role['driver'] == 'cq':
         if judge:
             return cq.judge(config, role, job, wt, directory)
@@ -379,14 +472,16 @@ def process(config, job, wt):
         result = json.loads(progress_path.read_text())
     if result.get('dispatch_pending') or result.get('pending_judge') or result.get('pending_mechanical'):
         wt = resume_worktree(result, wt)
-    if (result.get('pending_judge') and result.get('worktree')
+    if ((result.get('pending_judge') or result.get('pending_mechanical')) and result.get('worktree')
             and Path(result['worktree']).resolve() != Path(wt).resolve()):
-        # The A2 tree the deferred judge must inspect is gone: judging the
-        # base tree would record a verdict and snapshot for the wrong checkout.
+        # The recorded candidate tree is gone: verifying or judging the base
+        # tree would record a result for the wrong checkout.
+        pending = 'judge' if result.get('pending_judge') else 'mechanical'
         result.update(verdict='FAILED',
-                      reason='pending judge worktree unavailable; needs human',
+                      reason='pending ' + pending + ' worktree unavailable; needs human',
                       finished_at=utc())
         result.pop('pending_judge', None)
+        result.pop('pending_mechanical', None)
         atomic(result_path, result)
         return result
     if resume_progress:
@@ -470,6 +565,12 @@ def process(config, job, wt):
                 atomic(progress_path, result)
                 report = dispatch(config, role, current, wt, attempt_dir)
                 result.pop('dispatch_pending', None)
+                if report.get('stop') == 'blackout':
+                    # The window opened while this rung prepared its worktree;
+                    # no provider call started, so keep the rung and defer the
+                    # attempt to a later pass.
+                    result['next_rung'] = rung
+                    return defer('GLM peak blackout; attempt deferred')
                 disposition = report.get('worker_disposition') or report.get('disposition')
                 if (report.get('stop') in ('ok', 'error') and disposition == 'needs_human'
                         and str(report.get('summary') or '').strip()):
@@ -550,6 +651,11 @@ def process(config, job, wt):
                     raise
                 finally:
                     result.pop('dispatch_pending', None)
+                if judged.get('stop') == 'blackout':
+                    # The window opened before the judge call started; the
+                    # recorded pending_judge keeps the judge resumable after
+                    # the blackout without repeating this rung's fixer.
+                    return defer('GLM peak blackout; judge deferred without repeating fixer')
                 if judged.get('stop') == 'rate-limit':
                     return defer('judge rate limit; resume judge without repeating fixer', rate_limit=judged)
                 result.pop('pending_judge', None)
@@ -663,6 +769,23 @@ def pending(job_id):
     return bool(prior.get('retry_after'))
 
 
+def unreadable_result(job_id):
+    """True when a result.json exists but cannot be classified as pending.
+
+    The malformed artifact stays untouched for tick reconciliation (harvest
+    fails the prepared run and retains it), so the drain only excludes the job
+    from dispatch: a missing result is still pending and a valid terminal
+    result is still not."""
+    path = ROOT / 'state/repair' / job_id / 'result.json'
+    if not path.exists():
+        return False
+    try:
+        json.loads(path.read_text()).get('retry_after')
+    except (OSError, ValueError, AttributeError):
+        return True
+    return False
+
+
 def mark_stale(job, reason):
     """Terminal, spend-free verdict for a superseded job; the tick harvests it."""
     directory = ROOT / 'state/repair' / job['job']
@@ -754,14 +877,16 @@ def triage_phase(config, dry_run=False):
     if role.get('driver') != 'cq':
         raise ValueError('triage requires cq structured judge bridge')
     def judge(row, context, remaining):
+        # phase() measured `remaining` before this call; the context scan below
+        # can outlive it, so pin the deadline at entry and recompute the
+        # provider budget immediately before dispatch.
+        deadline = time.monotonic() + remaining
         job = {'job': 'crq-triage-' + row['finding']['id'], 'run': row['review_id'],
                'triage_context': context}
         directory = state / 'repair/triage' / row['finding']['id']
         directory.mkdir(parents=True, exist_ok=True)
         if not triage_context_scan(c, context, directory / 'context-scan.json'):
             return {'stop': 'ok', 'verdict': 'unsure', 'context_scan_refused': True, 'reason': 'triage context secret scan rejected'}
-        bounded_config = copy.deepcopy(config)
-        bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
         selected = options.get('escalation_role', config['repair']['roles']['judge_critical']) if row.get('_escalate') else role
         if runner_disabled():
             # A handover can start while the phase runs; phase() keeps deferred
@@ -775,6 +900,18 @@ def triage_phase(config, dry_run=False):
             # The blackout can start during drain()'s tick-lock wait or this pass;
             # phase() keeps deferred rows pending for the next pass.
             return {'stop': 'deferred', 'errorClass': 'blackout', 'reason': 'GLM peak blackout; triage judge deferred'}
+        until = dispatch_paused(config)
+        if until:
+            # --triage-dry-run enters the phase without drain()'s pass-level pause
+            # check, so the gate samples the global marker itself: a live provider
+            # pause defers this judgment instead of reaching the provider.
+            return {'stop': 'deferred', 'errorClass': 'rate-limit',
+                    'reason': 'provider dispatch paused until ' + until + '; triage judge deferred'}
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {'stop': 'deadline', 'reason': 'phase deadline elapsed before triage provider dispatch'}
+        bounded_config = copy.deepcopy(config)
+        bounded_config['repair']['budget']['wall_clock_min'] = remaining / 60
         return dispatch(bounded_config, selected, job, config['clone'],
                         state / 'repair/triage' / row['finding']['id'], judge=True)
     def transport(key, request):
@@ -789,7 +926,9 @@ def triage_phase(config, dry_run=False):
     result = phase(inbox, repo, tip, judge, transport, utc(),
                    maximum=max(0, min(6, int(options.get('max_per_pass', 6)))),
                    seconds=config['repair']['budget']['wall_clock_min'] * 60, dry_run=dry_run)
-    write_result(result)
+    # The report returns to the caller instead of stdout: the drain folds it
+    # into its one JSON result and the triage dry-run returns it directly, so
+    # stdout stays exactly one JSON artifact.
     if result.get('stopped') == 'rate-limit' and not dry_run:
         rate_limit_pause(result.get('stop_report', {}), 'backfill-triage')
     return result
@@ -797,7 +936,8 @@ def triage_phase(config, dry_run=False):
 
 def drain(config):
     """Automatic inbox drain, minor-only items after critical/major items. Items use isolated worker
-    processes up to the configured cap, with serial findings within each item."""
+    processes up to the configured cap, with serial findings within each item. Returns the pass's
+    JSON result (None only on a narrated early exit), with the triage report inside when triage ran."""
     # Admission before any fetch, triage or write: a handed-over host must cost
     # nothing and leave the queue and inbox exactly as they are.
     if runner_disabled():
@@ -820,12 +960,18 @@ def drain(config):
     if runner_disabled():
         narrate(RUNNER_DISABLED + ': pass stopped before triage')
         return
+    triage = None
     try:
-        triage_phase(config)
+        triage = triage_phase(config)
     except Exception as exc:  # backfill deferral must not starve existing repair jobs
         narrate('backfill triage deferred: ' + str(exc)[:300])
+    # The triage report rides inside the drain's result, so a caller parsing
+    # stdout reads exactly one JSON value even on a pass triage ran.
+    result = {'status': 'drained'}
+    if triage is not None:
+        result['triage'] = triage
     if dispatch_paused(config):
-        return
+        return result
     groups = {}  # item -> job ids, items in order of their oldest job
     for job_id in drain_order(ROOT):
         try:
@@ -838,15 +984,86 @@ def drain(config):
     # Classify against the queue before sorting. Skipped, stale and completed
     # jobs cannot promote a minor-only item; stable sort retains inbox order.
     queue_path = ROOT / 'state/queue.json'
-    queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
+    try:
+        queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
+    except (OSError, ValueError) as exc:
+        # An unreadable queue must still yield one JSON artifact: keep the
+        # completed triage report and let run() exit non-zero. Nothing was
+        # admitted yet, so no spend or child is left behind.
+        narrate('repair drain failed: queue unreadable: ' + str(exc)[:300])
+        result['status'] = 'error'
+        result['error'] = 'queue unreadable: ' + str(exc)[:300]
+        return result
+    groups = hold_backfill_groups(groups, lambda item: dispatchable(config, queue, item, groups[item]))
     def priority(item):
         for job_id in groups[item]:
             status, job, _ = drain_job(ROOT, config, queue, job_id)
             if (status == 'run' and job and job.get('item') == item
-                    and pending(job_id) and job.get('finding', {}).get('severity') in ('critical', 'major')):
+                    and not unreadable_result(job_id) and pending(job_id)
+                    and job.get('finding', {}).get('severity') in ('critical', 'major')):
                 return 0
         return 1
     drain_items(config, groups, sorted(groups, key=priority))
+    return result
+
+
+BACKLOG_MAX_AGE_SECONDS = 3600
+
+
+def dispatchable(config, queue, item, job_ids):
+    """True when drain_item would run a repair for this group: a job of the
+    item is runnable, pending and has a readable result. Only such a group can
+    spend repair and end in a fix PR. Any other group costs drain_item nothing
+    but its existing stale marking and skip narration."""
+    for job_id in job_ids:
+        status, job, _ = drain_job(ROOT, config, queue, job_id)
+        if (status == 'run' and job and job.get('item') == item
+                and not unreadable_result(job_id) and pending(job_id)):
+            return True
+    return False
+
+
+def hold_backfill_groups(groups, dispatchable=lambda item: True):
+    """Soft budget: admit at most limit - open dispatchable backfill groups.
+
+    The drain never calls GitHub, so it reads the file the tick wrote. A
+    missing, unreadable, stale or future-dated file, or open >= limit, holds
+    every backfill group. Otherwise the first limit - open dispatchable groups
+    in drain order run; a group that cannot dispatch (its jobs are published,
+    completed or not queued) takes no slot and passes to drain_item as before.
+    Held jobs stay in the inbox: nothing is failed, marked stale or counted
+    as a retry.
+    """
+    held = [item for item in groups if item.startswith('backfill-finding-')]
+    if not held:
+        return groups
+    open_count = limit = None
+    try:
+        data = json.loads((ROOT / 'state/repair/fix-pr-backlog.json').read_text())
+        at = dt.datetime.fromisoformat(str(data['at']).replace('Z', '+00:00'))
+        age = (dt.datetime.now(dt.timezone.utc) - at).total_seconds()
+        if (0 <= age <= BACKLOG_MAX_AGE_SECONDS and not isinstance(data['open'], bool)
+                and not isinstance(data['limit'], bool)
+                and isinstance(data['open'], int) and isinstance(data['limit'], int)):
+            open_count, limit = data['open'], data['limit']
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    budget = 0 if open_count is None else max(0, limit - open_count)
+    if budget == 0:
+        drop = set(held)
+    else:
+        drop = set()
+        for item in held:
+            if not dispatchable(item):
+                continue
+            if budget > 0:
+                budget -= 1
+            else:
+                drop.add(item)
+    if drop:
+        shown = 'unknown' if open_count is None else str(open_count)
+        narrate('backfill repair held: %s open fix PRs, limit %s' % (shown, 'unknown' if limit is None else limit))
+    return {item: ids for item, ids in groups.items() if item not in drop}
 
 
 def drain_item(config, item, job_ids):
@@ -865,6 +1082,7 @@ def drain_item(config, item, job_ids):
     queue_path = ROOT / 'state/queue.json'
     queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
     jobs = []
+    held_runs = set()
     for job_id in job_ids:
         status, job, reason = drain_job(ROOT, config, queue, job_id)
         if not job or job.get('item') != item:
@@ -875,9 +1093,23 @@ def drain_item(config, item, job_ids):
             # It stays in its run's chain; process() returns the terminal result.
             jobs.append(job)
         elif status == 'run':
-            jobs.append(job)
+            if unreadable_result(job_id):
+                # A malformed result.json is tick-owned evidence: harvest fails
+                # the run and retains it, so the job is excluded from dispatch
+                # here and in the priority sort instead of crashing the drain.
+                narrate('repair ' + job_id + ': skipped: unreadable result.json preserved for tick reconciliation')
+                # Later jobs of the same run chain from this job's possible
+                # FIXED commit; without its result they would start from a
+                # base that omits it, so the whole run waits for the tick.
+                held_runs.add(job['run'])
+            else:
+                jobs.append(job)
         elif reason != 'no queued tick-owned repair run':
             narrate('repair ' + job_id + ': skipped: ' + reason)
+    if held_runs:
+        for run in sorted(held_runs):
+            narrate('repair run ' + str(run) + ': held: a job has an unreadable result.json')
+        jobs = [job for job in jobs if job['run'] not in held_runs]
     if not any(pending(job['job']) for job in jobs):
         return None
     try:
@@ -951,9 +1183,24 @@ def drain_items(config, groups, order):
                 # as the backfill triage report) are written again per child.
                 sys.stdout.flush()
                 sys.stderr.flush()
-                pid = os.fork()
+                # A KeyboardInterrupt between this fork and the registration
+                # below would unwind to the finally with no record of the
+                # child, and the coordinator could return without reaping it
+                # while its work still holds service.lock: hold SIGINT until
+                # the child is owned, then let a pending interrupt surface at
+                # the barrier read as before. The child unblocks first thing.
+                interrupt = {signal.SIGINT}
+                signal.pthread_sigmask(signal.SIG_BLOCK, interrupt)
+                try:
+                    pid = os.fork()
+                except BaseException:
+                    signal.pthread_sigmask(signal.SIG_UNBLOCK, interrupt)
+                    raise
             if pid == 0:
                 try:
+                    # The fork inherited the parent's blocked mask; the child
+                    # keeps its normal interrupt disposition for its own work.
+                    signal.pthread_sigmask(signal.SIG_UNBLOCK, interrupt)
                     global _REFUSAL_CHANNEL
                     os.close(refused_r)
                     for _pid, (_item, _rfd) in list(active.items()):
@@ -987,11 +1234,16 @@ def drain_items(config, groups, order):
                     sys.stderr.flush()
                 finally:
                     os._exit(code)
-            os.close(refused_w)
-            # Register the child BEFORE the blocking read: an interrupt that
-            # lands in the barrier must still find this admitted child in
-            # active, or the cleanup releases service.lock beneath it.
-            active[pid] = (item, refused_r)
+            try:
+                os.close(refused_w)
+                # Register the child BEFORE the blocking read: an interrupt that
+                # lands in the barrier must still find this admitted child in
+                # active, or the cleanup releases service.lock beneath it.
+                active[pid] = (item, refused_r)
+            finally:
+                # The child is owned now; a SIGINT held during the transition
+                # above is delivered from here on, and the cleanup finds it.
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, interrupt)
             # Barrier: the child publishes its item-gate result before any work.
             # Accepted means the child passed the gate; refused or a dead child
             # (EOF) latches the coordinator stop.
@@ -1032,7 +1284,16 @@ def reap_completed(active):
     """Collect every currently completed owned child before new admission."""
     failed, reaped = False, False
     for pid, (item, rfd) in list(active.items()):
-        found, status = os.waitpid(pid, os.WNOHANG)
+        lost = False
+        try:
+            found, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            # An interrupt landed after a previous reap consumed this child's
+            # exit status but before its PID was untracked, so the worker has
+            # already exited and its status is lost. Untrack it, keep waiting
+            # for the remaining owned children, and stop new admission rather
+            # than treat the unverified exit as success.
+            found, lost = pid, True
         if found:
             del active[pid]
             try:
@@ -1040,7 +1301,10 @@ def reap_completed(active):
             except OSError:
                 pass
             reaped = True
-            if status:
+            if lost:
+                narrate('repair item ' + item + ': worker exit status lost to an interrupt; stopping new admission')
+                failed = True
+            elif status:
                 code = os.waitstatus_to_exitcode(status)
                 message = ('provider pause; stopping new admission' if code == 2 else
                            'runner disabled; stopping new admission' if code == 3 else
@@ -1198,35 +1462,88 @@ def recover_job(config, job_id):
     return recovery.recover(ROOT, config, job_id, scan, judge, prepare)
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
+def explicit_job_result(job, outcome):
+    """The JSON artifact for an explicitly selected job: its recorded result
+    plus the admission outcome, so a caller never has to parse stderr."""
+    path = ROOT / 'state/repair' / job['job'] / 'result.json'
+    result = json.loads(path.read_text()) if path.exists() else None
+    return {'status': outcome or ('finished' if result else 'no-result'), 'job': job['job'], 'result': result}
+
+
+class UsageError(Exception):
+    """An argparse argument failure, routed to the CLI result writer so the
+    invocation still emits its one machine-readable JSON artifact."""
+
+
+class UsageArgumentParser(argparse.ArgumentParser):
+    """The CLI parser, whose argument failures are results instead of exits.
+
+    argparse's own error path exits 2 with nothing on stdout (e.g. `--job`
+    without a value), which would leave a caller with no JSON artifact. Raising
+    here lets run() report the usage error and keep exit code 2.
+    """
+
+    def error(self, message):
+        raise UsageError(str(message))
+
+
+def run(argv=None):
+    """Returns (exit code, result); main writes result as the one JSON artifact on stdout."""
+    parser = UsageArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
     parser.add_argument('--triage-dry-run', action='store_true')
     parser.add_argument('--job')
     parser.add_argument('--source-sha')
     parser.add_argument('--finding-sha256')
     parser.add_argument('--recover-job')
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except UsageError as exc:
+        narrate('repair dispatch refused: ' + str(exc))
+        return 2, {'status': 'usage-error', 'reason': str(exc)}
     # CLI admission before the lock, the state directory and every alternate
     # path (--recover-job, --job): a handed-over host must not write or spend.
     if runner_disabled():
         narrate(RUNNER_DISABLED + ': dispatch refused')
-        return 0
+        return 0, {'status': 'refused', 'reason': 'runner-disabled'}
     config = json.loads((ROOT / 'config.json').read_text())
     repair = config.get('repair', {})
     authorization = repair.get('spend_authorization')
     if repair.get('enabled') is not True or not isinstance(authorization, str) or not authorization.strip():
         narrate('repair dispatch disabled: repair.enabled and a recorded spend_authorization are required')
-        return
-    if args.triage_dry_run:
-        triage_phase(config, dry_run=True)
-        return
+        return 0, {'status': 'disabled', 'reason': 'repair.enabled and a recorded spend_authorization are required'}
     selectors = (args.job, args.source_sha, args.finding_sha256)
-    if args.recover_job and (any(selectors) or args.triage_dry_run):
+    # Presence is separate from validity: an empty string was still supplied,
+    # so it must select a job and refuse, never fall through to the drain.
+    supplied = tuple(selector is not None for selector in selectors)
+    # Mode validation before any alternate path runs: recovery selects exactly
+    # one job and never combines with --job/--source-sha/--finding-sha256 or
+    # --triage-dry-run.
+    # Presence, not truthiness: `--recover-job ''` was still supplied.
+    if args.recover_job is not None and (any(supplied) or args.triage_dry_run):
         narrate('repair dispatch refused: recovery selects exactly one job')
-        return 2
-    if any(selectors) and not all(selectors):
+        return 2, {'status': 'refused', 'reason': 'recovery selects exactly one job'}
+    if args.recover_job is not None and not args.recover_job.strip():
+        # An empty recovery selector must refuse, never fall through to the drain.
+        narrate('repair dispatch refused: --recover-job must not be empty')
+        return 2, {'status': 'refused', 'reason': '--recover-job must not be empty'}
+    if args.triage_dry_run and any(supplied):
+        # The dry run selects no job; a selector beside it would be ignored.
+        narrate('repair dispatch refused: --triage-dry-run takes no job selector')
+        return 2, {'status': 'refused', 'reason': '--triage-dry-run takes no job selector'}
+    if args.triage_dry_run:
+        # triage_phase returns its report only when triage is configured and
+        # has a rollout; otherwise it returns None having written nothing, so
+        # report that explicitly to keep one JSON artifact per exit.
+        result = triage_phase(config, dry_run=True)
+        if result is None:
+            return 0, {'status': 'no-triage', 'reason': 'triage is not configured for this state directory'}
+        return 0, result
+    if any(supplied) and not all(supplied):
         narrate('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
-        return 2
+        return 2, {'status': 'refused', 'reason': '--job, --source-sha and --finding-sha256 go together'}
+    if any(selector is not None and not selector.strip() for selector in selectors):
+        narrate('repair dispatch refused: supplied selector values must not be empty')
+        return 2, {'status': 'refused', 'reason': 'supplied selector values must not be empty'}
     # Validate all configured paid lanes before any A0 spend. Missing hard
     # budget support is an activation prerequisite, never a soft prompt promise.
     drivers = {role['driver'] for role in repair['roles'].values()}
@@ -1234,51 +1551,63 @@ def main(argv=None):
         if driver in drivers and (not repair.get(driver + '_budget_launcher') or
                                   not repair.get(driver + '_budget_launcher_verified')):
             narrate('repair dispatch disabled: verified ' + driver + ' budget launcher required')
-            return
+            return 0, {'status': 'disabled', 'reason': 'verified ' + driver + ' budget launcher required'}
     if 'paseo' in drivers and (not repair.get('paseo_host') or not repair.get('paseo_read_only_mode')):
         narrate('repair dispatch disabled: verified Paseo endpoint and read-only mode required')
-        return
+        return 0, {'status': 'disabled', 'reason': 'verified Paseo endpoint and read-only mode required'}
     # A missing key would otherwise turn every attempt into a FAILED verdict.
     if any(role['driver'] == 'cq' and role['model'].startswith('zai/') for role in repair['roles'].values()) \
             and not os.environ.get('ZAI_API_KEY') and not any(
                 provider_ready(candidate) for role in repair['roles'].values()
                 for candidate in fallback_roles(config, role)[1:]):
         narrate('repair dispatch disabled: ZAI_API_KEY is not in the service environment')
-        return
+        return 0, {'status': 'disabled', 'reason': 'ZAI_API_KEY is not in the service environment'}
     if blocked(repair):
         narrate('repair dispatch paused: GLM peak blackout')
-        return
+        return 0, {'status': 'paused', 'reason': 'GLM peak blackout'}
     directory = ROOT / 'state/repair'
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / 'service.lock').open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return
+            return 0, {'status': 'busy', 'reason': 'service.lock held by another repair pass'}
         if args.recover_job:
             until = dispatch_paused(config)
             if until:
                 narrate('repair recovery paused: provider rate limit until ' + until)
-                return
+                return 0, {'status': 'paused', 'reason': 'provider rate limit until ' + until}
             error = fetch_clone(config)
             if error:
                 narrate('repair recovery deferred: ' + error[:200])
-                return
+                return 0, {'status': 'deferred', 'reason': error[:200]}
             # The marker can be written during the fetch's tick-lock wait or
             # network call: recheck before the recovery judgment spends.
             if runner_disabled():
                 narrate(RUNNER_DISABLED + ': recovery deferred for ' + args.recover_job)
-                return
+                return 0, {'status': 'deferred', 'reason': 'runner-disabled'}
             result = recover_job(config, args.recover_job)
             if result.get('report', {}).get('stop') == 'rate-limit':
                 rate_limit_pause(result['report'], args.recover_job)
-            write_result(result)
-            return
-        if all(selectors):
+            return 0, result
+        if all(supplied):
             job = select_job(ROOT, config, args.job, args.source_sha, args.finding_sha256)
-            process_item(config, [job])
-            return
-        drain(config)
+            outcome = process_item(config, [job])
+            return 0, explicit_job_result(job, outcome)
+        result = drain(config)
+        if result is None:
+            result = {'status': 'drained'}
+        return (1 if result.get('status') == 'error' else 0), result
+
+
+
+
+def main(argv=None):
+    """Every CLI path ends in exactly one JSON artifact on stdout."""
+    code, result = run(argv)
+    if result is not None:
+        write_result(result)
+    return code
 
 
 if __name__ == '__main__':

@@ -182,8 +182,11 @@ export class PythonSectionScanner {
     // Def and import tracking reads the line as code only under a hypothesis
     // in which the line starts outside a string.
     const asCode = lexed.find((l) => l.start === null)?.code;
+    // A `def`/`class` signature (its own line and continuation lines) runs at
+    // definition time, in the enclosing scope — never inside its own body.
+    let inSignature = this.signatureParens > 0;
     if (asCode !== undefined && asCode.trim() !== '') {
-      this.trackDefs(asCode);
+      inSignature = this.trackDefs(asCode) || inSignature;
       this.trackImports(asCode);
     } else {
       // The line starts inside a multi-line string, so it is never code for
@@ -200,7 +203,9 @@ export class PythonSectionScanner {
         line: lineNumber,
         content,
         codes,
-        inTestBody: this.defs.some((d) => /^test/.test(d.name)),
+        inTestBody: (inSignature ? this.defs.slice(0, -1) : this.defs).some((d) =>
+          /^test/.test(d.name),
+        ),
       });
     }
   }
@@ -282,7 +287,8 @@ export class PythonSectionScanner {
     return rules;
   }
 
-  private trackDefs(code: string): void {
+  /** Returns true when the line is part of a `def`/`class` signature. */
+  private trackDefs(code: string): boolean {
     // A `def`/`class` signature can span lines on any indentation (an
     // unindented parameter, `):`, `) -> None:`): every line until its
     // brackets balance continues the def, so its indent must not pop the
@@ -290,12 +296,12 @@ export class PythonSectionScanner {
     // hunk that starts inside one still falls back to plain indentation.
     if (this.signatureParens > 0) {
       this.signatureParens = Math.max(0, this.signatureParens + bracketBalance(code));
-      return;
+      return true;
     }
     // A hunk can START inside a signature whose opening line is not visible,
     // so the bracket depth is unknown here: a line that begins with a closing
     // bracket continues that signature and must not pop the def stack.
-    if (/^\s*[)\]}]/.test(code)) return;
+    if (/^\s*[)\]}]/.test(code)) return true;
     const indent = /^\s*/.exec(code)![0].length;
     while (this.defs.length > 0 && this.defs.at(-1)!.indent >= indent) {
       this.defs.pop();
@@ -307,9 +313,10 @@ export class PythonSectionScanner {
       // A class body is not a function body: it hides any enclosing test def.
       this.defs.push({ name: '<class>', indent });
     } else {
-      return;
+      return false;
     }
     this.signatureParens = Math.max(0, bracketBalance(code));
+    return true;
   }
 
   /** Close an open signature from a line whose prefix is a multi-line string. */

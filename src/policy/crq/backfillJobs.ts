@@ -265,6 +265,14 @@ export function enqueue(
   return { queue: withObjectKeys(result.queue, [['items', [...rawItems, job]]]), item: job };
 }
 
+/** Mirrors backfill_jobs.MAX_PENDING_AGE_SECONDS. */
+export const MAX_PENDING_AGE_SECONDS = 86400;
+
+const ledgerEpochSeconds = (value: JsonValue | undefined): number => {
+  const t = ledgerTimestamp(value);
+  return Date.UTC(t.year, t.month - 1, t.day, t.hour, t.minute, t.second) / 1000;
+};
+
 /** Eligibility creates the same missing family and lineage histories as Python. */
 export function eligible(
   queue: JsonObject,
@@ -282,6 +290,12 @@ export function eligible(
     return (value as string) > at;
   };
   try {
+    // A job is built at the tip its inventory resolved; past 24 h its pin is too old to launch.
+    if (
+      ledgerEpochSeconds(at) - ledgerEpochSeconds(item.get('created_at')) >
+      MAX_PENDING_AGE_SECONDS
+    )
+      return { queue, eligible: false };
     if (future(item.get('not_before')) || future(queue.get('cooldown_until')))
       return { queue, eligible: false };
   } catch (error) {

@@ -35,9 +35,9 @@ async function waitFor(path: string): Promise<string> {
 const modulePath = fileURLToPath(
   new URL('../../../dist/adapters/crq/reviewProcess.js', import.meta.url),
 );
-async function start(root: string, timeoutBinary = 'timeout') {
+async function start(root: string, timeoutBinary = 'timeout', clockStepMs = 0) {
   const moduleUrl = pathToFileURL(modulePath).href;
-  const code = `import {runReviewChild} from ${JSON.stringify(moduleUrl)}; await runReviewChild({stateRoot:${JSON.stringify(root)},runId:'run-1',timeoutMinutes:1,timeoutBinary:${JSON.stringify(timeoutBinary)},env:{PATH:'/usr/bin:/bin'}});`;
+  const code = `import {runReviewChild} from ${JSON.stringify(moduleUrl)}; await runReviewChild({stateRoot:${JSON.stringify(root)},runId:'run-1',timeoutMinutes:1,monotonicMs:(()=>{let t=0;return()=>t+=${clockStepMs}})(),timeoutBinary:${JSON.stringify(timeoutBinary)},env:{PATH:'/usr/bin:/bin'}});`;
   return spawnReviewWrapper({
     stateRoot: root,
     runId: 'run-1',
@@ -68,17 +68,33 @@ describe('inactive detached review process', () => {
     expect(await readFile(join(dir, 'review.ndjson'), 'utf8')).toBe('hello');
     expect(await readFile(join(dir, 'stderr.log'), 'utf8')).toBe('problem');
   });
-  it.each([124, 137])('passes foreground timeout arguments and records exit %i', async (exit) => {
+  it.each([124, 137])(
+    'passes group-signalling timeout arguments and records exit %i',
+    async (exit) => {
+      const { root, dir } = await setup('open', ['/bin/echo', 'hello']);
+      const timeout = join(root, 'fake-timeout');
+      await writeFile(timeout, `#!/bin/sh\nprintf '%s\\n' "$@"\nexit ${exit}\n`);
+      await chmod(timeout, 0o700);
+      await start(root, timeout);
+      const result: unknown = JSON.parse(await waitFor(join(dir, 'exit.json')));
+      expect(result).toMatchObject({ exit, timed_out: true });
+      expect(await readFile(join(dir, 'review.ndjson'), 'utf8')).toBe(
+        '--kill-after=60\n1m\n/bin/echo\nhello\n',
+      );
+    },
+  );
+  it.each([
+    ['after the deadline and grace', 3 * 60_000, true],
+    ['inside the grace period', 90_000, false],
+    ['before the deadline', 0, false],
+  ])('records a group SIGKILL exit %s with timed_out=%s', async (_label, clockStepMs, timedOut) => {
     const { root, dir } = await setup('open', ['/bin/echo', 'hello']);
     const timeout = join(root, 'fake-timeout');
-    await writeFile(timeout, `#!/bin/sh\nprintf '%s\\n' "$@"\nexit ${exit}\n`);
+    await writeFile(timeout, '#!/bin/sh\nkill -9 $$\n');
     await chmod(timeout, 0o700);
-    await start(root, timeout);
+    await start(root, timeout, clockStepMs);
     const result: unknown = JSON.parse(await waitFor(join(dir, 'exit.json')));
-    expect(result).toMatchObject({ exit, timed_out: true });
-    expect(await readFile(join(dir, 'review.ndjson'), 'utf8')).toBe(
-      '--foreground\n--kill-after=60\n1m\n/bin/echo\nhello\n',
-    );
+    expect(result).toMatchObject({ exit: -9, timed_out: timedOut });
   });
   it('refuses backfill before invoking any command', async () => {
     const { root, dir } = await setup('backfill', ['/bin/false']);

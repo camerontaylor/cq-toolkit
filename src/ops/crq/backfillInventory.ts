@@ -23,7 +23,7 @@
  */
 import { JsonObject, parseJsonValue } from '../../policy/crq/jsonValue.js';
 import { ledgerJsonBytes } from '../../policy/crq/pythonJson.js';
-import { ledgerLoads } from '../../policy/crq/ledger.js';
+import { LedgerIntegrityError, ledgerLoads } from '../../policy/crq/ledger.js';
 import {
   BackfillInventoryError,
   replay,
@@ -285,10 +285,17 @@ export async function runBackfillInventory(
     if (error instanceof BackfillRouteError) {
       return refused(error.message);
     }
-    if (error instanceof BackfillInventoryError || error instanceof BackfillReportError) {
+    if (
+      error instanceof BackfillInventoryError ||
+      error instanceof BackfillReportError ||
+      error instanceof LedgerIntegrityError
+    ) {
       return refused(error.message);
     }
+    // Anything else is an unexpected effect failure (an I/O error from
+    // `readQueue`, `writeReport`, ...), not an explicit refusal: I1 assigns a
+    // thrown error exit 1, so a caller can tell the two apart.
     const message = error instanceof Error ? error.message : String(error);
-    return refused(message);
+    return { artifact: { status: 'failed', error: message }, exitCode: 1 };
   }
 }

@@ -71,7 +71,10 @@ export function parsePlist(source: string): PlistValue {
   const readText = (): string => {
     const end = source.indexOf('<', pos);
     if (end < 0) fail('unterminated element');
-    const text = source.slice(pos, end);
+    // XML 1.0 section 2.11: literal CRLF and lone CR in character data are
+    // normalized to LF before parsing. Normalize the raw text so that the
+    // character reference `&#13;` still decodes to CR afterwards.
+    const text = source.slice(pos, end).replace(/\r\n?/g, '\n');
     pos = end;
     return unescapeXml(text);
   };
@@ -150,7 +153,11 @@ function escapeXml(text: string): string {
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(text))
     throw new ValueError('strings can not contain control characters; encode as bytes instead');
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\r/g, '&#13;');
 }
 
 export function dumpPlist(root: PlistValue): string {

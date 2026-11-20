@@ -1,23 +1,28 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, open, readFile, realpath } from 'node:fs/promises';
+import { open, readFile, realpath } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import type {
   BackfillCountedArtifacts,
   BackfillCountedHarvestEffects,
 } from '../../ops/crq/internal/backfillHarvestCounted.js';
 import { JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
-import { ledgerLoads, LedgerIntegrityError, LedgerTypeError } from '../../policy/crq/ledger.js';
+import { LedgerIntegrityError, ledgerLoads } from '../../policy/crq/ledger.js';
 import { atomicWrite } from './atomic.js';
 import { artifactLocation, type ArtifactStore } from './findingStore.js';
+
+/** One run-directory name: no empty, dot, separator or NUL forms that could leave `runs/`. */
+function assertRunId(runId: string): void {
+  if (!runId || runId === '.' || runId === '..' || /[/\\\0]/.test(runId))
+    throw new LedgerIntegrityError('invalid run id');
+}
 
 /** Existing run artifacts only. `submission.json` is optional; the rest must exist. */
 export function backfillCountedArtifactReader(
   stateRoot: string,
 ): (runId: string) => Promise<BackfillCountedArtifacts> {
   return async (runId) => {
-    if (!runId || runId === '.' || runId === '..' || /[/\\\0]/.test(runId))
-      throw new LedgerIntegrityError('invalid run id');
+    assertRunId(runId);
     const root = await realpath(join(stateRoot, 'runs'));
     const dir = await realpath(join(root, runId));
     if (relative(root, dir) !== runId)
@@ -77,6 +82,50 @@ export function deferredArtifactStore(input: { durableRoot: string; store: Artif
   };
 }
 
+/**
+ * The `review-event.json` an earlier attempt retained for this run, parsed with
+ * the ledger loader. A missing file is a first attempt, not an error.
+ */
+export function backfillCountedRetainedEventReader(
+  stateRoot: string,
+): (runId: string) => Promise<JsonObject | null> {
+  return async (runId) => {
+    assertRunId(runId);
+    let bytes: Uint8Array;
+    try {
+      // Same containment rule as the artifact reader: a symlinked event must
+      // not pull in another run's self-consistent event.
+      const root = await realpath(join(stateRoot, 'runs'));
+      const dir = await realpath(join(root, runId));
+      if (relative(root, dir) !== runId)
+        throw new LedgerIntegrityError('run directory escapes its identity');
+      const path = await realpath(join(dir, 'review-event.json'));
+      if (relative(dir, path) !== 'review-event.json')
+        throw new LedgerIntegrityError('retained review event escapes run directory');
+      // O_NONBLOCK keeps a writer-less FIFO from hanging the open; the handle
+      // check then refuses anything that is not a regular file.
+      const handle = await open(
+        path,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
+      try {
+        if (!(await handle.stat()).isFile())
+          throw new LedgerIntegrityError('retained review event is not a regular file');
+        bytes = new Uint8Array(await handle.readFile());
+      } finally {
+        await handle.close();
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+    const value = ledgerLoads(bytes);
+    if (!(value instanceof JsonObject))
+      throw new LedgerIntegrityError('retained review event must be an object');
+    return value;
+  };
+}
+
 /** Compose the counted-harvest effects from real file seams. Git stays injected. */
 export function backfillCountedEffects(input: {
   stateRoot: string;
@@ -95,50 +144,8 @@ export function backfillCountedEffects(input: {
   const readArtifacts = backfillCountedArtifactReader(input.stateRoot);
   return {
     readArtifacts,
+    readRetainedEvent: backfillCountedRetainedEventReader(input.stateRoot),
     put: (bytes) => deferred.put(bytes),
-    // A retry reuses the event an earlier attempt retained, so a rebuilt
-    // bundle reference cannot mint a second event id for the same run.
-    readRetainedEvent: async (runId) => {
-      let bytes: Uint8Array;
-      try {
-        // Confine the read to this run's directory: a symlink to another run's
-        // event would otherwise be accepted (its id matches its own digest).
-        if (!runId || runId === '.' || runId === '..' || /[/\\\0]/.test(runId))
-          throw new LedgerIntegrityError('invalid run id');
-        const runsRoot = await realpath(join(input.stateRoot, 'runs'));
-        const dir = await realpath(join(runsRoot, runId));
-        if (relative(runsRoot, dir) !== runId)
-          throw new LedgerIntegrityError('run directory escapes its identity');
-        const path = await realpath(join(dir, 'review-event.json'));
-        if (relative(dir, path) !== 'review-event.json')
-          throw new LedgerIntegrityError('retained review event escapes its run directory');
-        // Open the checked file without following a final symlink, then prove the
-        // handle is that file and the directory is still the one checked.
-        const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-        try {
-          const opened = await handle.stat();
-          const named = await lstat(path);
-          if (
-            !opened.isFile() ||
-            !named.isFile() ||
-            opened.dev !== named.dev ||
-            opened.ino !== named.ino ||
-            (await realpath(dir)) !== dir
-          )
-            throw new LedgerIntegrityError('retained review event changed while being read');
-          bytes = new Uint8Array(await handle.readFile());
-        } finally {
-          await handle.close();
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-        throw error;
-      }
-      const event = ledgerLoads(bytes);
-      if (!(event instanceof JsonObject))
-        throw new LedgerTypeError('retained review event must be an object');
-      return event;
-    },
     repo: input.repo,
     // Retained bytes must exist before anything verifies or names them.
     writeReviewEvent: async (runId, bytes) => {

@@ -105,6 +105,15 @@ function gitEnv(): NodeJS.ProcessEnv {
   ) {
     env['GIT_CONFIG_GLOBAL'] = devNull;
   }
+  // GIT_ALLOW_PROTOCOL overrides protocol.<name>.allow, so an inherited list
+  // naming `ext` would defeat the pinned protocol.ext.allow=never. Keep the
+  // caller's restriction but drop `ext` from it.
+  const allow = process.env['GIT_ALLOW_PROTOCOL'];
+  if (allow !== undefined)
+    env['GIT_ALLOW_PROTOCOL'] = allow
+      .split(':')
+      .filter((name) => name.toLowerCase() !== 'ext')
+      .join(':');
   env['GIT_CONFIG_NOSYSTEM'] = '1';
   env['GIT_TERMINAL_PROMPT'] = '0';
   env['GIT_OPTIONAL_LOCKS'] = '0';
@@ -788,8 +797,10 @@ export interface LeasedUpdate {
  * argv (visible in the process table), never `.git/config` (persisted).
  * The same env resets any configured extra-header for that host
  * (actions/checkout's persisted credential would otherwise ride along),
- * empties `credential.helper` and `core.askPass` (both are programs) and
- * drops GIT_ASKPASS/SSH_ASKPASS, so no program is asked for a secret. A
+ * empties `credential.helper` and `core.askPass` (both are programs),
+ * refuses the `ext::` transport (an `insteadOf` rewrite is applied after
+ * {@link assertPushUrl} sees the URL) and drops GIT_ASKPASS/SSH_ASKPASS, so
+ * no program is asked for a secret. A
  * local path or `file:///` URL (tests push to a local bare repo) carries no
  * header. Returns the strings to redact from any child output.
  */
@@ -801,6 +812,12 @@ function gitRemoteEnv(url: string, token: string): { env: NodeJS.ProcessEnv; sec
   const config: [string, string][] = [
     ['credential.helper', ''],
     ['core.askPass', ''],
+    // `assertPushUrl` only sees the INPUT string: git applies
+    // `url.<base>.insteadOf` AFTER that check, so a repository or global
+    // rewrite could select the `ext::` transport and run a command. Pinning
+    // protocol.ext.allow=never blocks the rewritten transport; https and
+    // local-path remotes are unaffected.
+    ['protocol.ext.allow', 'never'],
   ];
   const secrets: string[] = [];
   if (url.startsWith('https://')) {

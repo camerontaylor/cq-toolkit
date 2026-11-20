@@ -3015,6 +3015,18 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       await persistedBookkeeping?.prepare(resolvedRoot);
                       return untrackedAllowed(resolvedRoot, path);
                     }),
+                  // Removal guard: receipt-attested ownership only, read-only.
+                  // isBookkeepingPath imports/fingerprints bookkeeping, which
+                  // would poison the run's state for a tree about to be deleted.
+                  isRetirableIgnoredPath: async (path, resolvedRoot) => {
+                    if (!persistedBookkeeping) return false;
+                    try {
+                      const owned = await persistedBookkeeping.ownedFiles();
+                      return owned.includes(resolve(await realpath(resolvedRoot), path));
+                    } catch {
+                      return false;
+                    }
+                  },
                   beforeWorktreeResolve: () =>
                     lease.assertSelection({
                       pr: meta.pr,

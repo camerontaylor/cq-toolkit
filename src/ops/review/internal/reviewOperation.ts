@@ -412,6 +412,28 @@ export const ResponseSchema = z.union([
     .strict(),
   RecordResponseSchema,
 ]);
+/**
+ * Client-side capabilities reader. The server's `ResponseSchema` branch is
+ * strict (the server must emit exactly the contract), but a client must
+ * survive a newer server: unknown operations/features and extra limit keys
+ * are additive. Only the fields the client relies on are validated:
+ * `command`, string-array `operations`/`features`, and the numeric
+ * `max_snapshot_bytes`/`max_content_bytes` limits. Unknown top-level keys pass.
+ */
+export const ClientCapabilitiesSchema = z
+  .object({
+    v: z.literal(1),
+    command: z.literal('review-v1'),
+    operations: z.array(z.string()),
+    features: z.array(z.string()),
+    limits: z
+      .object({
+        max_snapshot_bytes: z.number().int().positive(),
+        max_content_bytes: z.number().int().positive(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
 export const ReceiptSchema = z
   .object({
     v: z.literal(1),
