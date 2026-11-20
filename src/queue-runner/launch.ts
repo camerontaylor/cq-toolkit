@@ -273,7 +273,7 @@ export async function launch(
     const flags = record(plan.profile).flags;
     meta.profile = plan.profile;
     meta.config_digest = plan.config_digest;
-    meta.cmd = ['coderabbit', 'review', ...flagList(flags)];
+    meta.cmd = [...cliCmd, '--base-commit', base, ...flagList(flags)];
   }
   if (kind === LOCAL_REVIEW_KIND) {
     const flags = record(item.profile).flags;
