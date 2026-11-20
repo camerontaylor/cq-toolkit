@@ -395,7 +395,7 @@ const utf8 = new TextEncoder();
  * cannot name is a component the gate cannot attribute, and
  * unattributable content must fault, never pass under a mangled name.
  */
-function decodeGitQuotedPath(raw: string, source: string): string {
+export function decodeGitQuotedPath(raw: string, source: string): string {
   if (!raw.startsWith('"') || !raw.endsWith('"')) return raw;
   const inner = raw.slice(1, -1);
   const bytes: number[] = [];
@@ -443,6 +443,31 @@ function decodeGitQuotedPath(raw: string, source: string): string {
       `${source}: git pathname ${JSON.stringify(raw)} is not valid UTF-8 — refusing the unattributable component`,
     );
   }
+}
+
+/**
+ * Shared patch-header path decoding for scanners that attribute lines to a
+ * file: the b-side of a `diff --git` line (quoted or plain), and a
+ * `---`/`+++` header operand. Both decode Git C-quoting and strip the a/ b/
+ * prefix; an undecodable quoted form throws (see `decodeGitQuotedPath`).
+ */
+export function diffGitHeaderPath(line: string, source: string): string | undefined {
+  const rest = line.slice('diff --git '.length);
+  const quoted = /(?:^| )("b\/(?:[^"\\]|\\.)*")$/.exec(rest);
+  if (quoted !== null) {
+    return decodeGitQuotedPath(quoted[1] as string, source).replace(/^b\//, '');
+  }
+  const plain = /^"?a\/.*? b\/(.*)$/.exec(rest);
+  return plain === null ? undefined : (plain[1] as string);
+}
+
+export function patchHeaderOperandPath(operand: string, source: string): string | undefined {
+  // Git appends a literal tab to a `---`/`+++` operand whenever the rendered
+  // name contains a space, quoted or not; strip it so end-anchored path rules
+  // still match. (A tab inside a name is the `\t` escape, never a raw tab.)
+  const raw = operand.replace(/\t.*$/, '');
+  const candidate = decodeGitQuotedPath(raw, source);
+  return candidate === '/dev/null' ? undefined : candidate.replace(/^[ab]\//, '');
 }
 
 /**

@@ -223,6 +223,7 @@ describe('registry consult', () => {
         ['-C', stalePath, 'rev-list', '--count', `${SHA_B}..HEAD`],
         ['-C', stalePath, 'rev-parse', '--absolute-git-dir'],
         ['-C', stalePath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+        ['-C', stalePath, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
         ['-C', repoRoot, 'worktree', 'remove', stalePath],
         ['-C', repoRoot, 'show-ref', '--verify', '--quiet', `refs/heads/${LABEL}`],
         ['-C', repoRoot, 'worktree', 'add', '-B', LABEL, stalePath, SHA_B],

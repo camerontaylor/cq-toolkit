@@ -13,7 +13,8 @@ try {
     [process.execPath, ['scripts/emit-queue-runner-capabilities.mjs']],
   ]) {
     const child = spawn(command, args, { stdio: 'inherit', shell: process.platform === 'win32' });
-    for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => child.kill(signal));
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'])
+      process.once(signal, () => child.kill(signal));
     const status = await new Promise((resolve, reject) => {
       child.once('error', reject);
       child.once('exit', (code) => resolve(code ?? 1));

@@ -123,6 +123,30 @@ describe('the attempt-record free-text stripper', () => {
     expect(stripCredentialText(input)).toBe(expected);
   });
 
+  // `alice:123456` is host:port-shaped, yet the credential continues on the
+  // next line before `@`: the numeric password must not survive. An ordinary
+  // host:port with no following credential is unchanged.
+  test.each([
+    ['https://alice:123456\n@host.test/', 'https://\nhost.test/'],
+    ['http://localhost:8080\nprose here', 'http://localhost:8080\nprose here'],
+    [
+      'http://localhost:8080\nhttps://user:pw@other.test/',
+      'http://localhost:8080\nhttps://other.test/',
+    ],
+    // `://` with no scheme before it is not a separate URL: the secret goes.
+    ['alice:secret\n://@host.test/', '\nhost.test/'],
+  ])('a newline-split credential survives no host:port exception: %j', (input, expected) => {
+    expect(stripCredentialText(input)).toBe(expected);
+  });
+
+  test('a long letter run before @ on a continuation line stays linear', () => {
+    const input = `http://localhost:8080\n${'a'.repeat(200_000)}@host.test/`;
+    const start = Date.now();
+    const out = stripCredentialText(input);
+    expect(Date.now() - start).toBeLessThan(2_000);
+    expect(out).not.toContain('@');
+  });
+
   test('very long and many-@ inputs are linear (no catastrophic backtracking)', () => {
     const long = `https://${'a@'.repeat(50_000)}host/${'x'.repeat(100_000)}?q=${'y'.repeat(100_000)}`;
     const start = Date.now();

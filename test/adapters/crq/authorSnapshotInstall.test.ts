@@ -114,6 +114,11 @@ const PATTERNS = [
   '    description: primary-only vocabulary',
   "    regex: 'portkey'",
   "    sample: 'portkey'",
+  '  - id: test:path-scoped',
+  '    description: path scoped token',
+  "    regex: 'PATHSCOPED_[A-Z]+'",
+  "    path: '\\.env$'",
+  "    sample: 'PATHSCOPED_TOKEN'",
   'clean_probes:',
   "  - 'ordinary text'",
   '',
@@ -243,6 +248,32 @@ describe('installAuthorSnapshot', () => {
       );
       expect(await objectExists(repo.dir, fixture.blob)).toBe(false);
       expect(await objectExists(repo.dir, fixture.head)).toBe(false);
+    } finally {
+      repo.pool.killAll();
+    }
+  });
+
+  test('decodes a Git-quoted non-ASCII path before applying path-scoped rules', async () => {
+    const repo = await clone();
+    try {
+      const fixture = snapshotFor(repo.base, 'PATHSCOPED_TOKEN\n', false, { path: '\u00e9.env' });
+      await expect(installAuthorSnapshot(input(repo, fixture))).rejects.toThrow(
+        'snapshot secret scan refused',
+      );
+    } finally {
+      repo.pool.killAll();
+    }
+  });
+
+  test('decodes a Git-quoted path on a removed line (diff-only observation)', async () => {
+    // The head tree carries no \u00e9.env entry, so the per-entry tree scan
+    // cannot see it: only the diff's `--- "a/\303\251.env"` header attributes
+    // the removed secret line to a path the scoped rule applies to.
+    const repo = await cloneWithFile('\u00e9.env', 'PATHSCOPED_TOKEN\n');
+    try {
+      await expect(installAuthorSnapshot(input(repo, emptySnapshotFor(repo.base)))).rejects.toThrow(
+        'snapshot secret scan refused',
+      );
     } finally {
       repo.pool.killAll();
     }
