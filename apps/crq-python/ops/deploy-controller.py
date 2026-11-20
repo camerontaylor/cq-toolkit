@@ -2301,6 +2301,20 @@ def _refusing_liveness(*_args, **_kwargs):
     return "ambiguous"
 
 
+def _matches_retained(prior: dict, retained: dict) -> bool:
+    """The supplied journal is the retained transaction, except that the
+    owner may supply the prior target's approval tag when the retained record
+    legitimately has none (``prior_tag`` null: the prior commit had no
+    annotated runner tag). A retained tag is never replaced. The supplied
+    tag's own validity is checked by ``rollback_target`` and the helper's
+    annotated-tag binding before anything is consumed."""
+    if prior == retained:
+        return True
+    if retained.get("prior_tag") is not None:
+        return False
+    return {**prior, "prior_tag": None} == retained
+
+
 def rollback_plan(effects: Effects, helper_module, prior: dict,
                   overlay_path: Path, helper_sha256: str | None = None) -> dict:
     """Owner-approved rollback to the recorded prior target, through the SAME
@@ -2321,7 +2335,7 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
         # the supplied journal must BE that retained record before its
         # prior_head (or tag, or compatibility evidence) is consumed.
         retained = retained_deploy_records(effects, record["deployed"])
-        if retained and prior not in retained:
+        if retained and not _matches_retained(prior, retained[0]):
             raise Refused("prior record does not match the locally retained "
                           "transaction for the current deployment")
         if not rollback_compatible(record["rollback_compatibility"]):

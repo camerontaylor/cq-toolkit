@@ -145,6 +145,32 @@ class RollbackPlanTests(ControllerFixture):
         self.assertEqual(
             dc.retained_deploy_records(self.effects, self.target), [])
 
+    def test_owner_may_supply_the_missing_prior_tag_for_an_untagged_prior(self):
+        # The prior commit had no annotated runner tag, so the retained
+        # journal records prior_tag null; the documented owner-approved
+        # artifact supplies it. Only that field may differ, and only when
+        # the retained value is null.
+        self.command("tag", "-d", "crq-runner/20261027-9")
+        retained = self.retained_deploy_journal()
+        self.assertIsNone(retained["prior_tag"])
+        self.command("tag", "-a", "crq-runner/20261027-9", self.before,
+                     "-m", "owner approval of the untagged prior")
+        supplied = {**retained, "prior_tag": "crq-runner/20261027-9"}
+        self.assertTrue(dc._matches_retained(supplied, retained))
+        # Any other difference still refuses, as does replacing a real tag.
+        self.assertFalse(dc._matches_retained(
+            {**supplied, "prior_head": "f" * 40}, retained))
+        self.assertFalse(dc._matches_retained(
+            {**supplied, "transaction_id": uuid.uuid4().hex}, retained))
+        tagged = {**retained, "prior_tag": "crq-runner/20261027-9"}
+        self.assertFalse(dc._matches_retained(
+            {**tagged, "prior_tag": "crq-runner/20261027-8"}, tagged))
+        with self.fake_switch():
+            plan = dc.rollback_plan(self.effects, host, supplied,
+                                    self.overlay_path)
+        self.assertTrue(plan)
+        self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.before)
+
     def test_newest_deploy_of_a_repeated_target_is_the_current_transaction(self):
         # A to B, B to C, C to B: two retained deploys target B. Only the
         # newest is the transaction for the current deployment; the older
