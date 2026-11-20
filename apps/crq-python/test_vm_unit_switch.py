@@ -3193,5 +3193,51 @@ class FinishCleanupTests(unittest.TestCase):
         self.assertEqual(cleanup, [1, 2])
 
 
+class RunBootLockTests(unittest.TestCase):
+    """cmd_run boots under run.lock, as vm-feasibility cmd_boot does."""
+
+    def _run(self, hold_lock):
+        import fcntl
+        with tempfile.TemporaryDirectory() as tmp:
+            state = pathlib.Path(tmp)
+            run_dir = state / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            run = {"run_id": "r1", "path": str(run_dir), "port": 2222}
+            args = mock.Mock(state_dir=str(state), source_commit=SOURCE_COMMIT,
+                             mode="full", tools=None, keep=False)
+            holder = open(run_dir / "run.lock", "a")
+            if hold_lock:
+                fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                with mock.patch.object(harness, "source_commit_check",
+                                       return_value=SOURCE_COMMIT), \
+                     mock.patch.object(harness, "snapshot_uploads"), \
+                     mock.patch.object(harness.vm, "Recorder"), \
+                     mock.patch.object(harness.vm, "fetch_image"), \
+                     mock.patch.object(harness.vm, "host_stamp", return_value={}), \
+                     mock.patch.object(harness.vm, "sha256_file", return_value="x"), \
+                     mock.patch.object(harness, "prepare_run", return_value=run), \
+                     mock.patch.object(harness.vm, "boot",
+                                       side_effect=RuntimeError("boot reached")) as boot, \
+                     mock.patch.object(harness.vm, "stop_owned_process") as stop:
+                    with self.assertRaises(RuntimeError) as ctx:
+                        harness.cmd_run(args)
+            finally:
+                holder.close()
+            return ctx.exception, boot, stop
+
+    def test_busy_run_lock_blocks_boot_and_cleanup(self):
+        exc, boot, stop = self._run(hold_lock=True)
+        self.assertIn("run is busy", str(exc))
+        boot.assert_not_called()
+        stop.assert_not_called()
+
+    def test_boot_failure_under_the_lock_still_cleans_up(self):
+        exc, boot, stop = self._run(hold_lock=False)
+        self.assertEqual(str(exc), "boot reached")
+        boot.assert_called_once()
+        stop.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
