@@ -30,6 +30,7 @@ interface Harness {
   readonly saves: JsonObject[];
   readonly calls: string[][];
   readonly timeouts: number[];
+  readonly definite: boolean[];
 }
 
 function harness(
@@ -39,6 +40,7 @@ function harness(
   const saves: JsonObject[] = [];
   const calls: string[][] = [];
   const timeouts: number[] = [];
+  const definite: boolean[] = [];
   const effects: ClientHealthEffects = {
     saveQueue: (queue) => {
       saves.push(queue);
@@ -47,8 +49,9 @@ function harness(
     checkoutSha: () => SHA,
     repo: 'o/r',
     incompleteTicksThreshold: options.threshold,
-    forgeJson: (args, { timeoutSeconds }) => {
+    forgeJson: (args, { timeoutSeconds, definiteFailure }) => {
       calls.push(args);
+      definite.push(definiteFailure === true);
       timeouts.push(timeoutSeconds);
       const answer = forge(args);
       return answer instanceof Error
@@ -57,7 +60,7 @@ function harness(
     },
     ...(options.budget === undefined ? {} : { newBudget: () => options.budget as ForgeBudget }),
   };
-  return { effects, saves, calls, timeouts };
+  return { effects, saves, calls, timeouts, definite };
 }
 
 const forgeError = (pythonError: string, message = pythonError): Error =>
@@ -215,6 +218,13 @@ describe('recordClientHealth: opening the advisory issue', () => {
     expect(h.calls[1]?.slice(0, 5)).toEqual(['api', 'repos/o/r/issues/3', '-X', 'PATCH', '-f']);
     expect(h.calls[1]).toContain('state=open');
     expect(healthOf(result.queue)).toMatchObject({ issue_number: 3, issue_open: true });
+  });
+
+  it('marks only the issue create as a definite failure (gh_json definite_failure=True)', async () => {
+    const h = harness((args) => (args[0] === 'issue' ? [] : { number: 9 }));
+    await recordClientHealth(atThreshold(), true, h.effects);
+    expect(h.calls.map((c) => c[0])).toEqual(['issue', 'api']);
+    expect(h.definite).toEqual([false, true]);
   });
 
   it('keeps the opening marker after an ambiguous create (timeout) and reports it', async () => {

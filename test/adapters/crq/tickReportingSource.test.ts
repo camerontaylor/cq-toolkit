@@ -1,13 +1,14 @@
 // The reporting adapter: the `DeliveryEnv` file/gh ports and the three in-process reporting
 // phases (writeStatus, local_review_pr.publish, client_health.record) over a real state root.
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   fileDeliveryEnv,
   fileReportingPhases,
+  forgeJson,
   forgeTimeoutMs,
   pythonOsErrorText,
   readTextReplacing,
@@ -106,7 +107,25 @@ describe('fileDeliveryEnv', () => {
     const files = env().files;
     expect(Buffer.from(files.readBytes(join(dir, 'a')) as Uint8Array).toString()).toBe('hi');
     expect(files.readBytes(join(dir, 'missing'))).toBeNull();
-    expect(files.readBytes(dir)).toBeNull(); // a directory is EISDIR
+  });
+
+  it("maps a directory or a file-as-directory to Python's own OSError text, not a missing file", async () => {
+    const dir = await tmp('crq-del-');
+    await writeFile(join(dir, 'f'), 'x');
+    const read = (path: string): ReceiptOsError => {
+      try {
+        env().files.readBytes(path);
+      } catch (error) {
+        return error as ReceiptOsError;
+      }
+      throw new Error('expected a throw');
+    };
+    // IsADirectoryError: reading a directory is not "absent".
+    expect(read(dir)).toBeInstanceOf(ReceiptOsError);
+    expect(read(dir).message).toBe(`[Errno 21] Is a directory: '${dir}'`);
+    // NotADirectoryError: a path component that is a file.
+    const under = join(dir, 'f', 'meta.json');
+    expect(read(under).message).toBe(`[Errno 20] Not a directory: '${under}'`);
   });
 
   it('maps any other artifact read failure to the receipt OSError, not a raw Node error', async () => {
@@ -296,6 +315,75 @@ describe('fileReportingPhases', () => {
     expect(requested).toEqual(['c'.repeat(64)]);
   });
 
+  it('records Python OSError text, not the Node message, for an unreadable findings file', async () => {
+    const r = await roots();
+    const clone = await tmp('crq-rep-clone-');
+    const ID = 'c'.repeat(64);
+    const SHA40 = '1'.repeat(40);
+    const profile = { adapter: 'coderabbit-cli', revision: 'r1' };
+    const inputs = {
+      v: 1,
+      repo: 'o/r',
+      base_commit: SHA40,
+      base_tree: SHA40,
+      head_commit: SHA40,
+      head_tree: SHA40,
+      scope: 'full-diff',
+      projection: 'p',
+      config_digest: 'c'.repeat(64),
+      profile,
+    };
+    const runId = 'run-20261115T000000Z-abcdef12';
+    const receipt = new TextEncoder().encode(
+      JSON.stringify({
+        v: 1,
+        kind: 'local-review-full-diff',
+        identity: 'a'.repeat(64),
+        identity_inputs: inputs,
+        profile: { ...profile, flags: [] },
+        run_id: runId,
+        outcome: 'findings',
+        scope_adequate: true,
+        findings: [],
+        report: '',
+        observed: {},
+        independent_acceptance: false,
+      }),
+    );
+    const p = fileReportingPhases({
+      roots: r,
+      config: doc(CONFIG),
+      primaryRepo: 'owner/main',
+      clone,
+      runnerRoot: r.runnerRoot,
+      gh: silentGh,
+      now: () => NOW_MS,
+      readReceipt: () => Promise.resolve(receipt),
+    });
+    const queue = doc({
+      ...QUEUE,
+      items: [
+        {
+          ...QUEUE_ITEM,
+          state: 'done',
+          outcome: 'findings',
+          scope_adequate: true,
+          receipt_id: ID,
+          identity: 'a'.repeat(64),
+          identity_inputs: inputs,
+        },
+      ],
+      review_pr_links: {
+        k1: { item: 'pr101', repo: 'o/r', pr: 5, head: 'a'.repeat(40), base: 'b'.repeat(40) },
+      },
+    });
+    const next = await p.publishLocalReviewPr(queue);
+    const row = (plain(next.get('review_pr_outbox')) as Record<string, Record<string, unknown>>).k1;
+    const findings = join(r.stateRoot, 'runs', runId, 'review.ndjson');
+    expect(row?.pending).toBe(true);
+    expect(row?.error).toBe(`[Errno 2] No such file or directory: '${findings}'`);
+  });
+
   it('recordClientHealth saves the observation with the runner checkout sha', async () => {
     const runner = await tmp('crq-rep-git-');
     await mkdir(join(runner, '.git'), { recursive: true });
@@ -309,5 +397,52 @@ describe('fileReportingPhases', () => {
     // Discovery was skipped: the observation is returned for the tick to save, not saved here.
     const disk = JSON.parse(await readFile(join(r.stateRoot, 'queue.json'), 'utf8')) as object;
     expect('client_health' in disk).toBe(false);
+  });
+});
+
+describe('forgeJson exit classes', () => {
+  async function fakeGh(exit: number): Promise<{ clone: string; restore: () => void }> {
+    const bin = await tmp('crq-gh-bin-');
+    const clone = await tmp('crq-gh-clone-');
+    const script = join(bin, 'gh');
+    await writeFile(script, `#!/bin/sh\necho "boom from gh" >&2\nexit ${String(exit)}\n`);
+    await chmod(script, 0o755);
+    vi.stubEnv('PATH', `${bin}:${process.env.PATH ?? ''}`);
+    return { clone, restore: () => vi.unstubAllEnvs() };
+  }
+  const attempt = async (
+    call: Promise<unknown>,
+  ): Promise<{ pythonError: string; message: string }> =>
+    call.then(
+      () => {
+        throw new Error('expected a rejection');
+      },
+      (error: { pythonError: string; message: string }) => error,
+    );
+
+  it('a nonzero exit on the create (definite failure) is a CalledProcessError', async () => {
+    const { clone, restore } = await fakeGh(3);
+    try {
+      const error = await attempt(
+        forgeJson(clone)(['api', 'repos/o/r/issues'], { timeoutSeconds: 5, definiteFailure: true }),
+      );
+      expect(error.pythonError).toBe('CalledProcessError');
+      expect(error.message).toContain('non-zero exit status 3');
+    } finally {
+      restore();
+    }
+  });
+
+  it('a nonzero exit on any other call is `run`s RuntimeError with the stderr tail', async () => {
+    const { clone, restore } = await fakeGh(4);
+    try {
+      const error = await attempt(
+        forgeJson(clone)(['issue', 'list', '--limit', '100'], { timeoutSeconds: 5 }),
+      );
+      expect(error.pythonError).toBe('RuntimeError');
+      expect(error.message).toBe('gh issue list --limit 100 … exit 4: boom from gh');
+    } finally {
+      restore();
+    }
   });
 });

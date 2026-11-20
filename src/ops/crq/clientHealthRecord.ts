@@ -52,8 +52,13 @@ export interface ClientHealthEffects {
    * `crq.gh_json` inside the advisory window: the parsed JSON, or a thrown error with a
    * Python `pythonError` (`CalledProcessError` for a nonzero exit, `TimeoutExpired`,
    * `JSONDecodeError`, `FileNotFoundError`, …). `timeoutSeconds` is the budget's take.
+   * `definiteFailure` is `gh_json(..., definite_failure=True)`, set only for the issue create:
+   * a nonzero exit is then a `CalledProcessError`; otherwise it is `run`'s `RuntimeError`.
    */
-  forgeJson(args: string[], options: { timeoutSeconds: number }): Promise<JsonValue>;
+  forgeJson(
+    args: string[],
+    options: { timeoutSeconds: number; definiteFailure?: boolean },
+  ): Promise<JsonValue>;
   /** A fresh `ForgeBudget(requests=3, seconds=10)`; injectable for a deterministic clock. */
   newBudget?(): ForgeBudget;
 }
@@ -189,12 +194,15 @@ async function advisory(box: QueueBox, effects: ClientHealthEffects, log: string
       seconds: ADVISORY_BUDGET_SECONDS,
     });
   let calls = 0;
-  const forge = async (args: string[]): Promise<JsonValue> => {
+  const forge = async (args: string[], create = false): Promise<JsonValue> => {
     if (calls >= ADVISORY_MAX_CALLS || !budget.available()) {
       throw new HealthAdvisoryError('RuntimeError', 'health advisory budget exhausted');
     }
     calls += 1;
-    return effects.forgeJson(args, { timeoutSeconds: budget.take() });
+    return effects.forgeJson(args, {
+      timeoutSeconds: budget.take(),
+      ...(create ? { definiteFailure: true } : {}),
+    });
   };
   const save = async (): Promise<void> => {
     await effects.saveQueue(box.queue);
@@ -236,14 +244,10 @@ async function advisory(box: QueueBox, effects: ClientHealthEffects, log: string
       await save(); // persist intent before an ambiguous create response
       let result: JsonValue;
       try {
-        result = await forge([
-          'api',
-          `repos/${repo}/issues`,
-          '-f',
-          `title=${HEALTH_TITLE}`,
-          '-f',
-          `body=${body}`,
-        ]);
+        result = await forge(
+          ['api', `repos/${repo}/issues`, '-f', `title=${HEALTH_TITLE}`, '-f', `body=${body}`],
+          true,
+        );
       } catch (error) {
         if (pythonErrorName(error) === 'CalledProcessError') {
           box.update([['opening', false]]);

@@ -10,7 +10,6 @@
  * `ComposeInput.remaining` / `ComposeInput.delivery`.
  */
 import { readFileSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { currentEntryEnv } from '../../config/run-env.js';
@@ -36,8 +35,7 @@ import {
   type GhResult,
 } from '../../policy/crq/prReviewFindings.js';
 import { ReceiptOsError, type ReceiptFiles } from '../../policy/crq/receiptPrepare.js';
-import { sha256Hex } from '../../policy/crq/pythonJson.js';
-import { MAX_RECEIPT_BYTES } from '../../policy/crq/queueReceipt.js';
+import { readContentAddressedReceipt } from './reviewEffects.js';
 import { adequate, ValueError } from '../../policy/crq/reviewAdmission.js';
 import { authenticatedGh } from '../../policy/crq/reviewIdentity.js';
 import { DeliveryRuntimeError } from '../../ops/crq/internal/deliverPending.js';
@@ -179,7 +177,9 @@ export function fileDeliveryEnv(input: DeliveryRoots): ComposeInput['delivery'] 
         return new Uint8Array(readFileSync(path));
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') return null;
+        // Only FileNotFoundError is "absent"; Python raises IsADirectoryError /
+        // NotADirectoryError (OSError subclasses) for the other two, with their own text.
+        if (code === 'ENOENT') return null;
         // Python's OSError: the delivery layer maps only ReceiptOsError, so a raw Node error
         // would abort the whole phase instead of recording the item's delivery error.
         throw new ReceiptOsError('OSError', pythonOsErrorText(error, path));
@@ -278,8 +278,11 @@ export function forgeTimeoutMs(seconds: number): number {
 }
 
 /** `crq.gh_json(args, definite_failure)` in the advisory: gh in the clone, bounded, parsed. */
-function forgeJson(clone: string) {
-  return async (args: string[], options: { timeoutSeconds: number }): Promise<JsonValue> => {
+export function forgeJson(clone: string) {
+  return async (
+    args: string[],
+    options: { timeoutSeconds: number; definiteFailure?: boolean },
+  ): Promise<JsonValue> => {
     const argv = ['gh', ...args];
     const [command, ...rest] = argv;
     const result = spawnSync(command ?? 'gh', rest, {
@@ -299,11 +302,19 @@ function forgeJson(clone: string) {
         );
       throw new ForgeProcessError('FileNotFoundError', pythonOsErrorText(result.error, 'gh'));
     }
-    if (result.status !== 0)
+    if (result.status !== 0) {
+      // `gh_json(..., definite_failure=True)` (the create) uses `check_returncode()`; every
+      // other call goes through `run(check=True)`, which raises a bare RuntimeError.
+      if (options.definiteFailure === true)
+        throw new ForgeProcessError(
+          'CalledProcessError',
+          `Command [${argv.map(pyRepr).join(', ')}] returned non-zero exit status ${result.status ?? -1}.`,
+        );
       throw new ForgeProcessError(
-        'CalledProcessError',
-        `Command [${argv.map(pyRepr).join(', ')}] returned non-zero exit status ${result.status ?? -1}.`,
+        'RuntimeError',
+        `${argv.slice(0, 6).join(' ')} … exit ${result.status ?? -1}: ${(result.stderr ?? '').trim().slice(0, 400)}`,
       );
+    }
     try {
       return parseJsonText(result.stdout);
     } catch {
@@ -316,16 +327,10 @@ const parseJsonText = (text: string): JsonValue => parseJsonValue(text, { duplic
 
 /**
  * The default retained-receipt reader: `<stateRoot>/receipts/<id>.json`, bounded and checked
- * against its content address (`_ReceiptSnapshot`), as `reviewEffects.readReceipt` does.
+ * against its content address, the same reader `reviewEffects` binds.
  */
 export function stateReceiptReader(stateRoot: string): (receiptId: string) => Promise<Uint8Array> {
-  return async (receiptId) => {
-    if (!/^[0-9a-f]{64}$/.test(receiptId)) throw new ValueError('invalid receipt id');
-    const bytes = await readFile(join(stateRoot, 'receipts', `${receiptId}.json`));
-    if (bytes.length > MAX_RECEIPT_BYTES) throw new ValueError('receipt exceeds its read bound');
-    if (sha256Hex(bytes) !== receiptId) throw new ValueError('receipt digest mismatch');
-    return new Uint8Array(bytes);
-  };
+  return (receiptId) => readContentAddressedReceipt(join(stateRoot, 'receipts'), receiptId);
 }
 
 /** The three reporting phases, for `ComposeInput.remaining`. */
@@ -371,7 +376,14 @@ export function fileReportingPhases(
         },
         gh: input.gh,
         findingsPath: (runId) => join(runs, runId, 'review.ndjson'),
-        readText: readTextReplacing,
+        readText: (path) => {
+          try {
+            return readTextReplacing(path);
+          } catch (error) {
+            // An OSError's `str(exc)` is what the outbox row records.
+            throw new ReceiptOsError('OSError', pythonOsErrorText(error, path));
+          }
+        },
       }),
     recordClientHealth: (queue, discoveryEnabled) => {
       const effects: ClientHealthEffects = {
