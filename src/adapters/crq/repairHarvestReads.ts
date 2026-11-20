@@ -4,8 +4,8 @@
  * this outside tests. Verification, worktrees, the finding ledger and
  * publication stay injected; they have no TS wiring yet.
  */
-import { readFile, realpath, stat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { lstat, readFile, readlink, stat } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import { parseJsonValue, toPlainJson } from '../../policy/crq/jsonValue.js';
 import { PyError } from '../../queue-runner/pyErrors.js';
@@ -40,6 +40,66 @@ async function readJson(path: string): Promise<unknown> {
   }
 }
 
+/** Marks "the symlink pushed below this has been resolved"; no path component can be NUL. */
+const SYMLINK_RESOLVED = '\0resolved';
+
+/**
+ * CPython 3.14 `posixpath.realpath(strict=False)`, which `Path.resolve()`
+ * calls. Components resolve in filesystem order, so a `..` after a symlink
+ * climbs from the link's target, not from the link's own parent. A component
+ * that cannot be inspected (missing, not a directory, a symlink loop) is kept
+ * and the rest of the path resolves lexically. An embedded NUL is the one
+ * error Python does not swallow.
+ */
+async function pyRealpath(filename: string): Promise<string> {
+  if (filename.includes('\0'))
+    throw new PyError('ValueError', 'lstat: embedded null character in path');
+  const rest = filename.split('/').reverse();
+  let partCount = rest.length;
+  let path = filename.startsWith('/') ? '/' : process.cwd();
+  // symlink path -> fully resolved target, or null while it is being resolved
+  const seen = new Map<string, string | null>();
+  while (partCount > 0) {
+    const name = rest.pop();
+    if (name === undefined) break;
+    if (name === SYMLINK_RESOLVED) {
+      seen.set(rest.pop() ?? '', path);
+      continue;
+    }
+    partCount -= 1;
+    if (name === '' || name === '.') continue;
+    if (name === '..') {
+      const slash = path.lastIndexOf('/');
+      path = path.slice(0, slash) || '/';
+      continue;
+    }
+    const next = path === '/' ? `/${name}` : `${path}/${name}`;
+    let target: string;
+    try {
+      if (!(await lstat(next)).isSymbolicLink()) {
+        path = next;
+        continue;
+      }
+      if (seen.has(next)) {
+        const resolved = seen.get(next) ?? null;
+        path = resolved ?? next;
+        continue;
+      }
+      target = await readlink(next);
+    } catch {
+      path = next;
+      continue;
+    }
+    if (target.startsWith('/')) path = '/';
+    seen.set(next, null);
+    rest.push(next, SYMLINK_RESOLVED);
+    const parts = target.split('/').reverse();
+    rest.push(...parts);
+    partCount += parts.length;
+  }
+  return path;
+}
+
 export function fileRepairHarvestReads(input: FileRepairHarvestInput): FileRepairHarvestReads {
   const repair = (...parts: string[]): string => join(input.stateRoot, 'repair', ...parts);
   return {
@@ -51,25 +111,7 @@ export function fileRepairHarvestReads(input: FileRepairHarvestInput): FileRepai
         () => true,
         () => false,
       ),
-    /**
-     * `Path.resolve()` (non-strict): symlinks resolve as far as the path exists,
-     * the rest is kept. A `..` that follows a symlink resolves lexically.
-     */
-    async resolvePath(path) {
-      if (path.includes('\0'))
-        throw new PyError('ValueError', 'lstat: embedded null character in path');
-      let head = resolve(path);
-      const tail: string[] = [];
-      for (;;) {
-        try {
-          return join(await realpath(head), ...tail.reverse());
-        } catch {
-          const slash = head.lastIndexOf('/');
-          if (head === '/' || slash < 0) return resolve(path);
-          tail.push(head.slice(slash + 1));
-          head = slash === 0 ? '/' : head.slice(0, slash);
-        }
-      }
-    },
+    /** `Path.resolve()`: CPython 3.14 `posixpath.realpath(strict=False)`. */
+    resolvePath: pyRealpath,
   };
 }

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -355,12 +355,27 @@ describe('repairHarvest open runs (differential vs repair_tick.harvest)', () => 
     expect(out.queue).toContain('repair_failed');
   });
 
-  it('keeps a publish_failed run retrying and clears nothing on a repeat', async () => {
-    await same({
-      item: item({}, {}),
+  it('retries a publish_failed run: publish is called again and its error is replaced', async () => {
+    const retained = { state: 'publish_failed', error: 'earlier failure' };
+    const base = {
+      item: item({ state: 'repair_failed' }, retained),
       files: files([J1, job(J1), fixed(J1)]),
-      publish: 'value:no',
-    });
+    };
+    // Publication keeps failing: the run stays publish_failed with the NEW error.
+    const again = await same({ ...base, publish: 'value:still down' });
+    expect(again.calls).toContain('"publish"');
+    expect(again.queue).toContain('still down');
+    expect(again.queue).not.toContain('earlier failure');
+    expect(again.queue).toContain('"state":"publish_failed"');
+    // Publication recovers: the harvest calls publish again (the injected publish
+    // does the state change; here it leaves the run `ready`).
+    const ok = await same(base);
+    expect(ok.calls).toContain('"publish"');
+    expect(ok.queue).toContain('"state":"ready"');
+    // A dry run retries nothing.
+    const dry = await same({ ...base, dry: true });
+    expect(dry.calls).not.toContain('"publish"');
+    expect(dry.queue).toContain('earlier failure');
   });
 
   it('treats a receipt item as done with its repair outcome', async () => {
@@ -549,6 +564,34 @@ describe('repairHarvest result validation (differential)', () => {
     });
   });
 
+  // The next three pin behaviour crq flagged as defects in review (F2, F3). Python
+  // does exactly this, so the port must too; see the PR body for the Python-side note.
+  it('writes the unpublished-FIXED decision from a sibling whose identity does not match (as Python does)', async () => {
+    const out = await same({
+      item: item({}, { jobs: [J1, J2] }),
+      files: files(
+        [J1, job(J1, { canonical_finding_id: 'F1' }), fixed(J1, { repair_base: 'wrong' })],
+        [
+          J2,
+          job(J2, { canonical_finding_id: 'F2', repair_base: 'rb' }),
+          fixed(J2, { job: 'crq-evil', item: 'other' }),
+        ],
+      ),
+    });
+    expect(out.calls).toContain('"sibling","F2","crq-R-F2"');
+  });
+
+  it('records a sibling FAILED outcome even with retry_after set (as Python does)', async () => {
+    const out = await same({
+      item: item({}, { jobs: [J1, J2] }),
+      files: files(
+        [J1, job(J1, { canonical_finding_id: 'F1' }), fixed(J1, { repair_base: 'wrong' })],
+        [J2, job(J2, { canonical_finding_id: 'F2' }), verdict(J2, 'FAILED', { retry_after: 'T' })],
+      ),
+    });
+    expect(out.calls).toContain('"mark","crq-R-F2"');
+  });
+
   it('skips siblings without a finding id, a result, or readable files', async () => {
     await same({
       item: item({}, { jobs: [J1, J2, 'crq-R-F3', 'crq-R-F4', 7] }),
@@ -679,6 +722,15 @@ describe('repairHarvest terminal runs (differential)', () => {
     }
   });
 
+  it('reconciles terminal records on a dry harvest too (as Python does, unguarded)', async () => {
+    for (const state of ['done', 'failed']) {
+      const receipt = await same({ item: item({ kind: 'merged-current' }, { state }), dry: true });
+      expect(receipt.queue).toContain('"repair_outcome"');
+      const open = await same({ item: item({}, { state }), dry: true });
+      expect(open.queue).toContain(state === 'failed' ? '"repair_failed"' : '"state":"done"');
+    }
+  });
+
   it('replays a retained invalid-result failure through the ledger', async () => {
     await same({
       item: item({}, failedRecord([invalid(J1)])),
@@ -781,5 +833,93 @@ describe('repairHarvest with the file reads', () => {
     await expect(reads.readResult('crq-bad')).rejects.toMatchObject({ kind: 'ValueError' });
     writeFileSync(join(root, 'repair', 'crq-bad', 'result.json'), '{nope');
     await expect(reads.readResult('crq-bad')).rejects.toMatchObject({ kind: 'ValueError' });
+  });
+
+  it('resolves components in filesystem order, like Path.resolve (a ".." after a symlink)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'repair-hv-fs-'));
+    dirs.push(root);
+    mkdirSync(join(root, 'real', 'nested', 'deep'), { recursive: true });
+    writeFileSync(join(root, 'real', 'f'), 'x');
+    symlinkSync('real/nested', join(root, 'link'));
+    symlinkSync(join(root, 'real'), join(root, 'abs'));
+    symlinkSync('../real/nested', join(root, 'real', 'up'));
+    symlinkSync('loop2', join(root, 'loop1'));
+    symlinkSync('loop1', join(root, 'loop2'));
+    symlinkSync('missing/..', join(root, 'dangling'));
+    const cases = [
+      'link/..',
+      'link/../nested',
+      'link/deep/../..',
+      'link/../../real',
+      'abs/nested/..',
+      'abs/../real',
+      'real/up/deep',
+      'real/up/..',
+      'link/missing/..',
+      'link/missing/../deep',
+      'missing/../real',
+      'real/f/x',
+      'real/f/..',
+      'real/f/../nested',
+      'loop1',
+      'loop1/x',
+      'loop1/..',
+      'dangling',
+      'dangling/x',
+      'real/./nested//deep/',
+      '',
+    ].map((rel) => `${root}/${rel}`); // not join(): it would collapse the `..` lexically
+    cases.push('/', '/..', '/../..', '.', './real/../real', '..');
+    const reads = fileRepairHarvestReads({ stateRoot: root, worktreeRoot: root });
+    const ts: string[] = [];
+    for (const path of cases) ts.push(await reads.resolvePath(path));
+    const py = JSON.parse(
+      execFileSync(
+        'python3',
+        [
+          '-I',
+          '-c',
+          'import sys,json,pathlib;print(json.dumps([str(pathlib.Path(p).resolve()) for p in json.loads(sys.argv[1])]))',
+          JSON.stringify(cases),
+        ],
+        { encoding: 'utf8' },
+      ),
+    ) as string[];
+    expect(ts).toEqual(py);
+    // The case the lexical shortcut got wrong: `..` leaves the symlink's target.
+    expect(ts[0]).toBe(join(await reads.resolvePath(root), 'real'));
+  });
+
+  it('reports an unreadable result as absent, like Path.exists on 3.14', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'repair-hv-acc-'));
+    dirs.push(root);
+    const job = join(root, 'repair', 'crq-locked');
+    mkdirSync(job, { recursive: true });
+    writeFileSync(join(job, 'result.json'), '{}');
+    const reads = fileRepairHarvestReads({ stateRoot: root, worktreeRoot: root });
+    const pyExists = (): boolean =>
+      execFileSync(
+        'python3',
+        [
+          '-I',
+          '-c',
+          'import sys,pathlib;print(pathlib.Path(sys.argv[1]).exists())',
+          join(job, 'result.json'),
+        ],
+        { encoding: 'utf8' },
+      ).trim() === 'True';
+    expect(await reads.resultExists('crq-locked')).toBe(true);
+    expect(pyExists()).toBe(true);
+    if (process.getuid?.() === 0) return; // root ignores the mode bits
+    chmodSync(job, 0o000);
+    try {
+      // `os.path.exists` swallows every OSError, so Python reports False, not a raise.
+      expect(pyExists()).toBe(false);
+      expect(await reads.resultExists('crq-locked')).toBe(false);
+      // Reading the same file is a PermissionError, which the harvest does see.
+      await expect(reads.readResult('crq-locked')).rejects.toMatchObject({ kind: 'OSError' });
+    } finally {
+      chmodSync(job, 0o755);
+    }
   });
 });

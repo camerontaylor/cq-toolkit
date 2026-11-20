@@ -439,6 +439,45 @@ describe('repairEnqueue vs the real repair_tick.enqueue', () => {
     await same(enqueue({ ...base, state: {} }));
   });
 
+  // crq review (F4, F10) flagged the next two as defects. Python behaves exactly
+  // this way, and the port is differential against it, so they are pinned as parity.
+  it('keeps a completed inbox job for another finding and still binds the blocker to it (as Python does)', async () => {
+    const out = await same(
+      enqueue({
+        queue: { items: [openItem({ blocking: [{ run: 'r1', run_finding: 1 }] })] },
+        findings: { r1: rows(F2) }, // finding B now occupies slot 1
+        state: {
+          'repair/inbox/crq-r1-F1.json': { job: 'crq-r1-F1', finding: F1, repair_base: 'b0' },
+          'repair/crq-r1-F1/result.json': { verdict: 'FIXED' },
+        },
+      }),
+    );
+    expect(out.files['state/repair/inbox/crq-r1-F1.json']).toContain('fix a'); // still finding A
+    expect(out.queue).toContain('"repair_job":"crq-r1-F1"');
+  });
+
+  it('counts a foreign repository PR with the same number toward the round ceiling (as Python does)', async () => {
+    const done = (run: string): Record<string, unknown> => ({
+      jobs: [],
+      state: 'done',
+      pin: 'b0',
+      run,
+    });
+    const out = await same(
+      enqueue({
+        queue: {
+          items: [
+            openItem({ repo: 'other/x', repair_runs: { z1: done('z1'), z2: done('z2') } }),
+            openItem(),
+          ],
+        },
+        itemIndex: 1,
+      }),
+    );
+    expect(out.ret).toBe(false);
+    expect(out.queue).toContain('repair round ceiling reached; needs human');
+  });
+
   it('raises where Python raises on a record it cannot read', async () => {
     await same(enqueue({ meta: { base: 'b0', head: 'h0' } })); // no run_id
     await same(enqueue({ git: {} })); // rev-list unavailable
@@ -548,6 +587,17 @@ describe('repairBackfill vs the real repair_tick.backfill', () => {
     );
   });
 
+  it('enqueues from a meta.json that names another run, and stamps (as Python does)', async () => {
+    const out = await same(
+      backfill({
+        findings: { r1: rows(F1) },
+        runs: { r1: evidence({ run_id: 'r2' }) },
+      }),
+    );
+    expect(Object.keys(out.files)).toContain('state/repair/inbox/crq-r2-F1.json');
+    expect(out.queue).toContain('legacy_repair_backfilled');
+  });
+
   it('raises on a cycle without a run_id and on unreadable meta', async () => {
     await same(backfill({ queue: { items: [openItem({ cycles: [{}] })] } }));
     await same(backfill({ runs: { r1: { meta: 'not-a-dict', review: 'x' } } }));
@@ -596,6 +646,16 @@ describe('repairArchiveLegacy vs the real repair_tick.archive_legacy', () => {
   it('archives once; an empty missing list does not block', async () => {
     await same(archive({ legacy_repair_backfilled: 'T', legacy_repair_missing: [] }));
     await same(archive({ legacy_repair_backfilled: 'T', legacy_ledger_archived: 'EARLIER' }));
+  });
+
+  it('archives past a record in an unrecognized state (as Python does)', async () => {
+    const out = await same(
+      archive({
+        legacy_repair_backfilled: 'T',
+        items: [openItem({ repair_runs: { r: { state: 'mystery' } } })],
+      }),
+    );
+    expect(out.queue).toContain('legacy_ledger_archived');
   });
 
   it('raises on a repair record without a state', async () => {

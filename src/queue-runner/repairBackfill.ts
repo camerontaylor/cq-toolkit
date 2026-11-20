@@ -161,12 +161,17 @@ const prHead = (meta: Rec): unknown =>
  * `repair_tick.enqueue`: queue one repair record (and its inbox jobs) for a
  * review run's actionable findings. Returns true when a repair is queued or
  * still drainable for the run.
+ *
+ * `evidenceRun` is the run directory the findings are read from (Python's
+ * `rdir`): the backfill passes the cycle's own run, which is the meta's
+ * `run_id` unless the two disagree. Job ids and the record use the meta's id.
  */
 export async function repairEnqueue(
   q: Queue,
   item: Item,
   metaIn: unknown,
   fx: RepairEnqueueEffects,
+  evidenceRun?: string,
 ): Promise<boolean> {
   const meta = dict(metaIn, 'meta');
   const metaRun = get(meta, 'run_id');
@@ -207,7 +212,7 @@ export async function repairEnqueue(
   const runs = repairRuns(item);
   const runId = str(req(meta, 'run_id'), 'run_id');
   const existing = get(runs, runId);
-  const sourced = await fx.findings(runId, true);
+  const sourced = await fx.findings(evidenceRun ?? runId, true);
   const actionable = sourced.map((s) => s.finding);
   const sources = sourced.map((s) => ({ ...s.source, run: runId }));
   if (truthy(existing)) {
@@ -378,7 +383,7 @@ export async function repairBackfill(q: Queue, fx: RepairBackfillEffects): Promi
       }
       const meta = dict(await fx.readMeta(run), 'meta');
       if (get(meta, 'kind') === LOCAL_REVIEW_KIND) continue;
-      const queued = await repairEnqueue(q, item, meta, fx);
+      const queued = await repairEnqueue(q, item, meta, fx, run);
       if (
         !queued &&
         !Object.hasOwn(dict(get(item, 'repair_runs', {}), 'repair_runs'), run) &&
