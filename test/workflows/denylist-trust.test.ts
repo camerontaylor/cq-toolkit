@@ -55,11 +55,14 @@ describe.each(PATHS)('%s scans with a trusted scanner policy', (path) => {
     expect(text).toContain('DIFF_OPTS="--text --no-textconv --no-ext-diff"');
   });
 
-  it('ignores the scanned revision\'s own allowlists (gitleaks:allow, .gitleaksignore)', () => {
+  it("ignores the scanned revision's own allowlists (gitleaks:allow, .gitleaksignore)", () => {
     for (const line of gitleaksLines(text)) expect(line, line).toContain('--ignore-gitleaks-allow');
     const scan = text.split(/^ {6}- name: /m).find((step) => step.startsWith('Scan added commits'));
     expect(scan).toBeDefined();
-    const code = (scan ?? '').split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');
+    const code = (scan ?? '')
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
     expect(code).toMatch(/rm -f \.gitleaksignore\n[\s\S]*gitleaks git/);
   });
 
