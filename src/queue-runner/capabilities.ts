@@ -15,5 +15,10 @@ export const CAPABILITY_SCHEMA_VERSION = 1;
  * command outside `UNIT_COMMANDS`, which would block every unit switch to the
  * artifact. The SSH forced command `dispatch` and the operator commands
  * (`LIVE_OPERATOR_COMMANDS`) are routed in `crq.ts` and are never declared.
+ *
+ * A unit command is the unit's whole ExecStart argv, so the backfill unit is
+ * declared as `backfill inventory` (its `UNIT_COMMANDS` value), not `backfill`:
+ * the runner routes it through the operator-live `backfill` handler, which
+ * owns argv and exit codes. The other backfill subcommands stay operator-only.
  */
-export const LIVE_UNIT_COMMANDS = ['watchdog', 'publish'] as const;
+export const LIVE_UNIT_COMMANDS = ['watchdog', 'publish', 'backfill inventory'] as const;
