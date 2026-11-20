@@ -15,6 +15,7 @@ import signal
 import sys
 import tempfile
 import time
+import traceback
 from zoneinfo import ZoneInfo
 from crq_repair import DetectorUnavailable, atomic, command, git, hack_detector, utc, verify
 from crq_repair.drivers import cq, codex, paseo
@@ -1499,7 +1500,7 @@ def run(argv=None):
         args = parser.parse_args(argv)
     except UsageError as exc:
         narrate('repair dispatch refused: ' + str(exc))
-        return 2, {'status': 'usage-error', 'reason': str(exc)}
+        return 2, {'error': {'kind': 'usage', 'subcommand': None, 'message': str(exc), 'exitCode': 2}}
     # CLI admission before the lock, the state directory and every alternate
     # path (--recover-job, --job): a handed-over host must not write or spend.
     if runner_disabled():
@@ -1604,7 +1605,15 @@ def run(argv=None):
 
 def main(argv=None):
     """Every CLI path ends in exactly one JSON artifact on stdout."""
-    code, result = run(argv)
+    try:
+        code, result = run(argv)
+    except Exception as exc:
+        # An operational failure (a wrong finding digest, corrupt state) still owes
+        # the caller its one JSON artifact: exit 1, never a bare traceback.
+        narrate('repair dispatch failed: ' + str(exc)[:300])
+        narrate(traceback.format_exc())
+        write_result({'error': {'kind': 'failed', 'subcommand': None, 'message': str(exc)[:200], 'exitCode': 1}})
+        return 1
     if result is not None:
         write_result(result)
     return code

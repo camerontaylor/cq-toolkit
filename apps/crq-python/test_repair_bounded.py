@@ -893,8 +893,24 @@ class BoundedRepairTest(unittest.TestCase):
             code = service.main(['--job'])
         self.assertEqual(code, 2)
         drain.assert_not_called()
-        self.assertEqual(json.loads(out.getvalue())['status'], 'usage-error')
+        error = json.loads(out.getvalue())['error']
+        self.assertEqual((error['kind'], error['exitCode']), ('usage', 2))
         self.assertIn('--job', err.getvalue())
+
+    def test_operational_exception_is_one_error_artifact_with_exit_1(self):
+        # An exception out of run() (e.g. the ValueError select_job raises for a
+        # wrong digest) must exit 1 with exactly one JSON artifact, not a traceback.
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(service, 'run', side_effect=ValueError('bad digest')), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = service.main([])
+        self.assertEqual(code, 1)
+        error = json.loads(out.getvalue())['error']
+        self.assertEqual((error['kind'], error['message'], error['exitCode']), ('failed', 'bad digest', 1))
+        # The journal is the only diagnostic channel: the traceback stays on stderr.
+        self.assertIn('Traceback (most recent call last)', err.getvalue())
+        self.assertIn('ValueError: bad digest', err.getvalue())
+        self.assertEqual(len(out.getvalue().strip().splitlines()), 1)
 
 
 if __name__ == '__main__':
