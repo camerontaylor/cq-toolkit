@@ -9,7 +9,9 @@
  * JSON semantics: an undefined-valued member of a nested object IS absent
  * data ({a: undefined} and {} are the same JSON record) — required-field
  * positions (the ok variant's `value`) are guarded by the caller.
- * Plain objects: prototype null or Object.prototype only.
+ * Plain objects: prototype null or Object.prototype only. Arrays: prototype
+ * null or Array.prototype only — an inherited `toJSON` or any other prototype
+ * override is invoked by JSON.stringify but invisible to the own-key scan.
  * Requires cycle-freedom — call only after the stringify probe passed.
  */
 export function assertJsonLossless(value: unknown): void {
@@ -30,6 +32,18 @@ export function assertJsonLossless(value: unknown): void {
     case 'object': {
       if (value === null) return;
       if (Array.isArray(value)) {
+        // An array SUBCLASS hides its divergence on the PROTOTYPE, where the
+        // own-key scan below never looks: JSON.stringify invokes an inherited
+        // `toJSON` (`class A extends Array { toJSON() { return []; } }` with
+        // elements 1 and 2 serializes as `[]` — the journal line would
+        // reconstruct nothing the walk accepted). Any other inherited
+        // override is the same class of divergence, so only a plain array —
+        // prototype exactly Array.prototype or null — is accepted.
+        const arrayProto = Object.getPrototypeOf(value) as object | null;
+        if (arrayProto !== Array.prototype && arrayProto !== null) {
+          const name = (value as object).constructor?.name ?? 'unknown';
+          throw new Error(`non-plain array of type '${name}'`);
+        }
         // Arrays carry ONLY their indexed elements and `length`: any other
         // own key — a symbol, a hidden non-enumerable toJSON, an enumerable
         // `extra` property — is dropped by JSON.stringify exactly like the
@@ -53,6 +67,16 @@ export function assertJsonLossless(value: unknown): void {
             index <= 2 ** 32 - 2 &&
             String(index) === key
           ) {
+            // An ACCESSOR element (PR: getter re-read divergence) is not data:
+            // `value[i]` below invokes the getter, so a getter that answers
+            // differently per read hands the walk a value JSON.stringify never
+            // saw. Accept only data descriptors.
+            const elementDescriptor = Object.getOwnPropertyDescriptor(value, key);
+            if (elementDescriptor !== undefined && !('value' in elementDescriptor)) {
+              throw new Error(
+                `accessor array element at [${key}] — a getter can return different values per read`,
+              );
+            }
             continue;
           }
           throw new Error(
@@ -88,6 +112,17 @@ export function assertJsonLossless(value: unknown): void {
           throw new Error(`symbol-keyed own member '${key.toString()}' — JSON.stringify drops it`);
         }
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        // An ACCESSOR own member is not data: JSON.stringify invokes the
+        // getter once and `Object.values` below invokes it again, so a getter
+        // that answers differently per read lets the journal record a value
+        // the walk never checked ({ get x() { return n++ === 0 ? NaN : 1 } }
+        // serializes as {"x":null} while the walk reads 1 and accepts it).
+        // Accept only data descriptors.
+        if (descriptor !== undefined && !('value' in descriptor)) {
+          throw new Error(
+            `accessor own member '${key}' — a getter can return different values per read`,
+          );
+        }
         if (descriptor !== undefined && !descriptor.enumerable) {
           throw new Error(
             key === 'toJSON'

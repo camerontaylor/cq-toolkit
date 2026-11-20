@@ -76,6 +76,7 @@ describe('parseIso — crq.parse_iso quirks', () => {
     ['2026-1-8T0:0:0Z', '2026-01-08T00:00:00.000000Z'],
     ['2026-01-08T00:00:00ZZ', '2026-01-08T00:00:00.000000Z'],
     ['2026-01-08T00:00:00Zextra', '2026-01-08T00:00:00.000000Z'],
+    ['2026-11-15t12:00:00Z', '2026-11-15T12:00:00.000000Z'],
     ['2026-01-08T00:00:00.000Zextra', '2026-01-08T00:00:00.000000Z'],
   ])('%s -> %s', (value, expected) => {
     expect(parseIso(value)?.iso).toBe(expected);
@@ -185,5 +186,15 @@ describe('parseUtcDetailed — component-validation messages', () => {
     expect(parseUtcDetailed('junk')).toBeNull();
     expect(parseUtcDetailed('')).toBeNull();
     expect(parseUtcDetailed(123)).toBeNull();
+  });
+
+  test.each([
+    ['2025-W01-12:00', '2024-12-30T12:00:00.000000Z'],
+    ['2020-W01-123000', '2019-12-30T12:30:00.000000Z'],
+    ['2020W01123', '2019-12-30T23:00:00.000000Z'],
+    ['2020-W01-1T12', '2019-12-30T12:00:00.000000Z'],
+    ['2020W01T12', '2019-12-30T12:00:00.000000Z'],
+  ])("week-date separator follows CPython's fixed-position rule: %s", (value, expected) => {
+    expect(parseUtc(value)?.iso).toBe(expected);
   });
 });

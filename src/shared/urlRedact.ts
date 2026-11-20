@@ -200,6 +200,30 @@ export function redactUrlUserinfo(text: string): string {
   return out.join('');
 }
 
+// One forward pass: true when a scheme run whose FIRST character is a letter
+// (the same word-start rule discoverSchemes applies) is followed by `://`
+// before `end`. A bare `://` does not count, and a digit-led run stays invalid
+// until the next delimiter rather than turning valid when a later letter
+// appears. Linear in the prefix length.
+const hasNamedScheme = (token: string, end: number): boolean => {
+  let wordStart = 0;
+  for (let p = 0; p < end; p++) {
+    const c = token[p] ?? '';
+    if (/[A-Za-z0-9+.-]/.test(c)) continue;
+    if (
+      c === ':' &&
+      p > wordStart &&
+      /[A-Za-z]/.test(token[wordStart] ?? '') &&
+      token.startsWith('//', p + 1) &&
+      p + 3 <= end
+    ) {
+      return true;
+    }
+    wordStart = p + 1;
+  }
+  return false;
+};
+
 /**
  * Strip URL userinfo/query/fragment and SCP-style (or bare email-like)
  * `user[:secret]@host` prefixes from a text fragment.
@@ -245,8 +269,14 @@ export function stripCredentialText(text: string): string {
     while (next < text.length && /\s/.test(text[next] ?? '')) next++;
     const nextStart = next;
     while (next < text.length && !/\s/.test(text[next] ?? '')) next++;
+    // A next token carrying its own scheme before the `@` is a separate URL,
+    // not the continuation of this credential.
+    const followingToken = text.slice(nextStart, next);
+    const followingAt = followingToken.indexOf('@');
     const newlineCredential =
-      text.slice(i, nextStart).includes('\n') && text.slice(nextStart, next).includes('@');
+      text.slice(i, nextStart).includes('\n') &&
+      followingAt >= 0 &&
+      !hasNamedScheme(followingToken, followingAt);
     // Discover all schemes in one forward pass. Never search the remaining
     // suffix again for each URL (many adjacent URLs must also stay linear).
     const schemes = discoverSchemes(run, false);
@@ -285,11 +315,13 @@ export function stripCredentialText(text: string): string {
       const at = token.lastIndexOf('@', end - 1);
       const authority = token.slice(0, authorityEnd);
       const hostPort = /^(\[[^\]]*\]|[^:@]+):\d+$/.test(authority);
+      // The newline-continuation check applies INDEPENDENTLY of the host:port
+      // exception: a numeric password makes `user:123456` host:port-shaped, yet
+      // the credential still continues on the next line before `@`.
       const incomplete =
         at < 0 &&
-        !hostPort &&
-        ((authority.includes(':') && !/^\[[^\]]*\]$/.test(authority)) ||
-          (newlineCredential && authorityEnd === token.length));
+        ((newlineCredential && authorityEnd === token.length) ||
+          (!hostPort && authority.includes(':') && !/^\[[^\]]*\]$/.test(authority)));
       chunks.push(run.slice(scheme.start, scheme.authority));
       chunks.push(incomplete ? '' : token.slice(at >= 0 ? at + 1 : 0, end));
       chunks.push(freeText(token.slice(tailEnd)));

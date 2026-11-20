@@ -50,6 +50,31 @@ describe('associateLocalReview', () => {
     expect(r.queue).toBe(q);
   });
 
+  it('marks the previous link stale when no local-review item remains', async () => {
+    const link = { repo: 'o/r', pr: 7, item: 'a', head: H2, base: B };
+    const q = mk({ items: [{ id: 'x', kind: 'fix' }], review_pr_links: { 'o/r#7': link } });
+    const r = await associateLocalReview(q, 'o/r', 7, B, H1, false, effects());
+    expect(r.associated).toBe(false);
+    expect((toPlain(r.queue) as Plain).review_pr_links['o/r#7']?.stale).toBe(true);
+
+    const same = mk({
+      items: [{ id: 'x', kind: 'fix' }],
+      review_pr_links: { 'o/r#7': { ...link, head: H1 } },
+    });
+    const unchanged = await associateLocalReview(same, 'o/r', 7, B, H1, false, effects());
+    expect(unchanged.queue).toBe(same);
+
+    const dry = await associateLocalReview(q, 'o/r', 7, B, H1, true, effects());
+    expect(dry.queue).toBe(q);
+  });
+
+  it('treats a null review_pr_links as absent when no local-review item remains', async () => {
+    const q = mk({ items: [{ id: 'x', kind: 'fix' }], review_pr_links: null });
+    const r = await associateLocalReview(q, 'o/r', 7, B, H1, false, effects());
+    expect(r.associated).toBe(false);
+    expect(r.queue).toBe(q);
+  });
+
   it('is false when the facts read fails', async () => {
     const r = await run({ items: [item('a', 'pending')] }, false, effects([], null));
     expect(r.associated).toBe(false);

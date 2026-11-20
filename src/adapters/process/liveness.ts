@@ -180,9 +180,17 @@ export async function runLiveness(
         ? recordedPid
         : null;
   const cli = pidfile !== null && positive(pidfile.cli_pid) ? pidfile.cli_pid : null;
+  // A failed `ps` probe cannot prove the pid exited, so the pid stays alive.
+  const cmdlineMatches = async (probed: number, needle: string): Promise<boolean> => {
+    try {
+      return (await procCmdline(probed)).includes(needle);
+    } catch {
+      return true;
+    }
+  };
   const runnerAlive =
-    pid !== null && pidAlive(pid) && runId !== null && (await procCmdline(pid)).includes(runId);
-  const cliAlive = cli !== null && pidAlive(cli) && (await procCmdline(cli)).includes('coderabbit');
+    pid !== null && pidAlive(pid) && runId !== null && (await cmdlineMatches(pid, runId));
+  const cliAlive = cli !== null && pidAlive(cli) && (await cmdlineMatches(cli, 'coderabbit'));
   const runnerGroupAlive = groupAlive(pidfile === null ? undefined : pidfile.pgid);
   const wrapperGroupAlive = kind === 'legacy' && cli !== null ? groupAlive(cli) : null;
   return runState({

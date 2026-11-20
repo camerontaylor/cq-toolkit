@@ -68,16 +68,18 @@ describe('dev.review cycle', () => {
     await repo.write('custom/rules.yml', 'rules:\n');
     repo.commitAll('change configured scanner corpus');
     const effects = repoEffects(repo);
+    const submit = vi.fn(managedTerminal());
     const result = await cycleReview(
       effects,
       stubScanner(),
       'custom/rules.yml',
-      managedTerminal(),
+      submit,
     )({
       repoRoot: repo.root,
     });
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') expect(result.reason).toContain('custom/rules.yml');
+    expect(submit).not.toHaveBeenCalled();
     expect(reviewerCalls(effects)).toEqual([]);
     expect(effects.openLedger('feature/x').load().records).toEqual([]);
   });
@@ -137,28 +139,32 @@ describe('dev.review cycle', () => {
 
   test('THE SCAN GATES THE SUBMIT: a hit or a scanner fault refuses before the managed leg runs', async () => {
     const hit = repoEffects(repo);
+    const submitHit = vi.fn(managedTerminal());
     const refused = await cycleReview(
       hit,
       stubScanner([{ component: 'committed:src/a.ts', ruleId: 'class:secret' }]),
       undefined,
-      managedTerminal(),
+      submitHit,
     )({ repoRoot: repo.root });
     expect(refused.status).toBe('needs-human');
     if (refused.status === 'needs-human')
       expect(refused.reason).toContain('class:secret in committed:src/a.ts');
+    expect(submitHit).not.toHaveBeenCalled();
     expect(reviewerCalls(hit)).toEqual([]);
 
     const fault = repoEffects(repo);
+    const submitFault = vi.fn(managedTerminal());
     const faulted = await cycleReview(
       fault,
       () => {
         throw new Error('gitleaks missing');
       },
       undefined,
-      managedTerminal(),
+      submitFault,
     )({ repoRoot: repo.root });
     expect(faulted.status).toBe('needs-human');
     if (faulted.status === 'needs-human') expect(faulted.reason).toContain('gitleaks missing');
+    expect(submitFault).not.toHaveBeenCalled();
     expect(reviewerCalls(fault)).toEqual([]);
     expect(fault.openLedger('feature/x').load().records).toEqual([]);
   });
@@ -166,29 +172,33 @@ describe('dev.review cycle', () => {
   test('an unscannable untracked file (symlink, oversized) refuses — never silently skipped', async () => {
     await symlink('/etc/hostname', join(repo.root, 'link'));
     const linked = repoEffects(repo);
+    const submitLinked = vi.fn(managedTerminal());
     const result = await cycleReview(
       linked,
       stubScanner(),
       undefined,
-      managedTerminal(),
+      submitLinked,
     )({
       repoRoot: repo.root,
     });
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') expect(result.reason).toContain("untracked file 'link'");
+    expect(submitLinked).not.toHaveBeenCalled();
     expect(reviewerCalls(linked)).toEqual([]);
 
     await rm(join(repo.root, 'link'));
     await repo.write('big.txt', 'x'.repeat(SCAN_COMPONENT_CAP_BYTES + 1));
+    const submitBig = vi.fn(managedTerminal());
     const big = await cycleReview(
       repoEffects(repo),
       stubScanner(),
       undefined,
-      managedTerminal(),
+      submitBig,
     )({
       repoRoot: repo.root,
     });
     expect(big.status).toBe('needs-human');
     if (big.status === 'needs-human') expect(big.reason).toContain('per-file scan cap');
+    expect(submitBig).not.toHaveBeenCalled();
   });
 });

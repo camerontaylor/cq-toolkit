@@ -189,7 +189,7 @@ describe('detached review reservation', () => {
       );
       expect(durable.get('starts') as unknown[]).toHaveLength(1);
       expect(run(durable).get('launch_pending')).toBe(kind === 'open');
-      expect(order).toEqual(kind === 'open' ? ['save'] : ['save', 'spawn_failed', 'save']);
+      expect(order).toEqual(kind === 'open' ? ['save'] : ['save', 'save', 'spawn_failed']);
     }
   });
   it('preserves reservation on unexpected spawn error and ignores telemetry failure', async () => {

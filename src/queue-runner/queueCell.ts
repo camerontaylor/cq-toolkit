@@ -210,7 +210,11 @@ export class QueueCell {
   async launch(input: ReviewLaunchInput, effects: ReviewLaunchEffects): Promise<{ runId: string }> {
     let lastSaved: JsonObject | undefined;
     const saving: ReviewLaunchEffects = {
-      ...effects,
+      writeMeta: (runId, meta) => effects.writeMeta(runId, meta),
+      workStarted: (meta) => effects.workStarted(meta),
+      spawn: (runId) => effects.spawn(runId),
+      event: (kind, data) => effects.event(kind, data),
+      nowIso: () => effects.nowIso(),
       saveQueue: async (queue) => {
         await effects.saveQueue(queue);
         lastSaved = queue;

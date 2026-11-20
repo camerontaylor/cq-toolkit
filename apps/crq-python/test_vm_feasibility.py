@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -118,10 +119,29 @@ class StopOwnedProcessTests(unittest.TestCase):
         result, _ = self._stop("inactive", stop_rc=5, load_state="not-found")
         self.assertTrue(result["stopped"])
 
-    def test_failed_scope_query_is_not_proof_of_shutdown(self):
-        result, still_there = self._stop("", show_rc=1)
-        self.assertFalse(result["stopped"])
-        self.assertTrue(still_there)
+    def test_failed_scope_query_never_dispatches_stop(self):
+        with self.assertRaises(RuntimeError):
+            self._stop("", show_rc=1)
+        self.assertFalse(any("stop" in argv for argv in self.dispatched))
+
+    def test_indeterminate_membership_never_dispatches_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = pathlib.Path(tmp) / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            calls = []
+
+            def fake_run(argv, **kwargs):
+                calls.append(argv)
+                out = ("ActiveState=failed\nLoadState=loaded\n"
+                       "ControlGroup=/user.slice/crq-vm-r1.scope\n")
+                return mock.Mock(returncode=0, stdout=out, stderr="")
+
+            with mock.patch.object(vm.subprocess, "run", side_effect=fake_run), \
+                 mock.patch.object(vm, "_cgroup_pids", return_value=None):
+                with self.assertRaises(RuntimeError):
+                    vm.stop_owned_process(
+                        {"path": str(run_dir), "run_id": "r1"}, purge=True)
+            self.assertFalse(any("stop" in argv for argv in calls))
 
     def test_deactivating_scope_is_not_stopped(self):
         result, still_there = self._stop("deactivating", stop_rc=1)
@@ -222,6 +242,27 @@ class StopOwnedProcessTests(unittest.TestCase):
                     vm.load_run(pathlib.Path(tmp), bad, require_process=False)
 
 
+class DownloadTests(unittest.TestCase):
+    def test_failed_transfer_removes_the_partial_file(self):
+        class Broken:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, size):
+                raise OSError("connection reset")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = pathlib.Path(tmp) / "image.img"
+            with mock.patch.object(vm.urllib.request, "urlopen",
+                                   return_value=Broken()):
+                with self.assertRaises(OSError):
+                    vm.download("https://example.invalid/x", destination)
+            self.assertEqual(list(pathlib.Path(tmp).iterdir()), [])
+
+
 class FetchImageTests(unittest.TestCase):
     def _download(self, digest, data, calls, *, fail_image=False):
         def fake(url, destination, timeout=120):
@@ -284,6 +325,82 @@ class FetchImageTests(unittest.TestCase):
                                       vm.IMAGE_URL + vm.IMAGE_NAME])
             self.assertEqual(image["sha256"], digest)
             self.assertEqual((images / vm.IMAGE_NAME).read_bytes(), data)
+
+    def test_recorder_failure_removes_the_downloaded_manifest_part(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            recorder = vm.Recorder(state)
+            with mock.patch.object(
+                    vm, "download",
+                    side_effect=self._download("1" * 64, b"x", [])), \
+                    mock.patch.object(recorder, "append",
+                                      side_effect=OSError("ledger full")):
+                with self.assertRaisesRegex(OSError, "ledger full"):
+                    vm.fetch_sums(images / vm.SUMS_NAME, recorder)
+            self.assertEqual(list(images.glob("*.part")), [])
+
+    def test_cleanup_failure_never_masks_the_original_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            recorder = vm.Recorder(state)
+            with mock.patch.object(
+                    vm, "download",
+                    side_effect=self._download("1" * 64, b"x", [])), \
+                    mock.patch.object(recorder, "append",
+                                      side_effect=OSError("ledger full")), \
+                    mock.patch.object(pathlib.Path, "unlink",
+                                      side_effect=OSError("read-only")):
+                with self.assertRaisesRegex(OSError, "ledger full"):
+                    vm.fetch_sums(images / vm.SUMS_NAME, recorder)
+
+    def test_fetch_holds_an_exclusive_lock_on_the_images_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            with mock.patch.object(vm.fcntl, "flock") as flock, \
+                    mock.patch.object(vm, "_fetch_image_locked",
+                                      return_value={"ok": 1}):
+                self.assertEqual(vm.fetch_image(state, vm.Recorder(state)),
+                                 {"ok": 1})
+            self.assertEqual(flock.call_args.args[1], vm.fcntl.LOCK_EX)
+
+    def test_digest_mismatch_removes_the_unverified_partial_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            calls = []
+            with mock.patch.object(
+                    vm, "download",
+                    side_effect=self._download("1" * 64, b"wrong bytes", calls)):
+                with self.assertRaises(ValueError):
+                    vm.fetch_image(state, vm.Recorder(state))
+            self.assertFalse((images / vm.IMAGE_NAME).exists())
+            self.assertEqual(list(images.glob("*.part")), [])
+
+    def test_failed_promotion_removes_the_verified_partial_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            images = state / "images"
+            images.mkdir()
+            data = b"verified bytes"
+            inner = self._download(vm.sha256_bytes(data), data, [])
+
+            def fake(url, destination, timeout=120):
+                part = inner(url, destination, timeout)
+                if url.endswith(vm.IMAGE_NAME):
+                    # The destination becomes a directory mid-download, so the
+                    # promotion rename fails after verification succeeded.
+                    destination.mkdir()
+                return part
+
+            with mock.patch.object(vm, "download", side_effect=fake):
+                with self.assertRaises(OSError):
+                    vm.fetch_image(state, vm.Recorder(state))
+            self.assertEqual(list(images.glob("*.part")), [])
 
     def test_cached_image_is_verified_without_redownloading(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -367,8 +484,8 @@ class BoundsTests(unittest.TestCase):
     def test_qemu_is_bounded_and_isolated(self):
         argv = vm.qemu_command(pathlib.Path("/state/runs/r1"), 2222)
         joined = " ".join(argv)
-        self.assertIn("-m 2048", joined)
-        self.assertIn("-smp 2", joined)
+        self.assertEqual(argv[argv.index("-m") + 1], "2048")
+        self.assertEqual(argv[argv.index("-smp") + 1], "2")
         self.assertIn("hostfwd=tcp:127.0.0.1:2222-:22", joined)
         self.assertIn("overlay.qcow2", joined)
         self.assertIn("seed.iso", joined)
@@ -530,6 +647,19 @@ class LifecycleTests(unittest.TestCase):
                     vm.cmd_boot(args)
                 stop.assert_called_once()
 
+    def test_cmd_boot_rejected_by_busy_lock_never_cleans_up(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            args = type("Args", (), {"state_dir": str(state), "run_id": "r1",
+                                     "tools": None})()
+            with vm.run_lock(run):
+                with mock.patch.object(vm, "boot") as boot, \
+                     mock.patch.object(vm, "stop_owned_process") as stop:
+                    with self.assertRaises(RuntimeError):
+                        vm.cmd_boot(args)
+                    boot.assert_not_called()
+                    stop.assert_not_called()
+
     def test_cmd_boot_cleans_up_when_upload_fails(self):
         with tempfile.TemporaryDirectory() as temporary:
             state, run = self._prepared(temporary)
@@ -545,6 +675,35 @@ class LifecycleTests(unittest.TestCase):
                     vm.cmd_boot(args)
                 stop.assert_called_once()
 
+    def test_cmd_boot_cleanup_failure_keeps_stderr_empty_in_machine_mode(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            args = type("Args", (), {"state_dir": str(state), "run_id": "r1",
+                                     "tools": None, "json": True})()
+            err = io.StringIO()
+            with mock.patch.object(vm, "boot", return_value={"pid": 1}), \
+                 mock.patch.object(vm, "wait_ssh",
+                                   side_effect=RuntimeError("SSH never ready")), \
+                 mock.patch.object(vm, "stop_owned_process",
+                                   side_effect=RuntimeError("scope gone")):
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(RuntimeError) as raised:
+                        vm.cmd_boot(args)
+            self.assertEqual(err.getvalue(), "")
+            self.assertIn("scope gone", vm._error_message(raised.exception))
+
+    def test_cleanup_failure_narrates_outside_machine_mode(self):
+        import contextlib
+        import io
+        args = type("Args", (), {"json": False})()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            message = vm._cleanup_diagnostic(args, "cleanup after run",
+                                             RuntimeError("scope gone"))
+        self.assertIn(message, err.getvalue())
+
     def test_destroy_refuses_mismatched_live_process(self):
         with tempfile.TemporaryDirectory() as temporary:
             state, run = self._prepared(temporary)
@@ -552,9 +711,11 @@ class LifecycleTests(unittest.TestCase):
             (run / "process.json").write_text(json.dumps(
                 {"pid": os.getpid(), "starttime": "0",
                  "scope_unit": "crq-vm-test.scope"}))
-            with self.assertRaises(RuntimeError):
-                vm.stop_owned_process(
-                    {"run_id": "r1", "path": str(run)}, purge=False)
+            with mock.patch.object(vm.subprocess, "run") as run_cmd:
+                with self.assertRaises(RuntimeError):
+                    vm.stop_owned_process(
+                        {"run_id": "r1", "path": str(run)}, purge=False)
+            run_cmd.assert_not_called()
 
     def test_destroy_treats_a_changed_process_as_stopped(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -583,6 +744,7 @@ class LifecycleTests(unittest.TestCase):
                  mock.patch.object(vm, "prepare_run", return_value={
                      "run_id": "r1", "path": str(run), "port": 2222,
                      "started_at": "now"}), \
+                 mock.patch.object(vm, "verify_source_scripts"), \
                  mock.patch.object(vm, "host_stamp",
                                    return_value={"kvm_writable": True}), \
                  mock.patch.object(vm, "boot", return_value={
@@ -606,6 +768,56 @@ class LifecycleTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     vm.cmd_run(args)
             fetch.assert_not_called()
+
+    def test_cmd_run_refuses_bytes_outside_the_source_commit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state, run = self._prepared(temporary)
+            args = type("Args", (), {"state_dir": str(state), "tools": None,
+                                     "keep": False,
+                                     "source_commit": "a" * 40})()
+            with mock.patch.object(vm, "fetch_image"), \
+                 mock.patch.object(vm, "prepare_run", return_value={
+                     "run_id": "r1", "path": str(run), "port": 2222,
+                     "started_at": "now"}), \
+                 mock.patch.object(vm, "commit_blob",
+                                   return_value=b"committed bytes"), \
+                 mock.patch.object(vm, "boot") as boot, \
+                 mock.patch.object(vm, "stop_owned_process",
+                                   return_value={"stopped": True}) as stop:
+                with self.assertRaises(ValueError):
+                    vm.cmd_run(args)
+            boot.assert_not_called()
+            stop.assert_called_once()
+            self.assertFalse((run / "executed-host-script.py").exists())
+            self.assertFalse((run / "executed-guest-probe.py").exists())
+
+    def test_verify_source_scripts_against_a_real_commit(self):
+        def git(cwd, *argv):
+            subprocess.run(["git", *argv], cwd=str(cwd), check=True,
+                           capture_output=True)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            host = root / "vm-feasibility.py"
+            guest = root / "vm-guest-probe.py"
+            host.write_bytes(b"host bytes\n")
+            guest.write_bytes(b"guest bytes\n")
+            git(root, "init", "-q")
+            git(root, "-c", "user.email=probe@example.com",
+                "-c", "user.name=probe", "add", ".")
+            git(root, "-c", "user.email=probe@example.com",
+                "-c", "user.name=probe", "commit", "-q", "--no-verify",
+                "-m", "probe")
+            commit = subprocess.run(["git", "rev-parse", "HEAD"],
+                                    cwd=str(root), check=True,
+                                    capture_output=True).stdout.decode().strip()
+            vm.verify_source_scripts(commit, host, guest,
+                                     b"host bytes\n", b"guest bytes\n")
+            with self.assertRaises(ValueError):
+                vm.verify_source_scripts(commit, host, guest,
+                                         b"host bytes\n", b"modified\n")
+            with self.assertRaises(ValueError):
+                vm.commit_blob("b" * 40, "./vm-feasibility.py", root)
 
     def test_boot_failure_does_not_stop_an_unverified_scope(self):
         class ExitedProcess:
@@ -855,7 +1067,6 @@ class EvidenceTests(unittest.TestCase):
     def test_queued_setup_requires_success_and_a_waiting_fixture(self):
         phases = self._phases()
         phases["activation"]["queue_start"] = {"rc": 1}
-        phases["activation"]["jobs_before_mask"] = self._jobs()
         manager = {"before": self._snapshot(10, "i1", "boot-1"),
                    "after": self._snapshot(11, "i2", "boot-1"),
                    "after_phase": self._refusals()}
@@ -865,6 +1076,10 @@ class EvidenceTests(unittest.TestCase):
                   "boot_id_before": "boot-1", "boot_id_after": "boot-2",
                   "qemu_pid_before": 99, "qemu_pid_after": 99,
                   "qemu_identity_verified": True}
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["queued_setup_proven"])
+        phases["activation"]["queue_start"] = {"rc": 0}
+        phases["activation"]["jobs_before_mask"] = self._jobs()
         checks = vm.build_checks(phases, manager, reboot)
         self.assertFalse(checks["queued_setup_proven"])
 
@@ -882,6 +1097,9 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(vm.build_checks(phases, manager, reboot)
                         ["queued_stop_proven"])
         phases["activation"]["stop_queued_fixture"] = {"rc": 1}
+        phases["activation"]["jobs2_after_stop"] = self._jobs()
+        checks = vm.build_checks(phases, manager, reboot)
+        self.assertFalse(checks["queued_stop_proven"])
         phases["activation"]["jobs2_after_stop"] = self._jobs(
             "135 crq-queued-fixture.service start waiting")
         checks = vm.build_checks(phases, manager, reboot)
@@ -1233,6 +1451,28 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(err.getvalue(), "")
         artifact = json.loads(out.getvalue())
         self.assertEqual(artifact["error"]["kind"], "thrown")
+
+    def test_json_mode_serializes_malformed_report_containers(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as temporary:
+            report = pathlib.Path(temporary) / "report.json"
+            # A non-object report is refused (exit 2) as a structured error; a
+            # report whose containers are lists answers with problems (exit 1).
+            # Neither may produce an AttributeError traceback.
+            for payload, expected in (([], 2), ({"image": []}, 1),
+                                      ({"image": {}, "checks": []}, 1)):
+                report.write_text(json.dumps(payload))
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = vm.main(["--json", "verify", str(report)])
+                self.assertEqual(code, expected)
+                self.assertEqual(err.getvalue(), "")
+                artifact = json.loads(out.getvalue())
+                if expected == 2:
+                    self.assertEqual(artifact["error"]["kind"], "usage")
+                else:
+                    self.assertTrue(artifact["problems"])
 
 
 if __name__ == "__main__":

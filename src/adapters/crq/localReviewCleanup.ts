@@ -46,12 +46,14 @@ function registry(bytes: Uint8Array): Map<string, { head: string; branch: string
     const fields = record.split('\0');
     if (!fields[0]?.startsWith('worktree ')) return refuse('invalid worktree registry');
     const path = fields[0].slice(9);
+    // A bare repository's main record carries `bare` instead of a `HEAD` line.
+    const bare = fields.includes('bare');
     const head = fields.filter((v) => v.startsWith('HEAD '));
     const branch = fields.filter((v) => v.startsWith('branch '));
-    if (!path || head.length !== 1 || branch.length > 1 || records.has(path))
+    if (!path || head.length !== (bare ? 0 : 1) || branch.length > 1 || records.has(path))
       return refuse('invalid worktree registry');
     records.set(path, {
-      head: head[0]!.slice(5),
+      head: head.length ? head[0]!.slice(5) : '',
       branch: branch.length ? branch[0]!.slice(7) : null,
     });
   }

@@ -49,6 +49,7 @@ export function preparedBackfillRepo(git: BackfillAsyncGit): {
   const paths = new Map<string, readonly string[]>();
   const bundles = new Map<string, JsonValue>();
   let recorded: JsonObject[] = [];
+  let verifying: Promise<void> = Promise.resolve();
   const key = (...parts: readonly string[]) => parts.join('\0');
   const missing = (what: string): never => {
     throw new LedgerIntegrityError(`git ${what} was not prepared`);
@@ -81,20 +82,28 @@ export function preparedBackfillRepo(git: BackfillAsyncGit): {
         ]),
       );
     },
-    async verifyRecorded() {
-      // Entries leave the queue only once verified. A failed or not-yet-tried
-      // event stays queued for the next call, ahead of anything recorded while
-      // this pass was running, and the original rejection propagates.
-      const events = recorded;
-      recorded = [];
-      for (const [index, event] of events.entries()) {
-        try {
-          await git.verifyReview(event);
-        } catch (error) {
-          recorded = [...events.slice(index), ...recorded];
-          throw error;
+    verifyRecorded() {
+      // Each call runs behind the previous one: the queue is shared, so an
+      // overlapping call must not see it empty and resolve before the events
+      // recorded ahead of it have been verified.
+      const pass = verifying.then(async () => {
+        // Entries leave the queue only once verified. A failed or not-yet-tried
+        // event stays queued for the next call, ahead of anything recorded while
+        // this pass was running, and the original rejection propagates.
+        const events = recorded;
+        recorded = [];
+        for (const [index, event] of events.entries()) {
+          try {
+            await git.verifyReview(event);
+          } catch (error) {
+            recorded = [...events.slice(index), ...recorded];
+            throw error;
+          }
         }
-      }
+      });
+      // A failed pass must not poison the chain: the next call still runs.
+      verifying = pass.catch(() => undefined);
+      return pass;
     },
   };
 }

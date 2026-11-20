@@ -93,6 +93,15 @@ LIMITATIONS = [
 ]
 
 
+class UsageRefusal(ValueError):
+    """A usage error or refusal: the invocation itself is unacceptable.
+
+    Only this dedicated exception is a usage error (exit 2, doctrine I1).
+    Every other ``ValueError`` -- e.g. ``verify_image`` rejecting a corrupted
+    cached image -- is a thrown runtime error (exit 1).
+    """
+
+
 # ------------------------------------------------------------------ pure
 
 
@@ -129,6 +138,39 @@ def verify_image(path: pathlib.Path, expected: str) -> str:
         raise ValueError("image digest mismatch: expected %s, got %s"
                          % (expected, actual))
     return actual
+
+
+def commit_blob(commit: str, path: str, cwd: pathlib.Path) -> bytes:
+    """Return the exact blob bytes git records for ``path`` in ``commit``."""
+    result = subprocess.run(["git", "show", "%s:%s" % (commit, path)],
+                            cwd=str(cwd), capture_output=True)
+    if result.returncode != 0:
+        raise ValueError("git cannot read %s from %s: %s"
+                         % (path, commit,
+                            result.stderr.decode("utf-8", "replace").strip()))
+    return result.stdout
+
+
+def verify_source_scripts(source_commit: str, host_source: pathlib.Path,
+                          guest_source: pathlib.Path, host_bytes: bytes,
+                          guest_bytes: bytes) -> None:
+    """Refuse a run whose executed script bytes differ from source_commit.
+
+    The artifact digests and the guest upload digest only prove that the
+    recorded bytes are the bytes that ran; neither ties those bytes to the
+    stated commit. Comparing each script against the blob recorded in
+    ``source_commit`` turns a modified working tree into a refusal before
+    any provenance is written.
+    """
+    for script, executed in ((host_source, host_bytes),
+                             (guest_source, guest_bytes)):
+        expected = commit_blob(source_commit, "./" + script.name,
+                               script.parent)
+        if executed != expected:
+            raise ValueError(
+                "%s differs from its blob in %s; provenance is only bound "
+                "to scripts that the stated commit actually contains"
+                % (script.name, source_commit))
 
 
 def render_user_data(public_key: str, *, user: str = GUEST_USER) -> str:
@@ -324,6 +366,8 @@ def provenance_problems(report: dict) -> list[str]:
 def verify_report(report: dict, base_dir: pathlib.Path) -> list[str]:
     """Verify a saved report against its raw evidence and retained bytes."""
     problems = report_problems(report, require_evidence=True)
+    if not isinstance(report, dict):
+        return problems
     provenance = report.get("provenance")
     if not isinstance(provenance, dict):
         return problems
@@ -348,17 +392,28 @@ def verify_report(report: dict, base_dir: pathlib.Path) -> list[str]:
 
 def report_problems(report: dict, *, require_evidence: bool = False) -> list[str]:
     """Validate the evidence shape and the claims it is allowed to make."""
+    if not isinstance(report, dict):
+        return ["report must be a JSON object"]
     problems = []
     if report.get("schema_version") != REPORT_SCHEMA:
         problems.append("schema_version must be %d" % REPORT_SCHEMA)
-    image = report.get("image") or {}
+    image = report.get("image")
+    if image is None:
+        image = {}
+    elif not isinstance(image, dict):
+        # A list, string or number carries no image fields to read.
+        image = {}
+        problems.append("image evidence must be a JSON object")
     if not isinstance(image.get("sha256"), str) or len(image["sha256"]) != 64:
         problems.append("image sha256 missing")
     if image.get("sums_verified") is not True:
         problems.append("image checksum not verified")
     if image.get("signature_verified") is not False:
         problems.append("checksum must not be claimed as signed authenticity")
-    checks = report.get("checks") or {}
+    checks = report.get("checks")
+    if not isinstance(checks, dict):
+        checks = {}
+        problems.append("checks must be an object")
     if require_evidence:
         computed, error = recompute_checks(report)
         if error:
@@ -492,33 +547,56 @@ def tool(name: str, directory: pathlib.Path | None) -> str:
 # ------------------------------------------------------------- lifecycle
 
 
+def discard(part: pathlib.Path | str) -> None:
+    """Best-effort removal of a temporary file; never masks the error in flight."""
+    try:
+        pathlib.Path(part).unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"warning: could not remove {part}: {exc}", file=sys.stderr)
+
+
 def download(url: str, destination: pathlib.Path, timeout: float = 120) -> str:
     """Download to a sibling ``.part`` and fsync before replacing."""
-    part = destination.with_name(destination.name + ".part")
-    with urllib.request.urlopen(url, timeout=timeout) as response, \
-            part.open("wb") as handle:
-        while True:
-            chunk = response.read(1 << 20)
-            if not chunk:
-                break
-            handle.write(chunk)
-        handle.flush()
-        os.fsync(handle.fileno())
+    part = destination.with_name(f"{destination.name}.{uuid.uuid4().hex}.part")
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response, \
+                part.open("wb") as handle:
+            while True:
+                chunk = response.read(1 << 20)
+                if not chunk:
+                    break
+                handle.write(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        discard(part)
+        raise
     return str(part)
 
 
 def fetch_sums(sums_path: pathlib.Path, recorder: Recorder) -> None:
     started = time.time()
     part = download(IMAGE_URL + SUMS_NAME, sums_path)
-    recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + SUMS_NAME],
-                     "rc": 0, "bytes": pathlib.Path(part).stat().st_size,
-                     "seconds": round(time.time() - started, 3)})
-    pathlib.Path(part).replace(sums_path)
+    try:
+        recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + SUMS_NAME],
+                         "rc": 0, "bytes": pathlib.Path(part).stat().st_size,
+                         "seconds": round(time.time() - started, 3)})
+        pathlib.Path(part).replace(sums_path)
+    except BaseException:
+        discard(part)
+        raise
 
 
 def fetch_image(state: pathlib.Path, recorder: Recorder) -> dict:
+    """Fetch under an exclusive lock so manifest and image stay one transaction."""
     images = state / "images"
     images.mkdir(parents=True, exist_ok=True)
+    with (images / ".fetch.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return _fetch_image_locked(images, recorder)
+
+
+def _fetch_image_locked(images: pathlib.Path, recorder: Recorder) -> dict:
     sums_path = images / SUMS_NAME
     image_path = images / IMAGE_NAME
     if image_path.exists():
@@ -542,8 +620,12 @@ def fetch_image(state: pathlib.Path, recorder: Recorder) -> dict:
     expected = sums_digest(text, IMAGE_NAME)
     started = time.time()
     part = download(IMAGE_URL + IMAGE_NAME, image_path, timeout=1800)
-    actual = verify_image(pathlib.Path(part), expected)
-    pathlib.Path(part).replace(image_path)
+    try:
+        actual = verify_image(pathlib.Path(part), expected)
+        pathlib.Path(part).replace(image_path)
+    except BaseException:
+        discard(part)
+        raise
     recorder.append({"at": utc_now(), "argv": ["download", IMAGE_URL + IMAGE_NAME],
                      "rc": 0, "bytes": image_path.stat().st_size,
                      "seconds": round(time.time() - started, 3)})
@@ -643,20 +725,32 @@ def guest_ssh(run: dict, remote: str, recorder: Recorder,
 
 
 def wait_ssh(run: dict, recorder: Recorder, timeout: float = 240) -> dict:
-    deadline = time.time() + timeout
+    # One monotonic deadline governs the whole readiness window: every SSH call
+    # and sleep is capped to the budget that remains, so a late first SSH reply
+    # cannot grant cloud-init a fresh 240s and double the stated timeout.
+    deadline = time.monotonic() + timeout
     attempts = 0
-    while time.time() < deadline:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         attempts += 1
-        result = guest_ssh(run, "true", recorder, timeout=15)
+        result = guest_ssh(run, "true", recorder, timeout=min(15, remaining))
         if result["rc"] == 0:
-            done = guest_ssh(run, "cloud-init status --wait", recorder, timeout=240)
-            if done["rc"] == 0:
-                return {"attempts": attempts, "at": utc_now()}
-            status = guest_ssh(run, "cloud-init status", recorder, timeout=15)
-            if "status: error" in (status.get("stdout") or ""):
-                raise RuntimeError("cloud-init reported an error: "
-                                   + (status.get("stdout") or ""))
-        time.sleep(2)
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                done = guest_ssh(run, "cloud-init status --wait", recorder,
+                                 timeout=remaining)
+                if done["rc"] == 0:
+                    return {"attempts": attempts, "at": utc_now()}
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                status = guest_ssh(run, "cloud-init status", recorder,
+                                   timeout=min(15, remaining))
+                if "status: error" in (status.get("stdout") or ""):
+                    raise RuntimeError("cloud-init reported an error: "
+                                       + (status.get("stdout") or ""))
+        time.sleep(max(0.0, min(2, deadline - time.monotonic())))
     raise RuntimeError("guest SSH/cloud-init did not become ready")
 
 
@@ -980,7 +1074,11 @@ def build_checks(phases: dict, manager: dict, reboot: dict) -> dict:
             and (manager.get("before") or {}).get("manager", {}).get("invocation_id")
             != (manager.get("after") or {}).get("manager", {}).get("invocation_id")),
         "boot_id_changed": (
-            bool(reboot.get("boot_id_before"))
+            reboot.get("boot_id_before")
+            == (reboot.get("before") or {}).get("boot_id")
+            and reboot.get("boot_id_after")
+            == (reboot.get("after") or {}).get("boot_id")
+            and bool(reboot.get("boot_id_before"))
             and bool(reboot.get("boot_id_after"))
             and reboot.get("boot_id_before") != reboot.get("boot_id_after")),
         "metadata_equal": not restore_changes,
@@ -1119,6 +1217,23 @@ def cmd_prepare(args) -> int:
     return 0
 
 
+def _cleanup_diagnostic(args, prefix: str, cleanup_error: Exception,
+                        exc: BaseException | None = None) -> str:
+    """Return the cleanup diagnostic without breaking machine mode (doctrine I1).
+
+    Machine mode (``--json``) keeps stderr empty, so the text is never narrated
+    there: the caller keeps it in the JSON result, or ``exc`` carries it as a
+    note that ``main`` serializes into the one error artifact. Outside machine
+    mode the same text still goes to stderr.
+    """
+    message = "%s did not complete: %s" % (prefix, cleanup_error)
+    if not getattr(args, "json", False):
+        print(message, file=sys.stderr)
+    elif exc is not None:
+        exc.add_note(message)
+    return message
+
+
 def cmd_boot(args) -> int:
     state = pathlib.Path(args.state_dir).expanduser().resolve()
     run = load_run(state, args.run_id, require_process=False)
@@ -1127,17 +1242,22 @@ def cmd_boot(args) -> int:
         save_json(pathlib.Path(run["path"]) / "run.json", run)
     recorder = Recorder(pathlib.Path(run["path"]))
     stamp = host_stamp()
+    entered_boot = False
     try:
         with run_lock(pathlib.Path(run["path"])):
+            entered_boot = True
             info = boot(run, recorder, args.tools, stamp)
         info["ssh"] = wait_ssh(run, recorder)
         upload_guest_probe(run, recorder)
-    except BaseException:
-        try:
-            stop_owned_process(run, purge=False)
-        except Exception as cleanup_error:
-            print("cleanup after failed boot did not complete: %s"
-                  % cleanup_error, file=sys.stderr)
+    except BaseException as exc:
+        # A boot rejected because another invocation holds run.lock owns no
+        # guest; cleaning up would stop that invocation's live guest.
+        if entered_boot:
+            try:
+                stop_owned_process(run, purge=False)
+            except Exception as cleanup_error:
+                _cleanup_diagnostic(args, "cleanup after failed boot",
+                                    cleanup_error, exc)
         raise
     print(json.dumps(info, indent=2, sort_keys=True))
     return 0
@@ -1178,8 +1298,8 @@ def cmd_run(args) -> int:
     source_commit = (getattr(args, "source_commit", None)
                      or os.environ.get("CRQ_VM_SOURCE_COMMIT"))
     if not isinstance(source_commit, str) or not COMMIT_RE.fullmatch(source_commit):
-        raise ValueError("run requires --source-commit with the full git commit "
-                         "whose tree produced the executed scripts")
+        raise UsageRefusal("run requires --source-commit with the full git commit "
+                           "whose tree produced the executed scripts")
     recorder = Recorder(state)
     stamps = {"start": host_stamp()}
     image = fetch_image(state, recorder)
@@ -1189,10 +1309,13 @@ def cmd_run(args) -> int:
         run_dir = pathlib.Path(run["path"])
         host_source = pathlib.Path(__file__).resolve()
         guest_source = host_source.with_name("vm-guest-probe.py")
+        host_bytes = host_source.read_bytes()
         guest_bytes = guest_source.read_bytes()
+        verify_source_scripts(source_commit, host_source, guest_source,
+                              host_bytes, guest_bytes)
         host_artifact = run_dir / "executed-host-script.py"
         guest_artifact = run_dir / "executed-guest-probe.py"
-        shutil.copy2(host_source, host_artifact)
+        host_artifact.write_bytes(host_bytes)
         guest_artifact.write_bytes(guest_bytes)
         provenance = {
             "source_commit": source_commit,
@@ -1226,21 +1349,21 @@ def cmd_run(args) -> int:
                               provenance)
         save_json(pathlib.Path(run["path"]) / "report.json", report)
         problems = report_problems(report, require_evidence=True)
-    except BaseException:
+    except BaseException as exc:
         if not args.keep:
             try:
                 stop_owned_process(run, purge=False)
             except Exception as cleanup_error:
-                print("cleanup after failed run did not complete: %s"
-                      % cleanup_error, file=sys.stderr)
+                _cleanup_diagnostic(args, "cleanup after failed run",
+                                    cleanup_error, exc)
         raise
     cleanup = None
     if not args.keep:
         try:
             cleanup = stop_owned_process(run, purge=False)
         except Exception as cleanup_error:
-            print("cleanup after run did not complete: %s" % cleanup_error,
-                  file=sys.stderr)
+            # The diagnostic stays in the JSON result in machine mode (I1).
+            _cleanup_diagnostic(args, "cleanup after run", cleanup_error)
             cleanup = {"stopped": False, "error": str(cleanup_error)}
     print(json.dumps({"run": run["run_id"], "path": run["path"],
                       "problems": problems, "checks": report["checks"],
@@ -1331,9 +1454,11 @@ def _stop_owned_process(run: dict, *, purge: bool) -> dict:
         # holds this run's QEMU before stopping it: another workspace under the
         # same user manager can own a scope with the same name.
         before_rc, before = _show_scope(derived_unit)
-        if before_rc == 0 and before.get("LoadState") != "not-found":
+        if before_rc != 0:
+            raise RuntimeError("cannot verify scope ownership: " + derived_unit)
+        if before.get("LoadState") != "not-found":
             members = _cgroup_pids(before.get("ControlGroup"))
-            if members is None and before.get("ActiveState") not in ("inactive", "failed"):
+            if members is None:
                 raise RuntimeError("cannot verify scope ownership: " + derived_unit)
             if members:
                 def owns(pid: int) -> bool:
@@ -1407,6 +1532,8 @@ def cmd_destroy(args) -> int:
 def cmd_verify(args) -> int:
     report_path = pathlib.Path(args.report).resolve()
     report = json.loads(report_path.read_text())
+    if not isinstance(report, dict):
+        raise UsageRefusal("report is not a JSON object: " + str(report_path))
     problems = verify_report(report, report_path.parent)
     print(json.dumps({"problems": problems}, indent=2, sort_keys=True))
     return 0 if not problems else 1
@@ -1416,6 +1543,15 @@ def _error_artifact(kind, subcommand, message, exit_code) -> dict:
     """The one JSON artifact for an error with no result (doctrine I1)."""
     return {"error": {"kind": kind, "subcommand": subcommand,
                       "message": message, "exitCode": exit_code}}
+
+
+def _error_message(exc: BaseException) -> str:
+    """The error text, carrying any notes retained instead of stderr prose."""
+    message = str(exc) or type(exc).__name__
+    for note in getattr(exc, "__notes__", ()):
+        if note:
+            message = "%s: %s" % (message, note)
+    return message
 
 
 class _JsonArgumentParser(argparse.ArgumentParser):
@@ -1490,21 +1626,23 @@ def main(argv=None) -> int:
                 "run": cmd_run, "destroy": cmd_destroy, "verify": cmd_verify}
     try:
         return commands[args.command](args)
-    except ValueError as exc:
-        # Refusals and missing arguments (e.g. run without --source-commit)
-        # stay usage errors (exit 2) but still write the one JSON artifact to
-        # stdout; stderr stays empty in machine mode.
-        message = str(exc) or type(exc).__name__
-        print(json.dumps(_error_artifact("refused", args.command, message, 2),
+    except UsageRefusal as exc:
+        # Usage errors and refusals (e.g. run without --source-commit, or a
+        # report that is not a JSON object) stay usage errors (exit 2) but
+        # still write the one JSON artifact to stdout; stderr stays empty in
+        # machine mode.
+        message = _error_message(exc)
+        print(json.dumps(_error_artifact("usage", args.command, message, 2),
                          indent=2, sort_keys=True))
         if not parser.json_mode:
             print("refused: " + message, file=sys.stderr)
         return 2
-    except (RuntimeError, OSError) as exc:
-        # A RuntimeError from QEMU or a guest phase, or an OSError from a
-        # missing report, a download or the filesystem, is a thrown error
-        # (exit 1), never an argument error.
-        message = str(exc) or type(exc).__name__
+    except (ValueError, RuntimeError, OSError) as exc:
+        # A ValueError from runtime integrity (e.g. verify_image rejecting a
+        # corrupted cached image), a RuntimeError from QEMU or a guest phase,
+        # or an OSError from a missing report, a download or the filesystem,
+        # is a thrown error (exit 1), never an argument error.
+        message = _error_message(exc)
         print(json.dumps(_error_artifact("thrown", args.command, message, 1),
                          indent=2, sort_keys=True))
         if not parser.json_mode:

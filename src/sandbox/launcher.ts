@@ -2,6 +2,7 @@
 import { spawn } from 'node:child_process';
 import { accessSync, constants, realpathSync } from 'node:fs';
 import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { buildSandboxLauncherEnv } from './index.js';
 import type { SandboxBackend, SandboxNetwork } from './config.js';
 import { currentEntryEnv, type EntryEnv } from '../config/run-env.js';
@@ -99,6 +100,10 @@ export function runChild(
     let errBytes = 0;
     let out = '';
     let err = '';
+    // One decoder per stream so a multibyte character split across two chunks
+    // is retained for the next write instead of decoding to U+FFFD.
+    const outDecoder = new StringDecoder('utf8');
+    const errDecoder = new StringDecoder('utf8');
     let overflowed = false;
     let spawnErrorMessage: string | undefined;
     let spawnErrored = false;
@@ -174,6 +179,10 @@ export function runChild(
       clearTimeout(drainTimer);
       if (overflowed) result.timedOut = true;
       if (spawnErrorMessage !== undefined) result.spawnError = spawnErrorMessage;
+      // Flush any bytes still held back by a decoder (a genuinely truncated
+      // final character) before the captured text is finalized.
+      out += outDecoder.end();
+      err += errDecoder.end();
       result.stdout = out.slice(0, options.maxOutputChars);
       result.stderr = (err !== '' ? err : (spawnErrorMessage ?? '')).slice(
         0,
@@ -181,16 +190,23 @@ export function runChild(
       );
       resolve(result);
     };
-    const capture = (current: string, chunk: Buffer, currentBytes: number): string => {
+    const capture = (
+      current: string,
+      chunk: Buffer,
+      currentBytes: number,
+      decoder: StringDecoder,
+    ): string => {
       if (currentBytes >= captureCap) {
         overflowed = true;
         return current;
       }
       if (currentBytes + chunk.byteLength > captureCap) {
         overflowed = true;
-        return current + chunk.toString('utf8', 0, captureCap - currentBytes);
+        // Truncation cuts whatever bytes fit; a character split by the cap is
+        // simply not emitted (its tail is dropped with the rest of the chunk).
+        return current + decoder.write(chunk.subarray(0, captureCap - currentBytes));
       }
-      return current + chunk.toString('utf8');
+      return current + decoder.write(chunk);
     };
     child.on('error', (error: NodeJS.ErrnoException) => {
       spawnErrored = true;
@@ -199,7 +215,7 @@ export function runChild(
       finish();
     });
     child.stdout?.on('data', (chunk: Buffer) => {
-      out = capture(out, chunk, outBytes);
+      out = capture(out, chunk, outBytes, outDecoder);
       outBytes = Math.min(outBytes + chunk.byteLength, captureCap);
       // Overflow must not be survivable (delta review): kill the group now so
       // a later exit 0 can never be classified ok after the cap was blown.
@@ -211,7 +227,7 @@ export function runChild(
       }
     });
     child.stderr?.on('data', (chunk: Buffer) => {
-      err = capture(err, chunk, errBytes);
+      err = capture(err, chunk, errBytes, errDecoder);
       errBytes = Math.min(errBytes + chunk.byteLength, captureCap);
       if (overflowed && !settled) {
         result.timedOut = true;
@@ -229,11 +245,14 @@ export function runChild(
 }
 
 /**
- * Resolve a launcher name to an ABSOLUTE path ONCE per adapter
+ * Resolve a launcher name to a CANONICAL absolute path ONCE per adapter
  * (final-head review): the certification probe and every later launch must
  * execute the SAME binary even when a request supplies a parentEnv whose PATH
  * differs — a PATH pointing into the workspace could otherwise select a
  * planted launcher while adapter identity still matches the receipt.
+ * The bound path is realpath'd: a launcher reached through a symlink binds its
+ * TARGET, so the containment check and every spawn canonicalize to the same
+ * file the probe ran instead of a replaceable symlink inside the workspace.
  * Resolution deliberately uses the ADAPTER environment (the env the
  * probe's availability check ran under), never the per-request parent env:
  * that is the run's entry snapshot (`currentEntryEnv()`), so an ambient PATH
@@ -249,17 +268,26 @@ export function resolveLauncher(
   name: string,
   env: EntryEnv = currentEntryEnv(),
 ): string | undefined {
-  const absolute = (candidate: string): string => resolve(candidate);
+  const absolute = (candidate: string): string | undefined => {
+    try {
+      return realpathSync(resolve(candidate));
+    } catch {
+      return undefined;
+    }
+  };
   if (name.includes('/')) return absolute(name);
   for (const dir of (env['PATH'] ?? '').split(delimiter)) {
     if (dir === '') continue;
-    const candidate = absolute(join(dir, name));
+    const candidate = resolve(join(dir, name));
     try {
       accessSync(candidate, constants.X_OK);
-      return candidate;
     } catch {
-      // Keep searching the remaining PATH entries.
+      continue;
     }
+    // A candidate that is executable but whose realpath fails (broken or
+    // racing symlink) must not end the search: try the remaining entries.
+    const canonical = absolute(candidate);
+    if (canonical !== undefined) return canonical;
   }
   return undefined;
 }

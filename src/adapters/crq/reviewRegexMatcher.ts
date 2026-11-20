@@ -22,6 +22,11 @@ export async function matchReviewRegexBatch(
     Buffer.byteLength(JSON.stringify(input)) > 16 * 1024 * 1024
   )
     throw new Error('review matcher input exceeds limits');
+  // The worker receives a structured clone, so it answers with indexes for the
+  // dimensions at submission. Snapshot them now so later caller mutations of the
+  // live arrays cannot invalidate otherwise correct hits.
+  const ruleCount = input.rules.length;
+  const lineCount = input.lines.length;
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL('./reviewRegexWorker.js', import.meta.url), {
       workerData: input,
@@ -65,12 +70,12 @@ export async function matchReviewRegexBatch(
           !Number.isSafeInteger(entry[0]) ||
           !Number.isSafeInteger(entry[1]) ||
           entry[0] < 0 ||
-          entry[0] >= input.lines.length ||
+          entry[0] >= lineCount ||
           entry[1] < 0 ||
-          entry[1] >= input.rules.length
+          entry[1] >= ruleCount
         )
           return finish();
-        const order = entry[0] * input.rules.length + entry[1];
+        const order = entry[0] * ruleCount + entry[1];
         if (order <= previous) return finish();
         previous = order;
         result.push([entry[0], entry[1]]);

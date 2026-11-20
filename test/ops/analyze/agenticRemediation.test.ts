@@ -103,6 +103,7 @@ function baseInput(): AgenticRemediationInput {
 const COMPLETE: WorkerResult = {
   structuredOutput: { summary: 'rename foo_bar to fooBar' },
   usage: { input: 120, output: 40, cacheRead: 0, cacheWrite: 0 },
+  usageProvenance: 'measured',
   denials: [],
   stopReason: 'complete',
 };
@@ -225,6 +226,7 @@ describe('makeAgenticRemediation (the driver-factory seam)', () => {
       fakeFactory(
         fakeDriver({
           usage: { input: 120, output: 12, cacheRead: 0, cacheWrite: 0 },
+          usageProvenance: 'measured',
           denials: [],
           stopReason: 'error',
           error:
@@ -246,6 +248,7 @@ describe('makeAgenticRemediation (the driver-factory seam)', () => {
       fakeFactory(
         fakeDriver({
           usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+          usageProvenance: 'measured',
           denials: [],
           stopReason: 'error',
         }),
@@ -261,6 +264,7 @@ describe('makeAgenticRemediation (the driver-factory seam)', () => {
       fakeFactory(
         fakeDriver({
           usage: { input: 9, output: 0, cacheRead: 0, cacheWrite: 0 },
+          usageProvenance: 'measured',
           denials: [],
           stopReason: 'budget',
         }),
@@ -282,6 +286,7 @@ describe('makeAgenticRemediation (the driver-factory seam)', () => {
       fakeFactory(
         fakeDriver({
           usage: { input: 9, output: 1, cacheRead: 0, cacheWrite: 0 },
+          usageProvenance: 'measured',
           denials: [],
           stopReason: 'aborted',
         }),
@@ -633,6 +638,7 @@ describe('#1195 usageSummary on terminal results', () => {
       fakeFactory(
         fakeDriver({
           usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+          usageProvenance: 'measured',
           denials: [],
           stopReason: 'error',
           errorClass: 'output-invalid',
@@ -653,6 +659,7 @@ describe('#1195 usageSummary on terminal results', () => {
       fakeFactory(
         fakeDriver({
           usage: { input: 9, output: 1, cacheRead: 0, cacheWrite: 0 },
+          usageProvenance: 'measured',
           denials: [],
           stopReason: 'aborted',
         }),
@@ -672,6 +679,7 @@ describe('#1195 usageSummary on terminal results', () => {
       fakeFactory(
         fakeDriver({
           usage: { input: -5, output: 1, cacheRead: 0, cacheWrite: 0 },
+          usageProvenance: 'measured',
           denials: [],
           stopReason: 'complete',
         }),
@@ -679,6 +687,45 @@ describe('#1195 usageSummary on terminal results', () => {
     )(baseInput());
     expect(result.status).toBe('ok');
     expect(KnownUsageSummarySchema.parse(result.usageSummary)).toEqual({
+      knownCount: 0,
+      unknownCount: 1,
+      unpricedCount: 1,
+    });
+  });
+
+  // Seam v3: only an explicit `'measured'` declaration licenses the token
+  // numbers. An `'unmeasured'` placeholder and a legacy/custom result with no
+  // declaration at all both stay UNKNOWN — while the engine-derived cost, which
+  // carries its own provenance, still folds in.
+  test('usage without a measured declaration stays UNKNOWN; the settled cost still lands', async () => {
+    const unmeasured = await makeAgenticRemediation(
+      fakeFactory(
+        fakeDriver({
+          usage: { input: 7, output: 3, cacheRead: 0, cacheWrite: 0 },
+          usageProvenance: 'unmeasured',
+          costUSD: 0.02,
+          denials: [],
+          stopReason: 'complete',
+        }),
+      ),
+    )(baseInput());
+    expect(KnownUsageSummarySchema.parse(unmeasured.usageSummary)).toEqual({
+      costUSD: 0.02,
+      knownCount: 0,
+      unknownCount: 1,
+      unpricedCount: 0,
+    });
+
+    const undeclared = await makeAgenticRemediation(
+      fakeFactory(
+        fakeDriver({
+          usage: { input: 7, output: 3, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+          stopReason: 'complete',
+        }),
+      ),
+    )(baseInput());
+    expect(KnownUsageSummarySchema.parse(undeclared.usageSummary)).toEqual({
       knownCount: 0,
       unknownCount: 1,
       unpricedCount: 1,

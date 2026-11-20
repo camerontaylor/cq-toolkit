@@ -6,6 +6,7 @@ import {
   acquireFileLock,
   acquireSlot,
   attachSlotMetadata,
+  readSlotMetadata,
 } from '../../../src/adapters/lock/slotLock.js';
 // @ts-expect-error The recovery executable is plain JavaScript.
 import { recoverReviewCheckout as untypedRecover } from '../../../scripts/recover-review-checkout.mjs';
@@ -162,6 +163,27 @@ test('removed recovery accepts a missing checkout parent while holding the origi
   expect(await f.read(f.paths[0]!)).toEqual({ version: 1, state: 'unbound', incomplete: false });
 });
 
+test('removed recovery of a complete bound record whose checkout is already gone reaches reconciliation', async () => {
+  const f = await recoveryFixture();
+  const parent = join(dirname(dirname(dirname(f.paths[0]!))), 'gone-parent');
+  const checkout = join(parent, 'checkout');
+  const gitDir = join(parent, 'admin');
+  await mkdir(checkout, { recursive: true });
+  await mkdir(gitDir);
+  const slot = attachSlotMetadata(await acquireFileLock(f.paths[0]!));
+  await slot.writeMetadata({
+    version: 1,
+    state: 'bound',
+    incomplete: false,
+    checkoutPath: checkout,
+    checkoutGitDir: gitDir,
+  });
+  await slot.close();
+  await rename(parent, `${parent}-saved`);
+  await recoverReviewCheckout({ ...f.env, CQ_RECOVERY_CHECKOUT: checkout }, f.io);
+  expect(await f.read(f.paths[0]!)).toEqual({ version: 1, state: 'unbound', incomplete: false });
+});
+
 test('missing acknowledgement preserves incomplete metadata', async () => {
   const f = await recoveryFixture();
   await expect(
@@ -175,6 +197,31 @@ test('failed recovery shell reports non-clearing result', async () => {
   await expect(recoverReviewCheckout(f.env, { ...f.io, shell: async () => false })).rejects.toThrow(
     'Recovery shell exited unsuccessfully',
   );
+  for (const path of f.paths) expect((await f.read(path))?.incomplete).toBe(true);
+});
+
+test('complete slots are marked incomplete before the shell starts', async () => {
+  const f = await recoveryFixture();
+  const slot = attachSlotMetadata(await acquireFileLock(f.paths[0]!));
+  await slot.writeMetadata({ version: 1, state: 'unbound', incomplete: false });
+  await slot.close();
+  const readFlags = async () => {
+    const values = await Promise.all(
+      f.paths.map((path) => readSlotMetadata(path.replace(/\.lock$/, '.json'))),
+    );
+    return values.map((value) => value?.incomplete);
+  };
+  let observed: (boolean | undefined)[] = [];
+  await expect(
+    recoverReviewCheckout(f.env, {
+      ...f.io,
+      shell: async () => {
+        observed = await readFlags();
+        return false;
+      },
+    }),
+  ).rejects.toThrow('Recovery shell exited unsuccessfully');
+  expect(observed).toEqual([true, true]);
   for (const path of f.paths) expect((await f.read(path))?.incomplete).toBe(true);
 });
 

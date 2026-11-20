@@ -131,6 +131,17 @@ const descriptiveManifestFields = new Set([
   'keywords',
   'funding',
 ]);
+/** Lockfiles select dependency versions. A member lockfile can select a different
+ * graph than the root lockfile when the shared workspace lockfile is disabled, so
+ * every level of the workspace tree must be compared, not just the root. */
+const dependencyLockfiles = [
+  'pnpm-lock.yaml',
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'yarn.lock',
+  'bun.lock',
+  'bun.lockb',
+];
 const installLifecycleScripts = new Set([
   'preinstall',
   'install',
@@ -150,17 +161,24 @@ export async function assertAddressDependencyMetadata(
   admit: () => void,
   prepared = false,
 ): Promise<void> {
-  const read = async (cwd: string, path: string) => {
+  // Metadata is compared as raw bytes unless it must be parsed: decoding binary
+  // lockfiles (e.g. bun.lockb) as UTF-8 replaces invalid sequences, so distinct
+  // bytes could otherwise compare equal.
+  const readBytes = async (cwd: string, path: string) => {
     admit();
     try {
       const full = await realpath(resolve(cwd, path));
       if (!within(await realpath(cwd), full))
         throw new Error('dependency metadata escapes checkout');
-      return await readFile(full, 'utf8');
+      return await readFile(full);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
     }
+  };
+  const read = async (cwd: string, path: string) => {
+    const bytes = await readBytes(cwd, path);
+    return bytes === null ? null : bytes.toString('utf8');
   };
   // Scripts npm actually executes when installation runs: every lifecycle key,
   // plus the scripts those lifecycle commands invoke (`npm run X` / `pnpm run X`)
@@ -238,9 +256,12 @@ export async function assertAddressDependencyMetadata(
     return fields;
   };
   const compare = async (path: string, manifest = false) => {
-    const a = await read(root, path);
-    const b = await read(caller, path);
-    if (!isDeepStrictEqual(manifest ? relevant(a) : a, manifest ? relevant(b) : b))
+    // Manifests are parsed, so they stay decoded text; every other metadata
+    // file is byte-compared so binary lockfiles are never lossily decoded.
+    const differs = manifest
+      ? !isDeepStrictEqual(relevant(await read(root, path)), relevant(await read(caller, path)))
+      : !isDeepStrictEqual(await readBytes(root, path), await readBytes(caller, path));
+    if (differs)
       throw new Error(
         prepared
           ? 'prepared dependency root manifests/locks differ; provide a prepared root matching the PR metadata'
@@ -249,13 +270,8 @@ export async function assertAddressDependencyMetadata(
   };
   await compare('package.json', true);
   for (const path of [
-    'pnpm-lock.yaml',
+    ...dependencyLockfiles,
     'pnpm-workspace.yaml',
-    'package-lock.json',
-    'npm-shrinkwrap.json',
-    'yarn.lock',
-    'bun.lock',
-    'bun.lockb',
     '.npmrc',
     '.yarnrc',
     '.yarnrc.yml',
@@ -303,7 +319,9 @@ export async function assertAddressDependencyMetadata(
     }
   for (const path of [...members].sort()) {
     await compare(path, true);
-    for (const config of ['.npmrc', '.yarnrc.yml', 'bunfig.toml'])
+    // A member lockfile (pnpm without a shared workspace lockfile, or a nested
+    // project) selects versions this checkout's installed tree may not match.
+    for (const config of [...dependencyLockfiles, '.npmrc', '.yarnrc.yml', 'bunfig.toml'])
       await compare(`${dirname(path)}/${config}`);
   }
 }
