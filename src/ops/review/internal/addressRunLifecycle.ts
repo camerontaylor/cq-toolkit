@@ -3,6 +3,7 @@ import { boundedFile, same, type Identity } from './addressFileIdentity.js';
 import type { ReviewAddressResult, ReviewAddressReport } from '../address.js';
 import {
   disposeAddressTerminalSession,
+  assertAddressTerminalRoot,
   checkpointAddressTerminalEvidence,
   noteAddressTerminalBookkeeping,
   noteAddressOrdinaryReport,
@@ -68,6 +69,7 @@ export interface TerminalInternals {
   bookkeeping(root: string, entries: ReadonlyMap<string, string>): Promise<void>;
   ordinaryReport(path: string, bytes: string): Promise<void>;
   candidate(root: string, path: string, remove: boolean): Promise<void>;
+  preflight(root: string): Promise<void>;
 }
 const terminalInternals = new WeakMap<AddressRunAuthority, TerminalInternals>();
 const runTokens = new WeakMap<AddressRunAuthority, object>();
@@ -205,6 +207,10 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
         checkpointAddressTerminalEvidence(terminalToken(this), root, head, expected),
       bookkeeping: (root, entries) => this.terminalBookkeeping(root, entries),
       ordinaryReport: (path, bytes) => this.ordinaryReport(path, bytes),
+      preflight: async (root) => {
+        await this.validateTerminal();
+        await assertAddressTerminalRoot(terminalToken(this), root);
+      },
       candidate: async (root, path, remove) => {
         await this.validateTerminal();
         if (!remove) {
@@ -678,6 +684,13 @@ export function checkpointAddressTerminalWorker(
   if (!association || association.participant.closed)
     throw new Error('address terminal: invalid worker checkpoint');
   return terminalInternals.get(association.owner)!.checkpoint(root, head, expected);
+}
+/** Refuse before `git worktree add` when this session could not later remove the candidate. */
+export function addressTerminalPreflight(binding: object, root: string): Promise<void> {
+  const association = terminalWorkers.get(binding);
+  if (!association || association.participant.closed)
+    throw new Error('address terminal: forged worker association');
+  return terminalInternals.get(association.owner)!.preflight(root);
 }
 export function addressTerminalCandidate(
   binding: object,
