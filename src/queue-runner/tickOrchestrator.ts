@@ -58,6 +58,14 @@ export interface TickPhases {
   backfillInventory(queue: JsonObject): Promise<JsonObject>;
   /** Deferred refresh, merged and push discovery (live, unrestricted ticks only). */
   discovery(queue: JsonObject): Promise<PhaseResult>;
+  /** `repair_tick.reset_fix_pr_backlog()`: the cap view is unread until a refresh reads it. */
+  resetFixPrBacklog(): Promise<void>;
+  /**
+   * Live ticks only. `if backfill_repair_present(q)`: `refresh_fix_pr_backlog`
+   * inside a one-request, 30 s forge window. The phase owns the presence test
+   * and swallows a failed read (the view stays unread, creation holds).
+   */
+  refreshFixPrBacklog(queue: JsonObject): Promise<void>;
   /** Per live item: republish, harvest_review, legacy addressing, repair harvest. */
   harvestItems(queue: JsonObject, dry: boolean): Promise<PhaseResult>;
   reconcileCompleted(queue: JsonObject): Promise<JsonObject>;
@@ -192,7 +200,16 @@ export async function runTick(input: TickInput, p: TickPhases): Promise<string[]
     }
   }
   const startsBefore = startsCount(q);
-  const harvested = await p.harvestItems(q, dry);
+  // crq.py:3531-3560: reset and refresh the fix-PR cap view around the harvest
+  // pass; the trailing reset runs even when a phase abandons the tick.
+  await p.resetFixPrBacklog();
+  if (!dry) await p.refreshFixPrBacklog(q);
+  let harvested: PhaseResult;
+  try {
+    harvested = await p.harvestItems(q, dry);
+  } finally {
+    await p.resetFixPrBacklog();
+  }
   q = harvested.queue;
   log.push(...harvested.log);
   if (!dry) {

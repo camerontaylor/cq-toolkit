@@ -142,6 +142,20 @@ export function utcFromMillis(milliseconds: number): UtcInstant {
   return new UtcInstant(BigInt(Math.trunc(milliseconds)) * 1000n);
 }
 
+/**
+ * `datetime.fromisoformat(value.replace('Z', '+00:00')).tzinfo is not None`
+ * for a value that parses: the separator is whatever single character sits at
+ * the position fixed by the date's shape, and the time part is tz-aware iff it
+ * carries a `+` or `-` offset. Call only after a successful parse.
+ */
+export function utcHasOffset(value: string): boolean {
+  const text = value.replaceAll('Z', '+00:00');
+  const separator = findDateTimeSeparator(text);
+  if (separator === -1) return false;
+  const timeText = text.slice(separator + (text.codePointAt(separator)! > 0xffff ? 2 : 1));
+  return findOffsetStart(timeText) !== -1;
+}
+
 function parseIsoLike(text: string): bigint | null {
   const separator = findDateTimeSeparator(text);
   const dateText = separator === -1 ? text : text.slice(0, separator);
