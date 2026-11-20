@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 
 import author_snapshot
 import backfill_runtime
@@ -103,21 +104,28 @@ def provision(runner, repo):
         return False
     if (path / ".git").is_dir():
         return True
-    partial = path.with_name(path.name + ".partial")
-    shutil.rmtree(partial, ignore_errors=True)
-    partial.parent.mkdir(parents=True, exist_ok=True)
+    # A unique scratch directory under `.tmp`, outside the owner/name
+    # namespace (a slug never starts with a dot), so a failed clone can never
+    # collide with or delete another repository's clone.
+    scratch_root = Path(runner.STATE) / "review-repos" / ".tmp"
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(prefix="clone-", dir=scratch_root))
+    partial = scratch / "clone"
+    # Keep the runner's user and system Git configuration (credential helpers,
+    # URL rewrites) exactly as crq.fetch does; only prompts are disabled.
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
-    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+    env.update(GIT_TERMINAL_PROMPT="0", GIT_SSH_COMMAND="ssh -o BatchMode=yes")
     try:
         subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "clone", "--quiet", "--no-checkout",
                         clone_url(runner, repo), str(partial)],
                        env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, timeout=CLONE_TIMEOUT_S, check=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(partial, path)
     except (OSError, subprocess.SubprocessError, author_snapshot.AuthorRefused):
-        shutil.rmtree(partial, ignore_errors=True)
         return False
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
     return True
 
 

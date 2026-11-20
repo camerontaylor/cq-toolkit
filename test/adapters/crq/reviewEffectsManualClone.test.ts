@@ -96,6 +96,7 @@ describe('manual review clones', () => {
     expect((await stat(join(clone, '.git'))).isDirectory()).toBe(true);
     expect(git(clone, 'log', '-1', '--format=%s', 'origin/main')).toBe('other/repo');
     expect(await readdir(join(root, 'state', 'review-repos', 'other'))).toEqual(['repo']);
+    expect(await readdir(join(root, 'state', 'review-repos', '.tmp'))).toEqual([]);
     // Reuse: a second provision finds the clone and does not clone again.
     expect(await effects.provisionRepo('Other/Repo')).toBe(true);
     expect(await effects.hasCommit('other/repo', git(clone, 'rev-parse', 'origin/main'))).toBe(
@@ -105,8 +106,13 @@ describe('manual review clones', () => {
 
   test('a repository that cannot be cloned is unavailable and leaves no partial', async () => {
     const { root, effects } = await fixture();
+    // Another repository whose name extends this one must survive the failure.
+    const sibling = join(root, 'state', 'review-repos', 'missing', 'repo.partial');
+    await mkdir(join(sibling, '.git'), { recursive: true });
     expect(await effects.provisionRepo('missing/repo')).toBe(false);
-    expect(await readdir(join(root, 'state', 'review-repos', 'missing'))).toEqual([]);
+    expect(await readdir(join(root, 'state', 'review-repos', 'missing'))).toEqual(['repo.partial']);
+    expect((await stat(join(sibling, '.git'))).isDirectory()).toBe(true);
+    expect(await readdir(join(root, 'state', 'review-repos', '.tmp'))).toEqual([]);
   });
 
   test('the primary and configured repositories need no manual clone', async () => {

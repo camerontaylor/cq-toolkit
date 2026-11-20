@@ -83,7 +83,16 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
         with mock.patch.object(transport, "clone_url", return_value=str(self.state / "missing.git")):
             self.assertEqual(self.call_review(self.review)["reason"], "repo-unavailable")
         self.assertEqual(self.saved["items"], [])
-        self.assertEqual(list((self.state / "review-repos" / "other").iterdir()), [])
+        self.assertEqual(sorted(p.name for p in (self.state / "review-repos").iterdir()), [".tmp"])
+        self.assertEqual(list((self.state / "review-repos" / ".tmp").iterdir()), [])
+        # A failed clone never touches another repository's clone, even one
+        # whose name extends this repository's name (owner/project.partial).
+        sibling = self.state / "review-repos" / "other" / "repo.partial"
+        (sibling / ".git").mkdir(parents=True)
+        (sibling / ".git" / "keep").write_text("retained snapshot objects")
+        with mock.patch.object(transport, "clone_url", return_value=str(self.state / "missing.git")):
+            self.assertEqual(self.call_review(self.review)["reason"], "repo-unavailable")
+        self.assertEqual((sibling / ".git" / "keep").read_text(), "retained snapshot objects")
         # A slug that is not owner/name is still refused before any clone.
         self.review["inputs"]["repo"] = "not-a-slug"
         with mock.patch.object(transport, "provision") as provision:
@@ -126,7 +135,7 @@ class ReviewTransportTests(SnapshotTransportFixture, unittest.TestCase):
             self.call_review(self.review)
             url.assert_called_once()
         self.assertTrue((clone / ".git").is_dir())
-        self.assertFalse(clone.with_name("unconfigured.partial").exists())
+        self.assertEqual(list((self.state / "review-repos" / ".tmp").iterdir()), [])
         self.assertEqual(self.saved["items"][0]["identity_inputs"]["repo"], "Foreign/Unconfigured")
         self.assertFalse(hasattr(self.runner, "REPOS"))
 

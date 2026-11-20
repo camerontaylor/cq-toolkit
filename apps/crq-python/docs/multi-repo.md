@@ -228,8 +228,11 @@ The primary and configured repositories use their configured clone for object
 resolution, snapshot installation, planning, scans, execution worktrees and
 cleanup. Any other repository is cloned once, on demand, into
 `<state>/review-repos/<owner>/<name>` (lower-cased identity) from the primary
-clone's origin URL with the repository swapped in, so it uses the same
-transport and credentials the runner already fetches with. Its pre-upload scan
+clone's origin URL with the repository swapped in, keeping the runner's Git
+configuration (credential helpers, URL rewrites) as `fetch` does. The clone is
+made in a unique scratch directory under `review-repos/.tmp` (outside the
+owner/name namespace) and moved into place only on success, so a failed clone
+never touches another repository's clone. Its pre-upload scan
 uses the universal secret-shape set only. A repository the runner cannot clone
 (missing, no access, or the 90 s clone timeout) answers
 `state: unsupported, reason: repo-unavailable`; a malformed slug still answers

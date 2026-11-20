@@ -8,7 +8,7 @@
  * Git runs through the bounded helper, so a snapshot or history call can never
  * outlive the forced command.
  */
-import { appendFile, mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { JsonNumber, JsonObject as ObjectValue } from '../../policy/crq/jsonValue.js';
@@ -206,26 +206,27 @@ export function createReviewEffects(options: ReviewEffectsOptions): ReviewEffect
         options.repo,
         repo,
       );
-      const partial = `${path}.partial`;
-      await rm(partial, { recursive: true, force: true });
-      await mkdir(join(path, '..'), { recursive: true });
-      // `git -C <parent> clone <url> <partial>`: the bounded helper needs an
-      // existing working directory, so the clone runs from the owner directory.
-      const result = await gitCall(
-        pool,
-        join(path, '..'),
-        ['clone', '--quiet', '--no-checkout', url, partial],
-        { timeoutMs: CLONE_TIMEOUT_MS },
-      );
-      if (result.code !== 0) {
-        await rm(partial, { recursive: true, force: true });
-        return false;
-      }
+      // A unique scratch directory under `.tmp`, outside the owner/name
+      // namespace (a slug never starts with a dot), so a failed clone can
+      // never collide with or delete another repository's clone.
+      const scratchRoot = join(state, 'review-repos', '.tmp');
+      await mkdir(scratchRoot, { recursive: true });
+      const scratch = await mkdtemp(join(scratchRoot, 'clone-'));
+      const partial = join(scratch, 'clone');
       try {
+        const result = await gitCall(
+          pool,
+          scratch,
+          ['clone', '--quiet', '--no-checkout', url, partial],
+          { timeoutMs: CLONE_TIMEOUT_MS, transportConfig: true },
+        );
+        if (result.code !== 0) return false;
+        await mkdir(join(path, '..'), { recursive: true });
         await rename(partial, path);
       } catch {
-        await rm(partial, { recursive: true, force: true });
         return false;
+      } finally {
+        await rm(scratch, { recursive: true, force: true });
       }
       return true;
     },
