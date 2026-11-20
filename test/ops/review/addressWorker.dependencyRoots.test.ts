@@ -255,6 +255,8 @@ describe('review.address candidate isolation', () => {
     ],
     ['-- ends the task list', "run-s build:deps -- 'docs:*'", 'docs:lint'],
     ['a quoted -- ends the task list', "run-s build:deps '--' 'docs:*'", 'docs:lint'],
+    ['printf operands are not a runner', "printf '%s' run-s 'docs:*'", 'docs:lint'],
+    ['a redirection operand is not a task', "run-s build:deps > 'docs:*'", 'docs:lint'],
     ['* stays inside one segment', "run-s 'build:*'", 'build:docs:html'],
   ])(
     'runner selection: %s reuses dependencies when an unselected script changes',
@@ -280,6 +282,34 @@ describe('review.address candidate isolation', () => {
       }
     },
   );
+  test.each([
+    ['run-s build:deps', 'build::deps'],
+    ["sh -c 'run-s build:*'", 'build:deps'],
+    ["run-s 'build:*'", 'build:other'],
+    ['run-s "build:*"', 'build:other'],
+    ['run-s build:**:other', 'build:other'],
+  ])('runner selection %s refuses reuse when only %s changes', async (postinstall, changed) => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const scripts = {
+        postinstall,
+        'build:deps': 'node deps.mjs',
+        'build::deps': 'node deps2.mjs',
+        'build:other': 'node other.mjs',
+      };
+      await f.repo.write('package.json', JSON.stringify({ scripts }));
+      f.repo.commitAll('runner selection changed script');
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ scripts: { ...scripts, [changed]: 'node different.mjs' } }),
+      );
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit).toBeUndefined();
+      expect(result.reason).toContain('manifests/locks differ');
+    } finally {
+      await f.cleanup();
+    }
+  });
   test.each([
     ["run-s 'build:[ab]'", 'build:a'],
     ["run-s 'build:**'", 'build:docs:html'],

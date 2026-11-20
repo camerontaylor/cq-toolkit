@@ -293,15 +293,24 @@ export async function assertAddressDependencyMetadata(
       // that name. Record the patterns it names; unsupported/negative matching stays
       // ambiguous below so no actual install input is omitted.
       const patterns = new Set<string>();
+      let unresolved = false;
       // Dynamic shell expressions and unsupported runner syntax stay conservative:
       // narrowing those to literal names could omit an actual install input.
       // A runner pattern whose targets cannot be established makes every script a
       // possible install input.
-      let unresolved = false;
       let ambiguous =
         /[$`\\<>]/.test(command) ||
         tokens.includes('eval') ||
         tokens.some((token) => /[\s'"]/.test(token));
+      // A shell payload (`sh -c 'run-s build:*'`) hides its runner selection inside
+      // one token; its targets cannot be established, so compare every script.
+      if (
+        tokens.some(
+          (token) =>
+            /\s/.test(token) && /(?:^|[\s/])(?:run-s|run-p|npm-run-all)(?:\s|$)/.test(token),
+        )
+      )
+        unresolved = true;
       for (let index = 0; index < tokens.length; index++) {
         const token = tokens[index] ?? '';
         if (token.startsWith('npm:')) {
@@ -310,10 +319,16 @@ export async function assertAddressDependencyMetadata(
           else literal.add(name);
         }
         const runner = token.split('/').at(-1) ?? '';
+        // `echo`/`printf` only print their operands: `printf '%s' run-s 'docs:*'`
+        // invokes no runner. Any other command position stays conservative.
+        let head = index;
+        while (head > 0 && !boundary[head - 1]) head--;
+        while (/^\w+=/.test(tokens[head] ?? '') && head < index) head++;
+        const printsOnly = head < index && ['echo', 'printf'].includes(tokens[head] ?? '');
         // Normalize path-qualified .bin invocations (e.g. ./node_modules/.bin/run-s)
         // to the runner name so the npm-run-all family stays ambiguous, keeping
         // the scripts it names reachable.
-        if (['npm-run-all', 'run-s', 'run-p'].includes(runner)) {
+        if (!printsOnly && ['npm-run-all', 'run-s', 'run-p'].includes(runner)) {
           ambiguous = true;
           for (let next = index + 1; next < tokens.length; next++) {
             const argument = tokens[next] ?? '';
@@ -324,6 +339,12 @@ export async function assertAddressDependencyMetadata(
               next++;
               continue;
             }
+            // Redirections are shell syntax: drop the operator and its operand.
+            if (/^\d*(?:>>?|<<?|&>>?)$/.test(argument)) {
+              next++;
+              continue;
+            }
+            if (/^\d*(?:>>?|<<?|&>>?)./.test(argument)) continue;
             if (argument.startsWith('-')) continue;
             // Unsupported matcher syntax (negation, brackets, braces, shell expansion) stays
             // ambiguous; supported `*`/`?` patterns resolve to the scripts they
@@ -336,7 +357,9 @@ export async function assertAddressDependencyMetadata(
               const variants = globstarVariants(task);
               if (variants === null) unresolved = true;
               else for (const variant of variants) patterns.add(variant);
-            } else if (task in scripts) literal.add(task);
+            } else if (Object.keys(scripts).some((name) => matchesScriptPattern(name, task)))
+              // The runner normalizes repeated separators in script names too.
+              patterns.add(task);
             else ambiguous = true;
           }
         }
