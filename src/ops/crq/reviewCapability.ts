@@ -587,22 +587,32 @@ export async function receiptRetainsItem(
   item: JsonObject,
   readReceipt: (receiptId: string) => Promise<Uint8Array>,
 ): Promise<boolean> {
+  return (await retainedReceiptDocument(item, readReceipt)) !== null;
+}
+
+/** The verified receipt document `receiptRetainsItem` accepts, or null: the document half of
+ * `local_review_runtime.retained`, whose callers read `outcome`, `run_id` and the profile. */
+export async function retainedReceiptDocument(
+  item: JsonObject,
+  readReceipt: (receiptId: string) => Promise<Uint8Array>,
+): Promise<JsonObject | null> {
   const receiptId = itemFields(item).receiptId;
-  if (receiptId === null) return false;
+  if (receiptId === null) return null;
   try {
     const data = await readReceipt(receiptId);
     const parsed = parseJsonValue(new TextDecoder('utf-8', { fatal: true }).decode(data), {
       duplicates: 'error',
     });
-    if (!(parsed instanceof JsonObject)) return false;
-    if (!ReceiptSchema.safeParse(toPlainJson(parsed)).success) return false;
+    if (!(parsed instanceof JsonObject)) return null;
+    if (!ReceiptSchema.safeParse(toPlainJson(parsed)).success) return null;
     const document = fromPlainJson(parsed) as JsonObject;
-    if (document.get('identity') !== item.get('identity')) return false;
-    if (!sameJson(document.get('identity_inputs'), item.get('identity_inputs'))) return false;
-    if (document.get('scope_adequate') !== true) return false;
-    return document.get('outcome') === 'clean' || document.get('outcome') === 'findings';
+    if (document.get('identity') !== item.get('identity')) return null;
+    if (!sameJson(document.get('identity_inputs'), item.get('identity_inputs'))) return null;
+    if (document.get('scope_adequate') !== true) return null;
+    const outcome = document.get('outcome');
+    return outcome === 'clean' || outcome === 'findings' ? document : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
