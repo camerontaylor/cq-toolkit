@@ -886,8 +886,14 @@ class JsonArgumentParser(argparse.ArgumentParser):
     empty. Without --json, argparse's own stderr usage report still applies.
     """
 
-    json_mode = False
-    subcommand = None
+    def __init__(self, *args, json_mode=False, subcommand=None, **kwargs):
+        # Abbreviations are off: argparse would otherwise accept `--js` as
+        # --json while the literal argv check below missed it, so the parse
+        # and the output mode could disagree.
+        kwargs.setdefault('allow_abbrev', False)
+        super().__init__(*args, **kwargs)
+        self.json_mode = json_mode
+        self.subcommand = subcommand
 
     def error(self, message):
         if not self.json_mode:
@@ -903,32 +909,34 @@ def main(argv=None):
         argv = sys.argv[1:]
     # The spelled-out form stays accepted; both spellings mean live-config.
     argv = ['live-config' if arg == '--live-config' else arg for arg in argv]
-    parser = JsonArgumentParser(description=__doc__)
+    # Machine mode is needed before the parse, because a usage error is the
+    # one failure that never produces a namespace to read --json from. With
+    # abbreviations off, the literal flag is the only spelling argparse accepts.
+    json_mode = '--json' in argv
+    parser = JsonArgumentParser(description=__doc__, json_mode=json_mode)
     parser.add_argument('--json', action='store_true',
                         help='machine mode: narration stays off stderr; every '
                              'failure is one JSON error artifact on stdout '
                              '(usage exit 2, operation exit 1)')
     parser.add_argument('--overlay', required=True, type=Path)
     sub = parser.add_subparsers(dest='operation', required=True)
-    sub.add_parser('live-config')
-    preparation = sub.add_parser('prepare')
+
+    def add(name):
+        return sub.add_parser(name, json_mode=json_mode, subcommand=name)
+
+    add('live-config')
+    preparation = add('prepare')
     preparation.add_argument('--units-output', required=True, type=Path)
     preparation.add_argument('--tag', required=True)
-    preview = sub.add_parser('preview')
+    preview = add('preview')
     preview.add_argument('--output', required=True, type=Path)
-    switching = sub.add_parser('switch')
+    switching = add('switch')
     switching.add_argument('--sha', required=True)
     switching.add_argument('--tag', default=None,
                            help='optional annotated runner tag; omitted for a '
                                 'merged main SHA')
-    legacy = sub.add_parser('legacy-check')
+    legacy = add('legacy-check')
     legacy.add_argument('--legacy-root', required=True, type=Path)
-    # Machine mode is needed before the parse, because a usage error is the
-    # one failure that never produces a namespace to read --json from.
-    parser.json_mode = '--json' in argv
-    for name, child in parser._subparsers._group_actions[0].choices.items():
-        child.json_mode = parser.json_mode
-        child.subcommand = name
     args = parser.parse_args(argv)
     try:
         overlay, raw = load_overlay(args.overlay)

@@ -156,6 +156,18 @@ class HostConfigTests(HostConfigFixture, unittest.TestCase):
         self.assertEqual(out, '')
         self.assertNotEqual(err, '')
 
+    def test_abbreviated_json_flag_is_a_usage_error_not_narrated_machine_mode(self):
+        # argparse would accept `--js` as --json while the output mode only
+        # recognises the literal flag; abbreviations are refused instead, so
+        # the operation never runs half in machine mode.
+        missing = self.base / 'missing-overlay.json'
+        for flag in ('--js', '--jso'):
+            with self.subTest(flag=flag):
+                code, out, err = self.run_main([flag, '--overlay', str(missing), 'live-config'])
+                self.assertEqual(code, 2)
+                self.assertEqual(out, '')
+                self.assertIn('unrecognized arguments: ' + flag, err)
+                self.assertNotIn('No such file', err)
 
     def test_preview_refuses_a_rendered_child_linked_into_a_checkout(self):
         # render_units and render_plists follow systemd/ and launchd/ under
