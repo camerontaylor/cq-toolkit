@@ -343,20 +343,22 @@ describe('review.address candidate isolation', () => {
     },
   );
   test('a catastrophic-backtracking runner pattern still resolves and compares scripts', async () => {
-    // Any literal task named after the pathological pattern must stay compared.
-    const named = 'task:literal';
+    // The changed script is selected only by the wildcard pattern (no literal task names
+    // it), so the mismatch exists only if wildcard matching resolves; the all-`a` name
+    // is the nonmatching input that makes backtracking matchers blow up.
+    const selected = `${'a'.repeat(64)}b`;
     const f = await fixture(undefined, '', { installedDependencies: 'matching' });
     try {
       const scripts = {
-        postinstall: `run-s *a*a*a*a*a*a*a*a*a*a*a*a*b ${named}`,
+        postinstall: `run-s *a*a*a*a*a*a*a*a*a*a*a*a*b`,
         ['a'.repeat(64)]: 'node long.mjs',
-        [named]: 'node named.mjs',
+        [selected]: 'node selected.mjs',
       };
       await f.repo.write('package.json', JSON.stringify({ scripts }));
       f.repo.commitAll('pathological runner pattern');
       await writeFile(
         join(f.dependencyRoot, 'package.json'),
-        JSON.stringify({ scripts: { ...scripts, [named]: 'different installed files' } }),
+        JSON.stringify({ scripts: { ...scripts, [selected]: 'different installed files' } }),
       );
       const result = await f.engine.fix(finding(), 1);
       expect(result.commit).toBeUndefined();
