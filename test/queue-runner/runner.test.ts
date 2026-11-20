@@ -154,9 +154,28 @@ describe('operator-live command seam (D1)', () => {
       'backfill',
       'reconcile-merged',
     ]);
+    // The backfill unit's declaration is its whole ExecStart argv
+    // (`backfill inventory`), never the bare operator command.
     for (const command of LIVE_OPERATOR_COMMANDS) {
       expect([...LIVE_UNIT_COMMANDS]).not.toContain(command);
     }
+    expect([...LIVE_UNIT_COMMANDS]).toContain('backfill inventory');
+  });
+
+  it('routes the backfill unit ExecStart through the operator handler with the inventory argv', async () => {
+    const seen: string[][] = [];
+    const result = await run(['backfill', 'inventory'], {
+      shadowRoot: '/unused',
+      tick: 'x',
+      operatorLive: async (command, args) => {
+        seen.push([command, ...args]);
+        return { artifact: { status: 'ok', value: { inventoried: 0 } }, exitCode: 0 };
+      },
+    });
+    expect(seen).toEqual([['backfill', 'inventory']]);
+    expect(result.exitCode).toBe(0);
+    // The bare `backfill` is a usage error, not a live unit.
+    expect((await run(['backfill'], { shadowRoot: '/unused', tick: 'x' })).exitCode).toBe(2);
   });
 
   it('forwards argv to the operator handler and preserves its exit code', async () => {
