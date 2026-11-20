@@ -2,7 +2,10 @@
 
 Status: plan only. Nothing in this document is wired to a schedule, a service
 or a runtime entry point. It depends on the orchestrators (`tickOrchestrator.ts`,
-`slotOrchestrator.ts`) and their adapter PRs landing first.
+`slotOrchestrator.ts`) and their adapter PRs landing first. What can be
+compared today (the scheduling pass) has an executable read-only procedure:
+[tick-slot-shadow-procedure.md](tick-slot-shadow-procedure.md); the remaining
+gaps are listed in [tick-slot-missing-effects.md](tick-slot-missing-effects.md).
 
 ## Goal
 

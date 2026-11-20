@@ -23,9 +23,9 @@ const heavy = {
     calls.push('collect');
     return { queue, log: ['c'] };
   },
-  readSlotUsage: async () => {
+  readSlotUsage: async (queue: JsonObject) => {
     calls.push('usage');
-    return { usage: 1, reserved: [] };
+    return { queue, usage: 1, reserved: [] };
   },
   admit: async (queue: JsonObject) => {
     calls.push('admit');
@@ -107,9 +107,9 @@ describe('file slot seams', () => {
       stateRoot: root,
       heavy: {
         ...heavy,
-        readSlotUsage: async () => {
+        readSlotUsage: async (queue: JsonObject) => {
           await seed('{"items":[],"n":2}');
-          return { usage: 1, reserved: [] };
+          return { queue, usage: 1, reserved: [] };
         },
       },
     });

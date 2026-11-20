@@ -58,17 +58,34 @@ import type { VendorUsage } from '../policy/crq/usageSlots.js';
 import { PlannerUsageError, type Mutation, type Plan } from './runner.js';
 
 /**
- * Everything a live tick does that this planner does not. The value's reason
- * repeats this list verbatim, so a reader never has to guess which effects are
- * missing before a switch.
+ * Every live-tick effect with no real binding yet, in `runTick` order. Each
+ * entry names a `TickPhases` member (or the effect a member needs) and what is
+ * missing; docs/crq/tick-slot-missing-effects.md gives the Python source and
+ * the TypeScript pieces for each. The value's reason repeats this list
+ * verbatim, so a reader never has to guess which effects are missing before a
+ * switch. Bound and therefore absent here: the state seams, `fetch`,
+ * `notifyOwner`, `readSlotUsage`, `recordCoverage`, `admit`'s gate/loop,
+ * delivery sequencing, `refreshSlotDeadline` and `writeHeartbeat`.
  */
 export const TICK_MISSING_EFFECTS: readonly string[] = [
-  'merged/push/PR-enrollment discovery',
-  'harvest effects (classification, receipts, cycles, coverage and repair bookkeeping)',
-  'per-kind launch planning and detached spawn',
-  'repair harvest and findings/PR-review delivery passes',
-  'backfill usage context and rank-4 admission',
-  'coverage opportunity ledger, next-slot deadline, status/heartbeat/summary publication',
+  'backfillPublish: no queue-in/queue-out phase over the publish-request writer',
+  'backfillInventoryMode: rollout inventory_mode is not parsed',
+  'backfillInventory: no in-tick run_inventory (the TS route is report-only and disk-based)',
+  'discovery: merged discovery, push repos and event are not composed into the phase',
+  'fix-PR backlog: repair_tick reset/refresh around the harvest loop has no port and no phase',
+  'harvestItems: harvest_review for every kind except local-review; repair_tick.harvest queue side',
+  'reconcileCompleted: local_review_runtime.reconcile_completed is not wrapped as a phase',
+  'delivery env: gh port, receipt files/readText and push issue adapters',
+  'repairBackfill: repair_tick.backfill has no port',
+  'archiveLegacy: repair_tick.archive_legacy has no port',
+  'reconcile: the fix-PR reconcile adapter returns counts, not the reconciled queue',
+  'enrollPrimary/enrollOthers: config-to-repository builder, local-review facts and event',
+  'admit.startOne: per-kind planItem, launch for every kind but open/delta, coverage fallback',
+  'detached review child: `_review` is not routed in the TS runner',
+  'writeStatus: no in-process write from the tick queue (the adapter re-reads disk)',
+  'publishLocalReviewPr: local_review_pr.publish (review_pr_outbox) has no port',
+  'recordClientHealth: client_health.record/advisory has no port',
+  'slot collectFinished: harvest_review dependency and effect binding',
 ];
 
 /** The `complete: false` reason a shadow plan carries. */
@@ -203,8 +220,9 @@ export function buildTickPlan(observation: TickObservation): Plan {
   const rawItems = queue.items;
   if (!Array.isArray(rawItems)) throw new TickAdmissionError('queue.items must be an array');
   const items: unknown[] = rawItems;
+  // `load_queue` pops `boost` from live items only; retired promotion rows keep it.
   const boostsDropped = items.filter(
-    (item) => isRecord(item) && Object.hasOwn(item, 'boost'),
+    (item) => isRecord(item) && item.kind !== PROMOTION_KIND && Object.hasOwn(item, 'boost'),
   ).length;
   const retired = retireSupersededOpen(queue);
   const context: ScheduleContext = {
