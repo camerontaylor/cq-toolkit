@@ -24,7 +24,7 @@ export interface ScanExemption {
   readonly path: string;
   readonly rule: string;
   readonly reason: string;
-  readonly rx: RegExp;
+  readonly rx: GlobMatcher;
 }
 
 export interface LoadedExemptions {
@@ -32,21 +32,32 @@ export interface LoadedExemptions {
   readonly error: string | null;
 }
 
-function escapeRegex(ch: string): string {
-  return ch.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+/** One glob token; the same language `_glob_regex` builds as a regex. */
+type GlobToken =
+  | { readonly kind: 'lit'; readonly char: string }
+  | { readonly kind: 'one' } // ?    -> [^/]
+  | { readonly kind: 'star' } // *    -> [^/]*
+  | { readonly kind: 'any' } // **   -> [^\n]*
+  | { readonly kind: 'dirs' }; // **/  -> (?:[^\n]*/)?
+
+export interface GlobMatcher {
+  test(path: string): boolean;
 }
 
 /**
- * `_glob_regex`. Python's `.` excludes only `\n` and its `$` also matches
- * before one trailing `\n`; both are reproduced.
+ * `_glob_regex`, as an NFA simulation instead of a backtracking regex: the
+ * cost is bounded by pattern length times path length for every accepted
+ * pattern, however many `*` it holds. The language is the regex
+ * `^<tokens>\n?$` that Python builds, where `.` excludes only `\n` and `$`
+ * also matches before one trailing `\n`.
  */
-export function globRegex(pattern: string): RegExp {
+export function globMatcher(pattern: string): GlobMatcher {
   let count = 0;
   for (let at = pattern.indexOf('**'); at !== -1; at = pattern.indexOf('**', at + 2)) count += 1;
   if (count > MAX_GLOBSTARS)
     throw new Error(`path has more than ${String(MAX_GLOBSTARS)} '**': ${pattern}`);
   const chars = Array.from(pattern);
-  const out: string[] = [];
+  const tokens: GlobToken[] = [];
   let i = 0;
   const startsWith = (token: string): boolean =>
     chars.slice(i, i + token.length).join('') === token;
@@ -54,22 +65,62 @@ export function globRegex(pattern: string): RegExp {
     if (startsWith('**/')) {
       // Consecutive "**/" segments match the same paths as one.
       while (startsWith('**/')) i += 3;
-      out.push('(?:[^\\n]*/)?');
+      tokens.push({ kind: 'dirs' });
     } else if (startsWith('**')) {
-      out.push('[^\\n]*');
+      tokens.push({ kind: 'any' });
       i += 2;
     } else if (chars[i] === '*') {
-      out.push('[^/]*');
+      tokens.push({ kind: 'star' });
       i += 1;
     } else if (chars[i] === '?') {
-      out.push('[^/]');
+      tokens.push({ kind: 'one' });
       i += 1;
     } else {
-      out.push(escapeRegex(chars[i] as string));
+      tokens.push({ kind: 'lit', char: chars[i] as string });
       i += 1;
     }
   }
-  return new RegExp(`^${out.join('')}\\n?$`, 'u');
+  const end = tokens.length;
+  // pos[i]: about to read token i (end = all consumed, end + 1 = after the
+  // optional trailing newline); loop[i]: inside the `[^\n]*` of a dirs token.
+  const closure = (pos: Uint8Array, loop: Uint8Array): void => {
+    for (let at = 0; at < end; at += 1) {
+      if (pos[at] === 0) continue;
+      const kind = (tokens[at] as GlobToken).kind;
+      if (kind === 'star' || kind === 'any' || kind === 'dirs') pos[at + 1] = 1;
+      if (kind === 'dirs') loop[at] = 1;
+    }
+  };
+  return {
+    test(path: string): boolean {
+      let pos = new Uint8Array(end + 2);
+      let loop = new Uint8Array(end + 1);
+      pos[0] = 1;
+      closure(pos, loop);
+      for (const ch of path) {
+        const nextPos = new Uint8Array(end + 2);
+        const nextLoop = new Uint8Array(end + 1);
+        for (let at = 0; at < end; at += 1) {
+          const token = tokens[at] as GlobToken;
+          if (pos[at] === 1) {
+            if (token.kind === 'lit' && ch === token.char) nextPos[at + 1] = 1;
+            else if (token.kind === 'one' && ch !== '/') nextPos[at + 1] = 1;
+            else if (token.kind === 'star' && ch !== '/') nextPos[at] = 1;
+            else if (token.kind === 'any' && ch !== '\n') nextPos[at] = 1;
+          }
+          if (loop[at] === 1 && ch !== '\n') {
+            nextLoop[at] = 1;
+            if (ch === '/') nextPos[at + 1] = 1;
+          }
+        }
+        if (pos[end] === 1 && ch === '\n') nextPos[end + 1] = 1;
+        closure(nextPos, nextLoop);
+        pos = nextPos;
+        loop = nextLoop;
+      }
+      return pos[end] === 1 || pos[end + 1] === 1;
+    },
+  };
 }
 
 function pyStripEmpty(value: string): boolean {
@@ -88,6 +139,15 @@ const BASIC_ESCAPES: Readonly<Record<string, string>> = {
   '\\': '\\',
 };
 
+/** TOML forbids every control character except tab raw inside a string. */
+function hasForbiddenControl(value: string): boolean {
+  for (let at = 0; at < value.length; at += 1) {
+    const code = value.charCodeAt(at);
+    if (code <= 0x08 || (code >= 0x0a && code <= 0x1f) || code === 0x7f) return true;
+  }
+  return false;
+}
+
 /** One string value and the text after it, or a thrown syntax error. */
 function parseString(text: string): { value: string; rest: string } {
   const quote = text[0];
@@ -95,7 +155,9 @@ function parseString(text: string): { value: string; rest: string } {
     if (text.startsWith("'''")) throw new Error('multi-line strings are not supported');
     const end = text.indexOf("'", 1);
     if (end === -1) throw new Error('unterminated string');
-    return { value: text.slice(1, end), rest: text.slice(end + 1) };
+    const value = text.slice(1, end);
+    if (hasForbiddenControl(value)) throw new Error('control character in string');
+    return { value, rest: text.slice(end + 1) };
   }
   if (quote === '"') {
     if (text.startsWith('"""')) throw new Error('multi-line strings are not supported');
@@ -105,6 +167,7 @@ function parseString(text: string): { value: string; rest: string } {
       const ch = text[at] as string;
       if (ch === '"') return { value, rest: text.slice(at + 1) };
       if (ch !== '\\') {
+        if (hasForbiddenControl(ch)) throw new Error('control character in string');
         value += ch;
         at += 1;
         continue;
@@ -194,7 +257,7 @@ export function parseScanExemptions(text: string): ScanExemption[] {
       path: path as string,
       rule: rule as string,
       reason: reason as string,
-      rx: globRegex(path as string),
+      rx: globMatcher(path as string),
     });
   }
   return out;

@@ -452,6 +452,26 @@ describe('launch: receipts, backfill, merged, author', () => {
     expect(h.queue.starts).toEqual([]);
   });
 
+  it('a failing meta write removes the prepared worktree and re-raises', async () => {
+    const h = harness({ writeMeta: () => Promise.reject(new Error('disk full')) });
+    await expect(launch(h.queue, item(), plan(), h.fx)).rejects.toThrow('disk full');
+    expect(h.calls).toContain('removeWorktree:/wt/pr-7-20261120T010203Z');
+    expect(h.calls).not.toContain('spawn');
+    expect(h.queue.starts).toEqual([]);
+  });
+
+  it('a non-refusal grant failure also removes the prepared worktree', async () => {
+    const h = harness({
+      grantAuthor: () => {
+        throw new Error('lease store unreadable');
+      },
+    });
+    const author = item({ kind: 'author', author: {} });
+    await expect(launch(h.queue, author, plan(), h.fx)).rejects.toThrow('lease store unreadable');
+    expect(h.calls).toContain('removeWorktree:/wt/pr-7-20261120T010203Z');
+    expect(h.calls).not.toContain('writeMeta');
+  });
+
   it('an author checkout failure is an author refusal, not a block', async () => {
     const h = harness({ checkout: () => Promise.reject(new ReviewCheckoutError('nope')) });
     const author = item({ kind: 'author', author: {} });

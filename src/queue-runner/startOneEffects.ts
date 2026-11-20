@@ -11,7 +11,7 @@
  * success, because a live tick with a missing step could lose queue state.
  */
 import type { AdmitEnv } from '../adapters/crq/admitWiring.js';
-import { JsonObject, toPlainJson } from '../policy/crq/jsonValue.js';
+import { JsonNumber, JsonObject, toPlainJson } from '../policy/crq/jsonValue.js';
 import { fromPlainJson } from '../policy/crq/queueDoc.js';
 import type { ScheduleContext } from '../policy/crq/tickSchedule.js';
 import { coverageFallback, type CoverageEffects, type Queue } from './coverageUsage.js';
@@ -77,6 +77,37 @@ export function makeStartOneEffects(
 }
 
 /**
+ * `fromPlainJson` reads an integral JS number as an int, and `JsonNumber.int`
+ * rejects one beyond the safe range. Exact big integers already arrive as
+ * bigints, so a remaining unsafe integral number can only be a float such as
+ * `1e20`: keep it a float instead of failing the admission after it ran.
+ */
+function keepUnsafeFloats(value: unknown): unknown {
+  if (typeof value === 'number')
+    return Number.isInteger(value) && !Number.isSafeInteger(value)
+      ? JsonNumber.float(value)
+      : value;
+  if (Array.isArray(value)) return value.map(keepUnsafeFloats);
+  if (
+    typeof value === 'object' &&
+    value !== null &&
+    !(value instanceof JsonNumber) &&
+    !(value instanceof JsonObject)
+  ) {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value))
+      Object.defineProperty(out, key, {
+        value: keepUnsafeFloats((value as Record<string, unknown>)[key]),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    return out;
+  }
+  return value;
+}
+
+/**
  * `AdmitEnv.startOne`: run one selection over a plain copy of the queue and
  * hand back the edited queue. Integers beyond the safe range stay bigints so
  * untouched extension fields survive the round trip. The int/float distinction of the JSON number
@@ -101,7 +132,7 @@ export function bindStartOne(env: {
       effects,
     );
     return {
-      queue: fromPlainJson(plain) as JsonObject,
+      queue: fromPlainJson(keepUnsafeFloats(plain)) as JsonObject,
       log,
       hasCoverage: result.hasCoverage,
     };

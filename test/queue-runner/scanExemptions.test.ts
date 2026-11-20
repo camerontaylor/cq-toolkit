@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   exemptReason,
-  globRegex,
+  globMatcher,
   loadScanExemptions,
   parseScanExemptions,
 } from '../../src/queue-runner/scanExemptions.js';
@@ -76,7 +76,7 @@ describe('malformed unrelated tables still void the file', () => {
 });
 
 describe('glob semantics (_glob_regex)', () => {
-  const match = (pattern: string, path: string): boolean => globRegex(pattern).test(path);
+  const match = (pattern: string, path: string): boolean => globMatcher(pattern).test(path);
   it('keeps * inside a segment and ** across segments', () => {
     expect(match('crates/**/*tests.rs', 'crates/a/b/x_tests.rs')).toBe(true);
     expect(match('crates/**/*tests.rs', 'crates/x_tests.rs')).toBe(true);
@@ -90,6 +90,46 @@ describe('glob semantics (_glob_regex)', () => {
   it('allows one trailing newline like Python $', () => {
     expect(match('a', 'a\n')).toBe(true);
     expect(match('a', 'a\n\n')).toBe(false);
+  });
+});
+
+describe('matching cost is bounded', () => {
+  it('a many-star pattern against a long non-matching path finishes quickly', () => {
+    const matcher = globMatcher(`${'*a'.repeat(20)}b`);
+    const started = performance.now();
+    expect(matcher.test('a'.repeat(5000))).toBe(false);
+    expect(matcher.test(`${'a'.repeat(5000)}b`)).toBe(true);
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+  it('matches what the regex form did across dirs, stars and the trailing newline', () => {
+    const match = (pattern: string, path: string): boolean => globMatcher(pattern).test(path);
+    expect(match('**/x.rs', 'x.rs')).toBe(true);
+    expect(match('**/x.rs', 'a/b/x.rs')).toBe(true);
+    expect(match('**/x.rs', 'a/bx.rs')).toBe(false);
+    expect(match('a**', 'a/b\nc')).toBe(false);
+    expect(match('a**', 'a/bc')).toBe(true);
+    expect(match('a*', 'a\n')).toBe(true);
+    expect(match('', '')).toBe(true);
+    expect(match('é?', 'éx')).toBe(true);
+  });
+});
+
+describe('raw control characters fail closed', () => {
+  const doc = (reason: string, quote: string): string =>
+    `[[exempt]]\npath = "a"\nrule = "generic-api-key"\nreason = ${quote}${reason}${quote}\n`;
+  it.each([
+    ['a basic string', '"', '\u0001'],
+    ['a literal string', "'", '\u0001'],
+    ['a NUL', '"', '\u0000'],
+    ['a DEL', "'", '\u007f'],
+  ])('rejects %s', (_name, quote, ch) => {
+    const loaded = loadScanExemptions(doc(`x${ch}y`, quote));
+    expect(loaded.entries).toEqual([]);
+    expect(loaded.error).toMatch(/control character/);
+  });
+  it('still loads an escaped control character and a raw tab', () => {
+    expect(loadScanExemptions(doc('x\\u0001y', '"')).error).toBeNull();
+    expect(loadScanExemptions(doc('x\ty', '"')).entries).toHaveLength(1);
   });
 });
 

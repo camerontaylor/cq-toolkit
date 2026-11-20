@@ -144,6 +144,13 @@ describe('bindStartOne', () => {
     expect(out.queue.get('extension')).toEqual(JsonNumber.int(big));
   });
 
+  it('keeps an integral float beyond the safe range a float', async () => {
+    const doc = queueDoc([pending()]);
+    const withFloat = new JsonObject([...doc.entries, ['extension', JsonNumber.float(1e20)]]);
+    const out = await bindStartOne({ bundle: bundle([]) })(withFloat, ctx);
+    expect(out.queue.get('extension')).toEqual(JsonNumber.float(1e20));
+  });
+
   it('a dry run plans without launching or editing state', async () => {
     const calls: string[] = [];
     const out = await bindStartOne({ bundle: bundle(calls) })(queueDoc([pending()]), {

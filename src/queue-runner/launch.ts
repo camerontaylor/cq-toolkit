@@ -298,17 +298,20 @@ export async function launch(
   }
   if (kind === AUTHOR_KIND)
     meta.author = pick(record(item.author), ['request_id', 'base', 'head', 'target', 'cycle']);
-  if (kind === AUTHOR_KIND) {
-    try {
+  // Nothing is reserved yet, so any failure before the reservation removes the
+  // prepared worktree. Python removes it only for `AuthorRefused` around the
+  // grant; removing it for every error here (including the meta write) is
+  // deliberately broader, because a leaked worktree is worse than a removed one.
+  try {
+    if (kind === AUTHOR_KIND)
       // Scan/worktree preparation may outlast the wait deadline. Recheck
       // immediately before reservation, still under the same tick lock.
       fx.grantAuthor(item, fx.nowIso());
-    } catch (error) {
-      await fx.removeWorktree(worktree.path, worktree.branch, clone);
-      throw error;
-    }
+    await fx.writeMeta(rdir, meta);
+  } catch (error) {
+    await fx.removeWorktree(worktree.path, worktree.branch, clone);
+    throw error;
   }
-  await fx.writeMeta(rdir, meta);
   try {
     await fx.workStarted({
       type: 'work-started',

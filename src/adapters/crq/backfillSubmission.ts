@@ -73,7 +73,8 @@ export async function backfillSubmissionProof(
     );
   const runGit = input.runGit ?? runGitIn(input.worktree);
   const head = (await gitText(runGit, ['rev-parse', 'HEAD^{commit}'])).trim();
-  const status = (await gitText(runGit, ['status', '--porcelain'])).trim();
+  // `--untracked-files=all`: a repo-local `status.showUntrackedFiles=no` must not hide them.
+  const status = (await gitText(runGit, ['status', '--porcelain', '--untracked-files=all'])).trim();
   if (head !== input.head || status !== '')
     throw new BackfillSubmissionRefused('backfill submission must match clean pinned head');
   const accounting = new GitAccountingRepository({ repo: input.worktree, runGit });
