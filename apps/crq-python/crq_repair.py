@@ -325,9 +325,10 @@ def dispatch(config, role, job, wt, directory, judge=False):
 def review_diff_sections(diff):
     """Split a review diff into (path, text) per 'diff --git' section.
 
-    Text before the first header, or a header whose path cannot be parsed,
-    keeps the generic review-diff.txt path. An empty diff is one empty section
-    so the scan still runs once."""
+    Text before the first header keeps the generic review-diff.txt path. A
+    header without a ' b/' separator (for example a git-quoted non-ASCII path)
+    is scanned under the whole header line, which still contains the real
+    path. An empty diff is one empty section so the scan still runs once."""
     sections, path, lines = [], 'review-diff.txt', []
     for line in str(diff).splitlines():
         if line.startswith('diff --git '):
