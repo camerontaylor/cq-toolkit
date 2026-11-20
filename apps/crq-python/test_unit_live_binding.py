@@ -726,6 +726,17 @@ class DiscoveryTests(PortFixture):
         self.assertIn("crq-worker@tenant\\x2dblue.service",
                       " ".join(evidence["foreign"]))
 
+    def test_also_double_backslash_escape_is_foreign(self):
+        declared = self.declare()
+        # config_parse_also removes one backslash level, so the doubled form
+        # names crq-worker@tenant\x2dblue.service.
+        self.write("crq-tick.service",
+                   "[Install]\nAlso=crq-worker@tenant\\\\x2dblue.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("crq-worker@tenant\\x2dblue.service",
+                      " ".join(evidence["foreign"]))
+
     def test_quoted_install_argument_is_unquoted_before_matching(self):
         declared = self.declare()
         # systemd strips the quotes of a WantedBy argument, so the quoted

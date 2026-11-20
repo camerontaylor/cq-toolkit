@@ -699,6 +699,11 @@ class SubprocessSystemd:
                                 # names crq-slot.target) before it names the
                                 # unit.
                                 name = name.replace('"', "").replace("'", "")
+                                # ``Also=`` is parsed by config_parse_also, which
+                                # removes one backslash level before resolving
+                                # the name; other directives retain escapes.
+                                if match.group("directive") == "Also":
+                                    name = name.replace("\\\\", "\\")
                                 # A specifier left after instance expansion
                                 # (``%p``, ``%n``) expands to a name the scan
                                 # cannot predict, so discovery cannot vouch
