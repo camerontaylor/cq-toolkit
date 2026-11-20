@@ -1541,12 +1541,17 @@ def main(argv=None, run_factory=Run) -> int:
         return 0 if document.get("outcome") == "completed" else 1
     except RecoveryRequired as exc:
         record = exc.record or {}
-        print(json.dumps({"error": {"kind": "recovery_required",
-                                    "operation": args.operation,
-                                    "message": str(exc)[:400],
-                                    "run_dir": record.get("run_dir"),
-                                    "outcome": record.get("outcome")}},
-                         indent=2, sort_keys=True))
+        error = {"kind": "recovery_required",
+                 "operation": args.operation,
+                 "message": str(exc)[:400],
+                 "run_dir": record.get("run_dir"),
+                 "outcome": record.get("outcome")}
+        if record.get("persistence_error") is not None:
+            # deploy.json could not be written, so this JSON error is the
+            # only artifact holding the trigger map, runtime measurement
+            # and structured storage error; embed the whole record.
+            error["recovery_record"] = record
+        print(json.dumps({"error": error}, indent=2, sort_keys=True))
         return 3
     except Refused as exc:
         if args.operation == "status":
