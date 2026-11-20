@@ -194,7 +194,40 @@ describe('createStepFetch', () => {
       .intercept({ path: '/v1/y', method: 'GET' })
       .reply(200, 'followed');
     const request = new Request('http://redirect.invalid/v1/x', { redirect: 'error' });
-    await expect(createStepFetch(1_000, 0, transport)(request)).rejects.toThrow();
+    // A redirect failure, not merely any throw: without the Request unpacking undici throws
+    // ERR_INVALID_URL for "[object Request]", which a bare rejects.toThrow() would accept.
+    const failure = await createStepFetch(
+      1_000,
+      0,
+      transport,
+    )(request).then(
+      () => undefined,
+      (error: unknown) => error as { message: string; cause?: { message?: string; code?: string } },
+    );
+    expect(failure).toBeDefined();
+    expect(failure?.cause?.code).not.toBe('ERR_INVALID_URL');
+    expect(`${failure?.message} ${failure?.cause?.message ?? ''}`).toMatch(/redirect/i);
+    await transport.close();
+  });
+
+  test('a native Request with the default redirect policy follows the redirect to the target', async () => {
+    const transport = new agents.MockAgent();
+    transport.disableNetConnect();
+    transport
+      .get('http://redirect.invalid')
+      .intercept({ path: '/v1/x', method: 'GET' })
+      .reply(302, '', { headers: { location: 'http://redirect.invalid/v1/y' } });
+    transport
+      .get('http://redirect.invalid')
+      .intercept({ path: '/v1/y', method: 'GET' })
+      .reply(200, 'followed');
+    const response = await createStepFetch(
+      1_000,
+      0,
+      transport,
+    )(new Request('http://redirect.invalid/v1/x'));
+    expect(await response.text()).toBe('followed');
+    transport.assertNoPendingInterceptors();
     await transport.close();
   });
 

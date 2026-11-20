@@ -285,7 +285,14 @@ export function buildChildEnv(
   // CQ_PARENT_WORK_ID is the higher precedence tier and is NOT clobbered;
   // the composition is best-effort: no agent id in the parent env means
   // no link, exactly as before.
-  if (child['CQ_PARENT_WORK_ID'] === undefined || child['CQ_PARENT_WORK_ID'].trim() === '') {
+  // On Windows env names are case-insensitive, so an explicit override spelled
+  // `cq_parent_work_id` is the explicit link and must not be shadowed by a
+  // derived one under the canonical spelling.
+  const explicitParent =
+    platform === 'win32'
+      ? Object.entries(child).find(([k]) => k.toUpperCase() === 'CQ_PARENT_WORK_ID')?.[1]
+      : child['CQ_PARENT_WORK_ID'];
+  if (explicitParent === undefined || explicitParent.trim() === '') {
     const paseoParent = paseoParentLinkFromAgentId(parentEnv['PASEO_AGENT_ID']);
     if (paseoParent !== undefined) child['CQ_PARENT_WORK_ID'] = paseoParent;
   }
