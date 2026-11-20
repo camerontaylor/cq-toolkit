@@ -218,6 +218,23 @@ describe('counted backfill retained event reader (FIFO)', () => {
       await rm(root, { recursive: true, force: true });
     }
   }, 5000);
+
+  it.each(['meta.json', 'exit.json', 'review.ndjson'])(
+    'refuses a writer-less FIFO as %s instead of blocking on open',
+    async (name) => {
+      const root = await scratch();
+      try {
+        const dir = await stage(good, root);
+        await rm(join(dir, name), { force: true });
+        execFileSync('mkfifo', [join(dir, name)]);
+        const read = backfillCountedArtifactReader(join(root, 'state'));
+        await expect(read('r')).rejects.toThrow('not a regular file');
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+    5000,
+  );
 });
 
 describe('deferred artifact store', () => {
