@@ -633,6 +633,27 @@ describe('harvestReview push_current', () => {
     expect(await at('b1', { subject: { base: 'b1', head: 'h1', paths_filter: ['a'] } })).toBe('b1');
   });
 
+  it('a counted partial-scope review advances reviewed_tip (Python parity) while the receipt stays partial', async () => {
+    // crq.py:2779-2787: whole_range excludes only paths_filter/depends_on. Partial
+    // dispositions are content-determined, so holding the tip would re-review the span forever.
+    const at = async (reviewed: unknown) => {
+      const h = harness(cls({ findings: 1 }));
+      const q: Queue = { push_discovery: { 'acme/primary': { reviewed_tip: reviewed } } };
+      const it = captureItem({
+        kind,
+        capture: { paths: [{ disposition: 'ambiguous' }], target: 'tip' },
+      });
+      const msg = await harvestReview(q, it, false, h.fx);
+      expect(msg).toMatch(/^a: partial-scope; receipt rcpt-1/);
+      expect(h.calls).toContain('receipt:partial-scope');
+      expect(it.state).toBe('done');
+      return ((q.push_discovery as Rec)['acme/primary'] as Rec).reviewed_tip;
+    };
+    expect(await at('b1')).toBe('tip');
+    expect(await at(null)).toBe('tip');
+    expect(await at('other')).toBe('other');
+  });
+
   it('a rate limit leaves it pending with a cooldown and does not advance the tip', async () => {
     const h = harness(
       cls({ outcome: 'rate_limited', counted: false, message: 'm', wait_seconds: 60 }),
