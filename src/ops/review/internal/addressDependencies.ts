@@ -239,9 +239,257 @@ const globstarVariants = (pattern: string): string[] | null => {
 };
 
 const scriptRunners = new Set(['npm-run-all', 'run-s', 'run-p']);
+const packageManagers = new Set(['npm', 'pnpm', 'yarn', 'bun']);
+/** npm-run-all flags that take no value; anything else unknown is unresolved. */
+const runnerFlags = new Set([
+  '-c',
+  '--continue-on-error',
+  '-l',
+  '--print-label',
+  '-n',
+  '--print-name',
+  '-p',
+  '--parallel',
+  '-r',
+  '--race',
+  '-s',
+  '--sequential',
+  '--serial',
+  '--silent',
+  '--aggregate-output',
+]);
+const runnerValueOptions = new Set(['--max-parallel', '--npm-path']);
+/**
+ * Command heads whose effect on what runs next this pass does not model: shell
+ * keywords, evaluation and directory changes (`cd x && run-s …` reads another manifest).
+ */
+const unmodelledHeads = new Set([
+  'if',
+  'then',
+  'else',
+  'elif',
+  'fi',
+  'case',
+  'esac',
+  'for',
+  'select',
+  'while',
+  'until',
+  'do',
+  'done',
+  'in',
+  'function',
+  'time',
+  'coproc',
+  'eval',
+  'exec',
+  'source',
+  '.',
+  'alias',
+  'cd',
+  'pushd',
+  'popd',
+]);
+/** Characters an unquoted word may hold: nothing the shell expands, escapes or globs. */
+const plainCharacter = /[A-Za-z0-9_@%+=:,./-]/;
+const plainWord = /^[A-Za-z0-9_@%+=:,./-]+$/;
+/** A runner task: plain characters plus the `*`/`?` wildcards npm-run-all resolves. */
+const runnerTask = /^[A-Za-z0-9_@%+=:,./*?-]+$/;
 
-/** An npm-run-all runner word, including path-qualified `.bin` invocations. */
-const isRunner = (word: string): boolean => scriptRunners.has(word.split('/').at(-1) ?? '');
+type Lexeme =
+  | { kind: 'word'; text: string }
+  | { kind: 'separator' }
+  | { kind: 'redirect'; operand: boolean };
+
+/**
+ * Lex a lifecycle command under a deliberately small shell grammar, or return
+ * `null` when it uses anything outside it. Accepted: words built from plain
+ * characters, single-quoted text and double-quoted text free of `$`, backtick
+ * and `\`; `&&`, `||`, `|`, `;` and newline between commands; and `<`, `>`,
+ * `>>`, `>|`, `<>`, `&>`, `&>>`, `N>&M`, `N>&-` redirections. Everything else —
+ * escapes, expansions, substitutions, globs, braces, subshells, comments,
+ * heredocs, background `&` — is rejected rather than interpreted. One forward
+ * pass, so the cost is linear in the command length.
+ */
+const lexShell = (command: string): Lexeme[] | null => {
+  const lexemes: Lexeme[] = [];
+  const length = command.length;
+  let index = 0;
+  const redirect = (): boolean => {
+    // `index` is at `<` or `>`.
+    const first = command[index];
+    index++;
+    if (first === '<') {
+      if (command[index] === '<') return false; // heredoc / herestring
+      if (command[index] === '>') index++;
+    } else if (command[index] === '>' || command[index] === '|') index++;
+    let operand = true;
+    if (command[index] === '&') {
+      index++;
+      if (command[index] === '-') {
+        index++;
+        operand = false;
+      } else if (/\d/.test(command[index] ?? '')) {
+        while (/\d/.test(command[index] ?? '')) index++;
+        operand = false;
+      }
+    }
+    lexemes.push({ kind: 'redirect', operand });
+    return true;
+  };
+  while (index < length) {
+    const character = command[index] ?? '';
+    if (character === ' ' || character === '\t') {
+      index++;
+      continue;
+    }
+    if (character === '\n' || character === ';') {
+      lexemes.push({ kind: 'separator' });
+      index++;
+      continue;
+    }
+    if (character === '|') {
+      lexemes.push({ kind: 'separator' });
+      index += command[index + 1] === '|' ? 2 : 1;
+      continue;
+    }
+    if (character === '&') {
+      if (command[index + 1] === '&') {
+        lexemes.push({ kind: 'separator' });
+        index += 2;
+        continue;
+      }
+      if (command[index + 1] !== '>') return null; // background `&`
+      index++;
+      if (!redirect()) return null;
+      continue;
+    }
+    if (character === '<' || character === '>') {
+      if (!redirect()) return null;
+      continue;
+    }
+    // A word that is all digits directly before `<`/`>` is an fd number (`2>`).
+    let digits = index;
+    while (/\d/.test(command[digits] ?? '')) digits++;
+    if (digits > index && (command[digits] === '<' || command[digits] === '>')) {
+      index = digits;
+      if (!redirect()) return null;
+      continue;
+    }
+    let text = '';
+    while (index < length) {
+      const next = command[index] ?? '';
+      if (next === "'" || next === '"') {
+        const close = command.indexOf(next, index + 1);
+        if (close === -1) return null;
+        const quoted = command.slice(index + 1, close);
+        if (next === '"' && /[$`\\]/.test(quoted)) return null;
+        text += quoted;
+        index = close + 1;
+      } else if (plainCharacter.test(next)) {
+        text += next;
+        index++;
+      } else if (' \t\n;&|<>'.includes(next)) break;
+      else return null;
+    }
+    lexemes.push({ kind: 'word', text });
+  }
+  return lexemes;
+};
+
+/** Scripts a lifecycle command can run; `null` means every script (unresolved). */
+type Selection = { literal: Set<string>; patterns: string[] } | null;
+
+/**
+ * Fail closed: only a fully understood command narrows the scripts it can run.
+ * Each simple command must be `echo`/`printf` (operands are only printed), an
+ * npm-run-all runner with known options and literal or `*`/`?` task patterns,
+ * `<pm> run <script>` (or the pnpm/yarn/bun `<pm> <script>` shorthand) with no
+ * extra arguments, or another program whose arguments are all plain words that
+ * name no runner or package manager. Any other form — an assignment prefix, a
+ * shell keyword, a wrapper around a runner, an unknown option — is unresolved.
+ */
+const selectInvokedScripts = (
+  command: string,
+  scripts: Record<string, string>,
+  byCollapsedName: Map<string, string[]>,
+): Selection => {
+  const lexemes = lexShell(command);
+  if (lexemes === null) return null;
+  const names = Object.keys(scripts);
+  const literal = new Set<string>();
+  const patterns = new Set<string>();
+  let words: string[] = [];
+  const finish = (): boolean => {
+    const [head, ...args] = words;
+    words = [];
+    if (head === undefined) return true;
+    if (/^[A-Za-z_]\w*=/.test(head) || unmodelledHeads.has(head)) return false;
+    if (head === 'echo' || head === 'printf') return true;
+    const program = head.split('/').at(-1) ?? '';
+    if (scriptRunners.has(program)) {
+      for (let index = 0; index < args.length; index++) {
+        const argument = args[index] ?? '';
+        // Arguments after `--` feed `{1}`-style placeholders, not task selection.
+        if (argument === '--') break;
+        if (argument.startsWith('-')) {
+          if (runnerFlags.has(argument) || /^--max-parallel=\d+$/.test(argument)) continue;
+          if (!runnerValueOptions.has(argument)) return false;
+          index++;
+          if (!plainWord.test(args[index] ?? '')) return false;
+          continue;
+        }
+        if (!runnerTask.test(argument)) return false;
+        const task = collapseColons(argument);
+        if (/[*?]/.test(task)) {
+          const variants = globstarVariants(task);
+          if (variants === null) return false;
+          for (const variant of variants) patterns.add(variant);
+        } else if (names.some((name) => matchesScriptPattern(name, task))) patterns.add(task);
+        else return false;
+      }
+      return true;
+    }
+    if (packageManagers.has(program)) {
+      let at = 0;
+      if (args[0] === 'run' || args[0] === 'run-script') at = 1;
+      else if (program === 'npm') return false;
+      const name = args[at];
+      // Trailing arguments are appended to the script's own command, which this
+      // pass would then not see; a name that is not a script runs something else.
+      if (name === undefined || args.length > at + 1 || !Object.hasOwn(scripts, name)) return false;
+      literal.add(name);
+      return true;
+    }
+    for (const argument of args) {
+      if (!plainWord.test(argument)) return false;
+      const word = argument.split('/').at(-1) ?? '';
+      if (scriptRunners.has(word) || packageManagers.has(word)) return false;
+      if (argument.startsWith('npm:')) {
+        const name = argument.slice(4);
+        if (!Object.hasOwn(scripts, name)) return false;
+        literal.add(name);
+      }
+      // An unknown task runner (`turbo run build`) may name scripts as plain words.
+      for (const name of byCollapsedName.get(collapseColons(argument)) ?? []) literal.add(name);
+    }
+    return true;
+  };
+  for (let index = 0; index < lexemes.length; index++) {
+    const lexeme = lexemes[index];
+    if (lexeme === undefined) continue;
+    if (lexeme.kind === 'separator') {
+      if (!finish()) return null;
+    } else if (lexeme.kind === 'word') words.push(lexeme.text);
+    else if (lexeme.operand) {
+      // A redirection operand is a file name, never a task or argument.
+      if (lexemes[index + 1]?.kind !== 'word') return null;
+      index++;
+    }
+  }
+  if (!finish()) return null;
+  return { literal, patterns: [...patterns] };
+};
 
 /** Compare installed-tree inputs without exposing package-manager credential bytes. */
 export async function assertAddressDependencyMetadata(
@@ -275,136 +523,27 @@ export async function assertAddressDependencyMetadata(
   // installation executes, even when every lifecycle key itself is identical.
   const invokedScripts = (scripts: Record<string, string>): Set<string> => {
     const selected = new Set<string>();
+    const byCollapsedName = new Map<string, string[]>();
+    for (const name of Object.keys(scripts)) {
+      const collapsed = collapseColons(name);
+      const bucket = byCollapsedName.get(collapsed);
+      if (bucket) bucket.push(name);
+      else byCollapsedName.set(collapsed, [name]);
+    }
     const worklist = [...installLifecycleScripts].filter((key) => key in scripts);
     while (worklist.length > 0) {
       const key = worklist.pop();
       if (key === undefined || selected.has(key)) continue;
       selected.add(key);
-      const command = scripts[key] ?? '';
-      // Unquoted shell boundaries stay in the stream so a runner's task list ends there.
-      // A word is any run of quoted and unquoted segments (`"build":deps`), decoded
-      // together; a stray unmatched quote stays in the word and forces ambiguity.
-      // An unquoted newline separates commands like `;`, so it is a boundary too.
-      // An unquoted redirection operator (`>`, `2>&1`'s `>&1`, `&>>`) is its own token,
-      // so `run-s build:*>/dev/null` still names `build:*`; a leading fd digit stays a word.
-      const raw =
-        command.match(/&?[<>]+(?:&\d*-?)?|[;&|()\n]+|(?:"[^"]*"|'[^']*'|[^\s;&|()<>"']|["'])+/g) ??
-        [];
-      const boundary = raw.map((token) => /^[;&|()\n]+$/.test(token));
-      const redirect = raw.map((token) => /^&?[<>]/.test(token));
-      const tokens = raw.map((token) =>
-        token.replace(
-          /"([^"]*)"|'([^']*)'/g,
-          (_match, double?: string, single?: string) => double ?? single ?? '',
-        ),
-      );
-      const literal = new Set<string>();
-      // npm-run-all (run-s/run-p/npm-run-all) selects scripts by name pattern, so a
-      // token like `build:*` runs `build:deps` even though the command never spells
-      // that name. Record the patterns it names; unsupported/negative matching stays
-      // ambiguous below so no actual install input is omitted.
-      const patterns = new Set<string>();
-      let unresolved = false;
-      // Dynamic shell expressions and unsupported runner syntax stay conservative:
-      // narrowing those to literal names could omit an actual install input.
-      // A runner pattern whose targets cannot be established makes every script a
-      // possible install input.
-      let ambiguous =
-        /[$`\\<>]/.test(command) ||
-        tokens.includes('eval') ||
-        tokens.some((token) => /[\s'"]/.test(token));
-      // A runner hidden inside one word — a shell payload (`sh -c 'run-s build:*'`),
-      // quoted (`sh -c '"run-s" x'`), command-substituted (`` `run-s x` ``) or nested
-      // (`sh -c 'bash -c "run-s x"'`) — has targets this pass cannot establish, so
-      // compare every script. Splitting on every shell metacharacter, quote, backtick
-      // and expansion sigil exposes a runner word at any nesting depth in one linear
-      // pass; over-detection only widens the comparison.
-      if (
-        tokens.some(
-          (token) =>
-            !isRunner(token) && token.split(/[\s;&|()<>`'"\\$]+/).some((word) => isRunner(word)),
-        )
-      )
-        unresolved = true;
-      for (let index = 0; index < tokens.length; index++) {
-        const token = tokens[index] ?? '';
-        if (token.startsWith('npm:')) {
-          const name = token.slice(4);
-          if (!name || /[*?\[]/.test(name)) ambiguous = true;
-          else literal.add(name);
-        }
-        const runner = token.split('/').at(-1) ?? '';
-        // `echo`/`printf` only print their operands: `printf '%s' run-s 'docs:*'`
-        // invokes no runner. Any other command position stays conservative.
-        let head = index;
-        while (head > 0 && !boundary[head - 1]) head--;
-        while (/^\w+=/.test(tokens[head] ?? '') && head < index) head++;
-        const printsOnly = head < index && ['echo', 'printf'].includes(tokens[head] ?? '');
-        // Normalize path-qualified .bin invocations (e.g. ./node_modules/.bin/run-s)
-        // to the runner name so the npm-run-all family stays ambiguous, keeping
-        // the scripts it names reachable.
-        if (!printsOnly && isRunner(token)) {
-          ambiguous = true;
-          for (let next = index + 1; next < tokens.length; next++) {
-            const argument = tokens[next] ?? '';
-            // The task list ends at a shell boundary or `--` (forwarded arguments).
-            if (boundary[next] || argument === '--') break;
-            // Options that take a separate value consume it so it is not read as a task.
-            if (argument === '--max-parallel' || argument === '--npm-path') {
-              next++;
-              continue;
-            }
-            // Redirections are shell syntax: drop the operator, its operand unless the
-            // operator already names an fd (`>&1`), and the fd digit before it (`2>`).
-            if (redirect[next]) {
-              if (/[<>&]$/.test(argument)) next++;
-              continue;
-            }
-            if (/^\d+$/.test(argument) && redirect[next + 1]) continue;
-            if (argument.startsWith('-')) continue;
-            // Unsupported matcher syntax (negation, brackets, braces, shell expansion) stays
-            // ambiguous; supported `*`/`?` patterns resolve to the scripts they
-            // name so a pattern-selected script is still compared.
-            // A quoted argument carries forwarded task arguments after the
-            // pattern (`"build:* --mode=production"`): match the task alone.
-            const task = collapseColons(argument.trim().split(/\s+/)[0] ?? '');
-            if (/[!\[\]{}()+,|\\$`]/.test(task)) unresolved = true;
-            else if (/[*?]/.test(task)) {
-              const variants = globstarVariants(task);
-              if (variants === null) unresolved = true;
-              else for (const variant of variants) patterns.add(variant);
-            } else if (Object.keys(scripts).some((name) => matchesScriptPattern(name, task)))
-              // The runner normalizes repeated separators in script names too.
-              patterns.add(task);
-            else ambiguous = true;
-          }
-        }
-        if (!['npm', 'pnpm', 'yarn', 'bun'].includes(runner)) continue;
-        let name = tokens[index + 1];
-        if (name === 'run' || name === 'run-script') name = tokens[index + 2];
-        else if (runner === 'npm') {
-          ambiguous = true;
-          continue;
-        }
-        if (!name || !(name in scripts) || name.startsWith('-') || /[*?\[]/.test(name))
-          ambiguous = true;
-        else literal.add(name);
-      }
-      if (unresolved) ambiguous = true;
-      const resolved = [...patterns];
+      const selection = selectInvokedScripts(scripts[key] ?? '', scripts, byCollapsedName);
       for (const target of Object.keys(scripts)) {
+        if (target === key || selected.has(target)) continue;
         if (
-          target === key ||
-          selected.has(target) ||
-          !(
-            unresolved ||
-            literal.has(target) ||
-            (ambiguous && command.includes(target)) ||
-            resolved.some((pattern) => matchesScriptPattern(target, pattern))
-          )
+          selection === null ||
+          selection.literal.has(target) ||
+          selection.patterns.some((pattern) => matchesScriptPattern(target, pattern))
         )
-          continue;
-        worklist.push(target);
+          worklist.push(target);
       }
       for (const hook of [`pre${key}`, `post${key}`]) {
         if (hook in scripts && !selected.has(hook)) worklist.push(hook);

@@ -306,6 +306,28 @@ describe('review.address candidate isolation', () => {
     ["run-s 'build:*'", 'build:other'],
     ['run-s "build:*"', 'build:other'],
     ['run-s build:**:other', 'build:other'],
+    // Fail closed: anything outside the understood grammar compares every script.
+    ['run\\-s build:deps', 'build:other'],
+    ["run\\-s 'build:*'", 'build:deps'],
+    ["x=run-s; $x 'build:*'", 'build:deps'],
+    ["r=run-s; ${r} 'build:*'", 'build:deps'],
+    ['x="run-s"; $x build:deps', 'build:other'],
+    ["sh -c 'x=run-s; $x build:*'", 'build:deps'],
+    ['A=1 run-s build:deps', 'build:other'],
+    ['run-s build:deps # build:*', 'build:other'],
+    ["env run-s 'build:*'", 'build:deps'],
+    ["npx run-s 'build:*'", 'build:deps'],
+    ['pnpm exec run-s build:deps', 'build:other'],
+    ['sh -c run-s', 'build:deps'],
+    ['pnpm run /build/', 'build:deps'],
+    ['npm run build:deps -- extra', 'build:other'],
+    ["concurrently 'npm:build:*'", 'build:deps'],
+    ["if true; then run-s 'build:*'; fi", 'build:deps'],
+    ['cd sub && run-s build:deps', 'build:other'],
+    ['run-s --unknown build:deps', 'build:other'],
+    ['run-s build:deps &', 'build:other'],
+    ['run-s build:{deps,other}', 'build:other'],
+    ['run-s build:deps <<EOF', 'build:other'],
   ])('runner selection %s refuses reuse when only %s changes', async (postinstall, changed) => {
     const f = await fixture(undefined, '', { installedDependencies: 'matching' });
     try {
@@ -399,6 +421,30 @@ describe('review.address candidate isolation', () => {
       expect(Date.now() - started).toBeLessThan(5000);
       expect(result.commit).toBeUndefined();
       expect(result.reason).toContain('manifests/locks differ');
+    } finally {
+      await f.cleanup();
+    }
+  }, 10_000);
+  test('a long simple command lexes in linear time and still narrows the selection', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      const scripts = {
+        // Every fragment is inside the grammar, so the whole command is scanned and
+        // resolved: the runner selects build:*, and the unselected docs:lint may change.
+        postinstall: `echo ${'"a" \'b\' 2>&1 >x '.repeat(20000)}; run-s 'build:*'`,
+        'build:deps': 'node deps.mjs',
+        'docs:lint': 'node lint.mjs',
+      };
+      await f.repo.write('package.json', JSON.stringify({ scripts }));
+      f.repo.commitAll('long simple lexer input');
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ scripts: { ...scripts, 'docs:lint': 'node different.mjs' } }),
+      );
+      const started = Date.now();
+      const result = await f.engine.fix(finding(), 1);
+      expect(Date.now() - started).toBeLessThan(5000);
+      expect(result.commit, result.reason).toBeTruthy();
     } finally {
       await f.cleanup();
     }
