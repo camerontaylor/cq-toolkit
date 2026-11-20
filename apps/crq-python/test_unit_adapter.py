@@ -1569,6 +1569,25 @@ class AdapterTests(AdapterFixture):
         self.assertEqual(adapter_mod._duration_seconds("20min 30s"), 1230)
         self.assertIsNone(adapter_mod._duration_seconds("9" * 5000))
 
+    def test_all_systemd_time_span_units_are_accepted(self):
+        for text, expected in (("2d", 172800), ("1w", 604800), ("1day", 86400),
+                               ("2days", 172800), ("5sec", 5), ("3seconds", 3),
+                               ("2hr", 7200), ("2hours", 7200), ("5minutes", 300),
+                               ("1month", 2629800), ("1M", 2629800),
+                               ("1y", 31557600), ("1year", 31557600),
+                               ("1500msec", 1), ("2000000usec", 2),
+                               ("2000000us", 2), ("1d 2h", 93600)):
+            with self.subTest(text=text):
+                self.assertEqual(adapter_mod._duration_seconds(text), expected)
+        self.assertIsNone(adapter_mod._duration_seconds("5mins"))
+        self.assertIsNone(adapter_mod._duration_seconds("5H"))
+
+    def test_saved_timeout_in_days_is_honored(self):
+        recovery, snapshot = self._recovery_with_timeout_line("TimeoutStartSec=2d")
+        self.fake.service_start_delay = 700
+        recovery.restore_activation("crq-tick.service", snapshot)
+        self.assertEqual(self.fake.active["crq-tick.service"], "active")
+
     def test_minute_unit_m_is_accepted(self):
         self.assertEqual(adapter_mod._duration_seconds("5m"), 300)
         self.assertIsNone(adapter_mod._duration_seconds("9" * 309 + "s"))

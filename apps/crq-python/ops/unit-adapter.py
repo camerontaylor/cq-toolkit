@@ -51,7 +51,23 @@ NODE_SCRIPT_RE = re.compile(
     r"(?P<root>.*/\.local/opt/crq-(?P<sha>[0-9a-f]{40}))"
     r"/dist/queue-runner/crq\.js")
 MAX_SAVED_START_TIMEOUT_SECONDS = 7 * 24 * 3600
-DURATION_RE = re.compile(r"(?P<value>\d+)(?P<unit>ms|s|min|m|h)?")
+# systemd.time(7) time-span units (case-sensitive: ``m`` is minutes, ``M`` months).
+DURATION_UNITS = {
+    "usec": 1e-6, "us": 1e-6, "\u00b5s": 1e-6,
+    "msec": 0.001, "ms": 0.001,
+    "seconds": 1, "second": 1, "sec": 1, "s": 1,
+    "minutes": 60, "minute": 60, "min": 60, "m": 60,
+    "hours": 3600, "hour": 3600, "hr": 3600, "h": 3600,
+    "days": 86400, "day": 86400, "d": 86400,
+    "weeks": 604800, "week": 604800, "w": 604800,
+    "months": 2629800, "month": 2629800, "M": 2629800,
+    "years": 31557600, "year": 31557600, "y": 31557600,
+}
+# Longest spelling first so ``min`` never matches as ``m`` and ``ms`` never as ``m``.
+DURATION_RE = re.compile(
+    r"(?P<value>\d+)(?P<unit>"
+    + "|".join(sorted(map(re.escape, DURATION_UNITS), key=len, reverse=True))
+    + ")?")
 UNIT_FILE_STATES = {"enabled", "disabled", "static", "masked", "alias",
                     "indirect", "generated", "transient", "bad"}
 RESTORABLE_ACTIVE = {"active", "inactive"}
@@ -232,8 +248,10 @@ def _logical_lines(text: str) -> list[str]:
     logical = []
     pending = ""
     # A leading UTF-8 BOM is not part of the first line, as systemd reads it.
-    # systemd splits physical lines on LF (CRLF) only; str.splitlines() also
-    # breaks on U+2028 and similar, which would expose comment text as keys.
+    # systemd's read_line also ends a line at a lone CR or NUL; this adapter
+    # splits on LF and CRLF only (a CR-only file reads as one line, finds no
+    # assignment and takes the pinned bound). str.splitlines() would also break
+    # on U+2028 and similar, which would expose comment text as keys.
     physical = re.split(r"\r?\n", text.removeprefix("\ufeff"))
     if physical and physical[-1] == "":
         physical.pop()
@@ -302,7 +320,7 @@ def _duration_seconds(text: str) -> int | None:
         position = match.end()
         while position < len(value) and value[position].isspace():
             position += 1
-        factor = {"ms": 0.001, "s": 1, "min": 60, "m": 60, "h": 3600}[match.group("unit") or "s"]
+        factor = DURATION_UNITS[match.group("unit") or "s"]
         try:
             seconds += int(match.group("value")) * factor
         except (OverflowError, ValueError):
