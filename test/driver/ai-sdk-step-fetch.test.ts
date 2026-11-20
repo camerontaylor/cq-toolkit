@@ -223,6 +223,72 @@ describe('createStepFetch', () => {
     await transport.close();
   });
 
+  /** Fail (not hang) when a regression leaves the call pending. */
+  const within = <T>(work: Promise<T>, ms = 1_000): Promise<T> =>
+    Promise.race([
+      work,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`still pending after ${String(ms)}ms`)), ms),
+      ),
+    ]);
+
+  test('an explicit init.body wins: an open streaming Request body is never buffered', async () => {
+    const transport = new agents.MockAgent();
+    transport.disableNetConnect();
+    transport
+      .get('http://init-body.invalid')
+      .intercept({ path: '/v1/x', method: 'POST' })
+      .reply(200, 'sent');
+    const open = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('partial'));
+      }, // never closes: buffering it first would hang
+    });
+    const request = new Request('http://init-body.invalid/v1/x', {
+      method: 'POST',
+      body: open,
+      duplex: 'half',
+    } as RequestInit);
+    const response = await within(
+      createStepFetch(1_000, 0, transport)(request, { body: 'from-init' }),
+    );
+    expect(await response.text()).toBe('sent');
+    await transport.close();
+  });
+
+  test('an explicit init.body wins over an already-consumed Request body', async () => {
+    const transport = new agents.MockAgent();
+    transport.disableNetConnect();
+    transport
+      .get('http://init-body.invalid')
+      .intercept({ path: '/v1/x', method: 'POST' })
+      .reply(200, 'sent');
+    const request = new Request('http://init-body.invalid/v1/x', { method: 'POST', body: 'old' });
+    await request.text(); // the body is now used; reading it again would reject "locked"
+    const response = await within(
+      createStepFetch(1_000, 0, transport)(request, { body: 'from-init' }),
+    );
+    expect(await response.text()).toBe('sent');
+    await transport.close();
+  });
+
+  test('init.signal null means no signal: an aborted Request signal does not reject', async () => {
+    const transport = new agents.MockAgent();
+    transport.disableNetConnect();
+    transport
+      .get('http://null-signal.invalid')
+      .intercept({ path: '/v1/x', method: 'POST' })
+      .reply(200, 'sent');
+    const request = new Request('http://null-signal.invalid/v1/x', {
+      method: 'POST',
+      body: 'payload',
+      signal: AbortSignal.abort(new Error('request signal aborted')),
+    });
+    const response = await within(createStepFetch(1_000, 0, transport)(request, { signal: null }));
+    expect(await response.text()).toBe('sent');
+    await transport.close();
+  });
+
   test('a supplied transport is used as is, never replaced by a minted Agent', async () => {
     // A supplied dispatcher (an operator's proxy agent, stood in for by a
     // MockAgent) must carry the request itself: the driver must not mint its

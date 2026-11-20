@@ -59,23 +59,23 @@ class TimedDispatcher extends Dispatcher {
  * on abort the reader is cancelled and the wait rejects with the signal's
  * reason, so an open body stream cannot pin the call past a caller abort.
  */
-async function bufferBody(request: Request, signal: AbortSignal): Promise<Buffer> {
-  signal.throwIfAborted();
+async function bufferBody(request: Request, signal: AbortSignal | null): Promise<Buffer> {
+  signal?.throwIfAborted();
   const reader = (request.body as ReadableStream<Uint8Array>).getReader();
   const onAbort = (): void => {
     void reader.cancel(signal.reason).catch(() => undefined);
   };
-  signal.addEventListener('abort', onAbort, { once: true });
+  signal?.addEventListener('abort', onAbort, { once: true });
   const chunks: Uint8Array[] = [];
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (signal.aborted) throw signal.reason;
+      if (signal?.aborted) throw signal.reason;
       if (done) break;
       chunks.push(value);
     }
   } finally {
-    signal.removeEventListener('abort', onAbort);
+    signal?.removeEventListener('abort', onAbort);
   }
   return Buffer.concat(chunks);
 }
@@ -99,16 +99,19 @@ export function createStepFetch(
         ? input.url
         : (input as string | URL);
     const isRequest = typeof Request !== 'undefined' && input instanceof Request;
-    const initSignal = (init as { signal?: AbortSignal | null } | undefined)?.signal;
+    const initOpts = init as { signal?: AbortSignal | null; body?: unknown } | undefined;
+    // `signal: null` means "no signal" in fetch; only `undefined` falls back to the request's.
+    const bufferSignal =
+      initOpts?.signal !== undefined ? initOpts.signal : isRequest ? input.signal : null;
+    // Native fetch prefers `init.body`, so the request body is never read then.
+    const needsBodyBuffer = isRequest && input.body !== null && initOpts?.body == null;
     const fromRequest = isRequest
       ? {
           method: input.method,
           headers: input.headers,
           signal: input.signal,
           redirect: input.redirect,
-          ...(input.body !== null
-            ? { body: await bufferBody(input, initSignal ?? input.signal) }
-            : {}),
+          ...(needsBodyBuffer ? { body: await bufferBody(input, bufferSignal) } : {}),
         }
       : {};
     return undiciFetch(target, {
