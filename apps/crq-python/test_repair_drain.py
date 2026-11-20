@@ -1485,6 +1485,36 @@ class RepairDrainTest(unittest.TestCase):
         self.assertIn('src/kept.ts', subprocess.run(['git', 'diff', '--cached', '--name-only'], cwd=original,
                                                     check=True, capture_output=True, text=True).stdout)
 
+    def test_recovery_dispatch_blackout_stop_defers_without_an_attempt(self):
+        # dispatch() returns stop: blackout when the window opens during
+        # preparation or before a fallback launch; recovery must defer that
+        # clock condition, not record it as an unresolved judgment.
+        import sys
+        job_id = 'crq-run1-F1'
+        job = json.loads(bounded.job_path(self.root, job_id).read_text())
+        original = self.worktree('crq-repair-pr1-merged-crq-run1-F1')
+        atomic(self.root / 'state/repair' / job_id / 'result.json',
+               {'job': job_id, 'item': job['item'], 'repair_base': self.pin,
+                'worktree': str(original), 'verdict': 'FAILED', 'reason': 'driver no_outcome'})
+        self.config['repair']['max_rounds_per_pin'] = 10
+        c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', CLONE=self.clone,
+                            CONFIG=self.config, iso=lambda: 'now', load_queue=lambda: self.queue,
+                            ran_locked=lambda fn: (fn(), True)[1],
+                            run=lambda args, **kw: subprocess.run(args, **kw, capture_output=True, text=True, check=True),
+                            secret_scan_diff=mock.Mock(return_value=(True, {})),
+                            save_queue=lambda q: atomic(self.root / 'state/queue.json', q))
+        artifact = self.root / 'state/repair' / job_id / 'recovery.json'
+        stop = {'stop': 'blackout', 'summary': 'GLM peak blackout; fallback launch deferred'}
+        with mock.patch.dict(sys.modules, {'crq': c}), \
+             mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'dispatch', return_value=stop) as judge:
+            deferred = service.recover_job(self.config, job_id)
+        self.assertEqual(judge.call_count, 1)
+        self.assertEqual(deferred['state'], 'deferred')
+        saved = json.loads(artifact.read_text())
+        self.assertEqual(saved['attempts'], 0)
+        self.assertIn('blackout_since', saved)
+
     def test_recovery_blackout_deferral_holds_the_attempt_budget(self):
         import sys
         job_id = 'crq-run1-F1'
@@ -2141,6 +2171,14 @@ class RepairDrainTest(unittest.TestCase):
         self.assertTrue(service.blackout(on, inside))
         self.assertTrue(service.blocked(on, inside))
 
+    def test_blocked_uses_the_remaining_fallback_budget(self):
+        start = utc('2026-11-02T05:35:00')  # Mon 13:35 SGT
+        repair = {'blackout': {**BLACKOUT, 'enabled': True}}
+        self.assertFalse(service.blocked({**repair, 'budget': {'wall_clock_min': 10}}, start))  # ends 13:45
+        self.assertTrue(service.blocked({**repair, 'budget': {'wall_clock_min': 25}}, start))   # reaches 14:00
+        off = {'blackout': {**BLACKOUT, 'enabled': False}, 'budget': {'wall_clock_min': 25}}
+        self.assertFalse(service.blocked(off, start))
+
     def test_main_refuses_without_zai_key_and_inside_blackout(self):
         atomic(self.root / 'config.json', self.config)
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(service, 'drain', return_value=None) as drain:
@@ -2587,6 +2625,45 @@ class RepairDrainTest(unittest.TestCase):
             report = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root)
         self.assertEqual(report['stop'], 'rate-limit')
         self.assertEqual(dispatch.call_count, 1)
+
+    def test_fallback_launch_rechecks_blackout_after_cleanup(self):
+        # A prior provider's run plus the retention/reset cleanup can carry the
+        # clock into the peak window: the fallback launch recheck defers it as
+        # the typed blackout stop (no provider refused, so callers must not
+        # take their rate-limit branch and write the drain-wide pause).
+        self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
+        self.config['repair']['blackout'] = dict(BLACKOUT)
+        with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'DEEPSEEK_API_KEY': 'fixture'}), \
+             mock.patch.object(service, '_dispatch', side_effect=[{'stop': 'rate-limit'}, {'stop': 'ok', 'changed': False}]) as dispatch, \
+             mock.patch.object(service, 'blocked', side_effect=[True]):
+            report = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root / 'attempt')
+        self.assertEqual(dispatch.call_count, 1)
+        self.assertEqual(report, {'stop': 'blackout', 'summary': 'GLM peak blackout; fallback launch deferred'})
+        self.assertEqual(list(service.provider_cooldowns()), ['zai'])
+
+    def test_fallback_blackout_recheck_uses_the_remaining_budget(self):
+        # The first provider spends 15 of the 20-minute budget, so the
+        # fallback's blackout check must cover only the 5 minutes left; a
+        # check against the configured 20 minutes would defer a fallback that
+        # can still finish before the window opens.
+        self.config['repair']['fallback_models'] = ['deepseek/deepseek-flash']
+        self.config['repair']['blackout'] = dict(BLACKOUT)
+        clock = [1000.0]
+        outcomes = iter([{'stop': 'rate-limit'}, {'stop': 'ok', 'changed': False}])
+        def run(*args):
+            clock[0] += 15 * 60 if clock[0] == 1000.0 else 0
+            return next(outcomes)
+        with mock.patch.dict(os.environ, {'ZAI_API_KEY': 'fixture', 'DEEPSEEK_API_KEY': 'fixture'}), \
+             mock.patch.object(service.time, 'monotonic', side_effect=lambda: clock[0]), \
+             mock.patch.object(service, '_dispatch', side_effect=run) as dispatch, \
+             mock.patch.object(service, 'blocked', return_value=False) as blocked:
+            report = service.dispatch(self.config, ROLES['fixer'], {'run': 'r', 'job': 'j'}, self.clone, self.root / 'attempt')
+        self.assertEqual(report['stop'], 'ok')
+        self.assertEqual(dispatch.call_count, 2)
+        self.assertEqual(blocked.call_count, 1)
+        self.assertAlmostEqual(blocked.call_args.args[0]['budget']['wall_clock_min'], 5, places=3)
+        # The caller's config keeps the configured budget.
+        self.assertEqual(self.config['repair']['budget']['wall_clock_min'], 20)
 
     def test_pause_defaults_to_30_minutes_and_is_never_shortened(self):
         now = dt.datetime.now(dt.timezone.utc)
