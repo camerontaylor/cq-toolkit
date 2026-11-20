@@ -364,6 +364,27 @@ def dispatch(config, role, job, wt, directory, judge=False):
     return {'stop': 'rate-limit', 'retry_after_ms': max(1000, (end - dt.datetime.now(dt.timezone.utc)).total_seconds() * 1000)}
 
 
+def review_diff_sections(diff):
+    """Split a review diff into (path, text) per 'diff --git' section.
+
+    Text before the first header keeps the generic review-diff.txt path. A
+    header without a ' b/' separator (for example a git-quoted non-ASCII path)
+    is scanned under the whole header line, which still contains the real
+    path. An empty diff is one empty section so the scan still runs once."""
+    sections, path, lines = [], 'review-diff.txt', []
+    for line in str(diff).splitlines():
+        if line.startswith('diff --git '):
+            if lines:
+                sections.append((path, '\n'.join(lines)))
+            _, _, tail = line.rpartition(' b/')
+            path = tail.strip() or 'review-diff.txt'
+            lines = []
+        lines.append(line)
+    if lines or not sections:
+        sections.append((path, '\n'.join(lines)))
+    return sections
+
+
 def _dispatch(config, role, job, wt, directory, judge=False):
     directory.mkdir(parents=True, exist_ok=True)
     job = copy.deepcopy(job)
@@ -377,6 +398,14 @@ def _dispatch(config, role, job, wt, directory, judge=False):
     if not triage_context_safe(c, {'current_path': snapshot.get('path') or 'source-snapshot.txt', 'source': snapshot.get('source', '')},
                                directory / 'source-snapshot-scan.json'):
         raise ValueError('source snapshot secret scan rejected; refusing dispatch')
+    # The review diff rides in the job and is serialized into the judge prompt;
+    # it gets the identical scan before any driver or provider call.
+    # Each file section is scanned under its own path so path-gated rules
+    # (key-material-env) apply exactly as they do for the source snapshot.
+    for index, (section_path, section) in enumerate(review_diff_sections(job.get('review_diff', ''))):
+        if not triage_context_safe(c, {'current_path': section_path, 'source': section},
+                                   directory / ('review-diff-scan-' + str(index) + '.json')):
+            raise ValueError('review diff secret scan rejected; refusing dispatch')
     job['source_snapshot'] = snapshot
     atomic(directory / 'source-snapshot.json', snapshot)
     # The admission checks sample the clock before worktree retention and the
