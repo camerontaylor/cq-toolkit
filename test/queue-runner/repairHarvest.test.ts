@@ -564,9 +564,10 @@ describe('repairHarvest result validation (differential)', () => {
     });
   });
 
-  // These two cases pin the Python behavior around sibling identity and retry timing
-  // until the repair behavior changes in both runtimes.
-  it('writes the unpublished-FIXED decision from a sibling whose identity does not match (as Python does)', async () => {
+  // The retry-timing case still pins the Python behavior; the identity case
+  // now shares the checks that run ahead of the verdict dispatch in both
+  // runtimes.
+  it('terminalizes a mismatched sibling instead of recording its unpublished-FIXED decision', async () => {
     const out = await same({
       item: item({}, { jobs: [J1, J2] }),
       files: files(
@@ -578,7 +579,8 @@ describe('repairHarvest result validation (differential)', () => {
         ],
       ),
     });
-    expect(out.calls).toContain('"sibling","F2","crq-R-F2"');
+    expect(out.calls).not.toContain('"sibling"');
+    expect(out.calls).toContain('"invalid repair result: sibling identity mismatch"');
   });
 
   it('records a sibling FAILED outcome even with retry_after set (as Python does)', async () => {

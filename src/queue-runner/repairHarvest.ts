@@ -158,8 +158,33 @@ export async function recordUnpublishedSiblings(
     if (!isRec(result) || !isRec(job)) continue;
     if (!truthy(get(job, 'canonical_finding_id'))) continue;
     try {
+      // Sibling results bypass harvest's validation: apply the same identity
+      // and binding checks before the verdict dispatches, so a mismatched
+      // result cannot record a decision. A deterministic artifact defect is
+      // terminalized (like harvest's record_terminal_failure) instead of
+      // replayed forever: the failure outcome is recorded, the
+      // attacker-controlled verdict is not, and the tick proceeds.
+      let reason: string | null = null;
+      if (!pyEq(get(result, 'job'), other) || !pyEq(get(result, 'item'), get(job, 'item'))) {
+        reason = 'invalid repair result: sibling identity mismatch';
+      } else if (
+        truthy(get(job, 'source_sha')) &&
+        ['source_sha', 'finding_sha256', 'origin_job'].some(
+          (k) => !pyEq(get(result as Rec, k), get(job as Rec, k)),
+        )
+      ) {
+        reason = 'invalid repair result: sibling source/evidence binding mismatch';
+      }
       const verdict = get(result, 'verdict');
-      if (verdict === 'FIXED') {
+      if (reason !== null) {
+        await fx.markFindingOutcome(job, {
+          job: other,
+          item: get(job, 'item') ?? null,
+          verdict: 'FAILED',
+          reason,
+          finding: get(job, 'finding') ?? null,
+        });
+      } else if (verdict === 'FIXED') {
         await fx.recordUnpublishedFixedSibling(
           pyReq(job, 'canonical_finding_id'),
           other,
@@ -167,30 +192,7 @@ export async function recordUnpublishedSiblings(
           get(job, 'repair_base') ?? null,
         );
       } else if (verdict === 'FAILED' || verdict === 'NOT-FIXED' || verdict === 'STALE') {
-        // Sibling results bypass harvest's validation: apply the same identity
-        // and binding checks before the verdict becomes an outcome write-back.
-        let reason: string | null = null;
-        if (!pyEq(get(result, 'job'), other) || !pyEq(get(result, 'item'), get(job, 'item'))) {
-          reason = 'invalid repair result: sibling identity mismatch';
-        } else if (
-          truthy(get(job, 'source_sha')) &&
-          ['source_sha', 'finding_sha256', 'origin_job'].some(
-            (k) => !pyEq(get(result as Rec, k), get(job as Rec, k)),
-          )
-        ) {
-          reason = 'invalid repair result: sibling source/evidence binding mismatch';
-        }
-        if (reason !== null) {
-          await fx.markFindingOutcome(job, {
-            job: other,
-            item: get(job, 'item') ?? null,
-            verdict: 'FAILED',
-            reason,
-            finding: get(job, 'finding') ?? null,
-          });
-        } else {
-          await fx.markFindingOutcome(job, result);
-        }
+        await fx.markFindingOutcome(job, result);
       }
     } catch (e) {
       if (!isCaught(e)) throw e;
