@@ -12,6 +12,7 @@ import fcntl
 import json
 from pathlib import Path
 import subprocess
+import uuid
 from unittest import mock
 
 from test_deploy_controller_fixtures import ControllerFixture, dc, host
@@ -89,6 +90,29 @@ class RollbackPlanTests(ControllerFixture):
                         append.assert_not_called()
         self.assertEqual(dc.captured_state(self.effects), before)
         self.assertEqual({p.name: p.read_bytes() for p in self.record_dir.iterdir()}, records)
+
+    def test_foreign_journal_for_same_head_refuses_unless_retained(self):
+        # Matching HEAD admits another host's genuine journal: two hosts can
+        # reach the same deployed commit from different priors, so the supplied
+        # record must be the deploy transaction THIS controller retained, or
+        # its prior_head would name the wrong rollback target.
+        with self.fake_switch():
+            dc.deploy_plan(self.effects, host, self.target, self.tag,
+                           self.overlay_path)
+        retained = json.loads(
+            next(self.record_dir.glob("controller-*.json")).read_text())
+        foreign = {**retained, "transaction_id": uuid.uuid4().hex,
+                   "at": "2026-10-27T00:00:00Z", "prior_head": "f" * 40,
+                   "prior_tag": "crq-runner/20261027-9"}
+        before = dc.captured_state(self.effects)
+        records = {p.name: p.read_bytes() for p in self.record_dir.iterdir()}
+        with mock.patch.object(host, "switch") as helper_switch:
+            with self.assertRaisesRegex(dc.Refused, "locally retained transaction"):
+                dc.rollback_plan(self.effects, host, foreign, self.overlay_path)
+            helper_switch.assert_not_called()
+        self.assertEqual(dc.captured_state(self.effects), before)
+        self.assertEqual({p.name: p.read_bytes() for p in self.record_dir.iterdir()}, records)
+        self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.target)
 
     def test_missing_or_malformed_deployed_target_cannot_authorize_rollback(self):
         missing = dict(self.prior)
