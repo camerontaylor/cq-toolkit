@@ -78,6 +78,7 @@ REFUSALS = {
     "selected job lacks matching queued tick-owned preparation": "no-queued-run",
     "selected job revalidation lineage mismatch": "revalidation-lineage-mismatch",
     "job identity mismatch": "job-identity-mismatch",
+    "unreadable job: expected one exact CRQ job id": "job-id-invalid",
     "no queued tick-owned repair run": "no-queued-run",
     "job pin differs from its tick-owned repair run": "pin-record-mismatch",
     "pinned source path missing": "pinned-path-missing",
@@ -350,6 +351,9 @@ def _drain_case(
             bounded, "command", side_effect=_fake_command
         ):
             status, selected, reason = bounded.drain_job(root, CONFIG, queue_value, job_id)
+        # The OSError text names the temp state root; the replay substitutes
+        # its own root for this placeholder.
+        reason = reason.replace(str(root), "<state-root>")
     return {
         "kind": "drain",
         "name": name,
@@ -365,6 +369,9 @@ def _drain_case(
         "expected": {
             "status": status,
             "refusal": _refusal(reason),
+            # Python's exact prose, which the drain narrates and writes into a
+            # STALE result; the typed refusal alone cannot reproduce it.
+            "reason": reason,
             **_expected_job(selected),
         },
     }
@@ -660,6 +667,16 @@ def build() -> dict:
         _drain_case("job-unreadable-missing", job_id="crq-missing-F1"),
         _drain_case("finding-missing", job=_legacy_job(**{"finding": None})),
         _drain_case("finding-not-object", job=_legacy_job(finding=[])),
+        _drain_case("finding-string", job=_legacy_job(finding="src/a.ts")),
+        _drain_case("finding-number", job=_legacy_job(finding=7)),
+        _drain_case("finding-float", job=_legacy_job(finding=1.5)),
+        _drain_case("finding-bool", job=_legacy_job(finding=True)),
+        _drain_case(
+            "finding-key-absent",
+            job={key: value for key, value in _legacy_job().items() if key != "finding"},
+        ),
+        _drain_case("job-id-invalid-grammar", job_id="not-a-job"),
+        _drain_case("job-id-invalid-prefix-only", job_id="crq-"),
         # Prepared jobs: the strict one-job selector, including its tip check.
         _drain_case(
             "prepared-run",
@@ -674,6 +691,27 @@ def build() -> dict:
             job=prepared_job,
             queue=prepared_queue,
             git=_git(tip=TIP, blobs={PIN + ":src/kept.ts": BLOB}),
+        ),
+        _drain_case(
+            "prepared-revalidation-list-tip-moved",
+            job_id=PREPARED_JOB,
+            job=_prepared()[0] | {"revalidation": [1]},
+            queue=prepared_queue,
+            git=_git(tip=TIP, blobs={PIN + ":src/kept.ts": BLOB}),
+        ),
+        _drain_case(
+            "prepared-revalidation-list-at-tip",
+            job_id=PREPARED_JOB,
+            job=_prepared()[0] | {"revalidation": [1]},
+            queue=prepared_queue,
+            git=_git(blobs={PIN + ":src/kept.ts": BLOB}),
+        ),
+        _drain_case(
+            "prepared-revalidation-string-at-tip",
+            job_id=PREPARED_JOB,
+            job=_prepared()[0] | {"revalidation": "stale"},
+            queue=prepared_queue,
+            git=_git(blobs={PIN + ":src/kept.ts": BLOB}),
         ),
         _drain_case(
             "prepared-origin-job-missing",

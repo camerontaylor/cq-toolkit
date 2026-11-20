@@ -110,17 +110,32 @@ function injectedGit(entry: JsonObject): InjectedGit {
   return { git, reads };
 }
 
+const UNREADABLE_PREFIX = 'unreadable job: ';
+
+/**
+ * The adapter supplies Python's read-error text as `detail`; the fixture's
+ * recorded drain reason carries it after the fixed prefix, so a drain case
+ * replays it from there.
+ */
 function jobFileOf(entry: JsonObject): RepairJobFile {
+  const expected = entry.get('expected');
+  const reason = expected instanceof JsonObject ? expected.get('reason') : undefined;
+  const detail =
+    typeof reason === 'string' && reason.startsWith(UNREADABLE_PREFIX)
+      ? reason.slice(UNREADABLE_PREFIX.length)
+      : undefined;
   const raw = entry.get('job_raw');
   if (typeof raw === 'string') {
     try {
       return { kind: 'value', value: parseJsonValue(raw) };
     } catch {
-      return { kind: 'unreadable' };
+      return detail === undefined ? { kind: 'unreadable' } : { kind: 'unreadable', detail };
     }
   }
   const job = entry.get('job');
-  if (job === undefined || job === null) return { kind: 'unreadable' };
+  if (job === undefined || job === null) {
+    return detail === undefined ? { kind: 'unreadable' } : { kind: 'unreadable', detail };
+  }
   return { kind: 'value', value: job };
 }
 
@@ -179,6 +194,7 @@ function drainActual(outcome: ReturnType<typeof drainJob>): JsonObject {
   return new JsonObject([
     ['status', outcome.status],
     ['refusal', refusal],
+    ['reason', outcome.reason],
     ['job', job],
     ['job_keys', job === null ? null : job.entries.map(([key]) => key)],
   ]);
@@ -651,6 +667,6 @@ describe('repair explicit selection', () => {
         ...selectInputOf(entry).input,
         queue: new JsonObject([['items', JsonNumber.int(7)]]),
       }),
-    ).toEqual({ ok: false, refusal: 'selection-malformed' });
+    ).toEqual({ ok: false, refusal: 'selection-malformed', python: 'items' });
   });
 });
