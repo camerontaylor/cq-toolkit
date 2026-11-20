@@ -329,8 +329,12 @@ export async function runSummaryWriter(
   try {
     const effects = fileStatusWriterEffects(roots, realRunCommand, now);
     const documents = await loadDocuments(effects);
-    const scheduleProbe = await probeSchedule(effects, documents.config['schedule_id']);
-    // Python's schedule probe swallows every failure (`except Exception: pass`).
+    // Python's schedule probe swallows every failure (`except Exception: pass`),
+    // including a non-string schedule_id that makes the inspect call raise;
+    // the summary then publishes with the empty schedule dict.
+    const scheduleProbe = await probeSchedule(effects, documents.config['schedule_id']).catch(
+      () => ({ schedule: null, failure: null }),
+    );
     await effects.publishSummary({ ...documents, scheduleProbe });
     io.write(summaryPublishTarget(roots));
     return 0;

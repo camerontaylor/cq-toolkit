@@ -189,9 +189,12 @@ describe('crq summary dispatch (CLI contract, S1)', () => {
     expect(artifact.status).toBe('ok');
     expect(artifact.value?.path).toBe(join(xdg, 'crq', 'summary.json'));
     // Unlike `status`, `summary` writes no status.md.
-    await expect(readFile(join(stateRoot, 'status.md'), 'utf8')).rejects.toMatchObject({
-      code: 'ENOENT',
-    });
+    for (const name of ['status.md', 'status.json']) {
+      await expect(readFile(join(stateRoot, name), 'utf8')).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    }
+    expect(await readFile(join(stateRoot, 'events.jsonl'), 'utf8')).toBe('');
     const summary = JSON.parse(await readFile(artifact.value!.path!, 'utf8')) as {
       schema_version?: number;
       pending_items: { pr: number; label?: string; repair_origin?: string }[];
@@ -254,5 +257,54 @@ describe('crq summary dispatch (CLI contract, S1)', () => {
     const artifact = JSON.parse(result.stdout.trim()) as { status: string; error?: string };
     expect(artifact.status).toBe('failed');
     expect(artifact.error).toContain('summary-writer:');
+  });
+
+  async function setSchedule(runnerRoot: string, scheduleId: unknown): Promise<void> {
+    const path = join(runnerRoot, 'config.json');
+    const config = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+    config['schedule_id'] = scheduleId;
+    await writeFile(path, `${JSON.stringify(config)}\n`);
+  }
+
+  it('takes the schedule state from `paseo schedule inspect` when it succeeds', async () => {
+    const { runnerRoot, stateRoot } = await makeRunnerRoot();
+    await setSchedule(runnerRoot, 'crq-tick.timer');
+    const bin = await mkdtemp(join(tmpdir(), 'crq-summary-cli-bin-'));
+    const xdg = await mkdtemp(join(tmpdir(), 'crq-summary-cli-xdg-'));
+    cleanups.push(bin, xdg);
+    await writeFile(join(bin, 'paseo'), `#!/bin/sh\necho '{"status":"active"}'\n`, { mode: 0o755 });
+    const result = spawnSync(process.execPath, [CLI, 'summary', '--state-root', stateRoot], {
+      cwd: runnerRoot,
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: { ...process.env, XDG_STATE_HOME: xdg, PATH: `${bin}:${process.env.PATH ?? ''}` },
+    });
+    expect(result.status).toBe(0);
+    const summary = JSON.parse(await readFile(join(xdg, 'crq', 'summary.json'), 'utf8')) as {
+      schedule: { id: string; state: string };
+    };
+    expect(summary.schedule).toEqual({ id: 'crq-tick.timer', state: 'active' });
+  });
+
+  it('publishes with the default schedule state when the inspect fails or schedule_id is not a string', async () => {
+    for (const scheduleId of ['crq-tick.timer', 123]) {
+      const { runnerRoot, stateRoot } = await makeRunnerRoot();
+      await setSchedule(runnerRoot, scheduleId);
+      const bin = await mkdtemp(join(tmpdir(), 'crq-summary-cli-bin-'));
+      const xdg = await mkdtemp(join(tmpdir(), 'crq-summary-cli-xdg-'));
+      cleanups.push(bin, xdg);
+      await writeFile(join(bin, 'paseo'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+      const result = spawnSync(process.execPath, [CLI, 'summary', '--state-root', stateRoot], {
+        cwd: runnerRoot,
+        encoding: 'utf8',
+        timeout: 60_000,
+        env: { ...process.env, XDG_STATE_HOME: xdg, PATH: `${bin}:${process.env.PATH ?? ''}` },
+      });
+      expect(result.status).toBe(0);
+      const summary = JSON.parse(await readFile(join(xdg, 'crq', 'summary.json'), 'utf8')) as {
+        schedule: { id: unknown; state: string };
+      };
+      expect(summary.schedule).toEqual({ id: scheduleId, state: 'systemd' });
+    }
   });
 });
