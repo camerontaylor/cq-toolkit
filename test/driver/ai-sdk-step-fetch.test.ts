@@ -210,6 +210,28 @@ describe('createStepFetch', () => {
     await transport.close();
   });
 
+  test('a native Request keeps its integrity metadata (a digest mismatch rejects)', async () => {
+    const transport = new agents.MockAgent();
+    transport.disableNetConnect();
+    transport
+      .get('http://integrity.invalid')
+      .intercept({ path: '/v1/x', method: 'GET' })
+      .reply(200, 'tampered bytes');
+    // sha256 of different bytes: undici enforces SRI only when it is forwarded.
+    const wrong = `sha256-${'A'.repeat(43)}=`;
+    const request = new Request('http://integrity.invalid/v1/x', { integrity: wrong });
+    const failure = await createStepFetch(
+      1_000,
+      0,
+      transport,
+    )(request).then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+    expect(failure).toBeDefined();
+    await transport.close();
+  });
+
   test('a native Request with the default redirect policy follows the redirect to the target', async () => {
     const transport = new agents.MockAgent();
     transport.disableNetConnect();
