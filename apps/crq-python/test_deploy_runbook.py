@@ -328,6 +328,18 @@ class DeployTests(DeployFixture, unittest.TestCase):
                             "refs/remotes/origin/main"]).returncode, 0)
         return local
 
+    def test_older_target_helper_refuses_before_admission(self):
+        local = self.local_only_prior()
+        live = (self.runner / "config.json").read_bytes()
+        with mock.patch.object(host, "switch", lambda root, overlay, raw, target, tag=None: None):
+            run = self.build(target_sha=self.target)
+            with self.assertRaisesRegex(rb.Refused, "rollback_config support"):
+                run.run()
+        self.assertEqual(self.head(), local)
+        self.assertEqual((self.runner / "config.json").read_bytes(), live)
+        self.assertEqual(self.units.stopped, [])
+        self.assertFalse(self.marker().exists())
+
     def test_local_only_prior_is_not_refused_and_deploys(self):
         # The live prior SHA may be a local merge that is not on origin/main
         # (a ceres deploy of main from a local wip merge). Only the target is
@@ -535,7 +547,7 @@ class DeployTests(DeployFixture, unittest.TestCase):
             def root_check(self, root, overlay):
                 return host.root_check(root, overlay)
 
-            def switch(self, *args, **kwargs):
+            def switch(self, *args, rollback_config=None):
                 (fixture.runtime / "dist/cli.js").write_text("// replaced\n")
                 raise ValueError("helper refused the switch")
 
@@ -750,8 +762,8 @@ class DeployTests(DeployFixture, unittest.TestCase):
         real_switch = host.switch
         calls = {"n": 0}
 
-        def mutating_switch(root, overlay, raw, target, tag=None):
-            result = real_switch(root, overlay, raw, target, tag)
+        def mutating_switch(root, overlay, raw, target, tag=None, rollback_config=None):
+            result = real_switch(root, overlay, raw, target, tag, rollback_config=rollback_config)
             calls["n"] += 1
             if calls["n"] == 1:
                 (self.runner / "state/queue.json").write_text(
@@ -775,8 +787,8 @@ class DeployTests(DeployFixture, unittest.TestCase):
         real_switch = host.switch
         calls = {"n": 0}
 
-        def replacing_switch(root, overlay, raw, target, tag=None):
-            result = real_switch(root, overlay, raw, target, tag)
+        def replacing_switch(root, overlay, raw, target, tag=None, rollback_config=None):
+            result = real_switch(root, overlay, raw, target, tag, rollback_config=rollback_config)
             calls["n"] += 1
             if calls["n"] == 1:
                 (self.runtime / "dist/cli.js").write_text("// replaced\n")
@@ -821,7 +833,7 @@ class DeployTests(DeployFixture, unittest.TestCase):
             def root_check(self, root, overlay):
                 return host.root_check(root, overlay)
 
-            def switch(self, *args, **kwargs):
+            def switch(self, *args, rollback_config=None):
                 raise ValueError("helper refused the switch")
 
         run = self.build(helper=BrokenSwitch())
@@ -836,8 +848,8 @@ class DeployTests(DeployFixture, unittest.TestCase):
     def test_health_failure_keeps_hold_when_rollback_is_disabled(self):
         real_switch = host.switch
 
-        def dirtying_switch(root, overlay, raw, target, tag=None):
-            result = real_switch(root, overlay, raw, target, tag)
+        def dirtying_switch(root, overlay, raw, target, tag=None, rollback_config=None):
+            result = real_switch(root, overlay, raw, target, tag, rollback_config=rollback_config)
             (self.runner / "state/queue.json").write_text(
                 '{"schema_version": 3, "items": []}\n')
             return result

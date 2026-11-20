@@ -95,7 +95,7 @@ alert leaves back onto a pre-Phase-0.1 target's `promotion` block so a rollback
 still delivers alerts.
 An overlay written for a pre-Phase-0.1 deployment may keep its
 `promotion.record_url_template`, `promotion.alert_agent_*` and
-`promotion.signer.spool.*` leaves. They let `switch` reproduce the live source
+`promotion.signer.spool.*` leaves. They let `legacy_check` reproduce the live source
 config byte-for-byte for its drift check; the new config keeps the alert
 recipient and ignores the retired template and spool values. Remove them after
 the source has switched.
@@ -273,9 +273,11 @@ from this general sequence.
    clean: the runbook's rollback treats a queue shape the prior target
    cannot provably read as operator recovery, and this manual path must
    not bypass that refusal. Only after the check passes, run the same
-   helper `switch` back to the prior SHA (the recorded prior SHA need not be
-   on `origin/main`; the runbook passes the measured pre-deploy config bytes,
-   which are restored verbatim); remove any target-only
+   helper `switch` back to the prior SHA. The manual helper and the
+   controller rollback require a verified prior target on `origin/main`.
+   For a local-only prior, the runbook’s automatic rollback restores the
+   prior SHA and measured config bytes verbatim. After a successful manual
+   switch, remove any target-only
    `crq-*` unit the target installed that is absent from the saved
    prior set; restore the complete saved prior unit set into
    `$HOME/.config/systemd/user`; run
@@ -347,8 +349,8 @@ python3 /srv/crq-deploy/apps/crq-python/ops/deploy-controller.py --root /srv/crq
 Ordering and guarantees:
 
 1. **Preflight** — full 40-hex target SHA, annotated `crq-runner/` tag peeling
-   to it; prior HEAD/config digests retained; reachability, drift and
-   stopped-unit checks are the helper's own (they run inside its `switch`).
+   to it; prior HEAD/config digests retained; reachability and stopped-unit
+   checks are the helper's own (they run inside its `switch`).
    The owner must provision a durable, private mode-0700 record directory before
    invoking the controller. The controller never creates it or missing ancestors;
    absence, wrong type/mode and ambiguous prior annotated tags refuse before
@@ -581,9 +583,9 @@ The sequence:
 
 1. **Resolve the target.** Fetch `origin/main` and require a full SHA
    contained in `refs/remotes/origin/main`. A tag is optional. The target's
-   own `prepare-host.py` must accept a tagless switch; a historical target
-   whose helper still requires a tag is refused before the hold, because its
-   automatic rollback could never pass `None`.
+   own `prepare-host.py` must support both a tagless switch and exact-byte
+   rollback through `rollback_config`. The runbook checks both before
+   claiming the hold.
 2. **Measure before touching anything.** Record the live `repair.cq_bin`
    pointer, its entry bytes and mode, and hash `state/queue.json` plus the
    completion heartbeat. Require the controller's rollback-compatibility

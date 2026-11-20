@@ -29,7 +29,7 @@ CONFIG_KEYS = {
     'clone', 'worktree_root', 'timeout_bin', 'paseo_hosts',
     'repos', 'notify.hosts',
     'alerts.alert_agent_host', 'alerts.alert_agent_id',
-    # Transition-only promotion leaves: switch() renders the live source
+    # Transition-only promotion leaves: legacy_check() renders the live source
     # before its drift check, so an overlay must still be able to reproduce a
     # pre-Phase-0.1 config byte-for-byte. New configs keep the alert recipient
     # and ignore the rest; see apply().
@@ -859,7 +859,7 @@ def switch(root, overlay, raw, target, tag=None, rollback_config=None):
             # --no-overwrite-ignore aborts the checkout instead of silently
             # replacing an ignored host-local file at a tracked path.
             git(root, 'checkout', '--no-overwrite-ignore', '--detach', target)
-            # Same tick lock spans drift check, checkout, render and audit.
+            # The same tick lock spans backup, checkout, install and audit.
             record(root, overlay, raw, destination, 'switch-render', previous_sha=previous, tag=tag)
             atomic_bytes(root / CONFIG, destination)
             if git(root, 'status', '--porcelain', '--untracked-files=all') not in ('', ' M ' + CONFIG):

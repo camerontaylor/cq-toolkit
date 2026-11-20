@@ -323,6 +323,8 @@ export async function switchCheckout(
     if (changes.some((line) => line !== ` M ${CONFIG}`))
       throw new ValueError('checkout has changes other than rendered config');
     const previous = await gitText(effects, ['rev-parse', 'HEAD']);
+    // The Python helper also persists a private exact-byte crash-recovery copy.
+    // This port records the digest and retains the original bytes in memory for rollback.
     await effects.record(current, 'switch-before', [
       ['target', target],
       ['tag', tag],
@@ -337,7 +339,7 @@ export async function switchCheckout(
       await effects.writeConfig(current);
       throw error;
     }
-    // Same tick lock spans drift check, checkout, render and audit.
+    // The same tick lock spans checkout, install, and audit.
     try {
       signal?.throwIfAborted();
       await effects.record(destination, 'switch-render', [

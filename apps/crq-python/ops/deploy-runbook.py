@@ -54,8 +54,8 @@ are kept:
   triggers observed active before the run.
 
 The target's own helper and controller are extracted and executed. A target
-whose ``verify_target`` still requires an annotated tag is refused before the
-hold: it cannot support a tagless switch or the tagless automatic rollback.
+whose helper still requires an annotated tag or lacks exact-byte rollback
+support is refused before the hold.
 
 Only a failure *after* the switch triggers automatic rollback: a failed
 verification or a failed health check. A failure before the switch restarts
@@ -648,6 +648,12 @@ class Run:
                     "target that contains the tagless-helper change first. "
                     "Nothing has been switched.")
 
+        require("rollback_config" in inspect.signature(
+                    self.helper.switch).parameters,
+                "the target revision's prepare-host.switch cannot restore "
+                "recorded rollback config bytes. Choose a target with "
+                "rollback_config support. Nothing has been switched.")
+
     # -- steps ---------------------------------------------------------
     def refuse_unfinished_controller_transactions(self):
         """Run the controller's unfinished-transaction guard before admission.
@@ -1119,14 +1125,9 @@ class Run:
         # pre-deploy config bytes; the prior revision ran live, so it is not
         # re-verified as a deploy target (it may be a local merge that is not
         # on origin/main). A helper without the keyword cannot do this.
-        if "rollback_config" in inspect.signature(
-                self.helper.switch).parameters:
-            self.helper.switch(self.root, self.overlay, self.overlay_raw,
-                               self.prior_sha, None,
-                               rollback_config=self.original_config)
-        else:
-            self.helper.switch(self.root, self.overlay, self.overlay_raw,
-                               self.prior_sha, None)
+        self.helper.switch(self.root, self.overlay, self.overlay_raw,
+                           self.prior_sha, None,
+                           rollback_config=self.original_config)
         self.switched = False
         require(self.git("rev-parse", "HEAD") == self.prior_sha,
                 "helper returned but HEAD is not the prior SHA")
