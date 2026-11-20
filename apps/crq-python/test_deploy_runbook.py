@@ -735,6 +735,28 @@ class DeployTests(DeployFixture, unittest.TestCase):
                             for unit in TRIGGERS))
         self.assertEqual(self.record(run)["outcome"], "recovery_required")
 
+    def test_missing_cq_bin_entry_refuses_at_preflight(self):
+        # A pointer whose entry is already missing must be rejected before
+        # the admission hold: after the switch the same refusal would also
+        # fail the rollback's runtime check, leaving nothing to restart.
+        (self.runtime / "dist/cli.js").unlink()
+        run = self.build()
+        with self.assertRaisesRegex(rb.Refused, "points at a missing entry"):
+            run.run()
+        self.assertEqual(self.head(), self.prior)
+        self.assertFalse(self.marker().exists())
+        self.assertEqual(self.units.stopped, [])
+
+    def test_cq_bin_entry_deleted_after_measure_still_refuses(self):
+        # The later checks stay: deleting the measured entry after preflight
+        # must refuse the restart (and any rollback restart) exactly like a
+        # content change does.
+        run = self.build()
+        run.cq_bin = rb.measure_cq_bin(self.original_config)
+        (self.runtime / "dist/cli.js").unlink()
+        with self.assertRaisesRegex(rb.Refused, "points at a missing entry"):
+            run.runtime_pointer_check()
+
     def test_moved_cq_bin_pointer_is_refused_before_restart(self):
         # The pointer is measured from the live config and the target render
         # cannot move it (the overlay names it), so this is the belt-and-braces

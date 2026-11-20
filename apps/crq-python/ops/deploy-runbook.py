@@ -285,7 +285,10 @@ def measure_cq_bin(config_bytes):
 
     The configuration string alone does not prove what the runner executes;
     the measured entry does. A placeholder is recorded as such (the overlay
-    did not render a runtime) and compared as a string.
+    did not render a runtime) and compared as a string. A non-placeholder
+    pointer must name an existing entry: a missing one is refused here so
+    preflight rejects it before the admission hold, while the later
+    pre-restart checks still detect deletion after preflight.
     """
     try:
         config = json.loads(config_bytes.decode("utf-8"))
@@ -306,10 +309,12 @@ def measure_cq_bin(config_bytes):
     require(entry.is_absolute(),
             "live repair.cq_bin is not an absolute path: " + repr(pointer))
     record["exists"] = entry.is_file()
-    if record["exists"]:
-        record["sha256"] = sha256_file(entry)
-        record["mode"] = oct(entry.stat().st_mode & 0o777)
-        record["resolved"] = str(entry.resolve())
+    require(record["exists"],
+            "live repair.cq_bin points at a missing entry: " + repr(pointer)
+            + "; the runtime this deploy would execute cannot be measured")
+    record["sha256"] = sha256_file(entry)
+    record["mode"] = oct(entry.stat().st_mode & 0o777)
+    record["resolved"] = str(entry.resolve())
     return record
 
 
