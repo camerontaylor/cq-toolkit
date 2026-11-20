@@ -150,6 +150,7 @@ describe('operator-live command seam (D1)', () => {
     expect([...LIVE_OPERATOR_COMMANDS]).toEqual([
       'repair-prepare',
       'status',
+      'summary',
       'backfill',
       'reconcile-merged',
     ]);

@@ -25,6 +25,7 @@ import {
   fileTriageRows,
   publishSummaryAtomically,
   realRunCommand,
+  summaryPublishTarget,
   summaryStateEffects,
   type RunCommand,
   type SummaryStateRoots,
@@ -35,6 +36,7 @@ import { fileReadOnlyStatusEffects, type StatusStateRoots } from './statusSource
 import {
   jsonScalar,
   parseConfig,
+  probeSchedule,
   validateQueue,
   validateQueueExact,
   writeStatusForDocuments,
@@ -255,6 +257,23 @@ export interface StatusWriterCliIo {
 }
 
 /**
+ * One strict queue read shared by the seams and the route. The read goes
+ * through effects.readQueue, not a direct readFile: the strict decoder rejects
+ * invalid UTF-8 exactly as Python's Path.read_text() raises, and the seams and
+ * route consume the same bytes it returned. A concurrent tick swapping
+ * queue.json between two reads would otherwise leave a newly referenced repair
+ * job uncaptured and repairDigest would refuse with a spurious OSError.
+ */
+async function loadDocuments(effects: StatusWriterEffects): Promise<CrqDocuments> {
+  const queueText = await effects.readQueue();
+  return {
+    queue: validateQueue(queueText),
+    config: parseConfig(await effects.readConfig()),
+    queueExact: validateQueueExact(queueText),
+  };
+}
+
+/**
  * Assemble the full effect set for one invocation (composer seams resolved
  * from the state root) and run the write route. The status.md text is handed
  * to `io.write`; refusals surface as
@@ -278,16 +297,7 @@ export async function runStatusWriter(
     // and repairDigest would refuse with a spurious OSError. The strict
     // failure surfaces as the route's own schema refusal below.
     const effects = fileStatusWriterEffects(roots, realRunCommand, now);
-    // The one strict read goes through effects.readQueue, not a direct
-    // readFile: the strict decoder rejects invalid UTF-8 exactly as
-    // Python's Path.read_text() raises, and the seams and route consume
-    // the same bytes it returned.
-    const queueText = await effects.readQueue();
-    const documents: CrqDocuments = {
-      queue: validateQueue(queueText),
-      config: parseConfig(await effects.readConfig()),
-      queueExact: validateQueueExact(queueText),
-    };
+    const documents = await loadDocuments(effects);
     const seams = await resolveComposerSeams(roots.stateRoot, documents.queue);
     const result = await writeStatusForDocuments({ ...effects, composerSeams: seams }, documents);
     io.write(result.markdown);
@@ -302,3 +312,33 @@ export async function runStatusWriter(
 }
 
 export { writeStatusForDocuments };
+
+/**
+ * `crq summary`: Python's `status_summary.publish(ROOT, q, CONFIG, schedule)`
+ * and nothing else (no status.md, no status.json, no events line). The
+ * schedule probe is best effort: a failed `paseo schedule inspect` leaves the
+ * producer's empty schedule dict, never a refusal. The published path goes to
+ * `io.write`; refusals take the same `summary-writer: <class>: <message>`
+ * channel as the status route and exit 1.
+ */
+export async function runSummaryWriter(
+  roots: StatusStateRoots & SummaryStateRoots,
+  io: StatusWriterCliIo,
+  now?: () => number,
+): Promise<number> {
+  try {
+    const effects = fileStatusWriterEffects(roots, realRunCommand, now);
+    const documents = await loadDocuments(effects);
+    const scheduleProbe = await probeSchedule(effects, documents.config['schedule_id']);
+    // Python's schedule probe swallows every failure (`except Exception: pass`).
+    await effects.publishSummary({ ...documents, scheduleProbe });
+    io.write(summaryPublishTarget(roots));
+    return 0;
+  } catch (error) {
+    const pythonError = (error as { pythonError?: unknown }).pythonError;
+    const message = error instanceof Error ? error.message : String(error);
+    const label = typeof pythonError === 'string' ? pythonError : 'Error';
+    io.error(`summary-writer: ${label}: ${message}\n`);
+    return 1;
+  }
+}
