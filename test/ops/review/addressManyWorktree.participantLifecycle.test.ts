@@ -120,7 +120,14 @@ test.each(['head', 'index', 'foreign-file', 'path', 'mode', 'cancel-again', 'res
         expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('export const a = 1;\n');
       } else {
         await expect(pending).rejects.toThrow(/terminal|owner|authority/);
-        await expect(lstat(report.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
+        // A failed settlement rejects the awaiting action, so a retained
+        // reference is persisted now (restore-io); with none, no report exists.
+        if (mode === 'restore-io') {
+          const persisted = JSON.parse(await readFile(report.reportPath, 'utf8')) as {
+            failed: unknown[];
+          };
+          expect(persisted.failed).toHaveLength(1);
+        } else await expect(lstat(report.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
         expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe(
           mode === 'path' ? 'replacement bytes retained' : 'RAW CANCELLED PARTIAL\n',
         );
@@ -227,6 +234,7 @@ test('a rejected action that deferred a cancelled attempt still settles it befor
   const parent = new AbortController();
   const report = terminalReport(join(f.root, 'terminal-rejected-report.json'));
   try {
+    const actionError = new Error('worker rejected after deferring');
     const pending = withAddressOwnership(
       {
         repoRoot: f.repo.root,
@@ -246,10 +254,11 @@ test('a rejected action that deferred a cancelled attempt still settles it befor
         parent.abort();
         expect(ownershipModule.deferAddressTerminalAttempt(binding, attempt)).toBe(true);
         // The worker throws instead of reaching addressCancelledResult().
-        throw new Error('worker rejected after deferring');
+        throw actionError;
       },
     );
-    await expect(pending).rejects.toThrow('worker rejected after deferring');
+    // The action's own error survives cleanup unchanged.
+    await expect(pending).rejects.toBe(actionError);
     expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('export const a = 1;\n');
     expect(report.failed).toHaveLength(1);
     expect(f.repo.git('show', `${report.failed[0]!.sha}:src/a.ts`)).toBe('RAW CANCELLED PARTIAL\n');

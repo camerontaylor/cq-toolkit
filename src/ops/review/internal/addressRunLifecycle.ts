@@ -97,6 +97,35 @@ export interface Participant {
   opaqueDispatched: boolean;
 }
 
+/**
+ * Re-checks that a participant's report still resolves through the directory it
+ * was bound to. Returns the canonical target and the directory identity read
+ * by this check, or undefined when the journal directory vanished (ENOENT).
+ */
+async function validateBoundReportDirectory(
+  participant: Participant,
+): Promise<{ target: string; identity: Identity } | undefined> {
+  const report = participant.report;
+  if (!report) return undefined;
+  let parent: string;
+  try {
+    parent = await realpath(dirname(report.reportPath));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return undefined;
+  }
+  const target = resolve(parent, basename(report.reportPath));
+  const ancestor = participant.reportAncestor;
+  if (
+    !ancestor ||
+    !same(await lstat(ancestor.path), ancestor.identity) ||
+    (await realpath(ancestor.path)) !== ancestor.path ||
+    target !== participant.reportTarget
+  )
+    throw new Error('address terminal: report target identity changed');
+  return { target, identity: await lstat(dirname(target)) };
+}
+
 /** A fresh context mints its own token; callers cannot install or replace global capabilities. */
 function createAddressRunContext(owner: AddressRunAuthority, internals: TerminalInternals) {
   const token = Object.freeze({});
@@ -440,28 +469,15 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
       const targets = new Set<string>();
       for (const participant of open)
         if (participant.report) {
-          let parent: string;
-          try {
-            parent = await realpath(dirname(participant.report.reportPath));
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-            // The journal directory vanished after binding (ordinary parent
-            // cancellation timing). End the attempt without a report rather
-            // than failing with ENOENT and quarantining the owner.
-            continue;
-          }
-          const target = resolve(parent, basename(participant.report.reportPath));
-          const ancestor = participant.reportAncestor;
-          if (
-            !ancestor ||
-            !same(await lstat(ancestor.path), ancestor.identity) ||
-            (await realpath(ancestor.path)) !== ancestor.path ||
-            target !== participant.reportTarget
-          )
-            throw new Error('address terminal: report target identity changed');
-          if (targets.has(target)) throw new Error('address terminal: canonical report alias');
-          participant.reportDirectory = await lstat(dirname(target));
-          targets.add(target);
+          const directory = await validateBoundReportDirectory(participant);
+          // The journal directory vanished after binding (ordinary parent
+          // cancellation timing). End the attempt without a report rather
+          // than failing with ENOENT and quarantining the owner.
+          if (!directory) continue;
+          if (targets.has(directory.target))
+            throw new Error('address terminal: canonical report alias');
+          participant.reportDirectory = directory.identity;
+          targets.add(directory.target);
         }
       // Cancelled attempts are never released, so a participant closed without
       // arriving (a rejected action that skipped arrive()) still holds one.
@@ -496,25 +512,32 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
                   if (row) row.failedAttempt = attempt.retained;
                 }
               }
-            // Make a closed or rejected participant's reference operator-visible
-            // now, not only in memory: a closed one has no later write, and a
-            // rejected one's caller receives the error, never the in-memory
-            // report. Other open participants keep the existing contract: the
-            // full terminal report below when settlement succeeds, and no report
-            // when it fails (the in-memory report still carries the reference to
-            // the caller).
+            // Make a reference operator-visible now, not only in memory, when
+            // no caller receives the report: a closed participant has no later
+            // write, and after a failed settlement every open participant's
+            // action rejects with the terminal error. When settlement succeeds,
+            // open participants get the full terminal report below.
             for (const participant of gained) {
               if (!participant.report || !participant.reportTarget) continue;
-              // An open rejected participant is written once, by the open pass
-              // below, when settlement succeeds; only a failed settlement (no
-              // open pass) needs the early write.
-              if (!participant.closed && !(participant.rejected && !settled)) continue;
+              // An open participant is written once, by the open pass below,
+              // when settlement succeeds. When settlement fails there is no open
+              // pass and every open participant's action rejects with the
+              // terminal error (arrive() throws it), so its caller never
+              // receives the report: write it now.
+              if (!participant.closed && settled) continue;
               try {
+                // A closed participant was not re-validated above: apply the
+                // same bound-directory checks and use the identity they read.
+                let directory = participant.reportDirectory;
+                if (!directory) {
+                  directory = (await validateBoundReportDirectory(participant))?.identity;
+                  if (!directory) continue;
+                }
                 await persistAddressTerminalReport(
                   terminalToken(this),
                   participant.reportTarget,
                   participant.report,
-                  participant.reportDirectory ?? (await lstat(dirname(participant.reportTarget))),
+                  directory,
                 );
               } catch (error) {
                 persistFailure ??= { error };
