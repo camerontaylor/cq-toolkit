@@ -85,8 +85,6 @@ const participantLeases = new WeakMap<AddressRunLease, Participant>();
 export interface Participant {
   lease: AddressRunLease;
   closed: boolean;
-  /** The action rejected: the caller never receives this participant's in-memory report. */
-  rejected?: boolean;
   arrived: boolean;
   report?: ReviewAddressReport;
   reportTarget?: string;
@@ -314,7 +312,6 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
       // holds is never released: start terminal cleanup before the participant
       // closes so that attempt is still settled. The rejection itself wins; a
       // cleanup failure is recorded as the terminal failure by runTerminal.
-      participant.rejected = true;
       if (this.stopping && participant.attempts.some((attempt) => attempt.cancelled)) {
         try {
           await this.arrive(participant);
@@ -561,12 +558,16 @@ export abstract class AddressRunLifecycle implements AddressRunAuthority {
               report.fixesPerRun = new Set(
                 report.fixes.flatMap((fix) => (fix.commit ? [fix.commit] : [])),
               ).size;
-              await persistAddressTerminalReport(
-                terminalToken(this),
-                participant.reportTarget!,
-                report,
-                participant.reportDirectory!,
-              );
+              try {
+                await persistAddressTerminalReport(
+                  terminalToken(this),
+                  participant.reportTarget!,
+                  report,
+                  participant.reportDirectory!,
+                );
+              } catch (error) {
+                persistFailure ??= { error };
+              }
             }
           // A persistence failure never masks a settlement failure (which already
           // propagated); after a successful settlement it is surfaced here, once
