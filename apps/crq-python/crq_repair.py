@@ -15,6 +15,7 @@ import signal
 import sys
 import tempfile
 import time
+import traceback
 from zoneinfo import ZoneInfo
 from crq_repair import DetectorUnavailable, atomic, command, git, hack_detector, utc, verify
 from crq_repair.drivers import cq, codex, paseo
@@ -1610,6 +1611,7 @@ def main(argv=None):
         # An operational failure (a wrong finding digest, corrupt state) still owes
         # the caller its one JSON artifact: exit 1, never a bare traceback.
         narrate('repair dispatch failed: ' + str(exc)[:300])
+        narrate(traceback.format_exc())
         write_result({'error': {'kind': 'failed', 'subcommand': None, 'message': str(exc)[:200], 'exitCode': 1}})
         return 1
     if result is not None:

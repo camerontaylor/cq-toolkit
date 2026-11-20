@@ -907,6 +907,10 @@ class BoundedRepairTest(unittest.TestCase):
         self.assertEqual(code, 1)
         error = json.loads(out.getvalue())['error']
         self.assertEqual((error['kind'], error['message'], error['exitCode']), ('failed', 'bad digest', 1))
+        # The journal is the only diagnostic channel: the traceback stays on stderr.
+        self.assertIn('Traceback (most recent call last)', err.getvalue())
+        self.assertIn('ValueError: bad digest', err.getvalue())
+        self.assertEqual(len(out.getvalue().strip().splitlines()), 1)
 
 
 if __name__ == '__main__':
