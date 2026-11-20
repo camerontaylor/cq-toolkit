@@ -1652,6 +1652,10 @@ def usage_context_vectors() -> Dict[str, Any]:
             queue={"items": [{"id": "a", "attempt_id": "att-a", "run": "r"}], "starts": [],
                    "backfill_reservations": {"att-a": {}}},
             usage=window)
+    # `{}` is falsy, so usage_context writes remaining 0, then `usage["remaining"]`
+    # raises. `usage_slots.parse_usage` never returns it; the port refuses earlier.
+    context("refuses-an-empty-usage-object",
+            queue={"items": [], "starts": []}, usage={})
 
     return _family("usage-context", cases)
 

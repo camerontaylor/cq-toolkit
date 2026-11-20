@@ -85,6 +85,14 @@ Closed in S6-g, kept here as the record:
   `usage-context` group-P family (`test/adapters/crq/admitUsageContext.test.ts`).
   An unhashable `attempt_id` is now a refusal in `usageContext`, as Python's
   `attempt_id in dict` is a `TypeError`.
+  An empty usage object `{}` is the one probe Python refuses after
+  `usage_context` (`usage["remaining"]` is a `KeyError`); `usageContext` refuses
+  it as a `KeyError` too. `parseUsage` never returns it (it yields `null` or an
+  object with `remaining`), so the composed tick cannot reach it and both ports
+  refuse before any launch; the `refuses-an-empty-usage-object` vector pins it.
+  The differential replay maps each Python error class to its TS analogue
+  (`AttributeError` has none, so a dict method on another JSON type is a
+  `LedgerTypeError`) and pins the message where the port reproduces it.
 
 Closed in S6-f, kept here as the record:
 

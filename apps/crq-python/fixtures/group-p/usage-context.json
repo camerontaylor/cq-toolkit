@@ -1404,6 +1404,27 @@
         "error": "AttributeError",
         "message": "'str' object has no attribute 'get'"
       }
+    },
+    {
+      "name": "refuses-an-empty-usage-object",
+      "source": "crq.admit_available+backfill_runtime.usage_context",
+      "input": {
+        "queue": {
+          "items": [],
+          "starts": []
+        },
+        "usage": {},
+        "reserved": [],
+        "max_starts_per_hour": 5,
+        "max_starts_per_tick": 10,
+        "max_inflight": 10,
+        "now": "2026-11-14T00:00:00Z"
+      },
+      "expect": {
+        "ok": false,
+        "error": "KeyError",
+        "message": "'remaining'"
+      }
     }
   ]
 }

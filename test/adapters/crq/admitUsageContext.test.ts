@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 import { bindAdmit } from '../../../src/adapters/crq/admitWiring.js';
 import { JsonObject, parseJsonValue, toPlainJson } from '../../../src/policy/crq/jsonValue.js';
-import { LedgerIntegrityError, LedgerTypeError } from '../../../src/policy/crq/ledger.js';
+import { LedgerIntegrityError } from '../../../src/policy/crq/ledger.js';
 import { withObjectKeys } from '../../../src/policy/crq/queueDoc.js';
 import type { VendorUsage } from '../../../src/policy/crq/usageSlots.js';
 import { parseUtc } from '../../../src/policy/crq/utc.js';
@@ -54,6 +54,31 @@ const document = JSON.parse(
 ) as { cases: VectorCase[] };
 
 const STAMP = '2026-11-14T00:00:00Z';
+
+/**
+ * Python exception class -> the `pythonError` of the TS refusal that stands in
+ * for it. The port has no AttributeError, so a dict method applied to another
+ * JSON type is its `TypeError` analogue (`LedgerTypeError`).
+ */
+const REFUSAL_ANALOGUE: Record<string, string> = {
+  IntegrityError: 'IntegrityError',
+  KeyError: 'KeyError',
+  TypeError: 'TypeError',
+  AttributeError: 'TypeError',
+};
+
+/** Refusal cases whose Python message the port reproduces verbatim. */
+const REPRODUCED_MESSAGE = new Set([
+  'refuses-an-unreadable-terminal-time',
+  'refuses-an-empty-usage-object',
+]);
+
+/** The port's own message for each refusal whose Python text it cannot reproduce. */
+const PORT_MESSAGE: Record<string, string> = {
+  'refuses-a-non-object-hold': 'reservation must be an object',
+  'refuses-an-unhashable-attempt-id': 'attempt_id is unhashable',
+  'refuses-a-non-object-run-on-a-represented-item': 'run must be an object',
+};
 
 /** Bind the vector to `bindAdmit` with Python's stub: one appended start per launch. */
 async function replay(input: UsageContextInput) {
@@ -107,13 +132,15 @@ describe.each(document.cases)('usage-context/$name', (vector) => {
         (e: unknown) => e,
       );
       // Python raises before the gate and before any launch, never a quiet default.
-      expect(error).toBeInstanceOf(Error);
-      if (expected.error === 'IntegrityError') {
-        expect(error).toBeInstanceOf(LedgerIntegrityError);
-        expect((error as Error).message).toBe(expected.message);
-      } else {
-        expect(error).toBeInstanceOf(LedgerTypeError);
-      }
+      const analogue = REFUSAL_ANALOGUE[expected.error];
+      expect(analogue, `no TS analogue mapped for Python ${expected.error}`).toBeDefined();
+      expect(error).toBeInstanceOf(LedgerIntegrityError);
+      expect((error as LedgerIntegrityError).pythonError).toBe(analogue);
+      // Python's message is pinned where the port reproduces it; elsewhere the
+      // port's own message is pinned so a swapped or reworded refusal fails.
+      expect((error as Error).message).toBe(
+        REPRODUCED_MESSAGE.has(vector.name) ? expected.message : PORT_MESSAGE[vector.name],
+      );
       return;
     }
     const { out, attempts } = await replay(vector.input);

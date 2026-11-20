@@ -7,6 +7,7 @@
 import { JsonNumber, JsonObject, type JsonValue } from '../../../policy/crq/jsonValue.js';
 import {
   LedgerIntegrityError,
+  LedgerKeyError,
   LedgerTypeError,
   ledgerTimestamp,
 } from '../../../policy/crq/ledger.js';
@@ -94,6 +95,10 @@ export function usageContext(
     const started = run.get('started_at') ?? null;
     if (reserved.some((value) => pythonValueEqual(value, started))) represented++;
   }
+  // Python reads `usage["remaining"]` (a KeyError when absent). For an empty
+  // object `usage_context` itself is quiet, but `admit_available` raises the
+  // same KeyError on its next line, so the end result is identical.
+  if (usage !== null && !usage.has('remaining')) throw new LedgerKeyError('remaining');
   const remaining = usage === null ? 0n : integer(usage.get('remaining'), 'remaining');
   const adjusted = remaining - BigInt(Math.max(0, reserved.length - represented));
   const observation = new JsonObject([
