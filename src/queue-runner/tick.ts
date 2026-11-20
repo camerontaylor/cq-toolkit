@@ -26,6 +26,7 @@
 import { join } from 'node:path';
 import { fileTickEffects, type TickEffects } from '../adapters/crq/tickSource.js';
 import {
+  JsonNumber,
   JsonObject,
   parseJsonValue,
   toPlainJson,
@@ -374,11 +375,17 @@ async function observeRun(
   return { itemIndex, liveness };
 }
 
-/** Parse a JSON document that must be an object (queue, config). */
+/** Python `json.loads` reads `NaN`, `Infinity` and `-Infinity` as floats. */
+function pythonConstant(raw: string): JsonValue {
+  const value = raw === 'NaN' ? Number.NaN : raw === '-Infinity' ? -Infinity : Infinity;
+  return JsonNumber.float(value, raw);
+}
+
+/** Parse a JSON document that must be an object (config). */
 function parseObject(name: string, text: string): CrqRecord {
   let value: JsonValue;
   try {
-    value = parseJsonValue(text, { duplicates: 'last' });
+    value = parseJsonValue(text, { duplicates: 'last', parseConstant: pythonConstant });
   } catch (error) {
     throw new TickAdmissionError(
       `${name}: ${error instanceof Error ? error.message : String(error)}`,
