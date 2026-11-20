@@ -412,12 +412,14 @@ def load_scan_exemptions(base: Optional[str], clone: Optional[Path] = None) -> T
     closed: the scan then behaves exactly as without the feature)."""
     if not base:
         return [], None
-    p = run(["git", "show", f"{base}:{SCAN_EXEMPTIONS_PATH}"], cwd=clone or CLONE, check=False)
-    if p.returncode != 0:
+    spec = f"{base}:{SCAN_EXEMPTIONS_PATH}"
+    # cat-file -s prints nothing to stdout when the path is absent on the base.
+    if not git("cat-file", "-s", spec, check=False, cwd=clone).isdigit():
         return [], None
+    text = git("cat-file", "blob", spec, check=False, cwd=clone)
     try:
         import tomllib
-        doc = tomllib.loads(p.stdout)
+        doc = tomllib.loads(text)
         entries = []
         for e in doc.get("exempt", []):
             path, rule, reason = e.get("path"), e.get("rule"), e.get("reason")
