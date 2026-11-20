@@ -201,8 +201,10 @@ from this general sequence.
    mode 0600 and keep it 0600 (the live binding refuses a group- or
    world-writable lock). Keep both locks through step 3's prepare, step
    5's health observation and any rollback, and release neither when step
-   5 removes the runner-disabled marker: release them only after
-   acceptance, or after a completed rollback. Then hold admission,
+   5 removes the runner-disabled marker. Release the locks after acceptance
+   or a completed rollback. If either lock or a pre-mutation check refuses,
+   release any locks acquired and leave any marker owned by another handover
+   in place. Then hold admission,
    before stopping anything: claim the
    `apps/crq-python/state/runner-disabled` marker with `O_EXCL` (for
    example `( set -o noclobber; printf 'held for owner handover\n' >
@@ -274,11 +276,9 @@ from this general sequence.
    Rollback is those saved definitions plus the same helper `switch`
    back to the prior SHA; no automatic rollback runs here. To roll
    back, including after a failed health check in step 5 (which starts
-   the units): repeat step 1 in full — keep the admission marker already claimed in
-   step 1 (it is still held until step 5 removes it; claim it again, with
-   step 1's exclusive create, only if step 5 already released it), keep both
-   step 1 locks held (step 5 removes only the marker, never a lock),
-   then stop every `crq-*.timer`/`.path` and the
+   the units), keep using both step 1 locks already held. Repeat only
+   admission and drain: keep the marker if it is still held, or claim it
+   again with step 1's exclusive create if step 5 released it. Then stop every `crq-*.timer`/`.path` and the
    records service again (including the repair and backfill triggers if
    they were active), because the helper refuses active units; wait for
    every `crq-*.service` to reach inactive or failed, and drain owned
