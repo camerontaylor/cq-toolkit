@@ -181,6 +181,48 @@ describe('createStepFetch', () => {
     await transport.close();
   });
 
+  test('a native Request keeps its redirect policy (redirect: "error" rejects a redirect)', async () => {
+    const transport = new agents.MockAgent();
+    transport.disableNetConnect();
+    transport
+      .get('http://redirect.invalid')
+      .intercept({ path: '/v1/x', method: 'GET' })
+      .reply(302, '', { headers: { location: 'http://redirect.invalid/v1/y' } });
+    // The target answers, so only the Request's own redirect policy can reject.
+    transport
+      .get('http://redirect.invalid')
+      .intercept({ path: '/v1/y', method: 'GET' })
+      .reply(200, 'followed');
+    const request = new Request('http://redirect.invalid/v1/x', { redirect: 'error' });
+    await expect(createStepFetch(1_000, 0, transport)(request)).rejects.toThrow();
+    await transport.close();
+  });
+
+  test('aborting while a native Request body is still streaming rejects instead of hanging', async () => {
+    const transport = new agents.MockAgent();
+    transport.disableNetConnect();
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('partial'));
+      }, // never closes
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const request = new Request('http://stream.invalid/v1/x', {
+      method: 'POST',
+      body,
+      duplex: 'half',
+    } as RequestInit);
+    const controller = new AbortController();
+    const pending = createStepFetch(1_000, 0, transport)(request, { signal: controller.signal });
+    setTimeout(() => controller.abort(new Error('caller gave up')), 50);
+    await expect(pending).rejects.toThrow('caller gave up');
+    expect(cancelled).toBe(true);
+    await transport.close();
+  });
+
   test('a supplied transport is used as is, never replaced by a minted Agent', async () => {
     // A supplied dispatcher (an operator's proxy agent, stood in for by a
     // MockAgent) must carry the request itself: the driver must not mint its

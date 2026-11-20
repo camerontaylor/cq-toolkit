@@ -54,6 +54,32 @@ class TimedDispatcher extends Dispatcher {
   }
 }
 
+/**
+ * Buffer a native Request body, honoring `signal` while the stream is open:
+ * on abort the reader is cancelled and the wait rejects with the signal's
+ * reason, so an open body stream cannot pin the call past a caller abort.
+ */
+async function bufferBody(request: Request, signal: AbortSignal): Promise<Buffer> {
+  signal.throwIfAborted();
+  const reader = (request.body as ReadableStream<Uint8Array>).getReader();
+  const onAbort = (): void => {
+    void reader.cancel(signal.reason).catch(() => undefined);
+  };
+  signal.addEventListener('abort', onAbort, { once: true });
+  const chunks: Uint8Array[] = [];
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (signal.aborted) throw signal.reason;
+      if (done) break;
+      chunks.push(value);
+    }
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+  return Buffer.concat(chunks);
+}
+
 /** Apply per-request socket timeouts while preserving the supplied or process-global transport. */
 export function createStepFetch(
   stepTimeoutMs: number,
@@ -72,15 +98,19 @@ export function createStepFetch(
       typeof Request !== 'undefined' && input instanceof Request
         ? input.url
         : (input as string | URL);
-    const fromRequest =
-      typeof Request !== 'undefined' && input instanceof Request
-        ? {
-            method: input.method,
-            headers: input.headers,
-            signal: input.signal,
-            ...(input.body !== null ? { body: Buffer.from(await input.arrayBuffer()) } : {}),
-          }
-        : {};
+    const isRequest = typeof Request !== 'undefined' && input instanceof Request;
+    const initSignal = (init as { signal?: AbortSignal | null } | undefined)?.signal;
+    const fromRequest = isRequest
+      ? {
+          method: input.method,
+          headers: input.headers,
+          signal: input.signal,
+          redirect: input.redirect,
+          ...(input.body !== null
+            ? { body: await bufferBody(input, initSignal ?? input.signal) }
+            : {}),
+        }
+      : {};
     return undiciFetch(target, {
       ...fromRequest,
       ...(init as Parameters<typeof undiciFetch>[1]),
