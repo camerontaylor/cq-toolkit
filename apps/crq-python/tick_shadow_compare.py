@@ -78,15 +78,25 @@ def _oracle(python_root: Path, runner_root: Path, scratch: Path):
                             ignore=shutil.ignore_patterns("__pycache__", "test_*"))
     shutil.copy2(runner_root / "config.json", shim / "config.json")
     (shim / "state").symlink_to((runner_root / "state").resolve(), target_is_directory=True)
+    # A process that already imported crq (or any module the shim shadows) would
+    # hand back that cached copy, bound to ITS root and state. Hide every shadowed
+    # module for the import and restore them afterwards.
+    shadowed = {path.stem if path.suffix == ".py" else path.name for path in shim.iterdir()}
+    hidden = {name: sys.modules.pop(name) for name in list(sys.modules)
+              if name.split(".")[0] in shadowed}
     saved_path = list(sys.path)
     saved_modules = set(sys.modules)
     sys.path.insert(0, str(shim))
     try:
-        yield importlib.import_module("crq")
+        crq = importlib.import_module("crq")
+        if Path(crq.__file__).resolve().parent != shim.resolve():
+            raise CompareError(f"crq imported from {crq.__file__}, not the shim")
+        yield crq
     finally:
         sys.path[:] = saved_path
         for name in set(sys.modules) - saved_modules:
             del sys.modules[name]
+        sys.modules.update(hidden)
 
 
 def python_plan(crq, now: dt.datetime, usage_override=None, use_override: bool = False) -> dict:

@@ -5,6 +5,7 @@ roots) lives in test/queue-runner/tickShadowDifferential.test.ts.
 """
 import datetime as dt
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -61,6 +62,19 @@ class TickShadowCompareTest(unittest.TestCase):
         self.assertEqual(result["pinned_now"], NOW)
         self.assertEqual((root / "state" / "queue.json").read_bytes(), before)
         self.assertNotIn("events.jsonl", {p.name for p in (root / "state").iterdir()})
+
+    def test_oracle_ignores_an_already_imported_crq_and_restores_it(self):
+        # CI imports the real crq in the same process before this test runs.
+        sys.path.insert(0, str(HERE))
+        try:
+            import crq as resident
+        finally:
+            sys.path.remove(str(HERE))
+        root = runner_root(self.tmp, {"items": [], "starts": []})
+        with compare._oracle(HERE, root, self.tmp / "scratch") as crq:
+            self.assertIsNot(crq, resident)
+            self.assertEqual(crq.QUEUE.resolve(), (root / "state" / "queue.json").resolve())
+        self.assertIs(sys.modules["crq"], resident)
 
     def test_every_differing_field_is_reported(self):
         python = {"admission": {"slots": 2, "gate": None}, "candidates": [], "backgroundTurn": False}
