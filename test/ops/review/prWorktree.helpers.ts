@@ -197,7 +197,14 @@ export const fakeGit = (
       return { code: 0, stdout: '', stderr: '' };
     }
     if (sub === 'rev-list' && (args[4] ?? '').includes('..refs/heads/')) {
-      const head = model.branchHeads?.[(args[4] ?? '').split('..refs/heads/')[1] ?? ''];
+      const name = (args[4] ?? '').split('..refs/heads/')[1] ?? '';
+      // Same either-representation rule as show-ref: a fixture may model the
+      // ref via localBranches (unique counts) or branchHeads (head sha), so
+      // every `expectedSha..branchRef` reachability probe gets a valid
+      // answer for either model.
+      const unique = model.localBranches?.[name]?.unique;
+      if (unique !== undefined) return { code: 0, stdout: `${unique}\n`, stderr: '' };
+      const head = model.branchHeads?.[name];
       if (head === undefined) return { code: 128, stdout: '', stderr: 'fatal: bad revision' };
       const ancestor = head === SHA_A || head === (model.fetchHeadSha ?? SHA_B);
       return { code: 0, stdout: `${ancestor ? '0' : '1'}\n`, stderr: '' };

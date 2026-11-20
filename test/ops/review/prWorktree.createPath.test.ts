@@ -246,7 +246,7 @@ describe('create path unpushed-branch guard', () => {
       });
       await expect(
         resolvePrWorktree(baseOpts(model, memRegistry(), { repoRoot, run: fakeGit(model, calls) })),
-      ).rejects.toThrow(/withheld: refs\/heads\/.* carries 2 commit/);
+      ).rejects.toThrow(/review branch .* holds commits not in the fetched PR head/);
       expect(calls.some((args) => args.includes('add'))).toBe(false);
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
