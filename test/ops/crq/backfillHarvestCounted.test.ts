@@ -319,5 +319,21 @@ describe('counted backfill harvest', () => {
         counted,
       ),
     ).rejects.toThrow('retained review event id mismatch');
+    // A copied event with a valid own digest but another attempt is refused
+    // before any write, spool or ingest.
+    const foreign = new JsonObject(retained.entries.filter(([key]) => key !== 'id'));
+    const alien = withObjectKeys(foreign, [
+      ['payload', withObjectKeys(retained.get('payload') as JsonObject, [['attempt_id', 'x']])],
+    ]);
+    const copied = withObjectKeys(alien, [['id', ledgerDigestOf(alien)]]);
+    await expect(
+      harvestBackfillCounted(
+        queueOf(harvestable(good)),
+        0,
+        proof,
+        { ...rebuilt, readRetainedEvent: async () => copied },
+        counted,
+      ),
+    ).rejects.toThrow('retained review event identity mismatch');
   });
 });

@@ -81,7 +81,7 @@ class Live:
     LiveBindingRefused = FR
     factory = types.SimpleNamespace(FactoryRefused=FR)
     completion = types.SimpleNamespace(CompletionError=FR)
-    def production_adapter(self, effects, overlay, unit, runtime):
+    def production_adapter(self, effects, overlay, unit, runtime, source_sha=None):
         if outcome == "binding": raise FR("binding refused: " + "x" * 500)
         return object(), None
 dc._load_live_binding = lambda: Live()

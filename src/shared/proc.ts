@@ -238,6 +238,7 @@ export function buildChildEnv(
   parentEnv: Readonly<Record<string, string | undefined>>,
   overrides?: Readonly<Record<string, string>>,
   extraAllowlist: readonly string[] = [],
+  platform: NodeJS.Platform = process.platform,
 ): Record<string, string> {
   for (const name of extraAllowlist) {
     if (!ENV_NAME.test(name)) {
@@ -262,7 +263,18 @@ export function buildChildEnv(
     child[name] = value;
   }
   if (overrides !== undefined) {
-    for (const [name, value] of Object.entries(overrides)) child[name] = value;
+    for (const [name, value] of Object.entries(overrides)) {
+      // Windows env names are case-insensitive and Node picks the first
+      // spelling it finds, so an override `Path` must replace an inherited
+      // `PATH` rather than sit beside it. POSIX names stay case-sensitive.
+      if (platform === 'win32') {
+        const lower = name.toLowerCase();
+        for (const existing of Object.keys(child)) {
+          if (existing !== name && existing.toLowerCase() === lower) delete child[existing];
+        }
+      }
+      child[name] = value;
+    }
   }
   // Direct op parent correlation (measurement M5b1): translate the
   // enclosing Paseo agent id into the derived `paseo:<id>` parent-work
@@ -273,7 +285,14 @@ export function buildChildEnv(
   // CQ_PARENT_WORK_ID is the higher precedence tier and is NOT clobbered;
   // the composition is best-effort: no agent id in the parent env means
   // no link, exactly as before.
-  if (child['CQ_PARENT_WORK_ID'] === undefined || child['CQ_PARENT_WORK_ID'].trim() === '') {
+  // On Windows env names are case-insensitive, so an explicit override spelled
+  // `cq_parent_work_id` is the explicit link and must not be shadowed by a
+  // derived one under the canonical spelling.
+  const explicitParent =
+    platform === 'win32'
+      ? Object.entries(child).find(([k]) => k.toUpperCase() === 'CQ_PARENT_WORK_ID')?.[1]
+      : child['CQ_PARENT_WORK_ID'];
+  if (explicitParent === undefined || explicitParent.trim() === '') {
     const paseoParent = paseoParentLinkFromAgentId(parentEnv['PASEO_AGENT_ID']);
     if (paseoParent !== undefined) child['CQ_PARENT_WORK_ID'] = paseoParent;
   }
@@ -677,10 +696,15 @@ function defaultDelay(ms: number): Promise<void> {
 /**
  * THE GRACE LADDER (executes an already-made kill decision — header):
  *
- *   already exited → resolve 'terminated' immediately, no rungs (nothing
- *                    was sent — the markers stay honest);
+ *   already exited → SIGKILL the group (a leader can exit while a same-group
+ *                    descendant survives), resolve 'terminated', no rungs,
+ *                    nothing was sent to a live leader — the markers stay
+ *                    honest;
  *   SIGTERM  → mark { rung:'sigterm' }, send SIGTERM, wait `termGraceMs`;
- *              exits in the window → 'terminated';
+ *              the LEADER exits in the window → SIGKILL the group (same
+ *              reason: the kill decision covered the whole group, and a
+ *              descendant that ignores SIGTERM and redirects its stdio
+ *              outlives `child.close`), resolve 'terminated';
  *   SIGKILL  → mark { rung:'sigkill' }, send SIGKILL, wait `killGraceMs`;
  *              exits in the window → 'killed';
  *   still alive after SIGKILL → force-resolve 'killed' (an unstoppable
@@ -711,6 +735,11 @@ export async function terminateGracefully(
     Promise.race([closed(), wait(ms).then(() => false)]);
 
   if (child.exited) {
+    // The leader is gone, but a same-group descendant that ignores SIGTERM
+    // and redirects its stdio outlives it: reap the remnant with a group
+    // SIGKILL. No rung fired and no marker: nothing was delivered to a live
+    // leader, so the rung narration would not be honest about this child.
+    child.kill('SIGKILL');
     return 'terminated'; // nothing to signal — no rungs fired
   }
 
@@ -718,6 +747,13 @@ export async function terminateGracefully(
   fireRung(onRung, 'sigterm');
   child.kill('SIGTERM');
   if (await closesWithin(termGraceMs)) {
+    // The LEADER closed in the window, but the kill decision covers its whole
+    // process group: a same-group descendant that ignores SIGTERM and
+    // redirects its stdio keeps running past `child.close`. Reap it with a
+    // group SIGKILL — a cleanup of the already-decided kill, NOT an escalation
+    // rung: no `sigkill` marker fires (the leader died on SIGTERM, so the
+    // narration stays 'terminated').
+    child.kill('SIGKILL');
     return 'terminated';
   }
 

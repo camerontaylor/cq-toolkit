@@ -107,6 +107,8 @@ export class CheckoutWriterContext {
           entry.binding = await this.captureBinding(metadata);
         }
       }
+      // Retirement may have happened during the awaits above; refuse before installing.
+      this.assertLive();
       this.slots.set(name, entry);
       return this.methods(entry);
     } catch (error) {
@@ -200,6 +202,8 @@ export class CheckoutWriterContext {
         await this.methods(entry).writeMetadata({ version: 1, state: 'unbound', incomplete: true });
       }
     }
+    // A slot acquired through find() is owned by an ancestor; unbind it there too.
+    await this.parent?.removed(path);
     await this.hooks?.removed?.(path);
   }
   async isComplete(): Promise<boolean> {
@@ -251,23 +255,23 @@ export class CheckoutWriterContext {
       for (const entry of this.slots.values()) {
         const current = await entry.slot.readMetadata();
         if (current?.incomplete && this.begun.has(entry.slot)) continue; // our admitted slot, already begun
-        const admission =
-          entry.absentPath && !entry.binding ? entry.metadata : (current ?? entry.metadata);
+        const preAdmission = current ?? entry.metadata;
+        const admission = entry.absentPath && !entry.binding ? entry.metadata : preAdmission;
         if (admission.state === 'unbound') await this.assertAbsent(entry.absentPath);
-        written.push(entry);
+        written.push({ slot: entry.slot, metadata: preAdmission });
         await entry.slot.writeMetadata({ ...admission, incomplete: true });
         this.begun.add(entry.slot);
       }
     } catch (error) {
       if (this.hasMutated) throw error;
       const failures: Error[] = [];
-      for (const entry of written.reverse()) {
-        this.begun.delete(entry.slot);
+      for (const { slot, metadata } of written.reverse()) {
+        this.begun.delete(slot);
         try {
-          await entry.slot.writeMetadata(entry.metadata);
+          await slot.writeMetadata(metadata);
         } catch (cause) {
           failures.push(
-            new Error(`Incomplete slot restoration failed: ${entry.slot.metadataPath}`, { cause }),
+            new Error(`Incomplete slot restoration failed: ${slot.metadataPath}`, { cause }),
           );
         }
       }
@@ -296,11 +300,15 @@ export class CheckoutWriterContext {
     this.mutated = true;
     return [...fds];
   }
-  track(child: ChildProcess): void {
+  track(child: ChildProcess, drained?: Promise<void>): void {
     this.assertLive();
-    const close = new Promise<void>((done) => child.once('close', () => done()));
+    // A spawner whose lifecycle destroys the child's pipes itself (a forced
+    // close that proves nothing about descendants still holding them) supplies
+    // its own reconciliation: the child counts as drained only when that
+    // settles, never merely because the child emitted `close`.
+    const close = drained ?? new Promise<void>((done) => child.once('close', () => done()));
     this.hooks?.track(close);
-    this.parent?.track(child);
+    this.parent?.track(child, drained);
     this.#children.add(close);
     void close.then(
       () => this.#children.delete(close),
@@ -325,8 +333,8 @@ export function checkoutWriterStdio<
 >(base: [A, B, C]): [A, B, C, ...number[]] {
   return [...base, ...(storage.getStore()?.snapshot() ?? [])];
 }
-export function trackCheckoutWriter(child: ChildProcess): void {
-  storage.getStore()?.track(child);
+export function trackCheckoutWriter(child: ChildProcess, drained?: Promise<void>): void {
+  storage.getStore()?.track(child, drained);
 }
 
 /** Called only by terminalGit after its private terminal authority validation. */

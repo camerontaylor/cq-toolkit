@@ -20,7 +20,9 @@ async function cueOnce<T extends object>(cwd: string, requestId: string, respons
   let record: Record<string, unknown> = {};
   if (path) {
     try {
-      record = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+      const parsed: unknown = JSON.parse(await readFile(path, 'utf8'));
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed))
+        record = parsed as Record<string, unknown>;
     } catch {
       record = {};
     }

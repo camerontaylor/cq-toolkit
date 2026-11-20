@@ -201,3 +201,21 @@ class DeployPlanTests(DeployPlanFixture):
             with self.assertRaisesRegex(dc.Refused, "controller lock busy"):
                 dc.deploy_plan(self.effects, host, self.target, self.tag,
                                self.overlay_path)
+
+
+    def test_every_compatibility_record_is_judged_against_the_prior_head(self):
+        # Callers once passed the deploy target; the queue must be readable by
+        # the PRIOR (live) target, since that is what a rollback restores.
+        shas = []
+        real = dc.compatibility_record
+
+        def spy(effects, sha):
+            shas.append(sha)
+            return real(effects, sha)
+
+        with self.fake_switch(), mock.patch.object(dc, "compatibility_record",
+                                                   side_effect=spy):
+            dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+        self.assertEqual(len(shas), 2)  # preflight, after the switch
+        self.assertEqual(set(shas), {self.before})
+        self.assertNotEqual(self.before, self.target)

@@ -73,6 +73,34 @@ describe('preparedBackfillRepo', () => {
     repo.verifyReview(new JsonObject([['id', 'bad']]));
     await expect(verifyRecorded()).rejects.toThrow('review tree mismatch');
   });
+
+  it('chains overlapping verifyRecorded calls so none resolves early', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const log: string[] = [];
+    const slow: BackfillAsyncGit = {
+      ...fakeGit(),
+      verifyReview: async (event) => {
+        log.push(`start ${event.get('id') as string}`);
+        await gate;
+        log.push(`end ${event.get('id') as string}`);
+      },
+    };
+    const { repo, verifyRecorded } = preparedBackfillRepo(slow);
+    repo.verifyReview(new JsonObject([['id', 'first']]));
+    const first = verifyRecorded();
+    let secondSettled = false;
+    const second = verifyRecorded().then(() => {
+      secondSettled = true;
+    });
+    await Promise.resolve();
+    expect(secondSettled).toBe(false);
+    release();
+    await Promise.all([first, second]);
+    expect(log).toEqual(['start first', 'end first']);
+  });
 });
 
 describe('gitChangedPaths', () => {

@@ -104,7 +104,7 @@ describe('crq status dispatch (CLI contract)', () => {
     });
   });
 
-  it('exits 1 with the status-writer refusal on a corrupt queue', async () => {
+  it('exits 1 with the status-writer refusal in the artifact, not on stderr', async () => {
     const { runnerRoot, stateRoot } = await makeRunnerRoot();
     await writeFile(join(stateRoot, 'queue.json'), '{"items": "not-a-list"}');
     const result = spawnSync(process.execPath, [CLI, 'status', '--state-root', stateRoot], {
@@ -113,8 +113,10 @@ describe('crq status dispatch (CLI contract)', () => {
       timeout: 60_000,
     });
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain('status-writer:');
-    const artifact = JSON.parse(result.stdout.trim()) as { status: string };
+    // I1: the refusal travels in the one JSON document; stderr stays empty.
+    expect(result.stderr).toBe('');
+    const artifact = JSON.parse(result.stdout.trim()) as { status: string; error?: string };
     expect(artifact.status).toBe('failed');
+    expect(artifact.error).toContain('status-writer:');
   });
 });

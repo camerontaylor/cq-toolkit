@@ -77,6 +77,14 @@ describe('containment oracle bounds and edge cases', () => {
     );
     await expect(mergeHeadEvidence(input, runner)).rejects.toThrow('needs revalidation');
   });
+  test('rejects a merge commit in the published repair commit list', async () => {
+    const runner = override((args, value) =>
+      args[0] === 'rev-list' && args.includes('--parents')
+        ? `${published} ${base} ${actual}\n`
+        : value,
+    );
+    await expect(mergeHeadEvidence(input, runner)).rejects.toThrow('merge commits');
+  });
   test('rejects 129 compared paths', async () => {
     await expect(
       mergeHeadEvidence(

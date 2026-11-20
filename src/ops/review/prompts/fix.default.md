@@ -34,6 +34,11 @@ How to work:
   the summary, and cite the file and line that show it as evidence.
 - If a person must decide, or you cannot finish, commit nothing and say so
   with the matching disposition. Never answer before doing the work.
+- When you commit nothing, leave the worktree exactly as you found it:
+  revert your own uncommitted edits (for example `git restore` on the
+  paths you changed, and remove files you created) before the terminal
+  answer. A dirty tree is not cleaned up for you, and it blocks the
+  publication of every later fix on the branch.
 
 Commits:
 

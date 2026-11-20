@@ -42,7 +42,14 @@ function build(extra: Partial<Parameters<typeof fileEnrollmentPhaseEffects>[0]> 
         code: 0,
         stderr: '',
         stdout: JSON.stringify([
-          { number: 7, isDraft: false, baseRefName: 'main', headRefName: 'f', headRefOid: HEAD },
+          {
+            number: 7,
+            isDraft: false,
+            isCrossRepository: false,
+            baseRefName: 'main',
+            headRefName: 'f',
+            headRefOid: HEAD,
+          },
         ]),
       };
     },
@@ -159,7 +166,7 @@ describe('tick enrollment phase source', () => {
         kind: 'open',
         pr: 7,
         state: 'done',
-        cycles: [{ completed_at: '2026-01-01T00:00:00Z', head: old, run_id: 'r', base: old }],
+        cycles: [{ completed_at: '2026-01-01T00:00:00Z', head: old, run_id: 'r', base: BASE }],
       },
     ];
     const owned = await effects.primary(q({ repair_own_commits: [HEAD], items }), false);

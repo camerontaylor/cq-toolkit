@@ -16,7 +16,7 @@ import {
   readdir,
   rmdir,
 } from 'node:fs/promises';
-import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { GIT_HARDEN, HARDENED_DIFF_FLAGS } from '../../../shared/gitHarden.js';
 import {
@@ -212,6 +212,28 @@ async function validateEvidenceAuthority(token: object, terminal: boolean) {
   return context;
 }
 
+function assertBinaryOutside(cwd: string, bin: string): void {
+  const relation = relative(cwd, bin);
+  if (relation !== '..' && !relation.startsWith(`..${sep}`) && !isAbsolute(relation))
+    throw new Error('terminal trusted Git executable inside checkout');
+}
+
+/**
+ * Refuse a root whose terminal session binary lies inside it, before anything
+ * is created there that the same session could not later remove.
+ */
+export async function assertAddressTerminalRoot(token: object, root: string): Promise<void> {
+  const canonical = await realpath(root);
+  const session = await terminalSession(token, canonical, false, true);
+  assertBinaryOutside(canonical, session.bin);
+  if (!sameFile(await lstat(session.bin), session.binary))
+    throw new Error('terminal Git binary changed');
+  // The same inode can lose its execute bit; terminal cleanup spawns this path.
+  await access(session.bin, constants.X_OK).catch(() => {
+    throw new Error('terminal Git binary not executable');
+  });
+}
+
 async function terminalSession(
   token: object,
   root: string,
@@ -235,7 +257,13 @@ async function terminalSession(
         if (!path || !isAbsolute(path)) continue;
         try {
           const candidate = await realpath(join(path, 'git'));
-          if (!relative(canonical, candidate).startsWith('..')) continue;
+          // Outside means outside by whole path components. A candidate inside
+          // the checkout whose path merely begins with '..' (`..tools/git`) is
+          // still checkout-controlled and must not become the trusted binary.
+          const relation = relative(canonical, candidate);
+          // `relative` returns an absolute path across Windows drives: that is outside too.
+          if (relation !== '..' && !relation.startsWith(`..${sep}`) && !isAbsolute(relation))
+            continue;
           await access(candidate, constants.X_OK);
           const stat = await lstat(candidate);
           if (stat.isFile()) {
@@ -349,6 +377,9 @@ async function terminalGit(
     throw new Error('terminal command/time bound reached');
   if ((options.input?.length ?? 0) > SOURCE_CAP) throw new Error('terminal stdin bound reached');
   const cwd = await realpath(root);
+  // Discovery excluded only the first root; a token shared across checkouts must
+  // never spawn a binary that lies inside the checkout it is about to run in.
+  assertBinaryOutside(cwd, session.bin);
   const checkout = session.checkouts.get(cwd);
   if (checkout) {
     const entry = join(cwd, '.git');
@@ -625,6 +656,9 @@ export async function disposeAddressTerminalSession(token: object): Promise<void
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
   await rmdir(session.directory);
+  // The directory is gone, so the cached session is dead: drop it so a later
+  // terminal operation cannot resurrect it. Only while it is still ours.
+  if (terminalSessions.get(token) === pending) terminalSessions.delete(token);
 }
 
 export async function recordAddressTerminalEvidence(
@@ -938,8 +972,15 @@ export async function settleAddressTerminalEvidence(
       if (source.stat.size > SOURCE_CAP || session.bytes + source.stat.size > TOTAL_CAP)
         throw new Error('terminal source snapshot/total bound reached');
       session.bytes += source.stat.size;
-      const bytes = await boundedBytes(source.path, source.stat.size);
-      return { source, bytes };
+      try {
+        const bytes = await boundedBytes(source.path, source.stat.size);
+        return { source, bytes };
+      } finally {
+        // This snapshot only serves the attempt that took it: unchanged and
+        // failed attempts must not keep the reservation, or later attempts hit
+        // the total bound although the earlier temporary bytes are gone.
+        session.bytes -= source.stat.size;
+      }
     };
     const { bytes } = await verify();
     if (bytes.equals(attempt.baseline)) continue;

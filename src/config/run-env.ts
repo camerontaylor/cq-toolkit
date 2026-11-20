@@ -28,9 +28,12 @@ const store = new AsyncLocalStorage<RunEnvironment>();
  * omits `env` inherits the enclosing run's record.
  */
 export function runWithCqEnv<T>(cqEnv: CqEnv, fn: () => T, env: EntryEnv = currentEntryEnv()): T {
-  // A frozen record is already immutable, so share it (the entry capture and
-  // the run context then hold the SAME snapshot); otherwise pin a copy.
-  const pinned = Object.isFrozen(env) ? env : Object.freeze({ ...env });
+  // Materialize the record into an owned frozen copy, always. Freezing does not
+  // capture values: a frozen record can still hold an accessor whose getter
+  // re-reads `process.env.PATH`, so reusing it on `Object.isFrozen` would let a
+  // mid-run ambient change move a read. The spread reads every value once, here,
+  // at entry; only records of captured values are safe to share.
+  const pinned = Object.freeze({ ...env });
   return store.run({ cqEnv, env: pinned }, fn);
 }
 

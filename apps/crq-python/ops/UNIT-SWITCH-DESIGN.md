@@ -186,9 +186,16 @@ The installed timer file must hash-match the pinned template before its
 schedule is used, so preflight cannot certify a bound for a timer the
 transaction will not install. Service start commands use the declared
 `TimeoutStartSec` plus the completion margin (`_service_start_timeout`) rather
-than a fixed 60-second command timeout; the same applies to the restore service
-start. A blocking `systemctl start` for a healthy 10-minute oneshot therefore
-does not fail the transaction at 60 seconds.
+than a fixed 60-second command timeout. The restore service start instead uses
+the saved unit's own `TimeoutStartSec` (or its alias `TimeoutSec`) plus the
+same margin (`_restored_service_start_timeout`), because it starts the snapshot
+file rather than the pinned template, so a saved oneshot bound longer than the
+template's does not time out a healthy restore. The two keys are evaluated in
+file order and a value systemd rejects keeps the earlier one. A saved bound
+above seven days, or one that is absent, empty, `infinity` or unusable (for
+example too many digits), falls back to the pinned-derived bound, so a restore
+stays recoverable. A blocking `systemctl start` for a healthy
+10-minute oneshot therefore does not fail the transaction at 60 seconds.
 
 Restore applies the saved service active/inactive policy and verifies it before
 releasing any timer or path activator. A timer or path that then starts the
@@ -196,6 +203,18 @@ service is a normal new activation and is not stopped by the recovery. This
 avoids killing a path-triggered publisher run after the path is restarted.
 Injected capability and completion-sequence failures are converted to refusals
 in preflight, so a port exception cannot bypass the adapter's error type.
+
+## Tick-lock serializer
+
+For an issuing unit, `switch_unit` and `recover_unit` hold the runner's own
+`state/tick.lock` (`TICK_LOCK_NAME`, the same file as `crq.py` `LOCK`) across
+the adapter's single queue observation and the install or restore, so no tick,
+slot or repair pass can dispatch new queue work in that window. The lock is
+released immediately before `start` (and before `restore_activation` on a
+rollback or recovery): `crq-tick.service` is a oneshot running `crq.py tick`,
+which waits 90 s on the lock and exits 0 without ticking, so a lock held
+through activation would let lock-busy no-ops satisfy the completion
+observations. A busy lock refuses (retryable, exit 2) before any mutation.
 
 ## Non-issuing watchdog transactions
 

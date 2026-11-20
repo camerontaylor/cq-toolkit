@@ -50,7 +50,24 @@ HEX64_RE = re.compile(r"[0-9a-f]{64}")
 NODE_SCRIPT_RE = re.compile(
     r"(?P<root>.*/\.local/opt/crq-(?P<sha>[0-9a-f]{40}))"
     r"/dist/queue-runner/crq\.js")
-DURATION_RE = re.compile(r"(?P<value>\d+)(?P<unit>ms|s|min|h)?")
+MAX_SAVED_START_TIMEOUT_SECONDS = 7 * 24 * 3600
+# systemd.time(7) time-span units (case-sensitive: ``m`` is minutes, ``M`` months).
+DURATION_UNITS = {
+    "usec": 1e-6, "us": 1e-6, "\u00b5s": 1e-6,
+    "msec": 0.001, "ms": 0.001,
+    "seconds": 1, "second": 1, "sec": 1, "s": 1,
+    "minutes": 60, "minute": 60, "min": 60, "m": 60,
+    "hours": 3600, "hour": 3600, "hr": 3600, "h": 3600,
+    "days": 86400, "day": 86400, "d": 86400,
+    "weeks": 604800, "week": 604800, "w": 604800,
+    "months": 2629800, "month": 2629800, "M": 2629800,
+    "years": 31557600, "year": 31557600, "y": 31557600,
+}
+# Longest spelling first so ``min`` never matches as ``m`` and ``ms`` never as ``m``.
+DURATION_RE = re.compile(
+    r"(?P<value>\d+)(?P<unit>"
+    + "|".join(sorted(map(re.escape, DURATION_UNITS), key=len, reverse=True))
+    + ")?")
 UNIT_FILE_STATES = {"enabled", "disabled", "static", "masked", "alias",
                     "indirect", "generated", "transient", "bad"}
 RESTORABLE_ACTIVE = {"active", "inactive"}
@@ -267,15 +284,45 @@ def _section_values(text: str, section: str, key: str) -> list[str]:
     return values
 
 
+def _section_assignments(text: str, section: str, keys: tuple[str, ...]) -> list[tuple[str, str]]:
+    """Ordered (key, value) assignments of ``keys`` in ``section``, as systemd applies them."""
+    found = []
+    current = None
+    for line in _logical_lines(text):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current = stripped[1:-1].strip()
+            continue
+        if current != section or "=" not in stripped:
+            continue
+        name, value = stripped.split("=", 1)
+        if name.strip() in keys:
+            found.append((name.strip(), value.strip()))
+    return found
+
+
 def _duration_seconds(text: str) -> int | None:
-    match = DURATION_RE.fullmatch(text.strip())
-    if match is None:
+    # systemd time spans join components with optional whitespace
+    # ("5min 20s", "20min30s"); every component must parse.
+    value = text.strip()
+    if not value:
         return None
-    value = int(match.group("value"))
-    unit = match.group("unit") or "s"
-    factor = {"ms": 0.001, "s": 1, "min": 60, "h": 3600}[unit]
-    seconds = value * factor
-    if seconds <= 0:
+    seconds = 0.0
+    position = 0
+    while position < len(value):
+        match = DURATION_RE.match(value, position)
+        if match is None:
+            return None
+        position = match.end()
+        while position < len(value) and value[position].isspace():
+            position += 1
+        factor = DURATION_UNITS[match.group("unit") or "s"]
+        try:
+            seconds += int(match.group("value")) * factor
+        except (OverflowError, ValueError):
+            # Too many digits for int() (ValueError) or float (OverflowError).
+            return None
+    if seconds <= 0 or seconds == float("inf"):
         return None
     return int(seconds) if seconds >= 1 else 1
 
@@ -1325,6 +1372,46 @@ class ProductionUnitAdapter:
             return declared + COMPLETION_MARGIN_SECONDS
         return 60
 
+    def _restored_service_start_timeout(self, unit, inventory, service_state):
+        """The restored unit's own start bound, not the pinned template's.
+
+        ``restore_activation`` starts the file that came from the snapshot, so
+        the ``start`` command timeout must cover that file's declared
+        ``TimeoutStartSec``. A saved ``Type=oneshot`` service may declare a
+        longer bound than the pinned template; the pinned value would then time
+        out a healthy restore. The saved unit is parsed with the same
+        template-section parser, and a saved unit that declares no explicit
+        bound keeps the pinned-derived default.
+        """
+        try:
+            text = base64.b64decode(
+                service_state["bytes_b64"].encode("ascii"),
+                validate=True).decode("utf-8")
+        except (KeyError, ValueError, UnicodeEncodeError, UnicodeDecodeError):
+            self.refuse("restored service is not readable unit text")
+        # systemd applies TimeoutStartSec= and TimeoutSec= in file order. A
+        # value it rejects (garbage) is ignored and the earlier one stays; an
+        # empty, ``infinity`` or over-cap result keeps the pinned-derived
+        # default so a restore stays recoverable instead of refusing after the
+        # mask is already durable.
+        assignments = _section_assignments(
+            text, "Service", ("TimeoutStartSec", "TimeoutSec"))
+        effective = None
+        for _key, raw in assignments:
+            value = raw.strip()
+            if not value:
+                effective = None  # an empty assignment resets to the default
+            elif value == "infinity":
+                effective = None  # valid but unbounded
+            else:
+                parsed = _duration_seconds(value)
+                if parsed is not None:
+                    effective = parsed
+                # else: systemd rejects the value and keeps the earlier one.
+        if effective is None or effective > MAX_SAVED_START_TIMEOUT_SECONDS:
+            return self._service_start_timeout(unit, inventory)
+        return effective + COMPLETION_MARGIN_SECONDS
+
     # -- seam: snapshot and validation ----------------------------------
     def snapshot(self, unit):
         self._validate_unit(unit)
@@ -1892,6 +1979,13 @@ class ProductionUnitAdapter:
         # pinned template's declared type; a saved simple unit under a pinned
         # oneshot template must not be admitted by the oneshot branch.
         saved_type = self._saved_service_type(staged)
+        # Derive the start timeout while the mask and staged file are still in place, so an
+        # unsupported TimeoutStartSec refuses before the service is released. Only a restore
+        # that starts the service needs it; an inactive snapshot never does.
+        start_timeout = None
+        if snapshot["activators"]["service_active"] == "active":
+            start_timeout = self._restored_service_start_timeout(
+                unit, inventory, service_state)
         masked = self._show(unit, ["LoadState", "FragmentPath"])
         fenced = self._path_state(service)
         if masked["LoadState"] != "masked" \
@@ -1914,8 +2008,7 @@ class ProductionUnitAdapter:
         desired_service = snapshot["activators"]["service_active"]
         if desired_service == "active":
             self._ok(
-                self._run("start", unit,
-                          timeout=self._service_start_timeout(unit, inventory)),
+                self._run("start", unit, timeout=start_timeout),
                 "restore service activation")
         elif desired_service == "inactive":
             result = self._run("stop", unit, timeout=60)

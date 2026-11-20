@@ -45,7 +45,9 @@ class FakeAdapter:
 
     def snapshot(self, unit):
         self.calls.append("snapshot")
-        return {"proof": True}
+        # Must carry the prior runtime: the controller refuses a snapshot
+        # whose runtime differs from the preflight (recover_unit would reject it).
+        return {"proof": True, "runtime": "python"}
 
     def validate_snapshot(self, unit, snapshot):
         self.calls.append("validate_snapshot")

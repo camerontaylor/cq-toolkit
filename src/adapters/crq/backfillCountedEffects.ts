@@ -1,22 +1,44 @@
 import { createHash } from 'node:crypto';
-import { readFile, realpath } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { open, realpath } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import type {
   BackfillCountedArtifacts,
   BackfillCountedHarvestEffects,
 } from '../../ops/crq/internal/backfillHarvestCounted.js';
 import { JsonObject, type JsonValue } from '../../policy/crq/jsonValue.js';
-import { LedgerIntegrityError } from '../../policy/crq/ledger.js';
+import { LedgerIntegrityError, ledgerLoads } from '../../policy/crq/ledger.js';
 import { atomicWrite } from './atomic.js';
 import { artifactLocation, type ArtifactStore } from './findingStore.js';
+
+/** One run-directory name: no empty, dot, separator or NUL forms that could leave `runs/`. */
+function assertRunId(runId: string): void {
+  if (!runId || runId === '.' || runId === '..' || /[/\\\0]/.test(runId))
+    throw new LedgerIntegrityError('invalid run id');
+}
+
+/**
+ * Read one regular file without ever blocking. O_NONBLOCK keeps a writer-less
+ * FIFO from hanging the open; the handle check then refuses anything that is
+ * not a regular file.
+ */
+async function readRegularFile(path: string, what: string): Promise<Uint8Array> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    if (!(await handle.stat()).isFile())
+      throw new LedgerIntegrityError(`${what} is not a regular file`);
+    return new Uint8Array(await handle.readFile());
+  } finally {
+    await handle.close();
+  }
+}
 
 /** Existing run artifacts only. `submission.json` is optional; the rest must exist. */
 export function backfillCountedArtifactReader(
   stateRoot: string,
 ): (runId: string) => Promise<BackfillCountedArtifacts> {
   return async (runId) => {
-    if (!runId || runId === '.' || runId === '..' || /[/\\\0]/.test(runId))
-      throw new LedgerIntegrityError('invalid run id');
+    assertRunId(runId);
     const root = await realpath(join(stateRoot, 'runs'));
     const dir = await realpath(join(root, runId));
     if (relative(root, dir) !== runId)
@@ -32,7 +54,7 @@ export function backfillCountedArtifactReader(
       const rel = relative(dir, path);
       if (!rel || rel.startsWith(`..${sep}`) || rel === '..' || rel.includes(sep))
         throw new LedgerIntegrityError('run artifact escapes run directory');
-      return new Uint8Array(await readFile(path));
+      return readRegularFile(path, 'run artifact');
     };
     return {
       meta: (await read('meta.json', false)) as Uint8Array,
@@ -76,6 +98,38 @@ export function deferredArtifactStore(input: { durableRoot: string; store: Artif
   };
 }
 
+/**
+ * The `review-event.json` an earlier attempt retained for this run, parsed with
+ * the ledger loader. A missing file is a first attempt, not an error.
+ */
+export function backfillCountedRetainedEventReader(
+  stateRoot: string,
+): (runId: string) => Promise<JsonObject | null> {
+  return async (runId) => {
+    assertRunId(runId);
+    let bytes: Uint8Array;
+    try {
+      // Same containment rule as the artifact reader: a symlinked event must
+      // not pull in another run's self-consistent event.
+      const root = await realpath(join(stateRoot, 'runs'));
+      const dir = await realpath(join(root, runId));
+      if (relative(root, dir) !== runId)
+        throw new LedgerIntegrityError('run directory escapes its identity');
+      const path = await realpath(join(dir, 'review-event.json'));
+      if (relative(dir, path) !== 'review-event.json')
+        throw new LedgerIntegrityError('retained review event escapes run directory');
+      bytes = await readRegularFile(path, 'retained review event');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+    const value = ledgerLoads(bytes);
+    if (!(value instanceof JsonObject))
+      throw new LedgerIntegrityError('retained review event must be an object');
+    return value;
+  };
+}
+
 /** Compose the counted-harvest effects from real file seams. Git stays injected. */
 export function backfillCountedEffects(input: {
   stateRoot: string;
@@ -94,6 +148,7 @@ export function backfillCountedEffects(input: {
   const readArtifacts = backfillCountedArtifactReader(input.stateRoot);
   return {
     readArtifacts,
+    readRetainedEvent: backfillCountedRetainedEventReader(input.stateRoot),
     put: (bytes) => deferred.put(bytes),
     repo: input.repo,
     // Retained bytes must exist before anything verifies or names them.

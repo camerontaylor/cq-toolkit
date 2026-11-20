@@ -168,4 +168,13 @@ describe('planAuthor', () => {
       reason: 'author binding has an empty diff',
     });
   });
+
+  it('propagates a failed author diff instead of reporting nothing-to-review', async () => {
+    const { effects } = harness({
+      diffHasPaths: async () => {
+        throw new Error('git diff failed');
+      },
+    });
+    await expect(planAuthor(item(), false, effects)).rejects.toThrow('git diff failed');
+  });
 });

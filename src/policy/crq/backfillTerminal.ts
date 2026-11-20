@@ -95,7 +95,11 @@ export function terminalBackfill(
     const formatted = new UtcInstant(target).iso;
     if (!/^\d{4}-/.test(formatted) || formatted.startsWith('0000'))
       throw new LedgerIntegrityError('terminal cooldown overflows datetime');
-    const next = formatted.slice(0, 19) + 'Z';
+    // Keep the later of the stored and computed cooldowns: a failure with a shorter
+    // retryAfter or a lower exponent must not shorten an already-set deadline.
+    const computed = formatted.slice(0, 19) + 'Z';
+    const prior = row.get('next_eligible_at');
+    const next = typeof prior === 'string' && prior > computed ? prior : computed;
     const quarantined = pyTruthy(row.get('quarantined')) || immediate || failures >= 6n;
     return {
       failures,

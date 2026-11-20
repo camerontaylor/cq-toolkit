@@ -42,16 +42,17 @@ export interface FixTaskAttemptFailure {
 
 /**
  * A branchless failure row: work the run could not conclude and an attempt
- * never retained an artifact for. The gate is honestly `none` — no gate
- * refused a retained commit because there is no retained commit; `reason`
- * carries the stop cause. No branch or sha is invented.
+ * never retained an artifact for. The gate is the recorded failure's refusal
+ * (or `none` when no gate was recorded — no gate refused a retained commit
+ * because there is no retained commit); `reason` carries the stop cause. No
+ * branch or sha is invented.
  */
 export interface FixTaskNoArtifactFailure {
   /** The unit that planned the task: `<kind>/<slug>`, as in the failed refs. */
   unit: string;
   task: string;
   outcome: FixTaskOutcome;
-  gate: 'none';
+  gate: FailedAttemptGate;
   reason: string;
 }
 
@@ -125,26 +126,36 @@ export function unitLabelOf(branch: string): string {
 }
 
 /**
+ * A recorded failed round: an attempt the loop concluded `unfixed` or
+ * `escalated-to-human`. A failed round always records its outcome and the
+ * gate that refused it; `failedAttempt` is present only when the attempt
+ * retained a commit. Successful rounds carry neither.
+ */
+const isFailedRound = (round: NonNullable<FixTaskReport['rounds']>[number]): boolean =>
+  round.failedAttempt !== undefined || round.gate !== undefined || round.outcome !== undefined;
+
+/**
  * A task's failed-attempt and outstanding-work rows. Retained round evidence
- * is preserved verbatim (one row per failed round); a task fixed later keeps
- * those rows as history. A task outcome of `fixed` with failures is a past
- * failure eventually fixed; any other outcome is work still outstanding.
+ * is preserved verbatim (one row per recorded failed round — a round that
+ * retained no commit still keeps its recorded reason, outcome and gate,
+ * without inventing a branch or sha); a task fixed later keeps those rows as
+ * history. A task outcome of `fixed` with failures is a past failure
+ * eventually fixed; any other outcome is work still outstanding.
  */
 export function failureRowsOf(task: FixTaskReport, unit: string): FixTaskFailure[] {
   const id = task.task.id;
-  const rounds = task.rounds ?? [];
-  if (rounds.some((round) => round.failedAttempt !== undefined))
-    return rounds
-      .filter((round) => round.failedAttempt !== undefined)
-      .map((round) => ({
-        unit,
-        task: id,
-        outcome: round.outcome ?? (task.outcome === 'fixed' ? 'unfixed' : task.outcome),
-        gate: round.gate ?? 'none',
-        reason: round.reason,
-        branch: round.failedAttempt!.branch,
-        sha: round.failedAttempt!.sha,
-      }));
+  const rounds = (task.rounds ?? []).filter(isFailedRound);
+  if (rounds.length > 0)
+    return rounds.map((round) => ({
+      unit,
+      task: id,
+      outcome: round.outcome ?? (task.outcome === 'fixed' ? 'unfixed' : task.outcome),
+      gate: round.gate ?? 'none',
+      reason: round.reason,
+      ...(round.failedAttempt === undefined
+        ? {}
+        : { branch: round.failedAttempt.branch, sha: round.failedAttempt.sha }),
+    }));
   if (task.failedAttempt !== undefined)
     return [
       {
@@ -193,8 +204,10 @@ export function plannedTaskRowOf(task: FixTaskReport): PlannedTaskRow {
   // The refinement above is the row's truthful outcome: branchless failure
   // rows copy it (a no-attempt row labelled exhausted must not read `unfixed`
   // in the failed evidence), while retained attempt rows keep their recorded
-  // history verbatim.
-  for (const failure of failures) if (!('branch' in failure)) failure.outcome = outcome;
+  // history verbatim. Branchless rows of recorded failed rounds already carry
+  // the round's own recorded outcome — that history is never rewritten.
+  if (!(task.rounds ?? []).some(isFailedRound))
+    for (const failure of failures) if (!('branch' in failure)) failure.outcome = outcome;
   const publishedBranch = publishedFailedAttemptBranch(task);
   return {
     unit,
@@ -248,7 +261,11 @@ export function neverStartedRow(
 export function fixRunCounters(rows: readonly PlannedTaskRow[]): FixRunCounters {
   const attempted = rows.filter((row) => row.attempts.length > 0).length;
   const fixed = rows.filter((row) => row.outcome === 'fixed' && row.commits.length > 0).length;
-  const skipped = rows.filter((row) => row.outcome === 'fixed' && row.commits.length === 0).length;
+  // `skipped` is resolution without an attempt: a `fixed` outcome with no
+  // commit AND no attempt. A commitless row that WAS attempted stays unresolved.
+  const skipped = rows.filter(
+    (row) => row.outcome === 'fixed' && row.commits.length === 0 && row.attempts.length === 0,
+  ).length;
   return {
     planned: rows.length,
     attempted,

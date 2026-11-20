@@ -100,7 +100,8 @@ function harness(options: { queue?: JsonObject; receipt?: Uint8Array } = {}): Ha
       if (bytes === undefined) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
       return bytes;
     },
-    isConfiguredRepo: (repo) => repo === REPO,
+    // Only the runner repo and `any/clonable` resolve a clone in the harness.
+    provisionRepo: async (repo) => repo === REPO || repo === 'any/clonable',
     hasCommit: async () => true,
     fetchRepo: async () => undefined,
     installSnapshot: async () => undefined,
@@ -219,14 +220,22 @@ describe('review-v1 pure handler', () => {
     });
   });
 
-  test('an unconfigured repository is observed as unsupported, not an error', async () => {
+  test('a repository that cannot be cloned is observed as unavailable, not an error', async () => {
     const h = harness();
     const result = await h.call(frame({ inputs: { ...inputs, repo: 'other/repo' } }), {
       policy: policy({ repo: 'other/repo' }),
     });
     expect(result.get('action')).toBe('observed');
     expect(result.get('state')).toBe('unsupported');
-    expect(result.get('reason')).toBe('unsupported-repo');
+    expect(result.get('reason')).toBe('repo-unavailable');
+    expect(h.state.saves).toBe(0);
+  });
+
+  test('manual review admits any clonable repository without a policy entry', async () => {
+    const h = harness();
+    const result = await h.call(frame({ inputs: { ...inputs, repo: 'any/clonable' } }));
+    expect(result.get('action')).toBe('created');
+    expect(h.state.saves).toBe(1);
   });
 
   test('a non-writer principal is denied before the lock is taken', async () => {
@@ -330,6 +339,20 @@ describe('review-v1 pure handler', () => {
     expect(h.state.saves).toBeGreaterThan(1);
   });
 
+  test('cancel requires the recorded principal', async () => {
+    const h = harness();
+    await h.call(frame());
+    await expect(
+      h.call(
+        { v: 1, op: 'cancel', request_id: 'req-1' },
+        { principal: 'client-b', policy: policy({ write: [PRINCIPAL, 'client-b'] }) },
+      ),
+    ).rejects.toMatchObject({
+      name: 'ValueError',
+      message: 'cancel request owner denied',
+    });
+  });
+
   test('notify-update requires the recorded principal', async () => {
     const h = harness();
     await h.call(frame());
@@ -342,6 +365,22 @@ describe('review-v1 pure handler', () => {
       name: 'ValueError',
       message: 'notification request owner denied',
     });
+  });
+
+  test('cancel requires the recorded principal', async () => {
+    const h = harness();
+    await h.call(frame());
+    const saves = h.state.saves;
+    await expect(
+      h.call(
+        { v: 1, op: 'cancel', request_id: 'req-1' },
+        { principal: 'client-b', policy: policy({ write: [PRINCIPAL, 'client-b'] }) },
+      ),
+    ).rejects.toMatchObject({
+      name: 'ValueError',
+      message: 'cancel request owner denied',
+    });
+    expect(h.state.saves).toBe(saves);
   });
 
   test('record with a policy-disallowed repository is refused before any ledger work', async () => {

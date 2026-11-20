@@ -101,6 +101,25 @@ export function mapGhFault(
 }
 
 /**
+ * Strip an inherited `GH_REPO` from the child environment (the review-debt
+ * #163 lesson, applied to this adapter): gh resolves its repository as
+ * `-R` > `GH_REPO` > cwd, and this adapter binds its repository through the
+ * spawn `cwd` (`repoRoot`) ALONE — no `-R` in any argv. A parent `GH_REPO`
+ * would therefore redirect every effect (createPr, editPrBody, comment, the
+ * pr views) at ANOTHER repository, if authorized, so it never reaches the
+ * child. The strip is case-insensitive on every platform: gh's Go runtime
+ * folds env names on win32, and a lowercase `gh_repo` carries no meaning on
+ * POSIX.
+ */
+function stripGhRepoOverride(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (name.toUpperCase() !== 'GH_REPO') result[name] = value;
+  }
+  return result;
+}
+
+/**
  * Run gh with an execFile ARGS ARRAY. A non-zero exit, a spawn failure, or
  * a run exceeding `timeoutMs` (SIGKILL) rejects with the mapped fault.
  * `stdin` (a PR body or comment) is written to the child and the pipe
@@ -115,7 +134,10 @@ function runGhWith(
   cqEnv?: CqEnv,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const env = ghSpawnEnv({ ...process.env, GH_PROMPT_DISABLED: '1' });
+    // The spawn cwd is this adapter's repository binding; an inherited
+    // GH_REPO would override it (gh's `-R` > `GH_REPO` > cwd precedence), so
+    // it is stripped before the child ever sees it.
+    const env = ghSpawnEnv(stripGhRepoOverride({ ...process.env, GH_PROMPT_DISABLED: '1' }));
     const bin = resolveWindowsCommand(resolveGhBin(cqEnv), env, process.platform, process.env);
     if (bin === undefined) {
       reject(new Error('gh executable not found'));
@@ -433,8 +455,10 @@ export function bodyOf(payload: { body?: unknown }): string {
  *   - comment:           gh pr comment <n> --body-file - (body over stdin)
  *   - getPrReadiness:    gh pr view <n> --json statusCheckRollup,
  *                        reviewDecision,isDraft,state,mergeable,
- *                        mergeStateStatus — ONE subprocess, ONE coherent
- *                        snapshot (fail-closed on an unreadable draft flag)
+ *                        mergeStateStatus,headRefOid — ONE coherent
+ *                        document, then a headRefOid re-read that rejects
+ *                        the snapshot if the head moved mid-read
+ *                        (fail-closed on an unreadable draft flag)
  *   - getPrBody:         gh pr view <n> --json body (the compose protocol's
  *                        read half)
  * The seam carries NO merge effect — the fleet run report is a
@@ -504,30 +528,49 @@ export function makeSubprocessPrEffects(
     comment: async (number, body) => {
       await runGh(['pr', 'comment', String(number), '--body-file', '-'], repoRoot, timeoutMs, body);
     },
-    getPrReadiness: async (number) =>
-      readinessSnapshotOf(
-        parseGhJson<{
-          statusCheckRollup?: unknown;
-          reviewDecision?: unknown;
-          isDraft?: unknown;
-          state?: unknown;
-          mergeable?: unknown;
-          mergeStateStatus?: unknown;
-        }>(
-          await runGh(
-            [
-              'pr',
-              'view',
-              String(number),
-              '--json',
-              'statusCheckRollup,reviewDecision,isDraft,state,mergeable,mergeStateStatus',
-            ],
-            repoRoot,
-            timeoutMs,
-          ),
-          'gh pr view',
+    getPrReadiness: async (number) => {
+      const doc = parseGhJson<{
+        statusCheckRollup?: unknown;
+        reviewDecision?: unknown;
+        isDraft?: unknown;
+        state?: unknown;
+        mergeable?: unknown;
+        mergeStateStatus?: unknown;
+        headRefOid?: unknown;
+      }>(
+        await runGh(
+          [
+            'pr',
+            'view',
+            String(number),
+            '--json',
+            'statusCheckRollup,reviewDecision,isDraft,state,mergeable,mergeStateStatus,headRefOid',
+          ],
+          repoRoot,
+          timeoutMs,
         ),
-      ),
+        'gh pr view',
+      );
+      // The snapshot is one document, but a push can land DURING the read:
+      // re-read the head afterwards and refuse the snapshot if it moved (the
+      // checks and review it carries would describe a superseded head).
+      const head = doc.headRefOid;
+      if (typeof head !== 'string' || head === '') {
+        throw new Error(
+          `gh pr view #${String(number)}: no headRefOid — refusing an unpinned readiness snapshot`,
+        );
+      }
+      const after = parseGhJson<{ headRefOid?: unknown }>(
+        await runGh(['pr', 'view', String(number), '--json', 'headRefOid'], repoRoot, timeoutMs),
+        'gh pr view',
+      );
+      if (after.headRefOid !== head) {
+        throw new Error(
+          `PR #${String(number)} head changed during the readiness read (${head} → ${String(after.headRefOid)}) — refusing a snapshot that mixes two heads`,
+        );
+      }
+      return readinessSnapshotOf(doc);
+    },
     getPrBody: async (number) =>
       bodyOf(
         parseGhJson<{ body?: unknown }>(

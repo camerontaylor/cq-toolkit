@@ -301,6 +301,7 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
       errorKind: undefined,
       assistantRateLimit: false,
       deniedToolUseIds: new Set<string>(),
+      countedAssistantMessageIds: new Set<string>(),
       denials: [],
       expectedSurface: { harness: true, tools: ['read'], internalTools: [] },
       initSeen: false,
