@@ -130,7 +130,9 @@ TICK_LOCK_NAME = "tick.lock"
 # Ticks and slots routinely hold tick.lock for a minute or more, up to most of
 # the 12-minute cadence; crq_repair waits out the same bound before skipping.
 # A still-busy lock refuses the transaction before any mutation or journal
-# write instead of racing a tick through the fence.
+# write instead of racing a tick through the fence. The refusal is retryable
+# (Refused, exit 2, nothing mutated); the bound is deliberately shorter than
+# the cadence so controller.lock is not held for a whole tick period.
 TICK_LOCK_WAIT_SECONDS = 300.0
 JOURNAL_SCHEMA = 1
 
@@ -1680,6 +1682,12 @@ def recover_unit(effects, adapter, path, *, adapter_factory=None):
         if adapter is None:
             raise Refused("no unit recovery adapter")
         adapter.validate_snapshot(record["unit"], record["snapshot"])
+        # Same dispatch window as switch_unit: hold the runner's tick lock
+        # across the fence's queue observation and the restore, release it
+        # before restore_activation. A busy lock refuses before any rewrite.
+        tick_fence = contextlib.ExitStack()
+        if unit_issues_queue_work(record["unit"]):
+            tick_fence.enter_context(effects.tick_lock())
         try:
             failed_phase = record.get("failed_phase", record["phase"])
             # Recovery does not infer a fence from the journal. It re-establishes
@@ -1707,12 +1715,15 @@ def recover_unit(effects, adapter, path, *, adapter_factory=None):
             if rebased_from is not None:
                 record["rebaselined_from"] = rebased_from
             effects.journal_replace(path, record)
+            tick_fence.close()
             adapter.restore_activation(record["unit"], record["snapshot"])
             completed = {**record, "outcome": "rolled_back"}
             effects.journal_replace(path, completed)
         except (Exception, KeyboardInterrupt) as exc:
             raise RecoveryRequired({**record, "record_path": str(path),
                                     "reason": type(exc).__name__ + ": " + str(exc)[:400]}) from exc
+        finally:
+            tick_fence.close()
         return completed
 
 
@@ -1996,9 +2007,11 @@ def switch_unit(effects, adapter, unit, runtime):
     Adapter preflight must establish artifact identity, provider availability and
     the current pointer without mutation. Its stop/drain fence must prevent new
     work until start. For an issuing unit the controller also holds the
-    runner's tick lock from the journal intent through start (and any
-    rollback), so no tick can dispatch new queue work between the fence's
-    queue observation and activation. Snapshot/restore retain exact installed
+    runner's tick lock from the journal intent until immediately before the
+    start's own pre-ExecStart work (unmask, daemon-reload, byte checks), and
+    reacquires it for any rollback fence, so no tick can dispatch new queue
+    work between the fence's queue observation and activation; the lock is
+    released before start so the started runner can actually tick. Snapshot/restore retain exact installed
     unit bytes and activation state. validate_snapshot rejects invalid types
     and paths before any mutation. Completion sequences are monotonic for
     each unit.
@@ -2111,6 +2124,12 @@ def switch_unit(effects, adapter, unit, runtime):
                     if rebased_from is not None:
                         identity["rebaselined_from"] = rebased_from
                     effects.journal_replace(path, identity)
+                    # Released before activation for the same reason as start:
+                    # the restored oneshot tick must be able to run, not wait
+                    # out its 90 s lock_wait as a no-op. The fence above has
+                    # already drained the queue and restore has finished.
+                    tick_fence.close()
+                    fence_held = False
                     adapter.restore_activation(unit, snapshot)
                     record = {**identity, "outcome": "rolled_back"}
                     effects.journal_replace(path, record)

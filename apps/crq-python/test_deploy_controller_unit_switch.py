@@ -170,6 +170,29 @@ class UnitSwitchTests(ControllerFixture):
                                 ("completion", False)])
         self.assertFalse(held())
 
+    def test_controller_tick_lock_path_is_the_runners_lock(self):
+        # A rename on either side would make the fence fail open silently.
+        import crq
+        self.assertEqual(dc.TICK_LOCK_NAME, crq.LOCK.name)
+        self.assertEqual(crq.LOCK.parent.name, "state")
+        self.assertEqual(self.effects.state_dir().name, crq.STATE.name)
+
+    def test_rollback_releases_the_tick_lock_before_restore_activation(self):
+        probe, seen, held = self.tick_lock_probe()
+
+        class Rollback(probe):
+            fail_completion = True
+
+            def restore_activation(self, unit, snapshot):
+                seen.append(("restore_activation", held()))
+                super().restore_activation(unit, snapshot)
+
+        with self.assertRaises(dc.RecoveryRequired):
+            dc.switch_unit(self.effects, Rollback("python"),
+                           "crq-tick.service", "node:" + "a" * 40)
+        self.assertEqual(seen[-2:], [("stop_and_drain", True),
+                                     ("restore_activation", False)])
+
     def test_tick_lock_is_reacquired_for_the_rollback_fence(self):
         probe, seen, held = self.tick_lock_probe()
         adapter = probe("python")
@@ -187,6 +210,31 @@ class UnitSwitchTests(ControllerFixture):
         dc.switch_unit(self.effects, probe("python"),
                        "crq-watchdog.service", "node:" + "a" * 40)
         self.assertTrue(all(flag is False for _, flag in seen))
+
+    def test_recovery_holds_the_tick_lock_for_the_fence_and_releases_before_activation(self):
+        class Crash(BaseException):
+            pass
+
+        probe, seen, held = self.tick_lock_probe()
+
+        class Crashing(probe):
+            def start(self, unit):
+                super().start(unit)
+                raise Crash()
+
+            def restore_activation(self, unit, snapshot):
+                seen.append(("restore_activation", held()))
+                super().restore_activation(unit, snapshot)
+
+        adapter = Crashing("python")
+        with self.assertRaises(Crash):
+            dc.switch_unit(self.effects, adapter, "crq-tick.service", "node:" + "a" * 40)
+        path = next(self.record_dir.glob("controller-*.json"))
+        del seen[:]
+        dc.recover_unit(self.effects, adapter, path)
+        self.assertEqual(seen, [("stop_and_drain", True),
+                                ("restore_activation", False)])
+        self.assertFalse(held())
 
     def test_activation_crash_recovers_after_a_demonstrated_fence(self):
         class Crash(BaseException):

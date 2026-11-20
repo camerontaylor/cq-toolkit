@@ -9,7 +9,10 @@
  * Declared divergences: `KeyboardInterrupt` (a BaseException) is not modelled;
  * adapter errors carry a class `name` standing in for `type(exc).__name__`;
  * a record that is not valid UTF-8 is an effects-seam matter (the seam must
- * throw like `read_text`), so it is not driven here.
+ * throw like `read_text`), so it is not driven here; the Python `tick_lock`
+ * (the runner's `state/tick.lock` fence around an issuing unit's transaction)
+ * has no TS counterpart yet, so the Python side's effects stub it as a
+ * nullcontext and the differential does not cover it (the port is inactive).
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';

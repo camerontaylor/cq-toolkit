@@ -204,6 +204,18 @@ avoids killing a path-triggered publisher run after the path is restarted.
 Injected capability and completion-sequence failures are converted to refusals
 in preflight, so a port exception cannot bypass the adapter's error type.
 
+## Tick-lock serializer
+
+For an issuing unit, `switch_unit` and `recover_unit` hold the runner's own
+`state/tick.lock` (`TICK_LOCK_NAME`, the same file as `crq.py` `LOCK`) across
+the adapter's single queue observation and the install or restore, so no tick,
+slot or repair pass can dispatch new queue work in that window. The lock is
+released immediately before `start` (and before `restore_activation` on a
+rollback or recovery): `crq-tick.service` is a oneshot running `crq.py tick`,
+which waits 90 s on the lock and exits 0 without ticking, so a lock held
+through activation would let lock-busy no-ops satisfy the completion
+observations. A busy lock refuses (retryable, exit 2) before any mutation.
+
 ## Non-issuing watchdog transactions
 
 The controller's queue-drain gate and the adapter's post-fence queue
