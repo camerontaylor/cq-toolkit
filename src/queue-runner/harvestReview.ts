@@ -510,7 +510,7 @@ async function harvestPush(
     // part covers a path subset and must never advance it.
     const record = setdefaultRec(setdefaultRec(q, 'push_discovery'), repo);
     const subject = rec(req(item, 'subject'), 'item.subject');
-    const wholeRange = !(py(subject.paths_filter) || py(item.depends_on));
+    const wholeRange = !partial && !(py(subject.paths_filter) || py(item.depends_on));
     const reviewed = record.reviewed_tip;
     if (
       wholeRange &&
