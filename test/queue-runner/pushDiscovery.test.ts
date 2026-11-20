@@ -190,6 +190,38 @@ describe('push discovery', () => {
     expect(items(legacy.queue)).toHaveLength(1);
     expect(items(legacy.queue)[0]?.get('state')).toBe('reviewing');
   });
+  it('does not re-enroll a done partial-scope range at the same tip but re-covers it on the next', async () => {
+    // Partial dispositions (byte cap, binary, ambiguous rename) are a pure function of the
+    // tip's content, so a same-tip retry would reproduce the identical receipt every pass.
+    const id = `push-r-${base.slice(0, 10)}-${tip.slice(0, 10)}`;
+    const partial = {
+      id,
+      repo: 'o/r',
+      kind: 'push-current',
+      state: 'done',
+      receipt_id: 'rcpt-partial',
+      subject: { type: 'push-range', base, head: tip },
+      capture: { paths: [{ disposition: 'unsupported' }], target: tip },
+    };
+    const same = await discoverPush(queue([partial]), [cfg], false, 'main/repo', effects());
+    expect(items(same.queue)).toHaveLength(1);
+    expect(items(same.queue)[0]?.get('receipt_id')).toBe('rcpt-partial');
+    expect(record(same.queue).get('reviewed_tip')).toBe(base);
+    const moved = 'c'.repeat(40);
+    const next = await discoverPush(
+      queue([partial]),
+      [cfg],
+      false,
+      'main/repo',
+      effects({ fetchTip: async () => moved }),
+    );
+    expect(items(next.queue).map((item) => item.get('id'))).toEqual([
+      id,
+      `push-r-${base.slice(0, 10)}-${moved.slice(0, 10)}`,
+    ]);
+    const subject = items(next.queue)[1]?.get('subject');
+    expect(subject instanceof JsonObject && subject.get('base')).toBe(base);
+  });
   it('resets divergence without enrollment and dry runs never mutate', async () => {
     const original = queue();
     const events: string[] = [];
