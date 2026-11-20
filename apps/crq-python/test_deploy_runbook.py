@@ -485,6 +485,51 @@ class DeployTests(DeployFixture, unittest.TestCase):
         self.assertTrue(self.marker().exists())
         self.assertEqual(self.units.started, [])
 
+    def test_drain_deadline_rejects_success_observed_after_expiry(self):
+        # With --drain-deadline-s 10 --drain-interval-s 600, a blocked first
+        # poll must not buy a 600s wait past the deadline, and a queue that
+        # settles only after the deadline must not be accepted: expiry fails
+        # closed even on a clean answer, and the hold stays.
+        (self.runner / "state/queue.json").write_text(
+            '{"items": [{"id": "q1", "run": {"run_id": 7}}], "starts": []}\n')
+        real_check = dc.drain_check
+
+        def settles_late(effects, liveness):
+            if self.clock() >= 10:
+                return {"drained": True, "blocked": []}
+            return real_check(effects, liveness)
+
+        run = self.build(drain_interval_s=600)
+        run.drain_fn = None
+        with mock.patch.object(dc, "drain_check", side_effect=settles_late):
+            with self.assertRaises(rb.RecoveryRequired) as caught:
+                run.run()
+        self.assertIn("drain expired", str(caught.exception))
+        # The sleep was capped at the remaining deadline, not the 600s
+        # interval: the late poll lands exactly at the deadline.
+        self.assertEqual(self.now[0], 10.0)
+        record = json.loads(
+            (Path(run.run_dir) / "drain.json").read_text())
+        self.assertFalse(record["drained"])
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.units.started, [])
+        self.assertEqual(self.head(), self.prior)
+        self.assertEqual(self.record(run)["outcome"], "recovery_required")
+
+    def test_drain_first_poll_success_stays_immediate(self):
+        # A queue already drained succeeds on the first poll even when the
+        # interval is longer than the deadline: no sleep precedes the verdict.
+        (self.runner / "state/queue.json").write_text(
+            '{"items": [], "starts": []}\n')
+        run = self.build(drain_interval_s=600)
+        run.drain_fn = None
+        document = run.run()
+        self.assertEqual(document["outcome"], "completed")
+        self.assertEqual(self.now[0], 0.0)
+        record = json.loads(
+            (Path(run.run_dir) / "drain.json").read_text())
+        self.assertTrue(record["drained"])
+
     def test_incompatible_queue_refuses_before_hold(self):
         state = self.runner / "state/queue.json"
         state.write_text('{"schema_version": 2, "items": []}\n')
