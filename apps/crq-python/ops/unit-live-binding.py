@@ -694,6 +694,25 @@ class SubprocessSystemd:
                             value = _expand_instance(path,
                                                      match.group("value"))
                             for name in value.split():
+                                # systemd removes the quotes of a quoted
+                                # argument before it names the unit.
+                                if len(name) >= 2 and name[0] == name[-1] \
+                                        and name[0] in "\"'":
+                                    name = name[1:-1]
+                                # A specifier left after instance expansion
+                                # (``%p``, ``%n``) expands to a name the scan
+                                # cannot predict, so discovery cannot vouch
+                                # that it stays inside the expected set.
+                                # ``%%`` is a literal percent sign.
+                                if "%" in name.replace("%%", "") \
+                                        and (source_declared
+                                             or "crq-" in name):
+                                    foreign.append(
+                                        "%s:%d: %s has an unresolved "
+                                        "specifier in %s"
+                                        % (path, number,
+                                           match.group("directive"), name))
+                                    continue
                                 # Each whitespace-separated argument is one
                                 # complete unit name. A CRQ name embedded in
                                 # a longer argument such as

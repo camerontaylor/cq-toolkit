@@ -726,6 +726,26 @@ class DiscoveryTests(PortFixture):
         self.assertIn("crq-worker@tenant\\x2dblue.service",
                       " ".join(evidence["foreign"]))
 
+    def test_quoted_install_argument_is_unquoted_before_matching(self):
+        declared = self.declare()
+        # systemd strips the quotes of a WantedBy argument, so the quoted
+        # form names crq-slot.target just as the bare form does.
+        self.write("crq-tick.service",
+                   '[Install]\nWantedBy="crq-slot.target"\n')
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("crq-slot.target", " ".join(evidence["foreign"]))
+
+    def test_unresolved_specifier_in_declared_dependency_is_foreign(self):
+        declared = self.declare()
+        # ``%p`` expands to the unit prefix (crq-tick), which names
+        # crq-worker@crq-tick.service, outside the expected set.
+        self.write("crq-tick.service",
+                   "[Unit]\nWants=crq-worker@%p.service\n")
+        evidence = self.discover(declared)
+        self.assertEqual(evidence["supported"], False)
+        self.assertIn("unresolved specifier", " ".join(evidence["foreign"]))
+
     def test_declared_source_may_name_expected_units(self):
         declared = self.declare()
         self.write("crq-tick.timer",
