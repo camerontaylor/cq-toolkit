@@ -694,11 +694,11 @@ class SubprocessSystemd:
                             value = _expand_instance(path,
                                                      match.group("value"))
                             for name in value.split():
-                                # systemd removes the quotes of a quoted
-                                # argument before it names the unit.
-                                if len(name) >= 2 and name[0] == name[-1] \
-                                        and name[0] in "\"'":
-                                    name = name[1:-1]
+                                # systemd removes quote characters wherever
+                                # they sit in an argument (``crq-"slot".target``
+                                # names crq-slot.target) before it names the
+                                # unit.
+                                name = name.replace('"', "").replace("'", "")
                                 # A specifier left after instance expansion
                                 # (``%p``, ``%n``) expands to a name the scan
                                 # cannot predict, so discovery cannot vouch

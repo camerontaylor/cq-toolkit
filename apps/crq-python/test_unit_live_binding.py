@@ -736,6 +736,19 @@ class DiscoveryTests(PortFixture):
         self.assertEqual(evidence["supported"], False)
         self.assertIn("crq-slot.target", " ".join(evidence["foreign"]))
 
+    def test_embedded_quotes_are_removed_before_matching(self):
+        declared = self.declare()
+        # systemd drops quote characters anywhere in the argument.
+        for value in ('crq-"slot".target', "crq-'slot'.target",
+                      'cr"q-slot.target"'):
+            with self.subTest(value=value):
+                self.write("crq-tick.service",
+                           "[Install]\nWantedBy=%s\n" % value)
+                evidence = self.discover(declared)
+                self.assertEqual(evidence["supported"], False)
+                self.assertIn("crq-slot.target",
+                              " ".join(evidence["foreign"]))
+
     def test_unresolved_specifier_in_declared_dependency_is_foreign(self):
         declared = self.declare()
         # ``%p`` expands to the unit prefix (crq-tick), which names
