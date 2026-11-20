@@ -2,19 +2,6 @@
   "version": 1,
   "repo": "camerontaylor/cq-toolkit",
   "prs": {
-    "2263": {
-      "tuple": {
-        "head": "e058c9f8cf0fbacdf0eceec9597006b550e3b980",
-        "base": "733422294bb08e68b945e4e71443b6a5e763d5bc",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-20T23:23:24.315Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
     "2264": {
       "tuple": {
         "head": "6e8ff51dd1f3307df9c8068369f5695ea53dffa7",
