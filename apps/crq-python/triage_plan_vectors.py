@@ -354,6 +354,17 @@ def cases() -> list[dict]:
         row("q1", "confirmed", current=TIP, **dup), row("q2", **dup),
         row("q3", "needs-human", **dup), row("q4", **dup),
     ]))
+    # An unsettled row seeds the canonical id even when it is itself skipped, so
+    # a later exact copy names it. Each vector fails if its status were settled.
+    add(case("canonical-seed-needs-human-escalated", [
+        row("n1", "needs-human", previous="e-j", **dup), row("n2", **dup),
+    ], reviews=[review("r1"), event("e-j", "crq-triage/judge", "owner")]))
+    add(case("canonical-seed-needs-human-skipped", [
+        row("n1", "needs-human", **dup), row("n2", **dup),
+    ]))
+    add(case("canonical-seed-unknown-status", [
+        row("n1", "parked", **dup), row("n2", **dup),
+    ]))
     add(case("duplicate-status-row-never-seeds-or-plans", [
         row("r1x", "duplicate", **dup), row("r2x", **dup),
     ]))
@@ -431,6 +442,13 @@ def cases() -> list[dict]:
         "me-pos-kelvin": "lac\u212A of source", "me-pos-long-s": "mi\u017fsing source", "me-neg-rate-newline": "missing source rate\nlimit",
         "me-pos-rate-sep": "missing source rate limit",
         "me-neg-notstr": 7, "me-neg-empty": "",
+        # Python's re.I folds ASCII i with U+0130 and U+0131; JS iu does not.
+        "me-pos-dotted-i": "m\u0130ssing source", "me-pos-dotless-i": "m\u0131ssing source",
+        "me-pos-dotless-i-need": "need more context, not prov\u0131ded",
+        "me-pos-dotted-i-wanted": "insuffic\u0130ent evidence", "me-pos-dotless-i-unavailable": "context unava\u0131lable",
+        "me-neg-dotless-invalid": "\u0131nvalid, missing context", "me-neg-dotted-dispatch": "d\u0130spatch missing source",
+        "me-neg-dotless-provider": "prov\u0131der lacks context", "me-neg-dotted-timed-out": "missing source, t\u0130med out",
+        "me-neg-dotless-timeout": "missing source, t\u0131meout", "me-neg-dotted-rate-limit": "missing source rate l\u0130m\u0130t",
     }
     me_rows, me_events = [], []
     for fid, reason in reasons.items():
@@ -554,6 +572,25 @@ def cases() -> list[dict]:
     add(case("tolerates-non-object-payload-off-needs-human", [
         row("ok", "untriaged", previous="ev"),
     ], reviews=[review("r1"), event("ev", payload=["x"])]))
+    # Python hashes the duplicate key only for an anchored row (truthy intervals
+    # and blob), and before the duplicate-status skip.
+    for name, blob in {"list": ["x"], "int-list": [1], "dict": {"k": "v"}}.items():
+        add(case("refuses-container-blob-" + name, [row("good"), row("bad", blob=blob)], kind="refusal"))
+    add(case("refuses-container-blob-on-duplicate-status", [
+        row("good"), row("bad", "duplicate", blob=["x"]),
+    ], kind="refusal"))
+    add(case("refuses-container-blob-in-recovered-anchor", [
+        row("a1", blob=ABSENT, intervals=ABSENT, anchor_status="unverified"),
+    ], kind="refusal", recovery={"enabled": True, "anchors": {
+        "a1": {"blob": ["x"], "intervals": [[5, 6]], "path": "src/a.py"}}}))
+    add(case("tolerates-container-blob-with-falsy-intervals", [
+        row("f1", blob=["x"], intervals=[], title="t1"),
+        row("f2", blob={"k": "v"}, intervals=None, title="t2"),
+        row("f3", blob=["x"], intervals=ABSENT, title="t3"),
+    ]))
+    add(case("tolerates-empty-container-blob", [
+        row("e1", blob=[], title="t1"), row("e2", blob={}, title="t2"),
+    ]))
     add(case("refuses-container-previous-event-id", [
         row("nh", "untriaged", previous=["ev"]),
     ], kind="refusal"))

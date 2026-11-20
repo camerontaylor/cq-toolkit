@@ -38,6 +38,9 @@
  * - Where Python raises an uncaught `KeyError`/`TypeError`/`AttributeError`
  *   on a structurally damaged row or retained event, this port throws a
  *   {@link TriagePlanRefusal}. Nothing is planned from a damaged inbox.
+ * - Python hashes the duplicate key only for an anchored row (truthy intervals
+ *   and blob). A list/dict blob there raises `TypeError: unhashable type`, so
+ *   it is a refusal; with falsy intervals Python never hashes and neither do we.
  * - Where Python is lenient about a type the ledger schema never produces
  *   (a non-string `severity`, `title`, `body`, `id`, `review_id`, `path` that
  *   is neither a string nor null), this port refuses instead. It never plans
@@ -50,13 +53,16 @@
  *    the seven overrides that make the equality classes match CPython for
  *    every scalar value (`ı`, `ẞ`, Cherokee). It is only used to compare
  *    titles for the exact-duplicate key, never to emit text.
- * 2. The duplicate key compares the anchor blob and intervals by their Python
+ * 2. `missingEvidence` widens the pattern's `i` to `[iİı]` because Python's
+ *    `re.I` folds ASCII `i` with U+0130/U+0131 and JavaScript's `iu` does not
+ *    (checked against `re.I` for every scalar value).
+ * 3. The duplicate key compares the anchor blob and intervals by their Python
  *    JSON text rather than by Python value equality, which differs only for
  *    `1 == 1.0 == True`; the ledger refuses floats and non-int intervals.
- * 3. The set iteration order in which Python asks Git for target dates is
+ * 4. The set iteration order in which Python asks Git for target dates is
  *    arbitrary (string hashing); this port asks in row order. Results do not
  *    depend on it, and the oracle sorts that run.
- * 4. Non-dry-run behaviour (recovery, writes, escalation actor names, the
+ * 5. Non-dry-run behaviour (recovery, writes, escalation actor names, the
  *    judge and delivery loop) is intentionally absent; calling this is always
  *    a dry run and the report says `dryRun: true`.
  */
@@ -202,11 +208,23 @@ function requireString(object: JsonObject, key: string, what: string): string {
   return value;
 }
 
+/**
+ * Python's `re.I` matches ASCII `i` to U+0130 `İ` and U+0131 `ı`; JavaScript's
+ * `iu` does not (their only simple case folds are Turkic). Every other letter
+ * these patterns use already agrees (`ſ`~`s` and the Kelvin sign~`k` match in
+ * both engines), so only the pattern's `i` needs widening.
+ */
+function pythonIgnoreCase(source: string): RegExp {
+  return new RegExp(source.replaceAll('i', '[i\\u0130\\u0131]'), 'iu');
+}
+
 /** `triage.missing_evidence`'s three patterns; Python's `.` excludes only `\n`. */
-const MISSING_EVIDENCE_EXCLUDED =
-  /secret|scan|dispatch|invalid|budget|timeout|timed out|provider|rate[^\n]limit/iu;
-const MISSING_EVIDENCE_WANTED =
-  /(?:missing|insufficient|lack|need|unavailable|not provided)[^\n]*?(?:source|context|evidence)|(?:source|context|evidence)[^\n]*?(?:missing|insufficient|unavailable|not provided)/iu;
+const MISSING_EVIDENCE_EXCLUDED = pythonIgnoreCase(
+  'secret|scan|dispatch|invalid|budget|timeout|timed out|provider|rate[^\\n]limit',
+);
+const MISSING_EVIDENCE_WANTED = pythonIgnoreCase(
+  '(?:missing|insufficient|lack|need|unavailable|not provided)[^\\n]*?(?:source|context|evidence)|(?:source|context|evidence)[^\\n]*?(?:missing|insufficient|unavailable|not provided)',
+);
 
 /** `triage.missing_evidence`: a legacy judgment that lacked source evidence. */
 export function missingEvidence(reason: JsonValue | undefined): boolean {
@@ -392,6 +410,12 @@ export function planTriageDryRun(input: TriagePlanInput): TriagePlanResult {
     const title = requireString(finding, 'title', 'finding');
     // An empty/unknown anchor is never evidence for an exact duplicate.
     const anchored = pythonTruthy(anchor.get('intervals')) && pythonTruthy(anchor.get('blob'));
+    // Python hashes the key (a tuple holding the blob) only for an anchored
+    // row, and before the duplicate-status skip: a list/dict blob raises
+    // `TypeError: unhashable type` and aborts the phase.
+    const blob = anchor.get('blob');
+    if (anchored && (Array.isArray(blob) || blob instanceof JsonObject))
+      refuse('anchor blob is a container; Python cannot hash the duplicate key');
     const key = JSON.stringify([
       row.severity,
       path,

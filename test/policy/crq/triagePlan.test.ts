@@ -263,6 +263,19 @@ describe('triage dry-run planning: plan evidence', () => {
     ]);
   });
 
+  test('an unsettled earlier row seeds the canonical id, whatever happens to it', () => {
+    // Each seed is skipped or planned itself; only its status keeps it canonical.
+    for (const name of [
+      'canonical-seed-needs-human-escalated',
+      'canonical-seed-needs-human-skipped',
+      'canonical-seed-unknown-status',
+    ]) {
+      const duplicate = find(name).plans.find((plan) => plan.action === 'duplicate');
+      expect(duplicate?.findingId, name).toBe('n2');
+      expect(duplicate?.evidence, name).toEqual({ canonicalId: 'n1' });
+    }
+  });
+
   test('pathless and investigation plans carry failureClass evidence', () => {
     const pathless = find('pathless-finding-needs-human').plans;
     expect(pathless.every((plan) => plan.evidence.failureClass === 'evidence')).toBe(true);
@@ -289,6 +302,14 @@ describe('missingEvidence', () => {
     expect(missingEvidence('owner decision required')).toBe(false);
     expect(missingEvidence(undefined)).toBe(false);
     expect(missingEvidence(7 as unknown as JsonValue)).toBe(false);
+  });
+
+  test('dotted and dotless I match ASCII i like Python re.I', () => {
+    expect(missingEvidence('m\u0130ssing source')).toBe(true);
+    expect(missingEvidence('m\u0131ssing source')).toBe(true);
+    expect(missingEvidence('\u0131nvalid, missing context')).toBe(false);
+    expect(missingEvidence('d\u0130spatch missing source')).toBe(false);
+    expect(missingEvidence('missing source rate l\u0130m\u0130t')).toBe(false);
   });
 });
 

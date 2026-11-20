@@ -3372,6 +3372,405 @@
    "ts_refuses": false
   },
   {
+   "clock_reads": 7,
+   "context_calls": [
+    {
+     "escalate": true,
+     "finding_id": "n1",
+     "recovered": false,
+     "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+   ],
+   "input": {
+    "clock": {
+     "start": 1000,
+     "step": 0
+    },
+    "commit_dates": {
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "2026-01-01T00:00:00Z",
+     "t2": "2026-02-01T00:00:00Z"
+    },
+    "context_errors": {},
+    "deleting": [],
+    "entries": [
+     "src/a.py"
+    ],
+    "lineage": [],
+    "maximum": 6,
+    "proven_deleted": [],
+    "recovery": {
+     "anchors": {},
+     "enabled": false
+    },
+    "reviews": [
+     {
+      "event_type": "review",
+      "id": "r1",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {}
+     },
+     {
+      "event_type": "finding-event",
+      "id": "e-j",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {
+       "actor": "crq-triage/judge",
+       "evidence": {
+        "reason": "owner"
+       }
+      }
+     }
+    ],
+    "rows": [
+     {
+      "file": "n1.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Same body",
+        "id": "n1",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "Same title"
+       },
+       "previous_event_id": "e-j",
+       "review_id": "r1",
+       "status": "needs-human",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "n2.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Same body",
+        "id": "n2",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "Same title"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     }
+    ],
+    "seconds": 600,
+    "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "name": "canonical-seed-needs-human-escalated",
+   "recover_calls": [],
+   "repo_calls": [
+    [
+     "begin"
+    ],
+    [
+     "entries",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    [
+     "lineage",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "src/a.py"
+    ],
+    [
+     "lineage",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "src/a.py"
+    ]
+   ],
+   "result": {
+    "context_errors": [],
+    "counts": {
+     "duplicate": 1
+    },
+    "delivered": 0,
+    "delivery_deferred": 0,
+    "dry_run": true,
+    "judged": 1,
+    "judgment_candidates": [
+     "n1"
+    ],
+    "outcomes": [
+     {
+      "action": "duplicate",
+      "finding_id": "n2",
+      "reason": "exact path/title/anchor duplicate"
+     }
+    ],
+    "stop_report": {},
+    "stopped": null,
+    "total": 2,
+    "unjudged": 0
+   },
+   "ts_refuses": false
+  },
+  {
+   "clock_reads": 4,
+   "context_calls": [],
+   "input": {
+    "clock": {
+     "start": 1000,
+     "step": 0
+    },
+    "commit_dates": {
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "2026-01-01T00:00:00Z",
+     "t2": "2026-02-01T00:00:00Z"
+    },
+    "context_errors": {},
+    "deleting": [],
+    "entries": [
+     "src/a.py"
+    ],
+    "lineage": [],
+    "maximum": 6,
+    "proven_deleted": [],
+    "recovery": {
+     "anchors": {},
+     "enabled": false
+    },
+    "reviews": [
+     {
+      "event_type": "review",
+      "id": "r1",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {}
+     }
+    ],
+    "rows": [
+     {
+      "file": "n1.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Same body",
+        "id": "n1",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "Same title"
+       },
+       "review_id": "r1",
+       "status": "needs-human",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "n2.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Same body",
+        "id": "n2",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "Same title"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     }
+    ],
+    "seconds": 600,
+    "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "name": "canonical-seed-needs-human-skipped",
+   "recover_calls": [],
+   "repo_calls": [
+    [
+     "begin"
+    ],
+    [
+     "entries",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    [
+     "lineage",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "src/a.py"
+    ]
+   ],
+   "result": {
+    "context_errors": [],
+    "counts": {
+     "duplicate": 1
+    },
+    "delivered": 0,
+    "delivery_deferred": 0,
+    "dry_run": true,
+    "judged": 0,
+    "judgment_candidates": [],
+    "outcomes": [
+     {
+      "action": "duplicate",
+      "finding_id": "n2",
+      "reason": "exact path/title/anchor duplicate"
+     }
+    ],
+    "stop_report": {},
+    "stopped": null,
+    "total": 2,
+    "unjudged": 0
+   },
+   "ts_refuses": false
+  },
+  {
+   "clock_reads": 4,
+   "context_calls": [],
+   "input": {
+    "clock": {
+     "start": 1000,
+     "step": 0
+    },
+    "commit_dates": {
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "2026-01-01T00:00:00Z",
+     "t2": "2026-02-01T00:00:00Z"
+    },
+    "context_errors": {},
+    "deleting": [],
+    "entries": [
+     "src/a.py"
+    ],
+    "lineage": [],
+    "maximum": 6,
+    "proven_deleted": [],
+    "recovery": {
+     "anchors": {},
+     "enabled": false
+    },
+    "reviews": [
+     {
+      "event_type": "review",
+      "id": "r1",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {}
+     }
+    ],
+    "rows": [
+     {
+      "file": "n1.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Same body",
+        "id": "n1",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "Same title"
+       },
+       "review_id": "r1",
+       "status": "parked",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "n2.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Same body",
+        "id": "n2",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "Same title"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     }
+    ],
+    "seconds": 600,
+    "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "name": "canonical-seed-unknown-status",
+   "recover_calls": [],
+   "repo_calls": [
+    [
+     "begin"
+    ],
+    [
+     "entries",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    [
+     "lineage",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "src/a.py"
+    ]
+   ],
+   "result": {
+    "context_errors": [],
+    "counts": {
+     "duplicate": 1
+    },
+    "delivered": 0,
+    "delivery_deferred": 0,
+    "dry_run": true,
+    "judged": 0,
+    "judgment_candidates": [],
+    "outcomes": [
+     {
+      "action": "duplicate",
+      "finding_id": "n2",
+      "reason": "exact path/title/anchor duplicate"
+     }
+    ],
+    "stop_report": {},
+    "stopped": null,
+    "total": 2,
+    "unjudged": 0
+   },
+   "ts_refuses": false
+  },
+  {
    "clock_reads": 6,
    "context_calls": [
     {
@@ -5569,7 +5968,7 @@
    "ts_refuses": false
   },
   {
-   "clock_reads": 99,
+   "clock_reads": 138,
    "context_calls": [
     {
      "escalate": true,
@@ -5580,6 +5979,42 @@
     {
      "escalate": true,
      "finding_id": "me-neg-dispatch",
+     "recovered": false,
+     "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+     "escalate": true,
+     "finding_id": "me-neg-dotless-invalid",
+     "recovered": false,
+     "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+     "escalate": true,
+     "finding_id": "me-neg-dotless-provider",
+     "recovered": false,
+     "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+     "escalate": true,
+     "finding_id": "me-neg-dotless-timeout",
+     "recovered": false,
+     "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+     "escalate": true,
+     "finding_id": "me-neg-dotted-dispatch",
+     "recovered": false,
+     "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+     "escalate": true,
+     "finding_id": "me-neg-dotted-rate-limit",
+     "recovered": false,
+     "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+     "escalate": true,
+     "finding_id": "me-neg-dotted-timed-out",
      "recovered": false,
      "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     },
@@ -5996,6 +6431,127 @@
        "actor": "crq-triage/model",
        "evidence": {
         "reason": ""
+       }
+      }
+     },
+     {
+      "event_type": "finding-event",
+      "id": "ev-me-pos-dotted-i",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {
+       "actor": "crq-triage/model",
+       "evidence": {
+        "reason": "m\u0130ssing source"
+       }
+      }
+     },
+     {
+      "event_type": "finding-event",
+      "id": "ev-me-pos-dotless-i",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {
+       "actor": "crq-triage/model",
+       "evidence": {
+        "reason": "m\u0131ssing source"
+       }
+      }
+     },
+     {
+      "event_type": "finding-event",
+      "id": "ev-me-pos-dotless-i-need",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {
+       "actor": "crq-triage/model",
+       "evidence": {
+        "reason": "need more context, not prov\u0131ded"
+       }
+      }
+     },
+     {
+      "event_type": "finding-event",
+      "id": "ev-me-pos-dotted-i-wanted",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {
+       "actor": "crq-triage/model",
+       "evidence": {
+        "reason": "insuffic\u0130ent evidence"
+       }
+      }
+     },
+     {
+      "event_type": "finding-event",
+      "id": "ev-me-pos-dotless-i-unavailable",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {
+       "actor": "crq-triage/model",
+       "evidence": {
+        "reason": "context unava\u0131lable"
+       }
+      }
+     },
+     {
+      "event_type": "finding-event",
+      "id": "ev-me-neg-dotless-invalid",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {
+       "actor": "crq-triage/model",
+       "evidence": {
+        "reason": "\u0131nvalid, missing context"
+       }
+      }
+     },
+     {
+      "event_type": "finding-event",
+      "id": "ev-me-neg-dotted-dispatch",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {
+       "actor": "crq-triage/model",
+       "evidence": {
+        "reason": "d\u0130spatch missing source"
+       }
+      }
+     },
+     {
+      "event_type": "finding-event",
+      "id": "ev-me-neg-dotless-provider",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {
+       "actor": "crq-triage/model",
+       "evidence": {
+        "reason": "prov\u0131der lacks context"
+       }
+      }
+     },
+     {
+      "event_type": "finding-event",
+      "id": "ev-me-neg-dotted-timed-out",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {
+       "actor": "crq-triage/model",
+       "evidence": {
+        "reason": "missing source, t\u0130med out"
+       }
+      }
+     },
+     {
+      "event_type": "finding-event",
+      "id": "ev-me-neg-dotless-timeout",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {
+       "actor": "crq-triage/model",
+       "evidence": {
+        "reason": "missing source, t\u0131meout"
+       }
+      }
+     },
+     {
+      "event_type": "finding-event",
+      "id": "ev-me-neg-dotted-rate-limit",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {
+       "actor": "crq-triage/model",
+       "evidence": {
+        "reason": "missing source rate l\u0130m\u0130t"
        }
       }
      }
@@ -6648,6 +7204,270 @@
        "status": "needs-human",
        "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       }
+     },
+     {
+      "file": "me-pos-dotted-i.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Body",
+        "id": "me-pos-dotted-i",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "me-pos-dotted-i"
+       },
+       "previous_event_id": "ev-me-pos-dotted-i",
+       "review_id": "r1",
+       "status": "needs-human",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "me-pos-dotless-i.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Body",
+        "id": "me-pos-dotless-i",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "me-pos-dotless-i"
+       },
+       "previous_event_id": "ev-me-pos-dotless-i",
+       "review_id": "r1",
+       "status": "needs-human",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "me-pos-dotless-i-need.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Body",
+        "id": "me-pos-dotless-i-need",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "me-pos-dotless-i-need"
+       },
+       "previous_event_id": "ev-me-pos-dotless-i-need",
+       "review_id": "r1",
+       "status": "needs-human",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "me-pos-dotted-i-wanted.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Body",
+        "id": "me-pos-dotted-i-wanted",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "me-pos-dotted-i-wanted"
+       },
+       "previous_event_id": "ev-me-pos-dotted-i-wanted",
+       "review_id": "r1",
+       "status": "needs-human",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "me-pos-dotless-i-unavailable.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Body",
+        "id": "me-pos-dotless-i-unavailable",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "me-pos-dotless-i-unavailable"
+       },
+       "previous_event_id": "ev-me-pos-dotless-i-unavailable",
+       "review_id": "r1",
+       "status": "needs-human",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "me-neg-dotless-invalid.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Body",
+        "id": "me-neg-dotless-invalid",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "me-neg-dotless-invalid"
+       },
+       "previous_event_id": "ev-me-neg-dotless-invalid",
+       "review_id": "r1",
+       "status": "needs-human",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "me-neg-dotted-dispatch.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Body",
+        "id": "me-neg-dotted-dispatch",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "me-neg-dotted-dispatch"
+       },
+       "previous_event_id": "ev-me-neg-dotted-dispatch",
+       "review_id": "r1",
+       "status": "needs-human",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "me-neg-dotless-provider.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Body",
+        "id": "me-neg-dotless-provider",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "me-neg-dotless-provider"
+       },
+       "previous_event_id": "ev-me-neg-dotless-provider",
+       "review_id": "r1",
+       "status": "needs-human",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "me-neg-dotted-timed-out.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Body",
+        "id": "me-neg-dotted-timed-out",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "me-neg-dotted-timed-out"
+       },
+       "previous_event_id": "ev-me-neg-dotted-timed-out",
+       "review_id": "r1",
+       "status": "needs-human",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "me-neg-dotless-timeout.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Body",
+        "id": "me-neg-dotless-timeout",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "me-neg-dotless-timeout"
+       },
+       "previous_event_id": "ev-me-neg-dotless-timeout",
+       "review_id": "r1",
+       "status": "needs-human",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "me-neg-dotted-rate-limit.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Body",
+        "id": "me-neg-dotted-rate-limit",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "me-neg-dotted-rate-limit"
+       },
+       "previous_event_id": "ev-me-neg-dotted-rate-limit",
+       "review_id": "r1",
+       "status": "needs-human",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
      }
     ],
     "seconds": 600,
@@ -6764,20 +7584,62 @@
      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
      "src/a.py"
+    ],
+    [
+     "lineage",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "src/a.py"
+    ],
+    [
+     "lineage",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "src/a.py"
+    ],
+    [
+     "lineage",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "src/a.py"
+    ],
+    [
+     "lineage",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "src/a.py"
+    ],
+    [
+     "lineage",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "src/a.py"
+    ],
+    [
+     "lineage",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "src/a.py"
     ]
    ],
    "result": {
     "context_errors": [],
     "counts": {
-     "confirmed": 10
+     "confirmed": 15
     },
     "delivered": 0,
     "delivery_deferred": 0,
     "dry_run": true,
-    "judged": 17,
+    "judged": 23,
     "judgment_candidates": [
      "me-neg-budget",
      "me-neg-dispatch",
+     "me-neg-dotless-invalid",
+     "me-neg-dotless-provider",
+     "me-neg-dotless-timeout",
+     "me-neg-dotted-dispatch",
+     "me-neg-dotted-rate-limit",
+     "me-neg-dotted-timed-out",
      "me-neg-empty",
      "me-neg-invalid",
      "me-neg-long-s",
@@ -6799,6 +7661,31 @@
       "action": "confirmed",
       "finding_id": "me-neg-rate-newline",
       "reason": "fixer investigation: missing source rate\nlimit"
+     },
+     {
+      "action": "confirmed",
+      "finding_id": "me-pos-dotless-i",
+      "reason": "fixer investigation: m\u0131ssing source"
+     },
+     {
+      "action": "confirmed",
+      "finding_id": "me-pos-dotless-i-need",
+      "reason": "fixer investigation: need more context, not prov\u0131ded"
+     },
+     {
+      "action": "confirmed",
+      "finding_id": "me-pos-dotless-i-unavailable",
+      "reason": "fixer investigation: context unava\u0131lable"
+     },
+     {
+      "action": "confirmed",
+      "finding_id": "me-pos-dotted-i",
+      "reason": "fixer investigation: m\u0130ssing source"
+     },
+     {
+      "action": "confirmed",
+      "finding_id": "me-pos-dotted-i-wanted",
+      "reason": "fixer investigation: insuffic\u0130ent evidence"
      },
      {
       "action": "confirmed",
@@ -6848,7 +7735,7 @@
     ],
     "stop_report": {},
     "stopped": null,
-    "total": 27,
+    "total": 38,
     "unjudged": 0
    },
    "ts_refuses": false
@@ -24367,6 +25254,724 @@
     "stop_report": {},
     "stopped": null,
     "total": 1,
+    "unjudged": 0
+   },
+   "ts_refuses": false
+  },
+  {
+   "input": {
+    "clock": {
+     "start": 1000,
+     "step": 0
+    },
+    "commit_dates": {
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "2026-01-01T00:00:00Z",
+     "t2": "2026-02-01T00:00:00Z"
+    },
+    "context_errors": {},
+    "deleting": [],
+    "entries": [
+     "src/a.py"
+    ],
+    "lineage": [],
+    "maximum": 6,
+    "proven_deleted": [],
+    "recovery": {
+     "anchors": {},
+     "enabled": false
+    },
+    "reviews": [
+     {
+      "event_type": "review",
+      "id": "r1",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {}
+     }
+    ],
+    "rows": [
+     {
+      "file": "good.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Body",
+        "id": "good",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "Title"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "bad.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": [
+         "x"
+        ],
+        "body": "Body",
+        "id": "bad",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "Title"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     }
+    ],
+    "seconds": 600,
+    "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "name": "refuses-container-blob-list",
+   "raises": "TypeError",
+   "ts_refuses": false
+  },
+  {
+   "input": {
+    "clock": {
+     "start": 1000,
+     "step": 0
+    },
+    "commit_dates": {
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "2026-01-01T00:00:00Z",
+     "t2": "2026-02-01T00:00:00Z"
+    },
+    "context_errors": {},
+    "deleting": [],
+    "entries": [
+     "src/a.py"
+    ],
+    "lineage": [],
+    "maximum": 6,
+    "proven_deleted": [],
+    "recovery": {
+     "anchors": {},
+     "enabled": false
+    },
+    "reviews": [
+     {
+      "event_type": "review",
+      "id": "r1",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {}
+     }
+    ],
+    "rows": [
+     {
+      "file": "good.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Body",
+        "id": "good",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "Title"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "bad.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": [
+         1
+        ],
+        "body": "Body",
+        "id": "bad",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "Title"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     }
+    ],
+    "seconds": 600,
+    "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "name": "refuses-container-blob-int-list",
+   "raises": "TypeError",
+   "ts_refuses": false
+  },
+  {
+   "input": {
+    "clock": {
+     "start": 1000,
+     "step": 0
+    },
+    "commit_dates": {
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "2026-01-01T00:00:00Z",
+     "t2": "2026-02-01T00:00:00Z"
+    },
+    "context_errors": {},
+    "deleting": [],
+    "entries": [
+     "src/a.py"
+    ],
+    "lineage": [],
+    "maximum": 6,
+    "proven_deleted": [],
+    "recovery": {
+     "anchors": {},
+     "enabled": false
+    },
+    "reviews": [
+     {
+      "event_type": "review",
+      "id": "r1",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {}
+     }
+    ],
+    "rows": [
+     {
+      "file": "good.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Body",
+        "id": "good",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "Title"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "bad.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": {
+         "k": "v"
+        },
+        "body": "Body",
+        "id": "bad",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "Title"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     }
+    ],
+    "seconds": 600,
+    "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "name": "refuses-container-blob-dict",
+   "raises": "TypeError",
+   "ts_refuses": false
+  },
+  {
+   "input": {
+    "clock": {
+     "start": 1000,
+     "step": 0
+    },
+    "commit_dates": {
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "2026-01-01T00:00:00Z",
+     "t2": "2026-02-01T00:00:00Z"
+    },
+    "context_errors": {},
+    "deleting": [],
+    "entries": [
+     "src/a.py"
+    ],
+    "lineage": [],
+    "maximum": 6,
+    "proven_deleted": [],
+    "recovery": {
+     "anchors": {},
+     "enabled": false
+    },
+    "reviews": [
+     {
+      "event_type": "review",
+      "id": "r1",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {}
+     }
+    ],
+    "rows": [
+     {
+      "file": "good.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": "cccccccccccccccccccccccccccccccccccccccc",
+        "body": "Body",
+        "id": "good",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "Title"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "bad.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": [
+         "x"
+        ],
+        "body": "Body",
+        "id": "bad",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "Title"
+       },
+       "review_id": "r1",
+       "status": "duplicate",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     }
+    ],
+    "seconds": 600,
+    "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "name": "refuses-container-blob-on-duplicate-status",
+   "raises": "TypeError",
+   "ts_refuses": false
+  },
+  {
+   "input": {
+    "clock": {
+     "start": 1000,
+     "step": 0
+    },
+    "commit_dates": {
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "2026-01-01T00:00:00Z",
+     "t2": "2026-02-01T00:00:00Z"
+    },
+    "context_errors": {},
+    "deleting": [],
+    "entries": [
+     "src/a.py"
+    ],
+    "lineage": [],
+    "maximum": 6,
+    "proven_deleted": [],
+    "recovery": {
+     "anchors": {
+      "a1": {
+       "blob": [
+        "x"
+       ],
+       "intervals": [
+        [
+         5,
+         6
+        ]
+       ],
+       "path": "src/a.py"
+      }
+     },
+     "enabled": true
+    },
+    "reviews": [
+     {
+      "event_type": "review",
+      "id": "r1",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {}
+     }
+    ],
+    "rows": [
+     {
+      "file": "a1.json",
+      "row": {
+       "finding": {
+        "anchor_status": "unverified",
+        "body": "Body",
+        "id": "a1",
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "Title"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     }
+    ],
+    "seconds": 600,
+    "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "name": "refuses-container-blob-in-recovered-anchor",
+   "raises": "TypeError",
+   "ts_refuses": false
+  },
+  {
+   "clock_reads": 13,
+   "context_calls": [
+    {
+     "escalate": false,
+     "finding_id": "f1",
+     "recovered": false,
+     "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+     "escalate": false,
+     "finding_id": "f2",
+     "recovered": false,
+     "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+     "escalate": false,
+     "finding_id": "f3",
+     "recovered": false,
+     "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+   ],
+   "input": {
+    "clock": {
+     "start": 1000,
+     "step": 0
+    },
+    "commit_dates": {
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "2026-01-01T00:00:00Z",
+     "t2": "2026-02-01T00:00:00Z"
+    },
+    "context_errors": {},
+    "deleting": [],
+    "entries": [
+     "src/a.py"
+    ],
+    "lineage": [],
+    "maximum": 6,
+    "proven_deleted": [],
+    "recovery": {
+     "anchors": {},
+     "enabled": false
+    },
+    "reviews": [
+     {
+      "event_type": "review",
+      "id": "r1",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {}
+     }
+    ],
+    "rows": [
+     {
+      "file": "f1.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": [
+         "x"
+        ],
+        "body": "Body",
+        "id": "f1",
+        "intervals": [],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "t1"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "f2.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": {
+         "k": "v"
+        },
+        "body": "Body",
+        "id": "f2",
+        "intervals": null,
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "t2"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "f3.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": [
+         "x"
+        ],
+        "body": "Body",
+        "id": "f3",
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "t3"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     }
+    ],
+    "seconds": 600,
+    "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "name": "tolerates-container-blob-with-falsy-intervals",
+   "recover_calls": [],
+   "repo_calls": [
+    [
+     "begin"
+    ],
+    [
+     "entries",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    [
+     "lineage",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "src/a.py"
+    ],
+    [
+     "lineage",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "src/a.py"
+    ],
+    [
+     "lineage",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "src/a.py"
+    ]
+   ],
+   "result": {
+    "context_errors": [],
+    "counts": {},
+    "delivered": 0,
+    "delivery_deferred": 0,
+    "dry_run": true,
+    "judged": 3,
+    "judgment_candidates": [
+     "f1",
+     "f2",
+     "f3"
+    ],
+    "outcomes": [],
+    "stop_report": {},
+    "stopped": null,
+    "total": 3,
+    "unjudged": 0
+   },
+   "ts_refuses": false
+  },
+  {
+   "clock_reads": 9,
+   "context_calls": [
+    {
+     "escalate": false,
+     "finding_id": "e1",
+     "recovered": false,
+     "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+     "escalate": false,
+     "finding_id": "e2",
+     "recovered": false,
+     "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+   ],
+   "input": {
+    "clock": {
+     "start": 1000,
+     "step": 0
+    },
+    "commit_dates": {
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "2026-01-01T00:00:00Z",
+     "t2": "2026-02-01T00:00:00Z"
+    },
+    "context_errors": {},
+    "deleting": [],
+    "entries": [
+     "src/a.py"
+    ],
+    "lineage": [],
+    "maximum": 6,
+    "proven_deleted": [],
+    "recovery": {
+     "anchors": {},
+     "enabled": false
+    },
+    "reviews": [
+     {
+      "event_type": "review",
+      "id": "r1",
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "payload": {}
+     }
+    ],
+    "rows": [
+     {
+      "file": "e1.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": [],
+        "body": "Body",
+        "id": "e1",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "t1"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     },
+     {
+      "file": "e2.json",
+      "row": {
+       "finding": {
+        "anchor_status": "verified",
+        "blob": {},
+        "body": "Body",
+        "id": "e2",
+        "intervals": [
+         [
+          1,
+          2
+         ]
+        ],
+        "path": "src/a.py",
+        "severity": "major",
+        "title": "t2"
+       },
+       "review_id": "r1",
+       "status": "untriaged",
+       "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     }
+    ],
+    "seconds": 600,
+    "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "name": "tolerates-empty-container-blob",
+   "recover_calls": [],
+   "repo_calls": [
+    [
+     "begin"
+    ],
+    [
+     "entries",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    [
+     "lineage",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "src/a.py"
+    ],
+    [
+     "lineage",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "src/a.py"
+    ]
+   ],
+   "result": {
+    "context_errors": [],
+    "counts": {},
+    "delivered": 0,
+    "delivery_deferred": 0,
+    "dry_run": true,
+    "judged": 2,
+    "judgment_candidates": [
+     "e1",
+     "e2"
+    ],
+    "outcomes": [],
+    "stop_report": {},
+    "stopped": null,
+    "total": 2,
     "unjudged": 0
    },
    "ts_refuses": false

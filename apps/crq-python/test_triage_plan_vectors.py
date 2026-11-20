@@ -14,6 +14,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import triage_plan_vectors as emitter
 
@@ -45,10 +46,28 @@ class TriagePlanVectorsTest(unittest.TestCase):
         self.assertTrue(any("raises" in case for case in cases))
         self.assertTrue(any(case["ts_refuses"] for case in cases))
 
-    def test_python_never_calls_the_judge_or_a_ledger_write(self) -> None:
-        # Every unexpected effect raises AssertionError inside the oracle,
-        # which is not one of the swallowed exception types, so a green
-        # build proves a dry run reached none of them.
+    def test_every_forbidden_effect_trips_the_oracle_trap(self) -> None:
+        # The traps raise AssertionError, which run_python does not swallow, so
+        # a call from the dry run would abort build() instead of being recorded.
+        # Prove each trap really propagates, so a green build means the dry run
+        # reached none of them.
+        spec = next(case for case in emitter.cases() if case["kind"] == "plan")
+        callers = {
+            "judge": lambda inbox, judge, transport: judge(),
+            "transport": lambda inbox, judge, transport: transport(),
+            "recover": lambda inbox, judge, transport: inbox.recover([]),
+            "triage": lambda inbox, judge, transport: inbox.triage(),
+            "context_error": lambda inbox, judge, transport: inbox.context_error(),
+            "deliver": lambda inbox, judge, transport: inbox.deliver(),
+        }
+        for name, call in callers.items():
+            def phase(inbox, repo, tip, judge, transport, *_args, _call=call, **_kwargs):
+                return _call(inbox, judge, transport)
+
+            with self.subTest(effect=name), mock.patch.object(emitter.triage, "phase", phase):
+                with self.assertRaisesRegex(AssertionError, "dry run must not call " + name):
+                    emitter.run_python(spec)
+        # And the real build completed: no case swallowed such an assertion.
         for case in emitter.build()["cases"]:
             self.assertNotEqual(case.get("raises"), "AssertionError", case["name"])
 
