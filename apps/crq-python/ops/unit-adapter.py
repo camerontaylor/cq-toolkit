@@ -316,7 +316,9 @@ def _duration_seconds(text: str) -> int | None:
     value = text.strip()
     if not value:
         return None
-    seconds = 0.0
+    # systemd parses time spans in microseconds, truncating each component's
+    # fractional part, so accumulate whole microseconds only.
+    microseconds = 0
     position = 0
     while position < len(value):
         match = DURATION_RE.match(value, position)
@@ -327,13 +329,15 @@ def _duration_seconds(text: str) -> int | None:
             position += 1
         factor = DURATION_UNITS[match.group("unit") or "s"]
         try:
-            seconds += float(match.group("value")) * factor
+            microseconds += int(float(match.group("value")) * factor * 1e6)
         except (OverflowError, ValueError):
             # Too many digits for float() (OverflowError) or a non-numeric value.
             return None
-    if seconds <= 0 or seconds == float("inf"):
+    if microseconds <= 0:
+        # A zero-microsecond total is systemd's "0" value, which disables the
+        # start timeout; None makes preflight refuse it.
         return None
-    return int(seconds) if seconds >= 1 else 1
+    return microseconds // 1_000_000 if microseconds >= 1_000_000 else 1
 
 
 def _calendar_interval_seconds(text: str) -> int | None:
